@@ -109,6 +109,7 @@ lua-profile = ["tracy"]
 
 [dependencies]
 serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
 postcard = { version = "1", features = ["alloc"] }
 ab_glyph = "0.2"
 mlua = { version = "0.10", features = ["luau"] }

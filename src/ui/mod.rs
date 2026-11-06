@@ -366,6 +366,7 @@ impl UserVm {
         lua.set_app_data(audio);
         lua.set_app_data(vfs);
         lua.set_app_data(cache);
+        crate::engine::lua::debugger::attach(&lua, "UI");
         api::pending::register_core(&lua)?;
         user_api::register_stubs(&lua)?;
         api::globals::register(&lua)?;

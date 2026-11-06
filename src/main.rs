@@ -153,6 +153,13 @@ fn main() -> std::process::ExitCode {
         .with(tracy_layer())
         .init();
     rts_core_engine::threads::init_global_pool();
+    // Before any VM or script cache: it changes how scripts compile.
+    if cli.lua_debug.is_some() || cli.lua_debug_wait {
+        let port = cli.lua_debug.unwrap_or(4711);
+        if let Err(e) = rts_core_engine::engine::lua::debugger::start(port, cli.lua_debug_wait) {
+            tracing::error!("--lua-debug: can't listen on 127.0.0.1:{port}: {e}");
+        }
+    }
     rts_core_engine::diagnostics::log_panics();
     rts_core_engine::diagnostics::log_system();
 
