@@ -385,6 +385,7 @@ What runs differently on game code that isn't FAF's (`engine::game_code::GameCod
 | `--session`: options the code's lobby defaults (`lobbyoptions.lua`, `/lua/CustomOptions`) | no | yes | yes |
 | `--session`: the AI, when the code's lobby list has no 'adaptive' | - | its first ('loud') | its first |
 | `--session`: LOUD's slot fields (`PlayerCount`, `WheelColor`, `Mult`, `ACT`) | no | yes | no |
+| A mod named `Hotstats` is installed (FAF's `mods.lua` skips it) | no | yes | yes |
 
 LOUD's AI logs a lot when asked: set `ScenarioInfo.EngineerDialog`, `PriorityDialog`,
 `DisplayFactoryBuilds`, `PlatoonDialog` or `InstanceDialog` to `true` in a `--script`.

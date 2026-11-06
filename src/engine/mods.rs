@@ -47,17 +47,19 @@ pub struct ModInfo {
 /// Every mod in the VFS, by uid.
 pub type Mods = BTreeMap<String, Arc<ModInfo>>;
 
-/// Finds and reads every `mod_info.lua` under `/mods` (FAF's `AllMods`:
-/// disabled ones and `Hotstats` left out; of two with one uid, the later
-/// path wins). Each file runs in its own throwaway VM, in parallel.
+/// Finds and reads every `mod_info.lua` under `/mods` (the game code's
+/// `AllMods`: disabled ones left out, and on FAF's code `Hotstats`
+/// ([`GameCode::skips_hotstats_mod`]); of two with one uid, the later path
+/// wins). Each file runs in its own throwaway VM, in parallel.
 pub fn discover(vfs: &Vfs) -> Mods {
     let files: Vec<&str> = match vfs.find_files("/mods", "*mod_info.lua") {
         Ok(f) => f.collect(),
         Err(_) => return Mods::new(),
     };
+    let skip_hotstats = super::game_code::GameCode::detect(vfs).skips_hotstats_mod();
     let read: Vec<Option<ModInfo>> = files
         .par_iter()
-        .map(|path| match read_mod_info(vfs, path) {
+        .map(|path| match read_mod_info(vfs, path, skip_hotstats) {
             Ok(m) => m,
             Err(e) => {
                 warn!(path, "mod info: {e}");
@@ -72,7 +74,7 @@ pub fn discover(vfs: &Vfs) -> Mods {
     mods
 }
 
-fn read_mod_info(vfs: &Vfs, path: &str) -> LuaResult<Option<ModInfo>> {
+fn read_mod_info(vfs: &Vfs, path: &str, skip_hotstats: bool) -> LuaResult<Option<ModInfo>> {
     let source = vfs.read_processed(path).map_err(LuaError::external)?;
     let location = path.rsplit_once('/').map_or("", |(d, _)| d).to_string();
     let lua = Lua::new();
@@ -111,7 +113,7 @@ fn read_mod_info(vfs: &Vfs, path: &str) -> LuaResult<Option<ModInfo>> {
         Ok(env.raw_get::<Option<LuaTable>>(k)?.map(|t| t.sequence_values::<String>().filter_map(Result::ok).collect()))
     };
     let name = text("name")?;
-    if name == "Hotstats" {
+    if skip_hotstats && name == "Hotstats" {
         return Ok(None);
     }
     let hookdir = text("hookdir")?;
@@ -473,5 +475,27 @@ mod tests {
         assert_eq!(names, ["One@/mods/one", "Two@/mods/two"]);
         assert_ne!(hash(&vfs, &mods[..1]), hash(&vfs, &mods));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// FAF's code leaves a mod named `Hotstats` out; LOUD's (and the base
+    /// game's) keep it.
+    #[test]
+    fn hotstats_is_left_out_on_fafs_code_only() {
+        let uids = |marker: &str| {
+            let dir = std::env::temp_dir().join(format!("mods_hotstats_{}_{}", std::process::id(), marker.replace('/', "-")));
+            let _ = std::fs::remove_dir_all(&dir);
+            for (path, body) in [(marker, ""), ("mods/hotstats/mod_info.lua", "name = 'Hotstats'\nuid = 'hs'\nui_only = true\n")] {
+                let p = dir.join(path);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, body).unwrap();
+            }
+            let vfs = Vfs::new(vec![crate::engine::vfs::MountPoint { source: dir.clone(), mountpoint: "/".into() }], vec![]).unwrap();
+            let found: Vec<String> = discover(&vfs).into_keys().collect();
+            let _ = std::fs::remove_dir_all(&dir);
+            found
+        };
+        assert!(uids("lua/version.lua").is_empty(), "FAF");
+        assert_eq!(uids("lua/loudutilities.lua"), ["hs"], "LOUD");
+        assert_eq!(uids("lua/other.lua"), ["hs"], "base game");
     }
 }
