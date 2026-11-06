@@ -88,6 +88,15 @@ fn log_filter() -> Targets {
     OWN_TARGETS.iter().fold(Targets::new().with_default(LevelFilter::WARN), |t, own| t.with_target(*own, LevelFilter::TRACE))
 }
 
+/// Whether the console log gets ANSI colours: only when its stream is a
+/// terminal (a pipe, such as the VS Code extension's output panel, or a
+/// redirect gets plain text), and not if `NO_COLOR` is set or `TERM=dumb`.
+fn console_colour(stderr: bool) -> bool {
+    use std::io::IsTerminal;
+    let tty = if stderr { std::io::stderr().is_terminal() } else { std::io::stdout().is_terminal() };
+    tty && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()) && std::env::var("TERM").as_deref() != Ok("dumb")
+}
+
 fn main() -> std::process::ExitCode {
     // Parse first: `--help` and argument errors exit before any setup.
     let cli = cli::Cli::parse_args();
@@ -143,6 +152,7 @@ fn main() -> std::process::ExitCode {
         )
         .with(
             fmt::layer()
+                .with_ansi(console_colour(audit_quiet_stdout))
                 .with_writer(if audit_quiet_stdout {
                     tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stderr)
                 } else {
