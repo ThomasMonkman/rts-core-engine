@@ -4,7 +4,7 @@ use crate::lua_api::shapes;
 use mlua::prelude::*;
 
 use crate::engine::api::blueprints::{BlueprintKind, BlueprintRegistry};
-use crate::engine::api::callbacks::{EntityCallbacks, UnitCallbacks};
+use crate::engine::api::callbacks::EntityCallbacks;
 use crate::engine::api::{moho, script_object};
 use crate::lua_api::{MohoClass, Obj, Status, lua_fn, lua_method};
 use crate::engine::sim::entity::{EntityId, EntityKind, EntityWorld};
@@ -1298,17 +1298,21 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             crate::engine::api::unit_stats::unit_killed(lua, entity_id(&this)?, killer)?;
             crate::engine::api::movement::start_falling(lua, entity_id(&this)?);
             let kind = kind.map(shapes::DamageType::into_inner).unwrap_or_else(|| LuaValue::String(lua.create_string("Normal").expect("string")));
-            // A unit killed while attached (cargo) is reported to what it's
-            // attached to first: `parent:OnAttachedKilled(unit)`.
-            let parent = {
+            // Then the attachments hear of it (moho's `Entity::Kill`,
+            // 0x1025e3b0, for every kind of entity): `parent:OnAttachedKilled(self)`,
+            // then `child:OnParentKilled(self)` for each child.
+            let id = entity_id(&this)?;
+            let (parent, children) = {
                 let w = world(lua);
-                w.get(entity_id(&this)?)
-                    .filter(|e| e.unit.is_some())
-                    .and_then(|e| e.attachment.map(|a| a.parent))
-                    .filter(|p| w.get(*p).is_some_and(|pe| pe.unit.is_some() && !pe.destroyed))
+                (w.get(id).and_then(|e| e.attachment.map(|a| a.parent)), w.attached_to(id))
             };
             if let Some(parent) = parent.map(|p| object(lua, p)).transpose()?.flatten() {
-                UnitCallbacks::on_attached_killed(lua, &parent, "unit", Obj::new(this.table().clone()))?;
+                EntityCallbacks::on_attached_killed(lua, &parent, "entity", Obj::new(this.table().clone()))?;
+            }
+            for child in children {
+                if let Some(child) = object(lua, child)? {
+                    EntityCallbacks::on_parent_killed(lua, &child, "entity", Obj::new(this.table().clone()))?;
+                }
             }
             EntityCallbacks::on_killed(lua, &this, "entity", instigator, shapes::DamageType(kind), excess.unwrap_or(0.0))
         })?;

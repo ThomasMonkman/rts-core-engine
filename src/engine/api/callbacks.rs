@@ -25,6 +25,11 @@ callbacks! {
         /// The entity is being destroyed (end of the beat it was destroyed in,
         /// still attached).
         OnDestroy();
+        /// An entity attached to this one (cargo, a shield, ...) was killed
+        /// (`Entity::Kill`, any kind of entity).
+        OnAttachedKilled(attached: Obj<moho::Entity>);
+        /// The entity this one is attached to was killed.
+        OnParentKilled(parent: Obj<moho::Entity>);
         /// An entity attached to this one ran its `OnDestroy`; it is detached next.
         OnAttachedDestroyed(attached: Obj<moho::Entity>);
         /// The entity this one is attached to ran its `OnDestroy`.
@@ -114,8 +119,6 @@ callbacks! {
         OnAssignedFocusEntity();
         /// Health changed by a quarter step (fractions of max health).
         OnHealthChanged(new: f64, old: f64);
-        /// A unit attached to this one (cargo) was killed.
-        OnAttachedKilled(attached: Obj<moho::Unit>);
         /// First seen by `army`.
         OnDetectedBy(army: u32);
         OnStartCapture(target: Obj<moho::Unit>);

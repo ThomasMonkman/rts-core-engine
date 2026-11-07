@@ -8,6 +8,7 @@
 --  * `IsDestroyed` stays false until the beat that ran `OnDestroy` is over.
 --  * The parent hears `OnAttachedDestroyed`, the children `OnParentDestroyed`.
 --  * `Kill` after `Destroy` in the same beat still runs `OnKilled`.
+--  * `OnAttachedKilled` / `OnParentKilled` (moho's `Entity::Kill` 0x1025e3b0).
 rawset(_G, "ScenarioResult", { done = false, failures = {}, notes = {} })
 local function check(ok, msg) if not ok then table.insert(ScenarioResult.failures, msg) end end
 local log = {}
@@ -79,5 +80,16 @@ ForkThread(function()
     k:Kill()
     check(log[1] == 'k:killed', 'Kill after Destroy runs OnKilled: ' .. table.concat(log, ' '))
 
+    -- Kill notifications, any entity kind.
+    log = {}
+    local kp, kc = unit(460, 'kp'), unit(464, 'kc')
+    kc:AttachBoneTo(-2, kp, -1)
+    kp:Kill()
+    check(log[1] == 'kc:parentKilled:kp' and log[2] == 'kp:killed', 'OnParentKilled before OnKilled: ' .. table.concat(log, ' '))
+    log = {}
+    local kp2, kc2 = unit(480, 'kp2'), unit(484, 'kc2')
+    kc2:AttachBoneTo(-2, kp2, -1)
+    kc2:Kill()
+    check(log[1] == 'kp2:attachedKilled:kc2' and log[2] == 'kc2:killed', 'OnAttachedKilled before OnKilled: ' .. table.concat(log, ' '))
     ScenarioResult.done = true
 end)
