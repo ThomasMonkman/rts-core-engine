@@ -1270,3 +1270,8 @@ fn build_site_snap() {
 fn mobile_placement() {
     scenario("mobile_placement", 100);
 }
+
+#[test]
+fn dispatch_hold() {
+    scenario("dispatch_hold", 1200);
+}

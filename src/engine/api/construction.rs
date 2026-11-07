@@ -276,7 +276,12 @@ fn ready_to_start(lua: &Lua, builder: EntityId) -> LuaResult<Option<(BuildOrder,
     let Some(bp) = cmd.blueprint.clone() else { return Ok(None) };
     let (site, reach) = {
         let w = entity::world(lua);
-        let Some(e) = w.get(builder).filter(|e| !e.destroyed && e.fraction_complete >= Fx::ONE) else { return Ok(None) };
+        // Moho's dispatch hold: a factory rolling a unit off
+        // (`BlockCommandQueue`) starts its next one after.
+        if crate::engine::api::orders::held(&w, builder) {
+            return Ok(None);
+        }
+        let Some(e) = w.get(builder) else { return Ok(None) };
         // (The structure's skirt is added below.)
         (e.position(), e.unit.as_deref().map(|u| u.build_range + u.radius * Fx::from_num(2)))
     };

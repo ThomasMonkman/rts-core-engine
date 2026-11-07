@@ -258,7 +258,7 @@ fn dive_states() -> (u32, u32) {
 fn dive_orders(world: &mut EntityWorld, commands: &mut Commands, surface: &mut Vec<u32>, vertical: &mut Vec<(u32, movement::VerticalMotion, movement::VerticalMotion)>) {
     use crate::engine::sim::command::CommandKind;
     use crate::engine::sim::layer::Layer;
-    let diving: Vec<u32> = commands.units_doing(&[CommandKind::Dive]).into_iter().filter(|&u| commands.current(u).is_some_and(|c| c.kind == CommandKind::Dive)).collect();
+    let diving: Vec<u32> = commands.units_doing(&[CommandKind::Dive]).into_iter().filter(|&u| commands.current(u).is_some_and(|c| c.kind == CommandKind::Dive) && !crate::engine::api::orders::held(world, u)).collect();
     for unit in diving {
         commands.pop_front(unit);
         let Some(u) = world.get_mut(unit).and_then(|e| e.unit.as_deref_mut()) else { continue };
