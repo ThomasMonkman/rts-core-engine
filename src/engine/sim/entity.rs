@@ -4,16 +4,31 @@
 //! by id, and `slot[id]` gives each entity's dense index (O(1) lookup).
 //! Ids are allocated monotonically and never reused, so a stale id finds an
 //! empty slot rather than a newer entity (FAF keys Lua tables by entity id).
-//! Destroyed entities are dropped by [`EntityWorld::compact`] once per tick
+//! Freed entities are dropped by [`EntityWorld::compact`] once per tick
 //! with an order-preserving `retain`, so iteration is always in id order on
 //! every machine, with no sorting needed.
+//!
+//! Destroying is moho's three steps (MohoEngine.dll, static):
+//! 1. `Destroy` ([`EntityWorld::destroy`]; `Entity::Destroy` 0x1025e420) only
+//!    sets the destroy-queued flag (`destroyed`; `BeenDestroyed` reads it,
+//!    0x102746d0) and queues the entity on the sim's destroy queue (`Sim`
+//!    +0xa58). Systems skip it from then on.
+//! 2. At the end of the beat the queue is drained in order
+//!    ([`EntityWorld::next_destroyed`]; `Sim::AdvanceBeat` 0x103194a1): each
+//!    entity's `OnDestroy` runs while it is still attached, then it is detached
+//!    ([`EntityWorld::detach_destroyed`]). Destroys made meanwhile join the
+//!    same drain, so `OnDestroy` never nests.
+//! 3. The object is freed after the beat (`Sim::Sync` -> `EntityDB::Purge`
+//!    0x10268270, deleting what `OnDestroy` marked ready, +0x1ba): `gone`
+//!    ([`EntityWorld::free`]), which `IsDestroyed` reads. Compaction removes
+//!    only freed entities.
 //!
 //! Hot / cold split: [`Entity`] holds only what per-tick systems and spatial
 //! queries scan (id, kind, army, destroyed, build fraction, transform,
 //! health, attachment) and is kept small (a test caps its size). Everything
 //! else is behind `cold`, and unit-only state behind `unit`. Destroyed
-//! entities stay flagged, so scripts can still query them from `OnDestroy`,
-//! until compaction. Lua never sees this layout: script objects carry
+//! entities stay flagged, so scripts can still query them (from `OnDestroy`
+//! too), until compaction. Lua never sees this layout: script objects carry
 //! `_c_object = EntityHandle(id)` and every native method looks the id up.
 //! Why not an ECS: docs/architecture/sim.md, "Entity storage".
 
@@ -128,7 +143,12 @@ pub struct Entity {
     pub id: EntityId,
     pub kind: EntityKind,
     pub army: Option<u32>,
+    /// `Destroy` has been called (moho's destroy-queued flag, which
+    /// `BeenDestroyed` reads): systems skip the entity from here on.
     pub destroyed: bool,
+    /// Its `OnDestroy` has run and the beat is over: moho has freed the object
+    /// (`IsDestroyed` is true), and compaction may drop the record.
+    pub gone: bool,
     /// Index of the blueprint in the category domain (cached at spawn so
     /// category filters are a bit test, not a string lookup).
     pub category_index: Option<u32>,
@@ -455,8 +475,11 @@ pub struct EntityWorld {
     /// Dense indices of the units (ascending, so in id order): passes over
     /// units skip the props (most of a big map's entities).
     unit_slots: Vec<u32>,
-    /// Destroyed entities still in `dense` (lets `compact` skip quiet ticks).
+    /// Freed entities still in `dense` (lets `compact` skip quiet ticks).
     destroyed: usize,
+    /// Entities `destroy`ed whose `OnDestroy` hasn't run yet, in the order
+    /// they were destroyed (moho's `Sim::GetOnDestroyedQueue`, +0xa58).
+    destroy_queue: std::collections::VecDeque<EntityId>,
     /// Live units by map cell.
     grid: SpatialGrid,
     /// Live props by map cell (kept apart so unit queries never scan trees).
@@ -518,6 +541,7 @@ impl EntityWorld {
             kind,
             army,
             destroyed: false,
+            gone: false,
             category_index: None,
             fraction_complete: Fx::ONE,
             position,
@@ -887,9 +911,9 @@ impl EntityWorld {
         self.dense.len()
     }
 
-    /// Drops destroyed entities, keeping id order, and returns their ids
+    /// Drops freed entities, keeping id order, and returns their ids
     /// (ascending) so callers can release what they hold for them.
-    /// Amortised: runs only once destroyed entities reach 1/8 of the array
+    /// Amortised: runs only once freed entities reach 1/8 of the array
     /// (until then they stay flagged and systems skip them), so a steady
     /// trickle of deaths costs a fraction of a pass per tick.
     pub fn compact(&mut self) -> Vec<EntityId> {
@@ -906,10 +930,10 @@ impl EntityWorld {
         }
         let mut removed = Vec::with_capacity(self.destroyed);
         self.dense.retain(|e| {
-            if e.destroyed {
+            if e.gone {
                 removed.push(e.id);
             }
-            !e.destroyed
+            !e.gone
         });
         for &id in &removed {
             self.slot[id as usize] = REMOVED;
@@ -932,15 +956,14 @@ impl EntityWorld {
         std::mem::take(&mut self.destroyed_log)
     }
 
-    /// Marks `id` destroyed and detaches it from its parent and children.
-    /// The record stays (scripts still query it from `OnDestroy`); returns
-    /// false if it was already destroyed or never existed.
+    /// `Destroy`: marks `id` destroyed (`BeenDestroyed`), takes it out of the
+    /// spatial index and queues it for its `OnDestroy`
+    /// ([`EntityWorld::next_destroyed`]). It stays attached until then. The
+    /// record stays (scripts still query it); returns false if it was already
+    /// destroyed or never existed.
     pub fn destroy(&mut self, id: EntityId) -> bool {
         match self.get_mut(id) {
-            Some(e) if !e.destroyed => {
-                e.destroyed = true;
-                e.attachment = None;
-            }
+            Some(e) if !e.destroyed => e.destroyed = true,
             _ => return false,
         }
         let e = self.get_mut(id).expect("checked above");
@@ -951,15 +974,51 @@ impl EntityWorld {
                 _ => self.grid.remove(id, cell),
             }
         }
-        self.destroyed += 1;
         self.destroyed_log.push(id);
+        self.destroy_queue.push_back(id);
+        true
+    }
+
+    /// The next destroyed entity whose `OnDestroy` is due (first destroyed
+    /// first), taken off the queue.
+    pub fn next_destroyed(&mut self) -> Option<EntityId> {
+        self.destroy_queue.pop_front()
+    }
+
+    /// After its `OnDestroy`: detaches `id` from its parent and its children
+    /// from it.
+    pub fn detach_destroyed(&mut self, id: EntityId) {
+        if let Some(e) = self.get_mut(id) {
+            e.attachment = None;
+        }
         while let Some(&(parent, child)) = self.children.range((id, EntityId::MIN)..=(id, EntityId::MAX)).next() {
             self.children.remove(&(parent, child));
             if let Some(e) = self.get_mut(child).filter(|e| e.attachment.is_some_and(|a| a.parent == id)) {
                 e.attachment = None;
             }
         }
-        true
+    }
+
+    /// The beat that ran `id`'s `OnDestroy` is over: the object is freed
+    /// (`IsDestroyed`), and compaction may drop it.
+    pub fn free(&mut self, id: EntityId) {
+        if let Some(e) = self.get_mut(id).filter(|e| e.destroyed && !e.gone) {
+            e.gone = true;
+            self.destroyed += 1;
+        }
+    }
+
+    /// Runs the destroy queue with no scripts: detaches and frees every
+    /// destroyed entity (tests and engine code with no Lua around).
+    pub fn finish_destroys(&mut self) {
+        let mut done = Vec::new();
+        while let Some(id) = self.next_destroyed() {
+            self.detach_destroyed(id);
+            done.push(id);
+        }
+        for id in done {
+            self.free(id);
+        }
     }
 
     /// Attaches `child` to `parent` and snaps it into place: `self_bone` onto
@@ -1233,10 +1292,12 @@ mod tests {
         w.get_mut(b).unwrap().attachment = None;
         w.attach(b, to(q));
         w.destroy(p);
+        w.finish_destroys();
         assert!(w.get(a).unwrap().attachment.is_none());
         assert_eq!(w.get(b).unwrap().attachment.map(|x| x.parent), Some(q));
         assert_eq!(w.get(c).unwrap().attachment.map(|x| x.parent), Some(q));
         w.destroy(q);
+        w.finish_destroys();
         assert!(w.get(b).unwrap().attachment.is_none() && w.get(c).unwrap().attachment.is_none());
     }
 
@@ -1257,15 +1318,36 @@ mod tests {
     }
 
     #[test]
-    fn destroy_detaches_and_is_idempotent() {
+    fn destroy_queues_then_detaches_and_is_idempotent() {
         let mut w = EntityWorld::default();
         let (parent, child) = (spawn(&mut w), spawn(&mut w));
         w.attach(child, Attachment { parent, parent_bone: None, self_bone: None });
         assert!(w.destroy(parent));
         assert!(w.get(parent).unwrap().destroyed);
-        assert_eq!(w.get(child).unwrap().attachment, None);
+        assert!(!w.get(parent).unwrap().gone);
+        // Still attached until its OnDestroy (moho's drain at the end of the beat).
+        assert_eq!(w.get(child).unwrap().attachment.map(|a| a.parent), Some(parent));
         assert!(!w.destroy(parent));
         assert!(!w.destroy(999));
+        w.finish_destroys();
+        assert_eq!(w.get(child).unwrap().attachment, None);
+        assert!(w.get(parent).unwrap().gone);
+        assert_eq!(w.next_destroyed(), None);
+    }
+
+    /// The queue drains first destroyed first, including destroys made
+    /// during the drain (they go to the back, not run nested).
+    #[test]
+    fn destroy_queue_is_fifo() {
+        let mut w = EntityWorld::default();
+        let ids: Vec<EntityId> = (0..4).map(|_| spawn(&mut w)).collect();
+        w.destroy(ids[2]);
+        w.destroy(ids[0]);
+        assert_eq!(w.next_destroyed(), Some(ids[2]));
+        w.destroy(ids[3]);
+        assert_eq!(w.next_destroyed(), Some(ids[0]));
+        assert_eq!(w.next_destroyed(), Some(ids[3]));
+        assert_eq!(w.next_destroyed(), None);
     }
 
     #[test]
@@ -1275,7 +1357,9 @@ mod tests {
         assert!(w.compact().is_empty(), "nothing destroyed: no-op");
         w.destroy(ids[1]);
         w.destroy(ids[3]);
-        assert!(w.get(ids[3]).is_some(), "record survives until compaction (OnDestroy)");
+        assert!(w.compact().is_empty(), "not freed until OnDestroy has run");
+        w.finish_destroys();
+        assert!(w.get(ids[3]).is_some(), "record survives until compaction");
         assert_eq!(w.compact(), vec![ids[1], ids[3]]);
         assert!(w.get(ids[1]).is_none() && w.get(ids[3]).is_none());
         assert_eq!(w.get(ids[4]).unwrap().id, ids[4]);
@@ -1291,9 +1375,11 @@ mod tests {
         let mut w = EntityWorld::default();
         let ids: Vec<EntityId> = (0..16).map(|_| spawn(&mut w)).collect();
         w.destroy(ids[3]);
+        w.finish_destroys();
         assert!(w.compact().is_empty(), "1/16 destroyed: deferred");
         assert!(w.get(ids[3]).is_some_and(|e| e.destroyed), "still flagged meanwhile");
         w.destroy(ids[7]);
+        w.finish_destroys();
         assert_eq!(w.compact(), vec![ids[3], ids[7]], "2/16 = 1/8: compacts");
         assert_eq!(w.len(), 14);
     }
