@@ -540,7 +540,7 @@ pub fn spawn_unit_built_by(
             u.fuel_use_time = crate::engine::sim::math::from_lua(fuel_use_time);
             u.armor_type = armor_type.map(std::sync::Arc::from);
             u.fuel_recharge = crate::engine::sim::math::from_lua(fuel_recharge);
-            u.transport_class = transport_class.clamp(1.0, 3.0) as u8;
+            u.transport_class = transport_class.clamp(0.0, 255.0) as u8;
             u.jammer = jammer;
             u.fuel_ratio = if fuel_use_time > 0.0 { Fx::ONE } else { -Fx::ONE };
             u.blueprint_command_caps = command_caps;

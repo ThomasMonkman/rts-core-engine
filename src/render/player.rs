@@ -318,16 +318,21 @@ impl PlayerControl {
         }
     }
 
-    /// Cargo-slot classes of `e`'s model (bits 1 / 2 / 4): where the sim's
+    /// Cargo-slot classes of `e`'s model (bit `class - 1`): where the sim's
     /// `free_slots` finds a bone to board into.
     fn slot_mask(scene: &World, e: &EntityView) -> u8 {
-        scene.blueprint_transport.as_ref().and_then(|t| t.get(e.blueprint as usize)).map_or(0, |&(s, _)| s)
+        scene.blueprint_transport.as_ref().and_then(|t| t.get(e.blueprint as usize)).map_or(0, |&(s, _, _)| s)
+    }
+
+    /// `e`'s `Transport.ClassGenericUpTo`.
+    fn generic_up_to(scene: &World, e: &EntityView) -> u8 {
+        scene.blueprint_transport.as_ref().and_then(|t| t.get(e.blueprint as usize)).map_or(0, |&(_, _, g)| g)
     }
 
     /// The entity's cargo class (its blueprint's `Transport.TransportClass`,
     /// 1 when unset).
     fn transport_class(scene: &World, e: &EntityView) -> u8 {
-        scene.blueprint_transport.as_ref().and_then(|t| t.get(e.blueprint as usize)).map_or(1, |&(_, c)| if c == 0 { 1 } else { c })
+        scene.blueprint_transport.as_ref().and_then(|t| t.get(e.blueprint as usize)).map_or(1, |&(_, c, _)| c)
     }
 
     /// Drag-selection priority (1 = highest): the blueprint's
@@ -603,7 +608,7 @@ impl PlayerControl {
         let passenger = Passenger { mobile: unit.kind == ViewKind::Unit, air: uc & oc::AIR != 0, commander: uc & oc::COMMAND != 0, class: Self::transport_class(scene, unit) };
         let carrier = Carrier {
             transport: Self::caps_of(scene, transport) & caps::TRANSPORT != 0,
-            staging: tc & oc::AIRSTAGINGPLATFORM != 0, carries_commander: tc & oc::CANTRANSPORTCOMMANDER != 0, slot_classes: Self::slot_mask(scene, transport), storage: false };
+            staging: tc & oc::AIRSTAGINGPLATFORM != 0, carries_commander: tc & oc::CANTRANSPORTCOMMANDER != 0, slot_classes: Self::slot_mask(scene, transport), generic_up_to: Self::generic_up_to(scene, transport), storage: false };
         crate::engine::sim::carry::can_carry(&passenger, &carrier)
     }
 
