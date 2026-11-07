@@ -182,11 +182,41 @@ pub struct Commands {
     /// (dragging its waypoint moves theirs too).
     #[serde(default)]
     factory_queues: BTreeMap<EntityId, Vec<CommandId>>,
+    /// Each unit's current command once moho's dispatcher has started it
+    /// ([`Commands::dispatch`]), and the units whose current command it
+    /// hasn't yet ([`Commands::undispatched`]), of which those the
+    /// dispatcher found held (`api::orders::held`, [`Commands::hold`]): a
+    /// held unit doesn't act on a new order until it's started.
+    #[serde(default)]
+    started: BTreeMap<EntityId, CommandId>,
+    #[serde(default)]
+    undispatched: std::collections::BTreeSet<EntityId>,
+    #[serde(default)]
+    waiting: std::collections::BTreeSet<EntityId>,
+    /// Ground attacks whose weapon has fired: (command, tick it ends at),
+    /// by unit ([`Commands::cycle_ground_attacks`]).
+    #[serde(default)]
+    ground_fired: BTreeMap<EntityId, (CommandId, u64)>,
 }
 
 impl Commands {
-    /// Re-indexes `unit` by its current command's kind.
+    /// Re-indexes `unit` by its current command's kind, and notes a new
+    /// current command as not yet dispatched.
     fn sync(&mut self, unit: EntityId) {
+        match self.current(unit).map(|c| c.id) {
+            Some(id) if self.started.get(&unit) != Some(&id) => {
+                self.undispatched.insert(unit);
+            }
+            Some(_) => {
+                self.undispatched.remove(&unit);
+                self.waiting.remove(&unit);
+            }
+            None => {
+                self.started.remove(&unit);
+                self.undispatched.remove(&unit);
+                self.waiting.remove(&unit);
+            }
+        }
         let now = self.current(unit).map(|c| c.kind);
         let before = match now {
             Some(k) => self.current_kind.insert(unit, k),
@@ -327,6 +357,67 @@ impl Commands {
 
     pub fn current(&self, unit: EntityId) -> Option<&Command> {
         self.queue(unit).next()
+    }
+
+    /// `unit`'s current command once the dispatcher has started it (what
+    /// movement acts on); `None` while the dispatcher holds it
+    /// ([`Self::hold`]).
+    pub fn dispatched(&self, unit: EntityId) -> Option<&Command> {
+        if self.waiting.contains(&unit) {
+            return None;
+        }
+        self.current(unit)
+    }
+
+    /// Units whose current command the dispatcher hasn't started, ascending.
+    pub fn undispatched(&self) -> Vec<EntityId> {
+        self.undispatched.iter().copied().collect()
+    }
+
+    /// The dispatcher found `unit` held: its new current command waits.
+    pub fn hold(&mut self, unit: EntityId) {
+        self.waiting.insert(unit);
+    }
+
+    /// The dispatcher starts `unit`'s current command; returns it.
+    pub fn dispatch(&mut self, unit: EntityId) -> Option<&Command> {
+        let id = self.current(unit)?.id;
+        self.started.insert(unit, id);
+        self.undispatched.remove(&unit);
+        self.waiting.remove(&unit);
+        self.map.get(&id)
+    }
+
+    /// `unit`'s weapon fired while its current command `id` is an attack on
+    /// the ground: the attack task ends `delay` ticks on (once per time the
+    /// order comes round).
+    pub fn note_ground_fire(&mut self, unit: EntityId, id: CommandId, at: u64) {
+        if self.ground_fired.get(&unit).is_none_or(|&(c, _)| c != id) {
+            self.ground_fired.insert(unit, (id, at));
+        }
+    }
+
+    /// Ground attacks due to end at `now` with another command behind them
+    /// go to the back of the queue (moho's attack task ends, and the
+    /// dispatcher moves an Attack on the ground behind any next command:
+    /// `IAiCommandDispatchImpl::TaskTick` 0x101893d7..0x1018952b). Alone,
+    /// one carries on. Returns the units cycled.
+    pub fn cycle_ground_attacks(&mut self, now: u64) -> Vec<EntityId> {
+        if self.ground_fired.is_empty() {
+            return Vec::new();
+        }
+        let mut cycled = Vec::new();
+        let entries: Vec<(EntityId, CommandId, u64)> = self.ground_fired.iter().map(|(&u, &(c, t))| (u, c, t)).collect();
+        for (u, c, t) in entries {
+            if self.current(u).map(|x| x.id) != Some(c) {
+                self.ground_fired.remove(&u);
+            } else if now >= t && self.queue_len(u) > 1 {
+                self.ground_fired.remove(&u);
+                self.requeue_front(u);
+                cycled.push(u);
+            }
+        }
+        cycled
     }
 
     /// How many commands `unit` has queued.

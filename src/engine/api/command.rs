@@ -636,7 +636,6 @@ fn command_table(lua: &Lua, c: &crate::engine::sim::command::Command) -> LuaResu
 
 pub fn register(lua: &Lua) -> LuaResult<()> {
     lua.set_app_data(Commands::default());
-    let g = lua.globals();
     move_off_factory(lua)?;
     use CommandKind as K;
     for (name, kind) in [
@@ -701,26 +700,37 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         formation(lua, name, kind)?;
     }
     // Clear the queues now; the returned command is already done.
-    for name in ["IssueClearCommands", "IssueStop"] {
-        crate::lua_api::register_fn(
-            lua,
-            &g,
-            "",
-            name,
-            Some(&[Some("units")]),
-            "Clears the units' queues now; the returned command is already done.",
-            Status::Implemented,
-            false,
-            |lua, units: shapes::Units| {
-                let units = units_of(lua, &units)?;
+    lua_fn!(lua, global,
+        /// Clears the units' queues and stops their weapons now (moho's
+        /// `ClearCommandQueue` + `AttackerStop`, MohoEngine.dll
+        /// 0x102cc457 / 0x102cc466); the returned command is already done.
+        IssueClearCommands = |lua, units: shapes::Units| {
+            let units = units_of(lua, &units)?;
+            {
                 let mut c = commands(lua);
                 for &u in &units {
                     c.clear(u);
                 }
-                Ok(CommandHandle(c.issue(&[], CommandKind::Stop, CommandTarget::None, None, 0)))
-            },
-        )?;
-    }
+            }
+            for &u in &units {
+                crate::engine::api::orders::attacker_stop(lua, u);
+            }
+            Ok(CommandHandle(commands(lua).issue(&[], CommandKind::Stop, CommandTarget::None, None, 0)))
+        })?;
+    lua_fn!(lua, global,
+        /// Replaces the units' queues with a Stop order (moho issues a real
+        /// command, type 1); its dispatch next tick stops their weapons
+        /// (`api::orders`).
+        IssueStop = |lua, units: shapes::Units| {
+            let units = units_of(lua, &units)?;
+            {
+                let mut c = commands(lua);
+                for &u in &units {
+                    c.clear(u);
+                }
+            }
+            Ok(issue(lua, &units, CommandKind::Stop, CommandTarget::None, None, 0))
+        })?;
     lua_fn!(lua, global,
         /// Empties the factories' factory command queues (their rally
         /// orders), leaving their builds alone; the returned command is done.
@@ -1018,13 +1028,21 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_method!(lua, moho::Unit,
-        /// The unit's queued commands, as `UnitCommand` tables.
+        /// The unit's queued commands, as `UnitCommand` tables. A factory
+        /// build of several units lists once per unit still to build, as
+        /// the real game shows `IssueBuildFactory(..., 3)` (`probe_queue`).
         GetCommandQueue = |lua, this: Obj<moho::Unit>| {
             let id = entity::entity_id(&this)?;
             let queue: Vec<crate::engine::sim::command::Command> = commands(lua).queue(id).cloned().collect();
             let t = lua.create_table_with_capacity(queue.len(), 0)?;
-            for (i, c) in queue.iter().enumerate() {
-                t.raw_set(i + 1, command_table(lua, c)?)?;
+            let mut n = 0;
+            for c in &queue {
+                let entry = command_table(lua, c)?;
+                let times = if c.kind == K::BuildFactory { c.count.max(1) } else { 1 };
+                for _ in 0..times {
+                    n += 1;
+                    t.raw_set(n, entry.clone())?;
+                }
             }
             Ok(shapes::List::<shapes::Shaped<UnitCommand>>::new(t))
         })?;

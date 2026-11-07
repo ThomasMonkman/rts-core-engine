@@ -47,8 +47,52 @@ ForkThread(function()
     IssueClearCommands({ busy })
     busy:SetBlockCommandQueue(false)
 
+    -- A blocked unit's new move waits for the unblock (real game:
+    -- probe_queue BQ).
+    local bq = make('uel0201', 390, 580)
+    bq:SetBlockCommandQueue(true)
+    IssueMove({ bq }, { 400, GetTerrainHeight(400, 580), 580 })
+    WaitTicks(10)
+    local p = bq:GetPosition()
+    check(math.abs(p[1] - 390) < 0.01, string.format('a blocked unit doesn\'t start its move (x %.2f)', p[1]))
+    bq:SetBlockCommandQueue(false)
+    WaitTicks(10)
+    check(bq:GetPosition()[1] > 390.05, 'it moves once unblocked')
+
+    -- An attack on the ground with a move behind it ends after firing and
+    -- goes to the back (real game: probe_queue AG).
+    local ag = make('uel0201', 440, 590)
+    IssueAttack({ ag }, { 440, GetTerrainHeight(440, 603), 603 })
+    IssueMove({ ag }, { 450, GetTerrainHeight(450, 590), 590 })
+    local cycled = false
+    for _ = 1, 150 do
+        WaitTicks(1)
+        local q = ag:GetCommandQueue()
+        if q[1] and q[1].commandType == 2 and q[2] and q[2].commandType == 10 then cycled = true break end
+    end
+    check(cycled, 'the ground attack went behind the move')
+    -- Clearing stops the weapons at once.
+    local w = ag:GetWeapon(1)
+    IssueClearCommands({ ag })
+    IssueAttack({ ag }, { 440, GetTerrainHeight(440, 603), 603 })
+    WaitTicks(3)
+    local had = w:GetCurrentTargetPos() ~= nil
+    IssueClearCommands({ ag })
+    note('had target ' .. tostring(had) .. ' after ' .. tostring(w:GetCurrentTargetPos() ~= nil))
+    check(had and w:GetCurrentTargetPos() == nil, 'IssueClearCommands drops the weapon\'s target')
+
+    -- A factory's build of 3 lists 3 entries.
+    local f3 = make('ueb0101', 400, 640)
+    IssueBuildFactory({ f3 }, 'uel0201', 3)
+    check(table.getn(f3:GetCommandQueue()) == 3, 'a build of 3 lists 3 entries (' .. table.getn(f3:GetCommandQueue()) .. ')')
+    IssueClearCommands({ f3 })
+
     -- The factory's roll-off.
     local land = make('ueb0101', 400, 600)
+    local stops, starts = {}, {}
+    local os0, oe0 = land.OnStopBuild, land.OnStartBuild
+    land.OnStopBuild = function(self, u, o) table.insert(stops, GetGameTick()) return os0(self, u, o) end
+    land.OnStartBuild = function(self, u, o) table.insert(starts, GetGameTick()) return oe0(self, u, o) end
     IssueBuildFactory({ land }, 'uel0201', 2)
     local started_while_blocked, blocked_ticks, tanks = false, 0, 0
     for _ = 1, 900 do
@@ -57,7 +101,7 @@ ForkThread(function()
         if blocked then blocked_ticks = blocked_ticks + 1 end
         local building, done = 0, 0
         for _, u in b:GetListOfUnits(categories.uel0201, false) or {} do
-            if u ~= victim and u ~= gone then
+            if u ~= victim and u ~= gone and u ~= bq and u ~= ag then
                 if u:GetFractionComplete() < 1 then building = building + 1 else done = done + 1 end
             end
         end
@@ -65,7 +109,7 @@ ForkThread(function()
         if blocked and done >= 1 and building > 0 then started_while_blocked = true end
         if done >= 2 then break end
     end
-    note(string.format('factory blocked %d ticks, %d tanks', blocked_ticks, tanks))
+    note(string.format('factory blocked %d ticks, %d tanks; OnStopBuild %s, OnStartBuild %s', blocked_ticks, tanks, tostring(stops[1]), tostring(starts[2])))
     check(blocked_ticks > 0, 'FAF blocks the factory\'s queue for the roll-off')
     check(not started_while_blocked, 'the next tank waits for the roll-off')
     check(tanks >= 2, 'then the factory builds it')

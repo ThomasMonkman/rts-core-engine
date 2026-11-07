@@ -1192,8 +1192,10 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     // A travelling formation sets the pace (members may go faster to catch
     // up with their slot); one gathering at the target moves at its slowest
     // unit's speed.
-    // The unit's current order, looked up once (a double map lookup).
-    let cmd = commands.current(unit);
+    // The unit's current order, looked up once (a double map lookup); one
+    // the dispatcher hasn't started yet (the unit is held:
+    // `api::orders::held`) isn't acted on.
+    let cmd = commands.dispatched(unit);
     // An aircraft's move with another move queued behind it flies through
     // its point (moho's speed-through: D at top speed outright,
     // `CalcMoveAir` 0x1029d6d0): no slowing onto it, and it's done a turn's
@@ -3274,7 +3276,7 @@ pub fn apply(world: &mut EntityWorld, commands: &mut Commands, moved: &[Moved], 
             static RUN: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("MakingAttackRun").expect("state"));
             u.states.set(*RUN, matches!(m.state.combat, 1 | 2));
         }
-        if m.arrived {
+        if m.arrived && commands.dispatched(m.unit).is_some() {
             use crate::engine::sim::command::CommandKind as K;
             let patrol = commands.current(m.unit).filter(|c| matches!(c.kind, K::Patrol | K::FormPatrol)).map(|c| (c.kind, c.target));
             match patrol {
