@@ -136,10 +136,18 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         crate::lua_api::registry::record(lua, FnEntry { scope: Scope::Global, name: name.into(), params: Some(&[]), args: <() as LuaArgs>::types, rets: <LuaMultiValue as LuaArgs>::types, doc, status: Status::Implemented });
     }
     lua_fn!(lua, global,
-        /// Wakes a thread suspended by `SuspendCurrentThread` (a no-op if it
-        /// isn't suspended).
-        ResumeThread = |lua, thread: LuaThread| {
-            lua.app_data_mut::<Scheduler>().expect("Scheduler not in app_data").resume_suspended(&thread);
+        /// Wakes a thread: one suspended by `SuspendCurrentThread`, or one
+        /// waiting (`WaitTicks`), whose wait is cut short. It runs in this
+        /// tick's pass if the pass hasn't gone by it yet, else next tick
+        /// (moho's `ResumeThread`, MohoEngine.dll 0x100bcba0). A killed or
+        /// finished thread is left alone; a non-thread (nil) logs "Attempted
+        /// to resume a thread that was already killed", as moho's does.
+        ResumeThread = |lua, thread: LuaValue| {
+            let LuaValue::Thread(thread) = thread else {
+                tracing::warn!(target: "lua", "Attempted to resume a thread that was already killed");
+                return Ok(());
+            };
+            lua.app_data_mut::<Scheduler>().expect("Scheduler not in app_data").resume(&thread);
             Ok(())
         })?;
     Ok(())
@@ -157,15 +165,14 @@ pub fn run_tick(lua: &Lua) -> LuaResult<()> {
 /// tick, then creation order), then every pending fork in FIFO order,
 /// including forks created while draining.
 pub fn run_due(lua: &Lua) -> LuaResult<()> {
-    let due = lua
-        .app_data_mut::<Scheduler>()
-        .expect("Scheduler not in app_data")
-        .take_due();
+    // One at a time: a thread may `ResumeThread` another due later this tick.
     // After each resume, platoons that thread emptied (AI managers move
     // units between platoons from their threads) end before any other
     // thread runs, so their own threads are killed instead of waking to a
     // platoon with no units; never while a thread is running.
-    for id in due {
+    loop {
+        let next = lua.app_data_mut::<Scheduler>().expect("Scheduler not in app_data").next_due();
+        let Some(id) = next else { break };
         resume(lua, id)?;
         crate::engine::api::entity::end_emptied_platoons(lua)?;
     }
@@ -179,9 +186,11 @@ pub fn run_due(lua: &Lua) -> LuaResult<()> {
                 resume(lua, id)?;
                 crate::engine::api::entity::end_emptied_platoons(lua)?;
             }
-            None => return Ok(()),
+            None => break,
         }
     }
+    lua.app_data_mut::<Scheduler>().expect("Scheduler not in app_data").end_pass();
+    Ok(())
 }
 
 fn resume(lua: &Lua, id: TaskId) -> LuaResult<()> {
@@ -278,5 +287,96 @@ mod tests {
         lua.load("ResumeThread(sleeper)").exec().unwrap();
         run_tick(&lua).unwrap();
         assert_eq!(lua.load("return table.concat(log, ',')").eval::<String>().unwrap(), "sleep,woke");
+    }
+
+    /// The sim's scheduler (moho waits) with `log` and a `tick` counter.
+    fn sim_vm() -> Lua {
+        let lua = Lua::new();
+        register(&lua).unwrap();
+        lua.app_data_mut::<Scheduler>().unwrap().set_moho_waits(true);
+        lua.load("log = {} function note(s) table.insert(log, s .. '@' .. tick) end tick = 0").exec().unwrap();
+        lua
+    }
+
+    fn tick(lua: &Lua) {
+        lua.load("tick = tick + 1").exec().unwrap();
+        run_tick(lua).unwrap();
+    }
+
+    fn log(lua: &Lua) -> String {
+        lua.load("return table.concat(log, ',')").eval().unwrap()
+    }
+
+    /// Moho's `ResumeThread` zeroes a waiting thread's wait too (0x100bcc86):
+    /// woken by an earlier thread in the pass it runs that tick; by a later
+    /// one (the pass has gone by it), the next tick.
+    #[test]
+    fn resume_cuts_a_wait_short() {
+        let lua = sim_vm();
+        lua.load(
+            "waker = ForkThread(function()
+                 coroutine.yield(1)
+                 while true do
+                     if wake then ResumeThread(wake) wake = nil end
+                     coroutine.yield(1)
+                 end
+             end)
+             sleeper = ForkThread(function()
+                 while true do note('sleeper') coroutine.yield(100) end
+             end)
+             late = ForkThread(function()
+                 coroutine.yield(1)
+                 while true do
+                     if wakeLate then ResumeThread(wakeLate) wakeLate = nil end
+                     coroutine.yield(1)
+                 end
+             end)",
+        )
+        .exec()
+        .unwrap();
+        tick(&lua);
+        tick(&lua);
+        assert_eq!(log(&lua), "sleeper@1");
+        // waker (forked first) resumes the sleeper: the pass hasn't reached it.
+        lua.load("wake = sleeper").exec().unwrap();
+        tick(&lua);
+        assert_eq!(log(&lua), "sleeper@1,sleeper@3");
+        // late (forked after it) resumes it: next tick.
+        lua.load("wakeLate = sleeper").exec().unwrap();
+        tick(&lua);
+        assert_eq!(log(&lua), "sleeper@1,sleeper@3");
+        tick(&lua);
+        assert_eq!(log(&lua), "sleeper@1,sleeper@3,sleeper@5");
+        // Outside the pass (another stage, after the threads): next tick.
+        lua.load("ResumeThread(sleeper)").exec().unwrap();
+        tick(&lua);
+        assert_eq!(log(&lua), "sleeper@1,sleeper@3,sleeper@5,sleeper@6");
+        // A thread resumed twice, or a dead one, or nil: no harm.
+        lua.load("ResumeThread(sleeper) ResumeThread(sleeper) ResumeThread(nil)").exec().unwrap();
+        tick(&lua);
+        tick(&lua);
+        assert_eq!(log(&lua), "sleeper@1,sleeper@3,sleeper@5,sleeper@6,sleeper@7");
+    }
+
+    /// A suspended thread resumed by another thread goes to the end of the
+    /// pass and runs that tick (moho re-links it at the stage list's tail).
+    #[test]
+    fn resumed_suspended_thread_runs_the_same_tick() {
+        let lua = sim_vm();
+        lua.load(
+            "sleeper = ForkThread(function()
+                 note('sleep') SuspendCurrentThread() note('woke')
+             end)
+             ForkThread(function()
+                 coroutine.yield(3)
+                 note('resume') ResumeThread(sleeper) note('resumed')
+             end)",
+        )
+        .exec()
+        .unwrap();
+        for _ in 0..3 {
+            tick(&lua);
+        }
+        assert_eq!(log(&lua), "sleep@1,resume@3,resumed@3,woke@3");
     }
 }

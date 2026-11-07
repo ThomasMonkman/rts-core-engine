@@ -9,6 +9,16 @@
 //! Forked tasks go to a FIFO `pending` queue and first run at the end of the
 //! tick they were forked in (after that tick's due tasks), including children
 //! forked while draining — see docs/architecture/lua-bridge.md.
+//!
+//! This is moho's script stage pass (MohoEngine.dll 0x10009390): it walks the
+//! stage's thread list once a beat, in order, with new threads (`ForkThread`)
+//! and resumed suspended ones appended to the end, so they run in the same
+//! pass. Each thread keeps a wait counter; the pass decrements it and runs
+//! the thread once it reaches 0 (0x10008be0). `ResumeThread` (0x100bcba0)
+//! zeroes it: a waiting thread the pass hasn't reached yet runs this beat, one
+//! it has passed runs next beat ([`Scheduler::resume`]). Due tasks are popped
+//! one at a time ([`Scheduler::next_due`]) so a task woken mid-pass slots in
+//! by id.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
@@ -25,6 +35,27 @@ struct Task {
     start_args: Option<LuaMultiValue>,
     /// Suspended indefinitely until `ResumeThread`.
     suspended: bool,
+    /// The tick it's waiting for, while it waits in `sleeping` (`None` while
+    /// it runs, is pending, or is suspended). A `sleeping` entry is live only
+    /// while it matches: `ResumeThread` moves the wake earlier by pushing a
+    /// second entry.
+    wake: Option<u64>,
+}
+
+/// Where the tick's script pass is ([`Scheduler::resume`] needs it to know
+/// whether the pass has already gone by a waiting thread).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum Pass {
+    /// The tick's threads haven't run yet.
+    #[default]
+    Before,
+    /// Running the due tasks; this one is running (all due tasks with a
+    /// lower id have run).
+    Due(TaskId),
+    /// Running the pending queue: every waiting task has been passed.
+    Pending,
+    /// Done for this tick.
+    After,
 }
 
 #[derive(Default)]
@@ -45,6 +76,7 @@ pub struct Scheduler {
     /// The sim's waits (moho's): a yield of `n` waits `n - 1` ticks. Off,
     /// a yield of `n` waits `n` steps (the interface's frames).
     moho_waits: bool,
+    pass: Pass,
 }
 
 impl Scheduler {
@@ -91,6 +123,7 @@ impl Scheduler {
     pub fn begin_tick(&mut self) {
         self.tick += 1;
         self.advanced = true;
+        self.pass = Pass::Before;
     }
 
     pub fn task_count(&self) -> usize {
@@ -112,20 +145,29 @@ impl Scheduler {
                 thread,
                 start_args: Some(args),
                 suspended: false,
+                wake: None,
             },
         );
         self.pending.push_back(id);
         id
     }
 
-    /// Next forked task waiting for its first run (FIFO), skipping killed ones.
+    /// Next forked (or resumed) task waiting to run this pass (FIFO),
+    /// skipping killed ones.
     pub fn next_pending(&mut self) -> Option<TaskId> {
+        self.pass = Pass::Pending;
         while let Some(id) = self.pending.pop_front() {
-            if self.tasks.contains_key(&id) {
+            if self.tasks.get(&id).is_some_and(|t| !t.suspended) {
                 return Some(id);
             }
         }
         None
+    }
+
+    /// The tick's script pass is over: a thread resumed from now on runs next
+    /// tick.
+    pub fn end_pass(&mut self) {
+        self.pass = Pass::After;
     }
 
     /// Removes a task; returns false if the thread isn't scheduled. Stale heap
@@ -150,17 +192,39 @@ impl Scheduler {
         }
     }
 
-    /// Wakes a suspended task on the next tick; no-op if it isn't suspended.
-    pub fn resume_suspended(&mut self, thread: &LuaThread) -> bool {
+    /// `ResumeThread`: zeroes the task's wait (MohoEngine.dll 0x100bcc86). A
+    /// suspended task goes to the end of this tick's pass (moho re-links it
+    /// at the tail of the stage's list), so it runs this tick unless the pass
+    /// is over. A waiting task runs when the pass reaches it: this tick if
+    /// the pass hasn't gone by it yet (before the threads run, or a higher id
+    /// while the due tasks run), else next tick. A task that's running or
+    /// pending is left as it is. False if the thread isn't a live task.
+    pub fn resume(&mut self, thread: &LuaThread) -> bool {
         let Some(&id) = self.by_thread.get(&Self::key(thread)) else { return false };
-        match self.tasks.get_mut(&id) {
-            Some(t) if t.suspended => {
-                t.suspended = false;
-                self.sleeping.push(Reverse((self.tick + 1, id)));
-                true
+        let (tick, pass) = (self.tick, self.pass);
+        let Some(t) = self.tasks.get_mut(&id) else { return false };
+        if t.suspended {
+            t.suspended = false;
+            if pass == Pass::After {
+                t.wake = Some(tick + 1);
+                self.sleeping.push(Reverse((tick + 1, id)));
+            } else {
+                t.wake = None;
+                self.pending.push_back(id);
             }
-            _ => false,
+            return true;
         }
+        let Some(wake) = t.wake else { return true };
+        let now = match pass {
+            Pass::Before => tick,
+            Pass::Due(running) if id > running => tick,
+            _ => tick + 1,
+        };
+        if now < wake {
+            t.wake = Some(now);
+            self.sleeping.push(Reverse((now, id)));
+        }
+        true
     }
 
     pub fn contains(&self, thread: &LuaThread) -> bool {
@@ -175,19 +239,27 @@ impl Scheduler {
     }
 
     /// The tasks due this tick (started with [`Scheduler::begin_tick`]), in
-    /// deterministic order. The caller resumes each with [`Scheduler::resume`].
+    /// deterministic order, all at once.
     pub fn take_due(&mut self) -> Vec<TaskId> {
-        let mut due = Vec::new();
+        std::iter::from_fn(|| self.next_due()).collect()
+    }
+
+    /// The next task due this tick, by (wake tick, id): stale entries (the
+    /// task was killed, suspended, or woken earlier by `ResumeThread`) are
+    /// skipped. The caller runs it ([`Scheduler::begin_resume`]).
+    pub fn next_due(&mut self) -> Option<TaskId> {
         while let Some(&Reverse((wake, id))) = self.sleeping.peek() {
             if wake > self.tick {
                 break;
             }
             self.sleeping.pop();
-            if self.tasks.get(&id).is_some_and(|t| !t.suspended) {
-                due.push(id);
+            if let Some(t) = self.tasks.get_mut(&id).filter(|t| t.wake == Some(wake) && !t.suspended) {
+                t.wake = None;
+                self.pass = Pass::Due(id);
+                return Some(id);
             }
         }
-        due
+        None
     }
 
     /// Takes what's needed to resume task `id` (it may have been killed by an
@@ -206,7 +278,9 @@ impl Scheduler {
             ResumeOutcome::Yielded(0) if !task.suspended => self.pending.push_back(id),
             ResumeOutcome::Yielded(ticks) => {
                 if !task.suspended {
-                    self.sleeping.push(Reverse((self.tick + ticks, id)));
+                    let wake = self.tick + ticks;
+                    task.wake = Some(wake);
+                    self.sleeping.push(Reverse((wake, id)));
                 }
             }
             ResumeOutcome::Suspended => task.suspended = true,
@@ -225,13 +299,14 @@ pub struct SavedScheduler {
     tick: u64,
     advanced: bool,
     next_id: TaskId,
-    /// (id, thread, start arguments, suspended), by id.
-    tasks: Vec<(TaskId, u32, Option<Vec<SavedValue>>, bool)>,
+    /// (id, thread, start arguments, suspended, wake), by id.
+    tasks: Vec<(TaskId, u32, Option<Vec<SavedValue>>, bool, Option<u64>)>,
     /// The sleeping heap's entries, sorted (entries are unique, so any heap
     /// built from them pops in the same order).
     sleeping: Vec<(u64, TaskId)>,
     pending: Vec<TaskId>,
     moho_waits: bool,
+    pass: Pass,
 }
 
 impl Scheduler {
@@ -244,7 +319,7 @@ impl Scheduler {
             let t = &self.tasks[id];
             let thread = gcid_of(lua, &LuaValue::Thread(t.thread.clone()))?;
             let args = t.start_args.as_ref().map(|a| a.iter().map(|v| SavedValue::save(lua, v)).collect::<LuaResult<Vec<_>>>()).transpose()?;
-            tasks.push((*id, thread, args, t.suspended));
+            tasks.push((*id, thread, args, t.suspended, t.wake));
         }
         let mut sleeping: Vec<(u64, TaskId)> = self.sleeping.iter().map(|Reverse(e)| *e).collect();
         sleeping.sort();
@@ -256,6 +331,7 @@ impl Scheduler {
             sleeping,
             pending: self.pending.iter().copied().collect(),
             moho_waits: self.moho_waits,
+            pass: self.pass,
         })
     }
 
@@ -266,17 +342,18 @@ impl Scheduler {
             advanced: saved.advanced,
             next_id: saved.next_id,
             moho_waits: saved.moho_waits,
+            pass: saved.pass,
             pending: saved.pending.iter().copied().collect(),
             sleeping: saved.sleeping.iter().map(|e| Reverse(*e)).collect(),
             ..Default::default()
         };
-        for (id, thread, args, suspended) in &saved.tasks {
+        for (id, thread, args, suspended, wake) in &saved.tasks {
             let LuaValue::Thread(thread) = heap.get(*thread)? else {
                 return Err(LuaError::runtime(format!("keyframe: task {id}'s thread (gcid {thread}) isn't a thread")));
             };
             let start_args = args.as_ref().map(|a| a.iter().map(|v| v.load(lua, heap)).collect::<LuaResult<LuaMultiValue>>()).transpose()?;
             s.by_thread.insert(Self::key(&thread), *id);
-            s.tasks.insert(*id, Task { thread, start_args, suspended: *suspended });
+            s.tasks.insert(*id, Task { thread, start_args, suspended: *suspended, wake: *wake });
         }
         Ok(s)
     }
