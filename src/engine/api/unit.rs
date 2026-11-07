@@ -579,6 +579,7 @@ pub fn spawn_unit_built_by(
     if builder.is_some() {
         crate::engine::api::construction::mark_unfinished(lua, id);
     }
+    note_unit_made(lua, army, crate::engine::sim::math::from_lua(cap_cost));
     world(lua).set_base_collision(id, blueprint_collision(&bp)?);
     // Structures (finished or not) block their footprint for pathing.
     let is_structure = match (crate::engine::api::categories::domain(lua)?.named.get("STRUCTURE"), category_index) {
@@ -1468,12 +1469,52 @@ fn over_cap_by(lua: &Lua, to: u32, cost: Fx) -> bool {
     if ignore {
         return false;
     }
-    let used = world(lua)
-        .units()
-        .filter(|e| !e.destroyed && e.army == Some(to))
-        .filter_map(|e| e.unit.as_deref().map(|u| u.cap_cost))
-        .fold(Fx::ZERO, |a, b| a.saturating_add(b));
-    used.saturating_add(cost) > Fx::from_num(cap)
+    cap_used(lua, to).saturating_add(cost) > Fx::from_num(cap)
+}
+
+/// Each army's cap usage (summed `CapCost` of its live units) as of the
+/// first query this tick, plus every unit made since: one pass over the
+/// units a tick at most, so script-spawning n units costs O(n), not O(n^2).
+/// Units destroyed during the tick still count until the next one, as in
+/// the real game (FAF probe `probe_econ`: deferred `Destroy`). A cache:
+/// keyed by the tick, rebuilt after a load, so not saved.
+#[derive(Default)]
+struct CapUsage {
+    tick: Option<u64>,
+    used: std::collections::BTreeMap<u32, Fx>,
+}
+
+fn sim_tick(lua: &Lua) -> u64 {
+    lua.app_data_ref::<crate::engine::sim::scheduler::Scheduler>().map_or(0, |s| s.tick())
+}
+
+fn cap_used(lua: &Lua, army: u32) -> Fx {
+    let tick = sim_tick(lua);
+    if lua.app_data_ref::<CapUsage>().is_none() {
+        lua.set_app_data(CapUsage::default());
+    }
+    let mut usage = lua.app_data_mut::<CapUsage>().expect("CapUsage");
+    if usage.tick != Some(tick) {
+        usage.used.clear();
+        for e in world(lua).units().filter(|e| !e.destroyed) {
+            if let (Some(a), Some(u)) = (e.army, e.unit.as_deref()) {
+                let total = usage.used.entry(a).or_insert(Fx::ZERO);
+                *total = total.saturating_add(u.cap_cost);
+            }
+        }
+        usage.tick = Some(tick);
+    }
+    usage.used.get(&army).copied().unwrap_or(Fx::ZERO)
+}
+
+/// A unit was made: counted in this tick's usage if it's already summed.
+fn note_unit_made(lua: &Lua, army: u32, cost: Fx) {
+    let tick = sim_tick(lua);
+    if let Some(mut usage) = lua.app_data_mut::<CapUsage>()
+        && usage.tick == Some(tick) {
+        let total = usage.used.entry(army).or_insert(Fx::ZERO);
+        *total = total.saturating_add(cost);
+    }
 }
 
 /// `CreateUnit` / `CreateUnitHPR` past the army's unit cap: moho's bindings
