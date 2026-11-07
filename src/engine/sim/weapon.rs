@@ -319,6 +319,9 @@ pub struct WeaponState {
     /// The current target came from the unit's attack order (dropped when
     /// the order stops forcing it).
     pub target_from_order: bool,
+    /// The unit's attack-order target as this weapon last saw it: a new one
+    /// resets the weapon's target ([`advance_target`]).
+    pub order_seen: Option<WeaponTarget>,
     /// `ManualFire`: never picks its own targets.
     pub manual_fire: bool,
     /// `OverChargeWeapon`: an overcharge order fires it (the first such
@@ -471,6 +474,7 @@ impl WeaponState {
             collide_friendly: false,
             firing_randomness: Fx::ZERO,
             target_from_order: false,
+            order_seen: None,
             damage: None,
         }
     }
@@ -1279,6 +1283,25 @@ fn advance_target(
     let projectile_ok = |v: &ProjectileView| hostile(v.army) && allowed(v.category);
     let view_of = |id: EntityId| projectiles.binary_search_by_key(&id, |v| v.id).ok().map(|i| &projectiles[i]);
 
+    // A new attack order resets every weapon's target: the attacker's
+    // `SetDesiredTarget` (vtable +0x20, MohoEngine.dll 0x101c4840) stores the
+    // order's target and calls `SetTarget(empty)` on each weapon
+    // (0x101c48b8, so `OnLostTarget`), and the target task takes the order's
+    // target on its next run. Real game (`probe_misc` AT): a tank shooting
+    // one target, ordered at tick 30 to attack another, has no target at
+    // 31 and the new one at 32 (a weapon with no target takes the order's
+    // as before: FAF probe probe_firsttick). Silo launches aren't attack
+    // orders.
+    let order_target = ordered.get(&w.unit).filter(|o| o.silo.is_none()).map(|o| o.target);
+    let new_order = order_target.is_some() && order_target != w.order_seen;
+    w.order_seen = order_target;
+    let order_reset = new_order && w.target.take().is_some();
+    if order_reset {
+        w.target_from_order = false;
+        w.check_countdown = 0;
+        push(&mut events, WeaponEventKind::LostTarget);
+    }
+
     // The primary weapon's target, while it's still a live unit (moho's
     // target task checks these first, MohoEngine.dll 0x101c600a..0x101c60de).
     let primary = w.primary_target.filter(|&t| world.get(t).is_some_and(|e| e.kind == EntityKind::Unit && !e.destroyed && !e.cold.killed));
@@ -1297,7 +1320,7 @@ fn advance_target(
     // weapon's range, without a search of its own (or its order's target).
     // Range is tested at the target point here (moho's target task,
     // MohoEngine.dll 0x101c60b6: `GetTargetPoint`, unlike the fire task).
-    let from_primary = primary.filter(|&t| enabled && w.prefers_primary_target && world.get(t).is_some_and(|e| targetable(e) && range_of(target_point_of(w, e)) == Reach::InRange));
+    let from_primary = primary.filter(|&t| enabled && !order_reset && w.prefers_primary_target && world.get(t).is_some_and(|e| targetable(e) && range_of(target_point_of(w, e)) == Reach::InRange));
     if let Some(t) = from_primary
         && w.target != Some(WeaponTarget::Entity(t)) {
         if w.target.is_some() {
@@ -1340,7 +1363,7 @@ fn advance_target(
     let reach = w.max_radius.saturating_mul(w.tracking_radius.max(Fx::ONE));
     let order = ordered.get(&w.unit);
     let overcharging = order.is_some_and(|o| o.overcharge == Some(w.index));
-    let forced = order.filter(|o| enabled && o.overcharge.map_or(o.silo == w.silo, |i| i == w.index) && from_primary.is_none()).map(|o| o.target).filter(|t| match *t {
+    let forced = order.filter(|o| enabled && !order_reset && o.overcharge.map_or(o.silo == w.silo, |i| i == w.index) && from_primary.is_none()).map(|o| o.target).filter(|t| match *t {
         WeaponTarget::Entity(id) => world.get(id).is_some_and(|e| targetable(e) && dist2_xz(e.position(), at) <= reach.saturating_mul(reach)),
         WeaponTarget::Ground(p) => !w.cannot_attack_ground && dist2_xz(p, at) <= reach.saturating_mul(reach),
     });
@@ -1404,7 +1427,7 @@ fn advance_target(
             push(&mut events, WeaponEventKind::LostTarget);
         }
     }
-    if enabled && w.target.is_none() && !w.manual_fire && w.targets_projectiles && !holding_fire {
+    if enabled && !order_reset && w.target.is_none() && !w.manual_fire && w.targets_projectiles && !holding_fire {
         // Projectiles move fast: searched every tick, nearest first (ties to
         // the lowest id).
         let best = projectiles
@@ -1418,7 +1441,7 @@ fn advance_target(
             took_target = true;
             push(&mut events, WeaponEventKind::GotTarget);
         }
-    } else if enabled && (w.target.is_none() || rechecks) && !w.manual_fire && !w.targets_projectiles {
+    } else if enabled && !order_reset && (w.target.is_none() || rechecks) && !w.manual_fire && !w.targets_projectiles {
         // An `AI.NeedUnpack` unit doesn't search while it moves, loads onto
         // or waits for a transport: its target task returns at once and
         // waits out its interval again (MohoEngine.dll 0x101c5f01..0x101c5f38,
@@ -2661,11 +2684,17 @@ mod tests {
         ws.get_mut(me, 1).yaw_only_on_target = true;
         assert_eq!(shots(&mut ws, &w), vec![false, true, false, false], "searched: the step after");
 
-        // An order on another target dead ahead: taken, fired on a step later.
+        // An order on another target dead ahead: the held target is dropped
+        // (real game `probe_misc` AT: no target the tick the order starts),
+        // the order's taken the step after, fired on a step later.
         let b = unit(&mut w, 2, 100.0, 112.0);
         ws.get_mut(me, 1).fire_clock = 0;
         ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(b), silo: None, overcharge: None });
         let mut out = Vec::new();
+        step(&mut ws, &w, None, None, &mut out);
+        assert_eq!(ws.get(me, 1).unwrap().target, None, "a new attack order resets the target");
+        assert_eq!(out.iter().map(|e| e.kind).collect::<Vec<_>>(), [WeaponEventKind::LostTarget]);
+        out.clear();
         step(&mut ws, &w, None, None, &mut out);
         assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(b)));
         assert!(!out.iter().any(|e| e.kind == WeaponEventKind::Fire), "ordered: not in the step it is taken");
