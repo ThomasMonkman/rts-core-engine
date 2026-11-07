@@ -51,7 +51,8 @@ pub mod caps {
 pub fn caps_of_motion_type(motion_type: &str) -> Option<u8> {
     use caps::*;
     Some(match motion_type {
-        "RULEUMT_Land" => LAND,
+        // Biped moves as Land (the footprint caps, `blueprints.rs`).
+        "RULEUMT_Land" | "RULEUMT_Biped" => LAND,
         "RULEUMT_Amphibious" => LAND | SEABED,
         "RULEUMT_Hover" | "RULEUMT_AmphibiousFloating" => LAND | WATER,
         "RULEUMT_Water" => WATER,

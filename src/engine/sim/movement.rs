@@ -54,7 +54,9 @@ impl MotionKind {
 
     pub fn parse(s: &str) -> Self {
         match s {
-            "RULEUMT_Land" => MotionKind::Land,
+            // moho treats Biped as Land (its footprint caps, 0x1010e540
+            // enum value 4); no FAF unit uses it.
+            "RULEUMT_Land" | "RULEUMT_Biped" => MotionKind::Land,
             "RULEUMT_Water" | "RULEUMT_SurfacingSub" => MotionKind::Water,
             "RULEUMT_Hover" | "RULEUMT_AmphibiousFloating" => MotionKind::Hover,
             "RULEUMT_Amphibious" => MotionKind::Amphibious,
