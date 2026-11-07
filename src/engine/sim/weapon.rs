@@ -1352,12 +1352,23 @@ fn advance_target(
     // order forces, nor the primary weapon's); finding nothing, they keep
     // it. (FAF's blueprint pass turns it off for anti-missile weapons.)
     let rechecks = w.always_recheck && !w.target_from_order && from_primary.is_none() && !w.targets_projectiles && w.target.is_some();
-    // Hold fire: no search at all (moho's weapon target check returns
-    // before searching while the unit's fire state is 1, MohoEngine.dll
-    // 0x102afd64, and its pick gives no target, 0x101c6324). Its countdown
-    // still runs out, so the search comes the tick hold fire ends; ordered
-    // and current targets are left alone.
+    // Hold fire (the unit's fire state 1): no search, and the target task
+    // drops the weapon's target (MohoEngine.dll 0x101c6324: with no attack
+    // order's target it sets an empty target, 0x101c65ec -> `SetTarget`
+    // 0x102b1d90, so `OnLostTarget` runs). A weapon without
+    // `AlwaysRecheckTarget` keeps a target still in range (it returns before
+    // that, 0x101c62d6..0x101c6319). Ordered targets are kept, so attack
+    // orders still engage. The search countdown still runs out, so the
+    // search comes the tick hold fire ends.
     let holding_fire = data.fire_state == 1;
+    if enabled && holding_fire && !w.target_from_order && from_primary.is_none() && !w.manual_fire && !w.targets_projectiles && (w.check_countdown == 0 || !w.always_recheck)
+        && let Some(WeaponTarget::Entity(t)) = w.target {
+        let keeps = !w.always_recheck && world.get(t).is_some_and(|e| range_of(e.position()) == Reach::InRange);
+        if !keeps {
+            w.target = None;
+            push(&mut events, WeaponEventKind::LostTarget);
+        }
+    }
     if enabled && w.target.is_none() && !w.manual_fire && w.targets_projectiles && !holding_fire {
         // Projectiles move fast: searched every tick, nearest first (ties to
         // the lowest id).
