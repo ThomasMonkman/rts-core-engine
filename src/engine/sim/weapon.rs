@@ -2160,6 +2160,140 @@ mod tests {
         assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "off hold fire: found on the next step");
     }
 
+    /// Hold fire drops a searched target (moho's target task sets an empty
+    /// target, MohoEngine.dll 0x101c6324, so `OnLostTarget` runs), except
+    /// that a weapon without `AlwaysRecheckTarget` keeps one in range.
+    #[test]
+    fn hold_fire_drops_the_target() {
+        for recheck in [true, false] {
+            let mut w = EntityWorld::default();
+            let me = unit(&mut w, 1, 0.0, 0.0);
+            let enemy = unit(&mut w, 2, 5.0, 0.0);
+            let mut ws = Weapons::default();
+            gun(&mut ws, me);
+            ws.get_mut(me, 1).always_recheck = recheck;
+            let mut out = Vec::new();
+            step(&mut ws, &w, None, None, &mut out);
+            assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)));
+            w.get_mut(me).unwrap().unit.as_deref_mut().unwrap().fire_state = 1;
+            out.clear();
+            for _ in 0..5 {
+                step(&mut ws, &w, None, None, &mut out);
+            }
+            if recheck {
+                assert!(ws.get(me, 1).unwrap().target.is_none(), "dropped on hold fire");
+                assert_eq!(out.iter().filter(|e| e.kind == WeaponEventKind::LostTarget).count(), 1, "{out:?}");
+            } else {
+                assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "kept: in range, no recheck");
+            }
+        }
+    }
+
+    /// Range is tested at the target's position when firing, not at its
+    /// target point (moho's fire task, MohoEngine.dll 0x102b1be0 -> 0x101cf6c0
+    /// with bl = 1): a collision box offset 2 beyond `MaxRadius` doesn't
+    /// keep a target standing in range from being fired on.
+    #[test]
+    fn fire_range_is_tested_at_the_target_position() {
+        let mut w = EntityWorld::default();
+        let me = unit(&mut w, 1, 0.0, 0.0);
+        let enemy = unit(&mut w, 2, 17.0, 0.0);
+        w.set_base_collision(enemy, CollisionShape::Box { center: FxVec3::from_f64(2.0, 0.5, 0.0), half: FxVec3::from_f64(0.5, 0.5, 0.5) });
+        let mut ws = Weapons::default();
+        gun(&mut ws, me);
+        let mut out = Vec::new();
+        for _ in 0..20 {
+            step(&mut ws, &w, None, None, &mut out);
+        }
+        assert!(out.iter().any(|e| e.kind == WeaponEventKind::Fire), "fired at a target 17 away, its box centre 19");
+    }
+
+    /// A tracked target beyond `MaxRadius` gives way to one in range of the
+    /// same priority (moho's search: a worse range code never replaces the
+    /// best, MohoEngine.dll 0x101c5199; ours ranks it before the current
+    /// target).
+    #[test]
+    fn recheck_switches_from_a_tracked_target_to_one_in_range() {
+        let mut w = EntityWorld::default();
+        let me = unit(&mut w, 1, 0.0, 0.0);
+        let tracked = unit(&mut w, 2, 0.0, 25.0);
+        let mut ws = Weapons::default();
+        gun(&mut ws, me);
+        ws.get_mut(me, 1).tracking_radius = Fx::from_num(2);
+        ws.get_mut(me, 1).target_check_ticks = 5;
+        ws.get_mut(me, 1).always_recheck = true;
+        let mut out = Vec::new();
+        step(&mut ws, &w, None, None, &mut out);
+        assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(tracked)));
+        let near = unit(&mut w, 2, 10.0, 0.0);
+        for _ in 0..6 {
+            step(&mut ws, &w, None, None, &mut out);
+        }
+        assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(near)));
+    }
+
+    /// The search passes over `BENIGN` units and land units outside the
+    /// playable area (MohoEngine.dll 0x101c4eca, 0x101c4f78).
+    #[test]
+    fn search_skips_benign_units_and_units_outside_the_playable_area() {
+        let mut w = EntityWorld::default();
+        let me = unit(&mut w, 1, 0.0, 0.0);
+        let civilian = unit(&mut w, 2, 4.0, 0.0);
+        let outside = unit(&mut w, 2, -5.0, 0.0);
+        let inside = unit(&mut w, 2, 0.0, 12.0);
+        w.get_mut(civilian).unwrap().category_index = Some(1);
+        let mut ws = Weapons::default();
+        gun(&mut ws, me);
+        ws.filters.benign = Some(CategorySet::from_indices(3, [1]));
+        ws.filters.playable = Some((Fx::from_num(-2), Fx::from_num(-20), Fx::from_num(20), Fx::from_num(20)));
+        let mut out = Vec::new();
+        step(&mut ws, &w, None, None, &mut out);
+        assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(inside)));
+        // In the air, outside the area doesn't matter.
+        w.get_mut(outside).unwrap().unit.as_deref_mut().unwrap().layer = Layer::Air;
+        w.get_mut(inside).unwrap().unit.as_deref_mut().unwrap().do_not_target = true;
+        ws.get_mut(me, 1).fire_target_layers = LayerMask::LAND | LayerMask::AIR;
+        for _ in 0..12 {
+            step(&mut ws, &w, None, None, &mut out);
+        }
+        assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(outside)));
+    }
+
+    /// An `AI.NeedUnpack` unit searches for nothing while it moves
+    /// (MohoEngine.dll 0x101c5f01).
+    #[test]
+    fn need_unpack_unit_does_not_search_while_moving() {
+        let mut w = EntityWorld::default();
+        let me = unit(&mut w, 1, 0.0, 0.0);
+        let enemy = unit(&mut w, 2, 5.0, 0.0);
+        let mut ws = Weapons::default();
+        gun(&mut ws, me);
+        ws.get_mut(me, 1).need_unpack = true;
+        let moving = crate::engine::sim::unit_state::UnitStates::index("Moving").unwrap();
+        w.get_mut(me).unwrap().unit.as_deref_mut().unwrap().states.set(moving, true);
+        let mut out = Vec::new();
+        for _ in 0..10 {
+            step(&mut ws, &w, None, None, &mut out);
+        }
+        assert!(ws.get(me, 1).unwrap().target.is_none(), "no search while moving");
+        w.get_mut(me).unwrap().unit.as_deref_mut().unwrap().states.set(moving, false);
+        for _ in 0..2 {
+            step(&mut ws, &w, None, None, &mut out);
+        }
+        assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)));
+    }
+
+    /// Reload is 10 / RateOfFire rounded with halves to even (moho's
+    /// `fistp`, MohoEngine.dll 0x102afe07).
+    #[test]
+    fn reload_rounds_halves_to_even() {
+        let mut s = WeaponState::new(1, 1);
+        for (rate, ticks) in [(4.0, 2), (1.0, 10), (0.4, 25), (3.0, 3)] {
+            s.rate_of_fire = Fx::from_num(rate);
+            assert_eq!(s.reload_ticks(), ticks, "rate {rate}");
+        }
+    }
+
     /// A weapon without target priorities (no `TargetPriorities` in its
     /// blueprint, e.g. the Fire Beetle's ExplosionRadiusRingDummyWeapon)
     /// finds nothing of its own (MohoEngine.dll 0x101c5178), but takes an
