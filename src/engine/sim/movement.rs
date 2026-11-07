@@ -3279,10 +3279,12 @@ pub fn apply(world: &mut EntityWorld, commands: &mut Commands, moved: &[Moved], 
             let patrol = commands.current(m.unit).filter(|c| matches!(c.kind, K::Patrol | K::FormPatrol)).map(|c| (c.kind, c.target));
             match patrol {
                 Some((kind, target)) => {
-                    // Patrols loop: with other patrol points queued, this one
-                    // goes to the back; alone, it's followed by a leg back to
-                    // where the unit started.
-                    let others = commands.queue(m.unit).skip(1).any(|c| matches!(c.kind, K::Patrol | K::FormPatrol));
+                    // Patrols loop: with anything queued after it, this one
+                    // goes to the back (moho's dispatcher, MohoEngine.dll
+                    // 0x101893d7..0x1018952b: any next command, of any
+                    // kind); alone, it's followed by a leg back to where the
+                    // unit started.
+                    let others = commands.queue(m.unit).nth(1).is_some();
                     let origin = world.get(m.unit).and_then(|e| e.unit.as_deref()).and_then(|u| u.patrol_origin);
                     if others {
                         commands.requeue_front(m.unit);
