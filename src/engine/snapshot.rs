@@ -56,6 +56,9 @@ pub struct EntityView {
     /// Its maximum health now (`GetMaxHealth`: a buff or script may have
     /// changed it from the blueprint's).
     pub max_health: f32,
+    /// Its build rate now (`GetBuildRate`: an enhancement, buff or
+    /// veterancy may have changed it from the blueprint's); 0 if not a unit.
+    pub build_rate: f32,
     /// 0..1 (1 = finished).
     pub build: f32,
     /// 0..1 of its current job (`GetWorkProgress`: building, an upgrade, an
@@ -974,6 +977,7 @@ fn view_of(e: &crate::engine::sim::entity::Entity, structure: Option<&crate::eng
         half,
         health,
         max_health: f(e.max_health),
+        build_rate: e.unit.as_deref().map_or(0.0, |u| f(u.build_rate)),
         build: f(e.fraction_complete),
         work: e.unit.as_deref().map_or(0.0, |u| f(u.work_progress)),
         shield: e.unit.as_deref().filter(|u| u.has_shield).map_or(-1.0, |u| f(u.shield_ratio)),

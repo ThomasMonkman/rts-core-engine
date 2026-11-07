@@ -73,7 +73,10 @@ methods.GetEconData = function(self)
 end
 methods.GetFuelRatio = function(self) local u = d(self) return u and u.fuel or -1 end
 methods.GetShieldRatio = function(self) local u = d(self) return u and u.shield or 0 end
+-- The sim's current rate (enhancements, buffs and veterancy change it).
 methods.GetBuildRate = function(self)
+    local u = d(self)
+    if u and u.build_rate then return u.build_rate end
     local bp = self:GetBlueprint()
     return bp and bp.Economy and bp.Economy.BuildRate or 0
 end

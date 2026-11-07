@@ -2218,7 +2218,7 @@ mod clock_tests {
     #[test]
     fn middle_follows_the_entities_left() {
         use rts_core_engine::engine::snapshot::{EntityView, Sighting, ViewKind};
-        let at = |id, x, z| EntityView { id, kind: ViewKind::Unit, army: 1, position: [x, 0.0, z], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0; 3], half: [1.0; 3], health: 1.0, max_health: 100.0, build: 1.0, work: 0.0, shield: -1.0, blueprint: 0, mesh: 0, scale: [1.0; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 };
+        let at = |id, x, z| EntityView { id, kind: ViewKind::Unit, army: 1, position: [x, 0.0, z], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0; 3], half: [1.0; 3], health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, work: 0.0, shield: -1.0, blueprint: 0, mesh: 0, scale: [1.0; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 };
         let entities = [at(2, 10.0, 20.0), at(5, 30.0, 40.0)];
         let mut ids = vec![2, 4, 5];
         assert_eq!(super::middle(&entities, &mut ids), Some([20.0, 30.0]));

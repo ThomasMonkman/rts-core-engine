@@ -1044,7 +1044,7 @@ mod pick_timing {
         use glam::Vec3;
         let mut w = super::World::new(1920, 1080);
         let units: Vec<EntityView> = (0..48_000u32)
-            .map(|i| EntityView { id: i + 1, kind: ViewKind::Unit, army: 1, position: [(i % 220) as f32 * 4.0, 20.0, (i / 220) as f32 * 4.0], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0, 0.5, 0.0], half: [0.5, 0.5, 0.7], health: 1.0, max_health: 100.0, build: 1.0, work: 0.0, shield: -1.0, blueprint: 0, mesh: i % 50, scale: [0.1; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 })
+            .map(|i| EntityView { id: i + 1, kind: ViewKind::Unit, army: 1, position: [(i % 220) as f32 * 4.0, 20.0, (i / 220) as f32 * 4.0], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0, 0.5, 0.0], half: [0.5, 0.5, 0.7], health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, work: 0.0, shield: -1.0, blueprint: 0, mesh: i % 50, scale: [0.1; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 })
             .collect();
         w.frame.entities = std::sync::Arc::new(units);
         w.add_mesh_bounds(&(0..50).map(|m| (m, [-5.0, 0.0, -7.0, 5.0, 8.0, 7.0])).collect::<Vec<_>>());
