@@ -332,8 +332,9 @@ pub struct UnitData {
     /// Footprint class it paths as (`nav::NavGrid::class_for`); `None` =
     /// the 1x1 class of its motion kind.
     pub nav_class: Option<crate::engine::sim::nav::NavClass>,
-    /// Blueprint `Transport.TransportClass` (1 small, 2 medium, 3 large; 1
-    /// when unset): the slot size it needs on a transport.
+    /// Blueprint `Transport.TransportClass` (1 small, 2 medium, 3 large, 4
+    /// super; 1 when unset; FAF's 5 and 10 fit no transport): the slot
+    /// size it needs on a transport.
     pub transport_class: u8,
     /// `Physics.FuelRechargeRate`: seconds of flight regained per second
     /// docked at air staging.

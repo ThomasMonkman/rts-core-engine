@@ -234,7 +234,7 @@ pub struct World {
     pub blueprint_order_categories: Option<Arc<Vec<u16>>>,
     /// Cargo-slot classes (bits 1 / 2 / 4) and cargo class (1..3) per
     /// blueprint (same index): the load cursors only where boarding works.
-    pub blueprint_transport: Option<Arc<Vec<(u8, u8)>>>,
+    pub blueprint_transport: Option<Arc<Vec<(u8, u8, u8)>>>,
     pub blueprint_selection_priority: Option<Arc<Vec<u8>>>,
     pub blueprint_icons: Option<Arc<Vec<String>>>,
     pub blueprint_icon_zoom: Option<Arc<Vec<f32>>>,

@@ -552,8 +552,9 @@ pub fn step(world: &EntityWorld, commands: &Commands, movers: &[EntityId], arriv
 
 /// Applies this tick's impulses and slides: each unit pushed this tick or
 /// still sliding takes `push = push / 2 + impulse` (at most `max_push` a
-/// tick), slides by it (refused per axis where its layer can't go, then put
-/// back on its surface) and keeps it faded for the next tick ([`fade`]).
+/// tick), slides by it (refused per axis where its layer can't go, then
+/// kept at its height over its surface) and keeps it faded for the next
+/// tick ([`fade`]).
 pub fn apply(world: &mut EntityWorld, scratch: &mut Scratch, terrain: Option<&Terrain>, nav: Option<&NavGrid>) {
     let Scratch { pushes, settling, active, .. } = scratch;
     // Last tick's sliders (sorted) and this tick's impulses (sorted by id),
@@ -610,11 +611,17 @@ pub fn apply(world: &mut EntityWorld, scratch: &mut Scratch, terrain: Option<&Te
         if x == p.x && z == p.z {
             continue;
         }
+        // Keeps its height over what it rides on: a submerged sub stays
+        // under, a hovercraft at its `Elevation` (snapping to the surface
+        // put a pushed sub on top while its layer stayed `Sub`).
         let y = match terrain {
-            Some(t) => match kind {
-                MotionKind::Water | MotionKind::Hover => t.surface_at(x, z),
-                _ => t.height_at(x, z),
-            },
+            Some(t) => {
+                let base = |x: Fx, z: Fx| match kind {
+                    MotionKind::Water | MotionKind::Hover => t.surface_at(x, z),
+                    _ => t.height_at(x, z),
+                };
+                base(x, z) + (p.y - base(p.x, p.z))
+            }
             None => p.y,
         };
         world.set_position(id, FxVec3 { x, y, z });
@@ -769,6 +776,27 @@ mod tests {
             apply(&mut w, &mut s, Some(&t), Some(&nav));
         }
         assert!(w.get(a).unwrap().position().x < Fx::from_num(10), "stayed off the ridge: {:?}", w.get(a).unwrap().position());
+    }
+
+    #[test]
+    fn pushed_subs_stay_submerged() {
+        use crate::engine::assets::scmap::Heightmap;
+        // Seabed at 0, water surface at 20; two subs 5 under, overlapping.
+        let t = Terrain::from_heightmap(&Heightmap { width: 32, height: 32, scale: 1.0 / 128.0, samples: vec![0; 33 * 33] }).with_water(Some(20.0));
+        let mut w = EntityWorld::default();
+        let (a, b) = (unit(&mut w, 10.0, 10.0), unit(&mut w, 10.6, 10.0));
+        for id in [a, b] {
+            w.get_mut(id).unwrap().unit.as_mut().unwrap().motion_params.kind = MotionKind::Water;
+            let p = w.get(id).unwrap().position();
+            w.set_position(id, FxVec3 { y: Fx::from_num(15), ..p });
+        }
+        let (c, mut s) = (Commands::default(), Scratch::default());
+        for _ in 0..3 {
+            step(&w, &c, &[], &[], usize::MAX, &mut s);
+            apply(&mut w, &mut s, Some(&t), None);
+        }
+        assert!(dist(&w, a, b) >= 1.0 - 1e-6, "pushed apart");
+        assert_eq!(w.get(a).unwrap().position().y, Fx::from_num(15), "still 5 under the surface");
     }
 
     #[test]

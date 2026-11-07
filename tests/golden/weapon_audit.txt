@@ -118,7 +118,7 @@
 93@180|ual0202|1|uab1101|pass|2|360
 94|ual0205|1|-|non-attack|0|0
 95|ual0205|2|uaa0101|pass|6|72
-95@180|ual0205|2|uaa0101|pass|3|72
+95@180|ual0205|2|uaa0101|pass|1|72
 96|ual0301|1|uab1101|pass|2|300
 96@180|ual0301|1|uab1101|pass|2|300
 97|ual0301|2|-|non-attack|0|0
