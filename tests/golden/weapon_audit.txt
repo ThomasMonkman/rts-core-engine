@@ -62,7 +62,7 @@
 52|uaa0310|5|uaa0101|pass|2|300
 53|uaa0310|6|ues0103|pass|3|150
 54|uaa0310|7|ues0103|pass|3|150
-55|uaa0310|8|uaa0101|pass|30|240
+55|uaa0310|8|uaa0101|pass|34|240
 56|uaa0310|9|uaa0101|pass|6|240
 57|uaa0310|10|-|non-attack|0|0
 58|uab1101|1|-|non-attack|0|0
@@ -376,7 +376,7 @@
 267@180|ues0302|7|uea0101|pass|2|24
 267@-90|ues0302|7|uea0101|pass|4|24
 268|ues0302|8|ueb2108|pass|1|1
-269|ues0302|9|ueb2108|pass|2|1
+269|ues0302|9|ueb2108|pass|1|1
 270|ues0304|1|ueb1101|pass|2|2000
 271|ues0304|2|ueb1101|pass|1|25002
 272|ues0305|1|ues0103|pass|2|75
@@ -598,7 +598,7 @@
 419|xaa0305|2|uaa0101|pass|2|71
 420|xaa0305|3|uaa0101|pass|2|71
 421|xaa0305|4|-|non-attack|0|0
-422|xaa0306|1|ues0103|pass|12|834
+422|xaa0306|1|ues0103|pass|12|1668
 423|xaa0306|2|-|non-attack|0|0
 424|xab1401|1|-|non-attack|0|0
 425|xab2307|1|uab1101|pass|9|220
@@ -643,7 +643,7 @@
 456|xes0307|2|ueb1101|pass|2|630
 456@180|xes0307|2|ueb1101|pass|2|210
 457|xes0307|3|ues0103|pass|4|50
-458|xes0307|4|ueb2108|pass|2|1
+458|xes0307|4|ueb2108|pass|1|1
 459|xes0307|5|ueb2109|pass|2|1
 460|xra0105|1|urb1101|pass|3|15
 461|xra0105|2|-|non-attack|0|0
@@ -872,9 +872,9 @@
 628@180|xss0302|3|xsb1101|pass|5|600
 629|xss0302|4|xsb2108|pass|2|1
 630|xss0302|5|xsb2108|pass|2|1
-631|xss0302|6|xsa0101|pass|8|8
+631|xss0302|6|xsa0101|pass|10|16
 631@180|xss0302|6|xsa0101|pass|2|8
-632|xss0302|7|xsa0101|pass|8|8
+632|xss0302|7|xsa0101|pass|14|8
 632@180|xss0302|7|xsa0101|pass|4|16
 633|xss0302|8|xsb1101|pass|1|30502
 634|xss0303|1|xsb1101|pass|4|500

@@ -387,7 +387,7 @@ pub struct UnitData {
     pub launch_index: u32,
     /// Blueprint `Intel.JammerBlips` / `JamRadius` (`sim::vision` jammers).
     pub jammer: Option<crate::engine::sim::vision::JammerSpec>,
-    /// Blueprint `Defense.ArmorType` (`api::armor`).
+    /// Blueprint `Defense.ArmorType`, lowercase (`api::armor`).
     pub armor_type: Option<std::sync::Arc<str>>,
     /// Fuel left, 0..1, or -1 for units without fuel (`GetFuelRatio`).
     pub fuel_ratio: Fx,

@@ -26,7 +26,9 @@ callbacks! {
         OnDestroy();
         /// Killed: `instigator` (or nil), the damage type, the overkill ratio.
         OnKilled(instigator: Instigator, kind: DamageType, overkill: f64);
-        /// Damaged, before armour (`direction` is a unit vector).
+        /// Damaged by `amount` after armour, only when that is more than 0
+        /// (MohoEngine.dll `DealDamage` 0x10308181; `direction` is a unit
+        /// vector).
         OnDamage(instigator: Instigator, amount: f64, direction: Vector, kind: DamageType);
         /// Fully reclaimed by `reclaimer`.
         OnReclaimed(reclaimer: Obj<moho::Unit>);
@@ -113,6 +115,13 @@ callbacks! {
         OnAttachedKilled(attached: Obj<moho::Unit>);
         /// First seen by `army`.
         OnDetectedBy(army: u32);
+        /// Damaged (more than 0, after armour) by an instigator of army
+        /// `army` (1-based; MohoEngine.dll `DealDamage` 0x10307708). FAF's is
+        /// empty.
+        OnDamageBy(army: u32);
+        /// Armour multiplied a hit of `kind` by 2 or more (`DealDamage`
+        /// 0x10307761; FAF defines none).
+        OnExtraDamageDealt(kind: DamageType);
         OnStartCapture(target: Obj<moho::Unit>);
         OnStopCapture(target: Obj<moho::Unit>);
         OnFailedCapture(target: Obj<moho::Unit>);
