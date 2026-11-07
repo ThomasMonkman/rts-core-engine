@@ -505,11 +505,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             continue;
         }
         match impact.kind {
-            ImpactKind::Air => {
-                if world(lua).destroy(impact.id) {
-                    ProjectileCallbacks::on_destroy(lua, &Obj::<moho::Projectile>::new(obj.clone()), "projectile")?;
-                }
-            }
+            ImpactKind::Air => crate::engine::api::entity::destroy(lua, &Obj::new(obj.clone()))?,
             // Still flying after hitting the ground: no more surface hits.
             ImpactKind::Terrain => {
                 if let Some(p) = projectiles(lua).get_mut(impact.id) {

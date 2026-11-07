@@ -1062,6 +1062,14 @@ fn build_target_destroyed() {
     scenario("build_target_destroyed", 600);
 }
 
+/// Moho's destroy queue: `OnDestroy` at the end of the beat, in order and
+/// not nested, still attached; `IsDestroyed` after it; the attachment
+/// notifications of `Destroy` and `Kill`.
+#[test]
+fn destroy_queue() {
+    scenario("destroy_queue", 100);
+}
+
 /// An engineer's assist ends once it has nothing to help with and an order
 /// queued behind it, so a shift-queued build takes over.
 #[test]

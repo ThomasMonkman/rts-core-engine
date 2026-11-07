@@ -22,8 +22,13 @@ callbacks! {
     moho::Entity {
         /// After the script object of a blueprint-less entity is created.
         OnCreate();
-        /// The entity is being destroyed.
+        /// The entity is being destroyed (end of the beat it was destroyed in,
+        /// still attached).
         OnDestroy();
+        /// An entity attached to this one ran its `OnDestroy`; it is detached next.
+        OnAttachedDestroyed(attached: Obj<moho::Entity>);
+        /// The entity this one is attached to ran its `OnDestroy`.
+        OnParentDestroyed(parent: Obj<moho::Entity>);
         /// Killed: `instigator` (or nil), the damage type, the overkill ratio.
         OnKilled(instigator: Instigator, kind: DamageType, overkill: f64);
         /// Damaged, before armour (`direction` is a unit vector).

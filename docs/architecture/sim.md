@@ -26,6 +26,7 @@ real game and what is inferred) are in the module comments of its file, listed b
 | Weapons | targeting, aim and the fire clock; beams | `sim/weapon.rs`, `api/weapon.rs`, `api/beam.rs` |
 | Projectiles | flight, collisions, `OnImpact` | `sim/projectile.rs`, `sim/collision.rs` |
 | LuaThreads | FAF's Lua threads due this tick | `sim/scheduler.rs`, `api/threads.rs` |
+| (end of LuaThreads) | the destroy queue: the `OnDestroy` of everything destroyed this tick, first destroyed first (moho's end-of-beat drain) | `api/entity.rs` (`run_destroy_queue`) |
 | Sync | the `Sync` table for the interface | `engine/sync.rs` |
 | Compact | destroyed entities removed; their effects end | `sim/entity.rs` |
 | LuaGc | the Lua garbage collection, at fixed ticks only | `sim/gc.rs` |
@@ -63,9 +64,12 @@ Not an ECS: an id-ordered **sparse set** with a **hot/cold split**.
 - `Entity` holds only what per-tick systems and spatial queries scan (id, kind, army, transform,
   health, ...). Cold data (blueprint, bones, mesh, intel, reclaim) is behind `Box<EntityCold>`, and
   unit-only state behind `Option<Box<UnitData>>`. A test caps the hot struct's size.
-- Destroyed entities stay flagged, so scripts can still query them from `OnDestroy`, until `compact`
-  removes them with an order-preserving `retain` at the end of a tick (once at least 1/8 are
-  destroyed). So iteration is always in id order with no sorting.
+- Destroying is moho's: `Destroy` only flags the entity (`destroyed`: `BeenDestroyed`, and systems
+  skip it) and queues it. At the end of the tick the queue drains in order: each `OnDestroy` runs with
+  the entity still attached, then it's detached; a destroy made meanwhile joins the same drain, so
+  `OnDestroy` never nests. Then the entities are freed (`gone`: `IsDestroyed`), and `compact`
+  removes freed ones with an order-preserving `retain` at the end of a tick (once at least 1/8 are
+  freed). So iteration is always in id order with no sorting.
 
 **Why not an ECS:** an ECS makes a system pass faster, but every Lua method call looks an entity up
 by id, and that lookup is several times faster in a dense array. Archetype iteration order also

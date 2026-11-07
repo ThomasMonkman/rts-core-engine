@@ -3,7 +3,7 @@
 //! Order per tick (docs/architecture/sim.md, the stages in [`step`]): player input, economy,
 //! threat, order resolution, movement (and attachments, animators), intel, construction and the
 //! other work orders, reclaim and capture, weapons and beams, projectiles + `OnImpact`, then the Lua
-//! threads due this tick, the sync beat, compaction, the Lua collection at fixed ticks, and the
+//! threads due this tick, the `OnDestroy` of what was destroyed this tick, the sync beat, compaction, the Lua collection at fixed ticks, and the
 //! snapshot for the renderer. The tick number goes up before any stage runs
 //! (`Scheduler::begin_tick`), so every stage of beat `n` reads `GetGameTick() == n`. Nothing here
 //! reads wall clock time; pacing to real time is the caller's job.
@@ -117,11 +117,14 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
     enter(Phase::LuaThreads);
     crate::engine::api::entity::end_emptied_platoons(lua)?;
     crate::engine::api::threads::run_due(lua)?;
+    // Last in the beat, as moho's `Sim::AdvanceBeat` (0x103194a1): the
+    // `OnDestroy` of everything destroyed this tick, in order.
+    crate::engine::api::entity::run_destroy_queue(lua)?;
     enter(Phase::Sync);
     sync_beat(lua)?;
     // An `EndGame` this tick: the game is over from the next tick on.
     crate::engine::api::sim_time::latch(lua);
-    // Last: entities destroyed this tick are gone from the next tick on
+    // Last: entities freed this tick are gone from the next tick on
     // (effects attached to them end first, while their final transform
     // is still known).
     enter(Phase::Compact);
