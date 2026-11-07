@@ -1384,7 +1384,16 @@ fn advance_target(
             push(&mut events, WeaponEventKind::GotTarget);
         }
     } else if enabled && (w.target.is_none() || rechecks) && !w.manual_fire && !w.targets_projectiles {
-        if w.check_countdown == 0 && !holding_fire {
+        // An `AI.NeedUnpack` unit doesn't search while it moves, loads onto
+        // or waits for a transport: its target task returns at once and
+        // waits out its interval again (MohoEngine.dll 0x101c5f01..0x101c5f38,
+        // unit states 2, 8, 7).
+        static PACKED: std::sync::LazyLock<[u32; 3]> = std::sync::LazyLock::new(|| {
+            ["Moving", "TransportLoading", "WaitingForTransport"].map(|s| crate::engine::sim::unit_state::UnitStates::index(s).expect("state"))
+        });
+        if w.check_countdown == 0 && need_unpack && PACKED.iter().any(|&s| data.states.contains(s)) {
+            w.check_countdown = w.target_check_ticks.max(1) - 1;
+        } else if w.check_countdown == 0 && !holding_fire {
             // Searches every `target_check_ticks` (a 0.5 s check: ticks 4, 9,
             // 14..., dev/probes probe_sight in FAF).
             w.check_countdown = w.target_check_ticks.max(1) - 1;
