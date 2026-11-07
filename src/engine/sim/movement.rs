@@ -98,7 +98,8 @@ pub struct MotionParams {
     /// Surface units (`Physics.*`; see `drive`): reverse top speed
     /// (`MaxSpeedReverse`) and how far back a target may be to be reached
     /// in reverse (`BackUpDistance`); lateral acceleration cap
-    /// (`MaxSteerForce`, 0 = none); stop and pivot past `rotate_threshold`
+    /// (`MaxSteerForce`; 0 = the acceleration, moho's motion setup
+    /// 0x1027ac9b); stop and pivot past `rotate_threshold`
     /// radians off course (`RotateOnSpot`, `RotateOnSpotThreshold`); facing
     /// turn rate when it's decoupled from the course (`TurnFacingRate`,
     /// rad/s; 0 = faces its course).

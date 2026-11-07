@@ -136,7 +136,9 @@ fn motion_of(bp: &LuaTable, motion_type: &str) -> LuaResult<(crate::engine::sim:
         }
     };
     let mut max_speed = fx(get("MaxSpeed")?);
-    let mut turn = get("TurnRate")?.unwrap_or(90.0);
+    // `RUnitBlueprintPhysics` ctor (0x1010db00): TurnRate 0, TurnRadius 5,
+    // RotateOnSpotThreshold 0.5 unless set.
+    let mut turn = get("TurnRate")?.unwrap_or(0.0);
     let (mut winged, mut min_speed, mut lift, mut break_trigger, mut break_distance) = (false, Fx::ZERO, Fx::ZERO, Fx::ZERO, Fx::ZERO);
     let mut air_params = AirParams::default();
     if kind == MotionKind::Air {
@@ -250,7 +252,11 @@ fn motion_of(bp: &LuaTable, motion_type: &str) -> LuaResult<(crate::engine::sim:
         break_distance,
         reverse_speed: surface_fx("MaxSpeedReverse")?,
         backup_distance: surface_fx("BackUpDistance")?,
-        steer_force: surface_fx("MaxSteerForce")?,
+        // 0 (or unset): the acceleration (motion setup 0x1027ac9b).
+        steer_force: match surface_fx("MaxSteerForce")? {
+            s if s == Fx::ZERO => if surface { accel } else { Fx::ZERO },
+            s => s,
+        },
         rotate_on_spot,
         // Raw blueprint values, as the path spline compares them (0x101a2256).
         corner_slowdown: surface && fx(Some(get("TurnRadius")?.unwrap_or(5.0))) > fx(Some(get("TurnRate")?.unwrap_or(0.0))),
@@ -265,8 +271,8 @@ fn motion_of(bp: &LuaTable, motion_type: &str) -> LuaResult<(crate::engine::sim:
         } else {
             Fx::ZERO
         },
-        // 0 (or unset): no limit (moho's default is +inf).
-        turn_radius: surface_fx("TurnRadius")?.max(Fx::ZERO),
+        // 0: no limit (the motion setup, 0x1027acbd); unset: 5.
+        turn_radius: if surface { fx(Some(get("TurnRadius")?.unwrap_or(5.0))).max(Fx::ZERO) } else { Fx::ZERO },
         air: air_params,
         ground: crate::engine::sim::movement::GroundParams {
             size_x: fx(bp.get::<Option<f64>>("SizeX")?.or(Some(1.0))),
