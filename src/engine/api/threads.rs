@@ -95,16 +95,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
         /// Kills a thread. `KillThread(nil)` is a no-op: FAF kills threads
         /// that may never have started (uel0307's shield thread); so is an
-        /// already dead thread. A live coroutine not made by `ForkThread`
-        /// raises, as moho's does (MohoEngine.dll string 0x10728838).
+        /// already dead thread. A coroutine `ForkThread` didn't make doesn't
+        /// raise: the real game's doesn't (FAF probe `probe_core`), although
+        /// the binary has a "Can't kill a thread that wasn't created with
+        /// ForkThread." string (0x10728838).
         KillThread = move |lua, thread: Option<LuaThread>| {
             let Some(thread) = thread else { return Ok(()) };
-            let killed = lua.app_data_mut::<Scheduler>()
+            lua.app_data_mut::<Scheduler>()
                 .expect("Scheduler not in app_data")
                 .kill(&thread);
-            if !killed && thread.status() == LuaThreadStatus::Resumable {
-                return Err(LuaError::runtime("KillThread: Can't kill a thread that wasn't created with ForkThread."));
-            }
             #[cfg(feature = "lua-profile")]
             profile::killed(lua, &thread);
             // Free the coroutine's stack now. A running thread can't be closed;
@@ -147,17 +146,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// waiting (`WaitTicks`), whose wait is cut short. It runs in this
         /// tick's pass if the pass hasn't gone by it yet, else next tick
         /// (moho's `ResumeThread`, MohoEngine.dll 0x100bcba0). A killed or
-        /// finished thread is left alone; a non-thread (nil) logs "Attempted
-        /// to resume a thread that was already killed", as moho's does.
+        /// finished thread, or a coroutine `ForkThread` didn't make, is left
+        /// alone; a non-thread (nil) logs "Attempted to resume a thread that
+        /// was already killed", as moho's does.
         ResumeThread = |lua, thread: LuaValue| {
             let LuaValue::Thread(thread) = thread else {
                 tracing::warn!(target: "lua", "Attempted to resume a thread that was already killed");
                 return Ok(());
             };
-            let known = lua.app_data_mut::<Scheduler>().expect("Scheduler not in app_data").resume(&thread);
-            if !known && thread.status() == LuaThreadStatus::Resumable {
-                return Err(LuaError::runtime("Can't resume a thread that wasn't created with ForkThread."));
-            }
+            lua.app_data_mut::<Scheduler>().expect("Scheduler not in app_data").resume(&thread);
             Ok(())
         })?;
     Ok(())
@@ -405,16 +402,15 @@ mod tests {
         assert_eq!(lua.app_data_ref::<Scheduler>().unwrap().task_count(), 0);
     }
 
-    /// `KillThread` / `ResumeThread` on a coroutine `ForkThread` didn't make
-    /// raise (moho's "Can't kill a thread that wasn't created with
-    /// ForkThread."); on nil or a dead thread they don't.
+    /// `KillThread` / `ResumeThread` never raise: not on a coroutine
+    /// `ForkThread` didn't make (the real game's don't, FAF probe
+    /// `probe_core`), nor on nil or a dead thread.
     #[test]
-    fn kill_and_resume_want_forked_threads() {
+    fn kill_and_resume_never_raise() {
         let lua = sim_vm();
-        let err = lua.load("local co = coroutine.create(function() coroutine.yield() end) coroutine.resume(co) KillThread(co)").exec().unwrap_err();
-        assert!(err.to_string().contains("wasn't created with ForkThread"), "{err}");
-        let err = lua.load("local co = coroutine.create(function() coroutine.yield() end) coroutine.resume(co) ResumeThread(co)").exec().unwrap_err();
-        assert!(err.to_string().contains("wasn't created with ForkThread"), "{err}");
+        lua.load("local co = coroutine.create(function() coroutine.yield() end) KillThread(co)").exec().unwrap();
+        lua.load("local co = coroutine.create(function() coroutine.yield() end) coroutine.resume(co) KillThread(co)").exec().unwrap();
+        lua.load("local co = coroutine.create(function() coroutine.yield() end) coroutine.resume(co) ResumeThread(co)").exec().unwrap();
         lua.load(
             "self_kill = ForkThread(function() KillThread(self_kill) coroutine.yield(1) end)
              done = ForkThread(function() end)",
