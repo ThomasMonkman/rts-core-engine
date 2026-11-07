@@ -255,6 +255,9 @@ pub struct WeaponState {
     pub firing_tolerance: Fx,
     /// Shots per second (`ChangeRateOfFire`).
     pub rate_of_fire: Fx,
+    /// The blueprint's `RateOfFire` (a negative `ChangeRateOfFire` goes back
+    /// to it: MohoEngine.dll 0x102afde2).
+    pub blueprint_rate_of_fire: Fx,
     /// Damage per shot set by `ChangeDamage` (FAF's `Damage` buffs); `None`:
     /// the blueprint's. FAF's own damage tables (`Weapon:GetDamageTable`)
     /// add their `DamageMod` instead, so only engine-made damage reads it.
@@ -439,6 +442,7 @@ impl WeaponState {
             blueprint_max_height_diff: None,
             firing_tolerance: Fx::ZERO,
             rate_of_fire: Fx::ONE,
+            blueprint_rate_of_fire: Fx::ONE,
             fire_clock: 0,
             target_check_ticks: 1,
             check_countdown: 0,
@@ -479,12 +483,17 @@ impl WeaponState {
         self.fired_at_target = false;
     }
 
-    /// Ticks between shots at the current rate of fire (at least 1).
+    /// Ticks between shots at the current rate of fire (at least 1):
+    /// 10 / rate, halves to even (moho's fire task, MohoEngine.dll
+    /// 0x102afdf1..0x102afe07: `fistp` in the FPU's default rounding, so a
+    /// RateOfFire of 4 reloads in 2 ticks). Moho divides in f32, ours in
+    /// fixed point: a rate whose f32 quotient is a tie only there (0.8: f32
+    /// 12.5, moho 12) can round the other way.
     pub fn reload_ticks(&self) -> u32 {
         if self.rate_of_fire <= Fx::ZERO {
             return u32::MAX;
         }
-        (Fx::from_num(10) / self.rate_of_fire).round().saturating_to_num::<u32>().max(1)
+        (Fx::from_num(10) / self.rate_of_fire).round_ties_even().saturating_to_num::<u32>().max(1)
     }
 
     /// Launch speed at a target `distance` away: the muzzle velocity, scaled

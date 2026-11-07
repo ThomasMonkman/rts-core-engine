@@ -51,6 +51,7 @@ fn configure(lua: &Lua, st: &mut WeaponState, unit: EntityId, wbp: &LuaTable) ->
     st.min_radius = fx(num("MinRadius")?);
     st.tracking_radius = crate::engine::sim::math::from_lua(num("TrackingRadius")?.unwrap_or(1.0));
     st.rate_of_fire = crate::engine::sim::math::from_lua(num("RateOfFire")?.unwrap_or(1.0));
+    st.blueprint_rate_of_fire = st.rate_of_fire;
     st.firing_tolerance = deg(num("FiringTolerance")?.unwrap_or(0.0));
     st.slaved_to_body = wbp.get::<Option<bool>>("SlavedToBody")?.unwrap_or(false);
     // Default as `RUnitBlueprintWeapon`'s constructor sets it (MohoEngine.dll
@@ -461,9 +462,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         with_state(lua, &this, |w| w.min_radius = crate::engine::sim::math::from_lua(r))
     })?;
     lua_method!(lua, moho::Weapon,
-        /// Sets shots per second.
+        /// Sets shots per second; a negative rate goes back to the
+        /// blueprint's (moho keeps the value, MohoEngine.dll 0x102b55a2, and
+        /// its fire task reads a negative one as the blueprint's, 0x102afde2).
         ChangeRateOfFire = |lua, (this, r): (Obj<moho::Weapon>, f64)| {
-        with_state(lua, &this, |w| w.rate_of_fire = crate::engine::sim::math::from_lua(r))
+        with_state(lua, &this, |w| w.rate_of_fire = if r < 0.0 { w.blueprint_rate_of_fire } else { crate::engine::sim::math::from_lua(r) })
     })?;
     lua_method!(lua, moho::Weapon,
         /// Sets how far (degrees) the turret may be off target and still fire.
