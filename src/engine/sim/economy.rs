@@ -45,20 +45,35 @@ use crate::engine::sim::math::Fx;
 
 /// `CreateEconomyEvent(unit, energy, mass, seconds)`: a one-off cost drawn
 /// from the unit's army over `seconds` (moho's economy events: weapon
-/// charge-ups, overcharge, teleport). It competes with unit consumption at
-/// the same served ratio; at progress 1 it's done (`EconomyEventIsDone`).
+/// charge-ups, overcharge, teleport; also capture). It competes with unit
+/// consumption in the stall split; at progress 1 it's done
+/// (`EconomyEventIsDone`).
+///
+/// Moho's event (MohoEngine.dll 0x10340160, tick 0x103404d0) is a consumer
+/// node asking `cost / ticks` per tick. What it's granted stays on the node
+/// until the whole per-tick request is there in both resources; only then
+/// is it used and the event moves one whole tick on. While stalled it asks
+/// only for what's still missing, so progress comes in whole steps, later.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EconomyEvent {
     pub unit: EntityId,
     /// Request per tick at full service.
     pub mass: Fx,
     pub energy: Fx,
-    /// Ticks the cost is spread over, and how many have been paid so far
-    /// (fractions when the army stalls); done when `paid == ticks`. Kept as
-    /// a count so a fully served event finishes exactly (a summed `1/ticks`
-    /// would round short of 1).
+    /// Ticks the cost is spread over, and how many have been paid so far;
+    /// done when `paid == ticks`. Kept as a count so a fully served event
+    /// finishes exactly (a summed `1/ticks` would round short of 1).
     pub ticks: Fx,
     pub paid: Fx,
+    /// Moho's whole-step event: what's granted toward the current tick's
+    /// request is kept in `granted_*` until it's complete. Off (silo
+    /// missiles, FAF's patched `CAiSiloBuildImpl`): `paid` moves by the
+    /// fraction served.
+    pub whole_steps: bool,
+    pub granted_mass: Fx,
+    pub granted_energy: Fx,
+    /// Asks for nothing this tick (a paused captor).
+    pub held: bool,
 }
 
 impl EconomyEvent {
@@ -70,6 +85,36 @@ impl EconomyEvent {
     pub fn done(&self) -> bool {
         self.paid >= self.ticks
     }
+
+    /// What it asks the economy for this tick (mass, energy).
+    fn need(&self) -> (Fx, Fx) {
+        if self.held || self.done() {
+            (Fx::ZERO, Fx::ZERO)
+        } else if self.whole_steps {
+            ((self.mass - self.granted_mass).max(Fx::ZERO), (self.energy - self.granted_energy).max(Fx::ZERO))
+        } else {
+            (self.mass, self.energy)
+        }
+    }
+
+    /// Takes this tick's grant: `fraction` of what it needed.
+    fn grant(&mut self, need: (Fx, Fx), fraction: Fx) {
+        if !self.whole_steps {
+            self.paid = (self.paid + fraction).min(self.ticks);
+            return;
+        }
+        self.granted_mass += need.0 * fraction;
+        self.granted_energy += need.1 * fraction;
+        // Moho compares f32 sums, which reach the request a few steps into a
+        // steady stall; fixed point would stay a fraction of an ulp short for
+        // ever. A gap below f32's precision (2^-24 of the request) is full.
+        let full = |granted: Fx, request: Fx| request - granted <= (request / Fx::from_num(1 << 24)).max(Fx::DELTA);
+        if full(self.granted_mass, self.mass) && full(self.granted_energy, self.energy) {
+            self.paid = (self.paid + Fx::ONE).min(self.ticks);
+            self.granted_mass = Fx::ZERO;
+            self.granted_energy = Fx::ZERO;
+        }
+    }
 }
 
 /// Live economy events by id (ids never reused), visited in id order.
@@ -80,13 +125,41 @@ pub struct EconomyEvents {
 }
 
 impl EconomyEvents {
-    /// `seconds <= 0` takes the whole cost in one tick.
+    /// `CreateEconomyEvent`: `max(1, trunc(seconds * 10))` ticks (moho
+    /// truncates, 0x103401e2), so up to 0.1 s takes the whole cost in one
+    /// tick.
     pub fn create(&mut self, unit: EntityId, energy: Fx, mass: Fx, seconds: Fx) -> u32 {
-        let ticks = (seconds * Fx::from_num(10)).max(Fx::ONE);
+        let ticks = (seconds * Fx::from_num(10)).round_to_zero().max(Fx::ONE);
+        self.insert(unit, energy, mass, ticks, true)
+    }
+
+    /// A whole-step event of exactly `ticks` (at least 1).
+    pub fn create_ticks(&mut self, unit: EntityId, energy: Fx, mass: Fx, ticks: u32) -> u32 {
+        self.insert(unit, energy, mass, Fx::from_num(ticks.max(1)), true)
+    }
+
+    /// An event paid by the fraction served each tick, over
+    /// `max(1, ceil(seconds * 10))` ticks (silo missiles).
+    pub fn create_fractional(&mut self, unit: EntityId, energy: Fx, mass: Fx, seconds: Fx) -> u32 {
+        let ticks = (seconds * Fx::from_num(10)).max(Fx::ONE).ceil();
+        self.insert(unit, energy, mass, ticks, false)
+    }
+
+    fn insert(&mut self, unit: EntityId, energy: Fx, mass: Fx, ticks: Fx, whole_steps: bool) -> u32 {
         let id = self.next;
         self.next += 1;
-        let ticks = ticks.ceil();
-        self.map.insert(id, EconomyEvent { unit, mass: mass / ticks, energy: energy / ticks, ticks, paid: Fx::ZERO });
+        let event = EconomyEvent {
+            unit,
+            mass: mass / ticks,
+            energy: energy / ticks,
+            ticks,
+            paid: Fx::ZERO,
+            whole_steps,
+            granted_mass: Fx::ZERO,
+            granted_energy: Fx::ZERO,
+            held: false,
+        };
+        self.map.insert(id, event);
         id
     }
 
@@ -284,11 +357,12 @@ pub fn step(world: &mut EntityWorld, armies: &mut Armies, events: &mut EconomyEv
     // dropped: nothing can wait on them any more).
     events.map.retain(|_, ev| world.get(ev.unit).is_some_and(|e| !e.destroyed));
     for ev in events.map.values() {
-        if ev.done() {
+        if ev.done() || ev.held {
             continue;
         }
         let Some(a) = world.get(ev.unit).and_then(|e| e.army).and_then(|army| armies.get_mut(army)) else { continue };
-        a.economy.request(ev.mass, ev.energy);
+        let (mass, energy) = ev.need();
+        a.economy.request(mass, energy);
     }
 
     // 2. each army settles in index order: served ratios, expense, overflow
@@ -311,12 +385,13 @@ pub fn step(world: &mut EntityWorld, armies: &mut Armies, events: &mut EconomyEv
         };
     });
     for ev in events.map.values_mut() {
-        if ev.done() {
+        if ev.done() || ev.held {
             continue;
         }
         let Some(a) = world.get(ev.unit).and_then(|e| e.army).and_then(|army| armies.get(army)) else { continue };
-        let fraction = a.economy.served_fraction(ev.mass, ev.energy);
-        ev.paid = (ev.paid + fraction).min(ev.ticks);
+        let need = ev.need();
+        let fraction = a.economy.served_fraction(need.0, need.1);
+        ev.grant(need, fraction);
     }
 }
 
@@ -513,13 +588,38 @@ mod tests {
         let mut w = EntityWorld::default();
         let mut a = armies(1);
         a.list[0].economy.energy.granted_storage = fx(1000.0);
-        a.list[0].economy.energy.stored = fx(5.0);
-        let id = w.spawn(EntityKind::Unit, BlueprintKind::Unit, "u".into(), Some(1), FxVec3::default(), FxQuat::IDENTITY);
+        // 5 energy a tick against the event's 10.
+        unit(&mut w, 1, |u| {
+            u.production_active = true;
+            u.production_energy = fx(50.0);
+        });
+        let id = w.iter().next().unwrap().id;
         let mut events = EconomyEvents::default();
         let ev = events.create(id, fx(100.0), Fx::ZERO, fx(1.0));
         step(&mut w, &mut a, &mut events);
-        let p = events.map[&ev].progress().to_num::<f64>();
-        assert!((p - 0.05).abs() < 1e-6, "half of one tick's 10 served, of 10 ticks: {p}");
+        assert_eq!(events.map[&ev].progress(), Fx::ZERO, "half a step granted: no progress yet");
+        assert_eq!(a.list[0].economy.energy.expense, fx(5.0), "but drawn");
+        step(&mut w, &mut a, &mut events);
+        assert_eq!(a.list[0].economy.energy.requested, fx(5.0), "only the missing half asked for");
+        assert_eq!(events.map[&ev].paid, Fx::ONE, "one whole step of 10");
+        // A steady stall still gets there (f32-like rounding of the last bit).
+        let mut events = EconomyEvents::default();
+        let ev = events.create(id, fx(300.0), Fx::ZERO, fx(1.0));
+        for _ in 0..80 {
+            step(&mut w, &mut a, &mut events);
+        }
+        assert!(events.is_done(ev));
+    }
+
+    /// Moho truncates an event's ticks: 2.55 s is 25 ticks, not 26.
+    #[test]
+    fn economy_event_ticks_truncate() {
+        let mut events = EconomyEvents::default();
+        let unit: EntityId = 0;
+        let ev = events.create(unit, fx(255.0), Fx::ZERO, fx(2.55));
+        assert_eq!(events.map[&ev].ticks, fx(25.0));
+        let ev = events.create(unit, fx(1.0), Fx::ZERO, fx(0.05));
+        assert_eq!(events.map[&ev].ticks, Fx::ONE, "at least one");
     }
 
     fn armies(n: u32) -> Armies {
