@@ -1260,7 +1260,9 @@ fn advance_target(
     }
     // `PrefersPrimaryWeaponTarget`: the primary's target, when it's in this
     // weapon's range, without a search of its own (or its order's target).
-    let from_primary = primary.filter(|&t| enabled && w.prefers_primary_target && world.get(t).is_some_and(|e| targetable(e) && range_of(e.position()) == Reach::InRange));
+    // Range is tested at the target point here (moho's target task,
+    // MohoEngine.dll 0x101c60b6: `GetTargetPoint`, unlike the fire task).
+    let from_primary = primary.filter(|&t| enabled && w.prefers_primary_target && world.get(t).is_some_and(|e| targetable(e) && range_of(target_point_of(w, e)) == Reach::InRange));
     if let Some(t) = from_primary
         && w.target != Some(WeaponTarget::Entity(t)) {
         if w.target.is_some() {
@@ -1487,10 +1489,7 @@ fn advance_target(
         }
     }
 
-    // Aim: where the target is. Range is tested there, before any lead
-    // (moho's fire task range test, 0x102b1be0, takes the target's own
-    // position, 0x101cf6c0): a slow anti-torpedo charge led onto a fast
-    // torpedo aims well past the ship, which kept it out of range.
+    // Aim: at the target point (a target bone, else the collision centre).
     let target_pos = match w.target {
         Some(WeaponTarget::Entity(t)) if w.targets_projectiles => view_of(t).map(|v| v.position),
         Some(WeaponTarget::Entity(t)) => world.get(t).map(|e| {
@@ -1505,7 +1504,17 @@ fn advance_target(
         Some(WeaponTarget::Ground(p)) => Some(p),
         None => None,
     };
-    let target_at = target_pos;
+    // Range is tested at the target's own position, not its target point
+    // and before any lead (moho's fire task range test, MohoEngine.dll
+    // 0x102b1be0, calls 0x101cf6c0 with bl = 1: a unit's position, a
+    // blip's): a slow anti-torpedo charge led onto a fast torpedo aims well
+    // past the ship, which kept it out of range.
+    let target_at = match w.target {
+        Some(WeaponTarget::Entity(t)) if w.targets_projectiles => view_of(t).map(|v| v.position),
+        Some(WeaponTarget::Entity(t)) => world.get(t).map(|e| e.position()),
+        Some(WeaponTarget::Ground(p)) => Some(p),
+        None => None,
+    };
     // Launch speed: reduced up close (`MuzzleVelocityReduceDistance`; moho
     // measures the horizontal distance from the solution's start, the
     // muzzle, to the target point, before leading: MohoEngine.dll
