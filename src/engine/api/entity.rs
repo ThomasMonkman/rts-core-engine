@@ -94,6 +94,7 @@ pub fn posed_bone(lua: &Lua, e: &crate::engine::sim::entity::Entity, bone: Optio
 /// aircraft to "fly off the factory by themselves").
 fn take_off(lua: &Lua, unit: EntityId, parent: Option<EntityId>) -> LuaResult<()> {
     use crate::engine::sim::layer::Layer;
+    set_attached(lua, unit, false);
     let grounded_aircraft = world(lua).get(unit).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.motion_params.kind == crate::engine::sim::movement::MotionKind::Air && u.layer != Layer::Air);
     if grounded_aircraft {
         crate::engine::api::movement::set_layer(lua, unit, Layer::Air)?;
@@ -104,13 +105,26 @@ fn take_off(lua: &Lua, unit: EntityId, parent: Option<EntityId>) -> LuaResult<()
     Ok(())
 }
 
+/// A unit's `Attached` state, which moho's `Unit::AttachTo` sets
+/// (MohoEngine.dll 0x1028aab6: state bits +0x490 |= 0x4000, `Attached`) and
+/// `Unit::DetachFrom` clears (0x1028ab2d). No-op for other entities.
+fn set_attached(lua: &Lua, id: EntityId, on: bool) {
+    let i = crate::engine::sim::unit_state::UnitStates::index("Attached").expect("unit state");
+    if let Some(u) = world(lua).get_mut(id).and_then(|e| e.unit.as_deref_mut()) {
+        u.states.set(i, on);
+    }
+}
+
 /// Attaches with the parent bone as posed by its manipulators (the rest pose
-/// for a parent without any).
+/// for a parent without any). A unit enters its `Attached` state.
 pub fn attach_posed(lua: &Lua, child: EntityId, attachment: crate::engine::sim::entity::Attachment) {
-    let manips = lua.app_data_ref::<crate::engine::sim::manipulator::Manipulators>();
-    let weapons = lua.app_data_ref::<crate::engine::sim::weapon::Weapons>();
-    let clips = lua.app_data_ref::<crate::engine::sim::pose::Clips>();
-    world(lua).attach_posed(child, attachment, |p, b| manips.as_deref().is_some_and(|m| m.of(p.id).next().is_some()).then(|| crate::engine::sim::pose::bone_world(p, Some(b), manips.as_deref(), weapons.as_deref(), clips.as_deref()).0));
+    {
+        let manips = lua.app_data_ref::<crate::engine::sim::manipulator::Manipulators>();
+        let weapons = lua.app_data_ref::<crate::engine::sim::weapon::Weapons>();
+        let clips = lua.app_data_ref::<crate::engine::sim::pose::Clips>();
+        world(lua).attach_posed(child, attachment, |p, b| manips.as_deref().is_some_and(|m| m.of(p.id).next().is_some()).then(|| crate::engine::sim::pose::bone_world(p, Some(b), manips.as_deref(), weapons.as_deref(), clips.as_deref()).0));
+    }
+    set_attached(lua, child, true);
 }
 
 /// `src`'s posed bones in mesh space (before its scale), for `TryCopyPose`:
@@ -318,6 +332,10 @@ fn on_destroy(lua: &Lua, id: EntityId) -> LuaResult<()> {
     }
     let children = world(lua).attached_to(id);
     world(lua).detach_destroyed(id);
+    set_attached(lua, id, false);
+    for &child in &children {
+        set_attached(lua, child, false);
+    }
     for child in children {
         if let Some(child) = object(lua, child)? {
             EntityCallbacks::on_parent_destroyed(lua, &child, "entity", Obj::new(this.clone()))?;

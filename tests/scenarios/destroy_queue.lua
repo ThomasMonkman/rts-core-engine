@@ -19,7 +19,7 @@ local function unit(x, tag)
     u.tag = tag
     local onDestroy, onKilled = u.OnDestroy, u.OnKilled
     u.OnDestroy = function(self)
-        note(tag .. ':destroy@' .. GetGameTick() .. (self:GetParent() ~= self and ':attached' or '') .. (IsDestroyed(self) and ':gone' or ''))
+        note(tag .. ':destroy@' .. GetGameTick() .. (self:GetParent() ~= self and ':attached' or '') .. (self:IsUnitState('Attached') and ':state' or '') .. (IsDestroyed(self) and ':gone' or ''))
         if self.alsoDestroy then self.alsoDestroy:Destroy() end
         note(tag .. ':end')
         return onDestroy(self)
@@ -60,9 +60,10 @@ ForkThread(function()
     log = {}
     local p, c = unit(420, 'p'), unit(424, 'c')
     c:AttachBoneTo(-2, p, -1)
+    check(c:IsUnitState('Attached'), 'AttachBoneTo sets the Attached state')
     c:Destroy()
     WaitTicks(1)
-    check(table.concat(log, ' ') == 'c:destroy@' .. (GetGameTick() - 1) .. ':attached c:end p:attachedDestroyed:c',
+    check(table.concat(log, ' ') == 'c:destroy@' .. (GetGameTick() - 1) .. ':attached:state c:end p:attachedDestroyed:c',
         'child destroy: ' .. table.concat(log, ' '))
     log = {}
     local c2 = unit(428, 'c2')
@@ -72,6 +73,11 @@ ForkThread(function()
     check(table.concat(log, ' ') == 'p:destroy@' .. (GetGameTick() - 1) .. ' p:end c2:parentDestroyed:p',
         'parent destroy: ' .. table.concat(log, ' '))
     check(c2:GetParent() == c2, 'children detached after the parent OnDestroy')
+    check(not c2:IsUnitState('Attached'), 'and out of the Attached state')
+    local c3 = unit(432, 'c3')
+    c3:AttachBoneTo(-2, c2, -1)
+    c3:DetachFrom()
+    check(not c3:IsUnitState('Attached'), 'DetachFrom clears the Attached state')
 
     -- Kill after Destroy still runs OnKilled.
     log = {}
