@@ -286,6 +286,8 @@ pub struct World {
     pub upgraded: Vec<(u32, u32)>,
     /// Launches for cameras following their launcher (`frame::camera_follows`).
     pub camera_follows: Vec<rts_core_engine::engine::sim::presentation::CameraFollow>,
+    /// Units' custom names (`Snapshot::custom_names`).
+    pub custom_names: Option<Arc<Vec<(u32, String)>>>,
     pub army_display: Option<Arc<Vec<crate::engine::snapshot::ArmyDisplay>>>,
     pub team_colors: Option<Vec<u32>>,
     pub army_rgb: Arc<Vec<[f32; 3]>>,
@@ -351,6 +353,7 @@ impl World {
             focus_army_changed: None,
             upgraded: Vec::new(),
             camera_follows: Vec::new(),
+            custom_names: None,
             army_display: None,
             team_colors: None,
             army_rgb: Arc::new(Vec::new()),
@@ -699,6 +702,9 @@ impl World {
             }
             if let Some(a) = snap.alliances.take() {
                 self.alliances = Some(a);
+            }
+            if let Some(n) = snap.custom_names.take() {
+                self.custom_names = Some(n);
             }
             if let Some(c) = snap.army_display.take() {
                 self.army_display = Some(c);

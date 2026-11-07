@@ -706,6 +706,16 @@ impl UserVm {
         Ok(())
     }
 
+    /// Units' names given by the sim (`SetCustomName`), replacing the last
+    /// set: `__engine_custom_names[id]`, read by `UserUnit:GetCustomName`.
+    pub fn set_custom_names(&self, names: &[(u32, String)]) -> LuaResult<()> {
+        let t = self.lua.create_table_with_capacity(0, names.len())?;
+        for (id, name) in names {
+            t.raw_set(*id, name.as_str())?;
+        }
+        self.lua.globals().raw_set("__engine_custom_names", t)
+    }
+
     /// The sim's explicit one-way alliances (`IsAlly` / `IsEnemy` /
     /// `IsNeutral`; unset pairs are enemies, an army is its own ally).
     pub fn set_alliances(&self, alliances: &[(u32, u32, crate::engine::sim::army::Alliance)]) -> LuaResult<()> {

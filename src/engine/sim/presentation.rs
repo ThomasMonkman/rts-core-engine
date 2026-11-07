@@ -190,6 +190,10 @@ pub struct Presentation {
     /// Bumped whenever a decal or splat comes or goes (snapshots resend
     /// the ground decals only then).
     pub decal_version: u64,
+    /// Bumped whenever a unit's `SetCustomName` runs (snapshots resend the
+    /// names only then; ids are never reused, so a dead unit's name is
+    /// harmless).
+    pub custom_name_version: u64,
 }
 
 /// What an effect is indexed under: the tick it ends on (by its lifetime)

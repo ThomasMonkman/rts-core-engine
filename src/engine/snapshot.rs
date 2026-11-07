@@ -803,6 +803,9 @@ pub struct Snapshot {
     /// How every army is shown; with the first snapshot and when it
     /// changed (`SetArmyColor`, `SetArmyShowScore`).
     pub army_display: Option<Arc<Vec<ArmyDisplay>>>,
+    /// Every unit's custom name (`SetCustomName`: AI and campaign
+    /// commanders), by id; with the first snapshot and when one changed.
+    pub custom_names: Option<Arc<Vec<(u32, String)>>>,
     /// The explicit one-way alliances `(from, to, alliance)` (unset pairs
     /// are enemies); when they changed.
     pub alliances: Option<Arc<Vec<(u32, u32, crate::engine::sim::army::Alliance)>>>,
@@ -886,6 +889,8 @@ pub struct SnapshotSink {
     sent_focus_army: Option<i32>,
     /// `Presentation::decal_version` last sent.
     sent_decals: Option<u64>,
+    /// `Presentation::custom_name_version` last sent.
+    sent_custom_names: Option<u64>,
     /// The full prop list went out (later snapshots send changes).
     sent_props: bool,
     /// Prop changes taken from the world but not delivered yet.
@@ -936,7 +941,7 @@ pub fn channel() -> (SnapshotSink, Receiver<Snapshot>, SharedDebugRequest) {
 
 impl SnapshotSink {
     fn new(tx: SyncSender<Snapshot>, in_flight: Arc<std::sync::atomic::AtomicUsize>, request: SharedDebugRequest) -> Self {
-        SnapshotSink { in_flight, tx, tick: 0, terrain_version: None, sent_blueprints: false, sent_alliances: None, sent_focus_army: None, sent_army_display: None, sent_decals: None, sent_props: false, pending_props: Vec::new(), sent_meshes: 0, sent_projectile_icons: 0, sent_vfs: false, clip_ids: Default::default(), clips: Vec::new(), sent_clips: 0, sent_effect_assets: 0, pose_ops: Vec::new(), hidden: Vec::new(), request, grid_key: None, grid: None, fog: Default::default(), sent_game_over: false }
+        SnapshotSink { in_flight, tx, tick: 0, terrain_version: None, sent_blueprints: false, sent_alliances: None, sent_focus_army: None, sent_army_display: None, sent_decals: None, sent_custom_names: None, sent_props: false, pending_props: Vec::new(), sent_meshes: 0, sent_projectile_icons: 0, sent_vfs: false, clip_ids: Default::default(), clips: Vec::new(), sent_clips: 0, sent_effect_assets: 0, pose_ops: Vec::new(), hidden: Vec::new(), request, grid_key: None, grid: None, fog: Default::default(), sent_game_over: false }
     }
 
     /// The same channel to the renderer for another session, with nothing
@@ -2597,6 +2602,12 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
         if sink.sent_decals != Some(p.decal_version) {
             snap.decals = Some(Arc::new(ground_decals(&p)));
             sink.sent_decals = Some(p.decal_version);
+        }
+        if sink.sent_custom_names != Some(p.custom_name_version)
+            && let Some(world) = lua.app_data_ref::<EntityWorld>()
+        {
+            snap.custom_names = Some(Arc::new(world.iter().filter(|e| !e.destroyed).filter_map(|e| Some((e.id, e.unit.as_deref()?.custom_name.clone()?))).collect()));
+            sink.sent_custom_names = Some(p.custom_name_version);
         }
         let _s = crate::prof_span!("snapshot sounds");
         // Nothing reads the shakes yet; don't let them pile up.

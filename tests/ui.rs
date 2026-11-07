@@ -2465,3 +2465,47 @@ fn ui_unit_values_follow_the_sim() {
     let got: (f64, f64, f64) = vm.lua().load("local u = __engine_unit(5) return u:GetHealth(), u:GetMaxHealth(), u:GetBuildRate()").eval().unwrap();
     assert_eq!(got, (1250.0, 5000.0, 45.0));
 }
+
+/// What the sim changes reaches the interface's UserUnit: `SetBuildRate`
+/// (an ACU's engineering upgrade) through the unit's snapshot view, and
+/// `SetCustomName` (AI and campaign commanders) through the snapshots'
+/// name list; a name given in the interface (FAF's rename dialog) wins.
+#[test]
+fn sim_build_rate_and_names_reach_the_interface() {
+    use rts_core_engine::ui::UnitInfo;
+    if !rts_core_engine::test_data::require_game("UI tests") {
+        return;
+    }
+    let mut engine = engine::Engine::new(INIT_LUA_PATH, FA_PATH, Arc::new(Mutex::new(DebugUiState::new()))).expect("engine");
+    let session = engine::session::SessionConfig { ticks: Some(0), create_initial_units: false, ai: false, ..Default::default() };
+    engine.start(&session).expect("session");
+    let (sink, rx, _request) = engine::snapshot::channel();
+    engine.set_snapshot_sink(sink);
+    let acu: u32 = engine
+        .sim_lua()
+        .load("local acu = CreateUnitHPR('uel0001', 'ARMY_1', 400, GetTerrainHeight(400, 640), 640, 0, 0, 0) acu:SetBuildRate(45) acu:SetCustomName('Brick') return tonumber(acu:GetEntityId())")
+        .eval()
+        .unwrap();
+    let (mut view, mut names) = (None, None);
+    for _ in 0..3 {
+        engine.tick().expect("tick");
+        while let Ok(mut snap) = rx.try_recv() {
+            drop(snap.ticket.take());
+            view = snap.entities.iter().find(|e| e.id == acu).copied().or(view);
+            names = snap.custom_names.take().or(names);
+        }
+    }
+    let view = view.expect("the ACU in a snapshot");
+    let names = names.expect("the names sent");
+    assert_eq!(view.build_rate, 45.0);
+    assert_eq!(&names[..], &[(acu, "Brick".to_string())]);
+
+    let vm = UserVm::with_cache(engine.vfs.clone(), engine.script_cache.clone()).expect("user vm");
+    vm.init().expect("userInit.lua");
+    vm.update_units(&[UnitInfo::from_view(&view, "uel0001".into())]).unwrap();
+    vm.set_custom_names(&names).unwrap();
+    let got: (f64, String) = vm.lua().load(format!("local u = GetUnitById('{acu}') return u:GetBuildRate(), u:GetCustomName()")).eval().unwrap();
+    assert_eq!(got, (45.0, "Brick".to_string()));
+    let renamed: String = vm.lua().load(format!("local u = GetUnitById('{acu}') u:SetCustomName('Mine') return u:GetCustomName()")).eval().unwrap();
+    assert_eq!(renamed, "Mine");
+}

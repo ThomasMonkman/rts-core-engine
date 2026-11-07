@@ -1058,7 +1058,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         with_unit(lua, &this, |u| u.build_restrictions = None)
     })?;
     lua_method!(lua, moho::Unit, SetCustomName = |lua, (this, name): (Obj<moho::Unit>, String)| {
-        with_unit(lua, &this, |u| u.custom_name = Some(name))
+        with_unit(lua, &this, |u| u.custom_name = Some(name))?;
+        if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
+            p.custom_name_version += 1;
+        }
+        Ok(())
     })?;
     lua_method!(lua, moho::Unit,
         /// `vector` (x, y, z) from the unit's centre in its own frame, in world

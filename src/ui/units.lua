@@ -88,7 +88,13 @@ methods.GetStat = function(self, name, default)
     if v == nil then v = default or 0 end
     return { Value = v }
 end
-methods.GetCustomName = function(self) return self._customName end
+-- A name given here (FAF's rename dialog) wins over the sim's
+-- (`SetCustomName`: AI and campaign commanders).
+methods.GetCustomName = function(self)
+    if self._customName then return self._customName end
+    local names = rawget(_G, '__engine_custom_names')
+    return names and names[self._id]
+end
 methods.SetCustomName = function(self, name) self._customName = name end
 -- Selection sets (control groups) the unit belongs to: FAF's selection.lua
 -- keeps the sets and tags units through these.

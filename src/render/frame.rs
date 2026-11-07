@@ -1230,6 +1230,14 @@ fn update_ui(s: &mut RenderState, dt: f32) {
         }
         s.ui_army_display = Some(c.clone());
     }
+    // Units named by the sim (`SetCustomName`: AI and campaign commanders).
+    if let Some(n) = &s.world.custom_names
+        && !s.ui_custom_names.as_ref().is_some_and(|u| std::sync::Arc::ptr_eq(u, n)) {
+        if let Err(e) = vm.set_custom_names(n) {
+            tracing::warn!("UI custom names: {e}");
+        }
+        s.ui_custom_names = Some(n.clone());
+    }
     // The player's team colours (`TeamColorMode`: FAF's team colour button).
     let (version, team) = vm.team_colors();
     if version != s.ui_team_colors {
