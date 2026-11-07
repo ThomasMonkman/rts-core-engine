@@ -278,7 +278,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                 weapons.ordered.extend(tasks.ordered(&commands));
             }
         }
-        let _ = _section;
+        drop(_section);
         let _section = crate::prof_span!("weapons projectile views");
         // Projectiles for anti-missile / anti-torpedo weapons, if any.
         let mut views = std::mem::take(&mut weapons.projectiles);
@@ -291,7 +291,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             }));
         }
         weapons.projectiles = views;
-        let _ = _section;
+        drop(_section);
         let _section = crate::prof_span!("weapons muzzles");
         {
             let manips = lua.app_data_ref::<crate::engine::sim::manipulator::Manipulators>();
@@ -308,7 +308,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                 })
             });
         }
-        let _ = _section;
+        drop(_section);
         let _section = crate::prof_span!("weapons step");
         weapons.tick = crate::engine::api::sim_time::current_tick(lua);
         weapons.water = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>().and_then(|t| t.water_surface);
