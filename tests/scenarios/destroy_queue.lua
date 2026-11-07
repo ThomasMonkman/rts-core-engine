@@ -5,6 +5,7 @@
 --    the beat, after the Lua threads, with the entity still attached.
 --  * A destroy made inside an `OnDestroy` runs after it, in the same drain
 --    (no nesting).
+--  * `IsDestroyed` stays false until the beat that ran `OnDestroy` is over.
 --  * The parent hears `OnAttachedDestroyed`, the children `OnParentDestroyed`.
 --  * `Kill` after `Destroy` in the same beat still runs `OnKilled`.
 rawset(_G, "ScenarioResult", { done = false, failures = {}, notes = {} })
@@ -17,7 +18,7 @@ local function unit(x, tag)
     u.tag = tag
     local onDestroy, onKilled = u.OnDestroy, u.OnKilled
     u.OnDestroy = function(self)
-        note(tag .. ':destroy@' .. GetGameTick() .. (self:GetParent() ~= self and ':attached' or ''))
+        note(tag .. ':destroy@' .. GetGameTick() .. (self:GetParent() ~= self and ':attached' or '') .. (IsDestroyed(self) and ':gone' or ''))
         if self.alsoDestroy then self.alsoDestroy:Destroy() end
         note(tag .. ':end')
         return onDestroy(self)
@@ -39,18 +40,20 @@ end
 
 ForkThread(function()
     WaitTicks(2)
-    -- Destroy: deferred, not nested.
+    -- Destroy: deferred, not nested, IsDestroyed late.
     local a, b = unit(400, 'a'), unit(404, 'b')
     a.alsoDestroy = b
     local tick = GetGameTick()
     a:Destroy()
     check(a:BeenDestroyed(), 'BeenDestroyed at once')
+    check(not IsDestroyed(a), 'IsDestroyed false until the object is freed')
     check(table.getn(log) == 0, 'OnDestroy not run inside Destroy: ' .. table.concat(log, ' '))
     -- A thread forked now still runs this tick, before the drain.
     ForkThread(function() note('thread@' .. GetGameTick()) end)
     WaitTicks(1)
     local want = 'thread@' .. tick .. ' a:destroy@' .. tick .. ' a:end b:destroy@' .. tick .. ' b:end'
     check(table.concat(log, ' ') == want, 'drain order: ' .. table.concat(log, ' ') .. ' (want ' .. want .. ')')
+    check(IsDestroyed(a) and IsDestroyed(b), 'IsDestroyed the beat after')
 
     -- Attachments: the child's OnDestroy runs attached, then the parent hears.
     log = {}

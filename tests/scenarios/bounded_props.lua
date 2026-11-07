@@ -1,7 +1,8 @@
 -- Scenario test (tests/scenarios.rs): moho's bounded prop list
 -- (`Prop:AddBoundedProp`, #478). It holds 1000 props; adding one more
 -- destroys the front one first: the lowest priority, then the oldest (by
--- tick). A destroyed prop leaves the list, making room.
+-- tick). A destroyed prop leaves the list, making room. Checked with
+-- `BeenDestroyed`: `IsDestroyed` turns true only after the beat.
 rawset(_G, "ScenarioResult", { done = false, failures = {}, notes = {} })
 local function check(ok, msg) if not ok then table.insert(ScenarioResult.failures, msg) end end
 local bp = '/env/evergreen/props/rocks/fieldstone01_prop.bp'
@@ -29,21 +30,21 @@ ForkThread(function()
         props[i] = p
     end
     -- 1000 in the list: nothing destroyed yet.
-    check(not IsDestroyed(lowest) and not IsDestroyed(low) and not IsDestroyed(same), 'a list of 1000 destroys nothing')
+    check(not lowest:BeenDestroyed() and not low:BeenDestroyed() and not same:BeenDestroyed(), 'a list of 1000 destroys nothing')
     -- A destroyed prop leaves the list, so the next add destroys nothing.
     props[500]:Destroy()
     rock(1000):AddBoundedProp(100)
-    check(not IsDestroyed(lowest), 'a destroyed prop made room')
+    check(not lowest:BeenDestroyed(), 'a destroyed prop made room')
     -- Full again: each add destroys the front, lowest priority first, then
     -- the older of equal priorities.
     rock(1001):AddBoundedProp(100)
-    check(IsDestroyed(lowest), 'the lowest priority goes first')
-    check(not IsDestroyed(low) and not IsDestroyed(same), 'only one goes per add')
+    check(lowest:BeenDestroyed(), 'the lowest priority goes first')
+    check(not low:BeenDestroyed() and not same:BeenDestroyed(), 'only one goes per add')
     rock(1002):AddBoundedProp(100)
-    check(IsDestroyed(low), 'then the older of equal priorities')
-    check(not IsDestroyed(same), 'the newer one stays')
+    check(low:BeenDestroyed(), 'then the older of equal priorities')
+    check(not same:BeenDestroyed(), 'the newer one stays')
     rock(1003):AddBoundedProp(100)
-    check(IsDestroyed(same), 'then the newer one')
-    check(not IsDestroyed(props[3]), 'higher priorities stay')
+    check(same:BeenDestroyed(), 'then the newer one')
+    check(not props[3]:BeenDestroyed(), 'higher priorities stay')
     ScenarioResult.done = true
 end)

@@ -31,7 +31,7 @@ ForkThread(function()
     check(built ~= nil, 'the build started')
     check(asked == 1, 'GetRebuildBonus asked once: ' .. asked)
     check(not reclaimed, 'the wreck was not reclaimed first')
-    check(IsDestroyed(wreck), 'the wreck is gone')
+    check(wreck:BeenDestroyed(), 'the wreck is gone')
     if built then
         check(built:GetHealth() > 1, 'a head start from the wreck: health ' .. built:GetHealth())
     end
