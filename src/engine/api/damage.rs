@@ -43,11 +43,10 @@ fn fx(v: f64) -> Fx {
 /// direction, type)` only when the amount is more than 0 (0x10308181), so
 /// negative damage doesn't heal and armour that takes it to 0 (the
 /// `Experimental` armour's `ExperimentalFootfall`) runs no `OnDamage`.
-/// Direction = unit vector from `location` to the target (zero if they
-/// coincide). Moho then divides by 1 + the target army's handicap, set only
+/// `direction` is what `OnDamage` gets (`direction_to`). Moho then divides by 1 + the target army's handicap, set only
 /// by the `DebugSetArmyHandicap` console command (0x103076b6): ours has
 /// none, so the divisor is 1, as in every normal game.
-fn deal(lua: &Lua, instigator: &LuaValue, location: FxVec3, target: EntityId, amount: f64, kind: &LuaValue) -> LuaResult<()> {
+fn deal(lua: &Lua, instigator: &LuaValue, direction: impl FnOnce(FxVec3) -> FxVec3, target: EntityId, amount: f64, kind: &LuaValue) -> LuaResult<()> {
     if amount == 0.0 {
         return Ok(());
     }
@@ -81,8 +80,7 @@ fn deal(lua: &Lua, instigator: &LuaValue, location: FxVec3, target: EntityId, am
         return Ok(());
     }
     let Some(obj) = obj else { return Ok(()) };
-    let dir = (pos - location).normalized().unwrap_or_default();
-    let dir = vector(lua, dir)?;
+    let dir = vector(lua, direction(pos))?;
     EntityCallbacks::on_damage(lua, &obj, "entity", shapes::Instigator(instigator.clone()), amount, dir, shapes::DamageType(kind.clone()))
 }
 
@@ -130,7 +128,11 @@ fn damage_shell(
             .collect()
     };
     for id in targets {
-        deal(lua, &instigator, center, id, amount, &kind)?;
+        // Moho's area damage passes the target's position minus the centre,
+        // not normalised (MohoEngine.dll 0x103088da..0x10308919 stores it in
+        // the damage's direction, +0x80, which `DealDamage` hands to
+        // `OnDamage` at 0x103081c7; the same at 0x10308470 and 0x10308590).
+        deal(lua, &instigator, |pos| pos - center, id, amount, &kind)?;
     }
     Ok(())
 }
@@ -158,7 +160,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             if entity_of(&instigator) == Some(target_id) {
                 return Ok(());
             }
-            deal(lua, &instigator, read_location(&location)?, target_id, amount, &kind)
+            // Unit vector from `location` to the target (zero if they
+            // coincide); moho's single-target path is not traced.
+            let location = read_location(&location)?;
+            deal(lua, &instigator, |pos| (pos - location).normalized().unwrap_or_default(), target_id, amount, &kind)
         })?;
     lua_fn!(lua, global,
         /// Damages every unit and prop within `radius` of `location`, units
@@ -218,13 +223,13 @@ mod tests {
         let run = |code: &str| -> String {
             lua.load(format!("hits = {{}} {code} return table.concat(hits, ' ')")).eval().unwrap()
         };
-        assert_eq!(run("DamageRing(I, {0, 0, 0}, 0.1, 10, 7, 'Normal', false, false)"), "E:7:-1 P:7:1");
+        assert_eq!(run("DamageRing(I, {0, 0, 0}, 0.1, 10, 7, 'Normal', false, false)"), "E:7:-5 P:7:3");
         assert_eq!(
             run("DamageArea(I, {0, 0, 0}, 10, 2, 'Normal', true, true)"),
-            "I:2:0 E:2:-1 A:2:1 N:2:1 P:2:1",
+            "I:2:0 E:2:-5 A:2:4 N:2:0.05 P:2:3",
             "self and friendly included; units (id order) then props"
         );
-        assert_eq!(run("DamageArea(nil, {0, 0, 0}, 4.5, 1, 'Force')"), "I:1:0 A:1:1 N:1:1 P:1:1", "no instigator: no filter");
+        assert_eq!(run("DamageArea(nil, {0, 0, 0}, 4.5, 1, 'Force')"), "I:1:0 A:1:4 N:1:0.05 P:1:3", "no instigator: no filter");
         assert_eq!(run("Damage(I, {0, 0, 0}, I, 5, 'Normal') Damage(I, {0, 0, 0}, F, 5, 'Normal')"), "F:5:1");
     }
 }
