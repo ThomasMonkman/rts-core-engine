@@ -1226,8 +1226,10 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     // A travelling formation sets the pace (members may go faster to catch
     // up with their slot); one gathering at the target moves at its slowest
     // unit's speed.
-    // The unit's current order, looked up once (a double map lookup).
-    let cmd = commands.current(unit);
+    // The unit's current order, looked up once (a double map lookup); one
+    // the dispatcher hasn't started yet (the unit is held:
+    // `api::orders::held`) isn't acted on.
+    let cmd = commands.dispatched(unit);
     // An aircraft's move with another move queued behind it flies through
     // its point (moho's speed-through: D at top speed outright,
     // `CalcMoveAir` 0x1029d6d0): no slowing onto it, and it's done a turn's
@@ -3314,15 +3316,17 @@ pub fn apply(world: &mut EntityWorld, commands: &mut Commands, moved: &[Moved], 
             static RUN: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("MakingAttackRun").expect("state"));
             u.states.set(*RUN, matches!(m.state.combat, 1 | 2));
         }
-        if m.arrived {
+        if m.arrived && commands.dispatched(m.unit).is_some() {
             use crate::engine::sim::command::CommandKind as K;
             let patrol = commands.current(m.unit).filter(|c| matches!(c.kind, K::Patrol | K::FormPatrol)).map(|c| (c.kind, c.target));
             match patrol {
                 Some((kind, target)) => {
-                    // Patrols loop: with other patrol points queued, this one
-                    // goes to the back; alone, it's followed by a leg back to
-                    // where the unit started.
-                    let others = commands.queue(m.unit).skip(1).any(|c| matches!(c.kind, K::Patrol | K::FormPatrol));
+                    // Patrols loop: with anything queued after it, this one
+                    // goes to the back (moho's dispatcher, MohoEngine.dll
+                    // 0x101893d7..0x1018952b: any next command, of any
+                    // kind); alone, it's followed by a leg back to where the
+                    // unit started.
+                    let others = commands.queue(m.unit).nth(1).is_some();
                     let origin = world.get(m.unit).and_then(|e| e.unit.as_deref()).and_then(|u| u.patrol_origin);
                     if others {
                         commands.requeue_front(m.unit);

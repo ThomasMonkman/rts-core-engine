@@ -380,6 +380,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                 // (probe_firsttick).
                 let killed = entity::world(lua).get(ev.unit).is_none_or(|e| e.destroyed || e.cold.killed);
                 if !disabled && !killed {
+                    crate::engine::api::orders::weapon_fired(lua, ev.unit);
                     WeaponCallbacks::on_fire(lua, &obj, "weapon")?;
                 }
             }

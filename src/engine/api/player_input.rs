@@ -266,7 +266,12 @@ fn finish(lua: &Lua, c: &PlayerCommand, units: &[EntityId], target: CommandTarge
         }
     }
     match c.kind {
-        CommandKind::Stop => {}
+        // Moho's Stop dispatch stops the attacker (`api::orders::attacker_stop`).
+        CommandKind::Stop => {
+            for &u in units {
+                crate::engine::api::orders::attacker_stop(lua, u);
+            }
+        }
         // A mobile build goes to every selected builder, as one shared order
         // (moho's): the first there starts the structure, the rest join in,
         // and it's done for all when the structure is (`construction`).

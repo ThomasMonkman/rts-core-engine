@@ -286,7 +286,12 @@ fn ready_to_start(lua: &Lua, builder: EntityId) -> LuaResult<Option<(BuildOrder,
     let Some(bp) = cmd.blueprint.clone() else { return Ok(None) };
     let (site, reach) = {
         let w = entity::world(lua);
-        let Some(e) = w.get(builder).filter(|e| !e.destroyed && e.fraction_complete >= Fx::ONE) else { return Ok(None) };
+        // Moho's dispatch hold: a factory rolling a unit off
+        // (`BlockCommandQueue`) starts its next one after.
+        if crate::engine::api::orders::held(&w, builder) {
+            return Ok(None);
+        }
+        let Some(e) = w.get(builder) else { return Ok(None) };
         // (The structure's skirt is added below.)
         (e.position(), e.unit.as_deref().map(|u| u.build_range + u.radius * Fx::from_num(2)))
     };
@@ -621,16 +626,19 @@ fn finish_order(lua: &Lua, builder: EntityId, job: &Job) {
         return;
     }
     let (job_command, order) = (job.command, job.order);
-    // Repeat build: what a factory finishes goes back on the end of its
-    // queue.
+    // Repeat build: the last of a factory order goes round again, its count
+    // reset, at the back of the queue (`Commands::repeat_to_back`).
     let repeat = order == BuildOrder::Factory && entity::world(lua).get(builder).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.repeat_queue);
     let mut c = lua.app_data_mut::<Commands>().expect("Commands");
-    if repeat
-        && let Some((target, bp)) = c.get(job_command).map(|cmd| (cmd.target, cmd.blueprint.clone())) {
-        c.issue(&[builder], CommandKind::BuildFactory, target, bp, 1);
-    }
-    if order == BuildOrder::Factory && c.count_down(job_command) > 0 {
-        return;
+    if order == BuildOrder::Factory {
+        if c.get(job_command).is_some_and(|cmd| cmd.count > 1) {
+            c.count_down(job_command);
+            return;
+        }
+        if repeat && c.get(job_command).is_some() {
+            c.repeat_to_back(builder, job_command);
+            return;
+        }
     }
     if job.guard.is_some() {
         c.remove_from_queue(builder, job_command);
@@ -1277,16 +1285,16 @@ fn take_from(lua: &Lua, factory: EntityId, source: EntityId) -> LuaResult<Option
 
 /// One unit of `source`'s factory build order `command` goes to an
 /// assisting factory: the order counts down, its last unit leaving
-/// `source`'s queue; on repeat that unit comes round again at the back,
+/// `source`'s queue; on repeat the order goes round again at the back,
 /// as one `source` finished itself would ([`finish_order`]).
 fn hand_one_over(lua: &Lua, source: EntityId, command: CommandId) {
     let repeat = entity::world(lua).get(source).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.repeat_queue);
     let mut c = lua.app_data_mut::<Commands>().expect("Commands");
-    if repeat
-        && let Some((target, bp)) = c.get(command).map(|cmd| (cmd.target, cmd.blueprint.clone())) {
-        c.issue(&[source], CommandKind::BuildFactory, target, bp, 1);
-    }
-    if c.count_down(command) == 0 {
+    if c.get(command).is_some_and(|cmd| cmd.count > 1) {
+        c.count_down(command);
+    } else if repeat && c.get(command).is_some() {
+        c.repeat_to_back(source, command);
+    } else {
         c.remove_from_queue(source, command);
     }
 }

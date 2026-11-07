@@ -4,8 +4,9 @@
 //! `OnSpecialAction(location)` and the order pops. No FAF unit has the
 //! command cap; mods use the hook.
 //!
-//! Inferred, not verified against the binary: the unit acts where it stands
-//! (no walking to the point first), at once.
+//! Confirmed in the binary: the dispatch (MohoEngine.dll 0x101f4629) calls
+//! `OnSpecialAction(target position)` with no task, so the unit acts where
+//! it stands, at once.
 
 use mlua::prelude::*;
 
@@ -19,6 +20,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         Some(c) => c
             .units_doing(&[CommandKind::SpecialAction])
             .into_iter()
+            .filter(|&u| !crate::engine::api::orders::held(&entity::world(lua), u))
             .filter_map(|u| c.current(u).map(|cmd| (u, cmd.id, cmd.target)))
             .collect(),
         None => return Ok(()),

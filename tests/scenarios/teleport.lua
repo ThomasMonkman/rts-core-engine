@@ -25,7 +25,7 @@ ForkThread(function()
     WaitTicks(2)
     check(seen ~= nil, 'OnTeleportUnit called')
     if seen then
-        check(seen.teleporter == nil and seen.x == 440 and seen.z == 620 and seen.q ~= nil, 'arguments: nil teleporter, the location, an orientation')
+        check(seen.teleporter == tank and seen.x == 440 and seen.z == 620 and seen.q ~= nil, 'arguments: the unit itself as teleporter, the location, an orientation')
         check(seen.teleporting, 'in the Teleporting state when told')
     end
     for _ = 1, 100 do
@@ -53,5 +53,18 @@ ForkThread(function()
     check(not acu:IsUnitState('Teleporting'), 'ACU left the Teleporting state')
     local a = acu:GetPosition()
     check(math.abs(a[1] - 380) < 1, string.format('ACU stayed put: %.1f', a[1]))
+
+    -- A teleport to an entity that's gone doesn't hold the queue.
+    local gone = CreateUnitHPR('uel0201', 'ARMY_1', 410, GetTerrainHeight(410, 610), 610, 0, 0, 0)
+    local cmd = IssueTeleport({tank}, gone)
+    gone:Destroy()
+    IssueMove({tank}, { 445, GetTerrainHeight(445, 620), 620 })
+    WaitTicks(3)
+    check(IsCommandDone(cmd), 'a teleport to a gone target ends')
+    check(table.getn(tank:GetCommandQueue()) <= 1, 'and the order after it carries on')
+
+    -- IssueTeleportToBeacon is an unload, for transports only.
+    local t = IssueTeleportToBeacon({tank}, acu)
+    check(IsCommandDone(t), 'IssueTeleportToBeacon: a tank is no transport')
     ScenarioResult.done = true
 end)
