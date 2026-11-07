@@ -116,8 +116,24 @@ pub(crate) fn target_of(v: &LuaValue) -> LuaResult<CommandTarget> {
     Ok(CommandTarget::Ground(FxVec3::from_f64(num(1)?, num(2)?, num(3)?)))
 }
 
+/// How many queued commands a unit may hold and still take an order that
+/// doesn't clear its queue (moho's `UNIT_IssueCommand`, MohoEngine.dll
+/// 0x102cbe21: `cmp eax, 0x1f4; jbe` on the queue's length).
+const MAX_QUEUED: usize = 500;
+
+/// Issues an order to `units` (a clearing one has emptied their queues
+/// first), leaving out units with more than [`MAX_QUEUED`] queued.
 pub(crate) fn issue(lua: &Lua, units: &[EntityId], kind: CommandKind, target: CommandTarget, blueprint: Option<String>, count: u32) -> CommandHandle {
-    let handle = CommandHandle(commands(lua).issue(units, kind, target, blueprint, count));
+    let mut c = commands(lua);
+    let capped: Vec<EntityId>;
+    let units = if units.iter().any(|&u| c.queue_len(u) > MAX_QUEUED) {
+        capped = units.iter().copied().filter(|&u| c.queue_len(u) <= MAX_QUEUED).collect();
+        &capped[..]
+    } else {
+        units
+    };
+    let handle = CommandHandle(c.issue(units, kind, target, blueprint, count));
+    drop(c);
     // Determinism hunting (dev): `RTS_LOG_ISSUE_UNIT=id` logs every order
     // given to that unit with the Lua stack that gave it.
     static WATCH: std::sync::OnceLock<Option<EntityId>> = std::sync::OnceLock::new();

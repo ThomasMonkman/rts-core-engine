@@ -329,6 +329,11 @@ impl Commands {
         self.queue(unit).next()
     }
 
+    /// How many commands `unit` has queued.
+    pub fn queue_len(&self, unit: EntityId) -> usize {
+        self.queues.get(&unit).map_or(0, VecDeque::len)
+    }
+
     pub fn is_idle(&self, unit: EntityId) -> bool {
         self.queues.get(&unit).is_none_or(|q| q.is_empty())
     }

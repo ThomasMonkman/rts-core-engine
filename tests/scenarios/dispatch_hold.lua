@@ -39,6 +39,14 @@ ForkThread(function()
     check(victim.Dead, 'IssueKillSelf kills the unit')
     check(IsDestroyed(gone), 'IssueDestroySelf destroys it')
 
+    -- More than 500 queued: no further (non-clearing) orders.
+    local busy = make('uel0105', 410, 620)
+    busy:SetBlockCommandQueue(true)
+    for _ = 1, 505 do IssuePause({ busy }) end
+    check(table.getn(busy:GetCommandQueue()) == 501, 'the queue stops taking orders past 500 (' .. table.getn(busy:GetCommandQueue()) .. ')')
+    IssueClearCommands({ busy })
+    busy:SetBlockCommandQueue(false)
+
     -- The factory's roll-off.
     local land = make('ueb0101', 400, 600)
     IssueBuildFactory({ land }, 'uel0201', 2)
