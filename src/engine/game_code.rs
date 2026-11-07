@@ -56,14 +56,6 @@ impl GameCode {
     pub fn runs_every_option_setter(self) -> bool {
         self != GameCode::Faf
     }
-
-    /// Whether a mod named `Hotstats` is left out of the installed mods:
-    /// FAF's `/lua/mods.lua` (`AllMods`) skips it, as FAF has the score
-    /// screen built in. The base game's (`mohodata.scd`) and LOUD's only
-    /// skip `enabled = false`, and LOUD ships Hotstats as a UI mod.
-    pub fn skips_hotstats_mod(self) -> bool {
-        self == GameCode::Faf
-    }
 }
 
 #[cfg(test)]
