@@ -24,8 +24,10 @@ impl LuaUserData for WeaponHandle {}
 const WEAPONS_KEY: &str = "engine.weapons";
 
 /// Default seconds between target searches for weapons without
-/// `TargetCheckInterval` (inferred; not verified against the binary).
-const DEFAULT_TARGET_CHECK: f64 = 0.5;
+/// `TargetCheckInterval`, as `RUnitBlueprintWeapon`'s constructor sets it
+/// (MohoEngine.dll 0x1010df7c: 3.0, from 0x1076c5fc). FAF's blueprint pass
+/// sets it on every weapon.
+const DEFAULT_TARGET_CHECK: f64 = 3.0;
 
 /// Registry table: unit entity id -> array of weapon objects.
 fn objects(lua: &Lua) -> LuaResult<LuaTable> {
@@ -65,7 +67,9 @@ fn configure(lua: &Lua, st: &mut WeaponState, unit: EntityId, wbp: &LuaTable) ->
     st.muzzle_velocity = fx(num("MuzzleVelocity")?);
     st.muzzle_velocity_given = num("MuzzleVelocity")?.is_some();
     st.bomb_drop = match wbp.get::<Option<bool>>("NeedToComputeBombDrop")? {
-        Some(true) => Some(fx(num("BombDropThreshold")?).max(Fx::ONE)),
+        // Default 1.5, as `RUnitBlueprintWeapon`'s constructor sets it
+        // (MohoEngine.dll 0x1010e0e6, from 0x1071c8c8).
+        Some(true) => Some(crate::engine::sim::math::from_lua(num("BombDropThreshold")?.unwrap_or(1.5)).max(Fx::ONE)),
         _ => None,
     };
     st.auto_initiate = wbp.get::<Option<bool>>("AutoInitiateAttackCommand")?.unwrap_or(false);
