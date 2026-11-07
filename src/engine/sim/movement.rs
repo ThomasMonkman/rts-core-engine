@@ -839,9 +839,11 @@ struct Drive {
 ///   0x101a25cd), then capped by `MaxSteerForce` (a lateral acceleration:
 ///   rate <= force / speed), so units arc wide when fast and turn tight
 ///   when slow;
-/// - a target behind it (> 90 degrees off) within `BackUpDistance` is
-///   reached in reverse, tail first, at up to `MaxSpeedReverse` (with a
-///   little hysteresis so it doesn't flip);
+/// - a target more than 120 degrees off its nose (cos < -0.5) and nearer
+///   than `BackUpDistance` is reached in reverse, tail first, at up to
+///   `MaxSpeedReverse`; moho's path spline gates it only on
+///   `MaxSpeedReverse > 0` and not `RotateOnSpot` (0x101a231d..0x101a2407),
+///   so hovercraft with a `TurnFacingRate` back up too;
 /// - `RotateOnSpot` units more than `RotateOnSpotThreshold` off course stop
 ///   and pivot first;
 /// - with a `TurnFacingRate` the course turns at the turn rate and the
@@ -864,15 +866,10 @@ fn drive(p: &MotionParams, state: MotionState, heading: Fx, turn: Fx, radius: Fx
     if p.steer_force > Fx::ZERO && rate.saturating_mul(state.speed.abs()) > p.steer_force {
         rate = p.steer_force / state.speed.abs();
     }
-    let reversing = state.speed < Fx::ZERO;
-    let reverse = !decoupled
-        && p.reverse_speed > Fx::ZERO
-        && p.backup_distance > Fx::ZERO
-        && if reversing {
-            err.abs() > Fx::FRAC_PI_2 - Fx::PI / 9 && remaining <= p.backup_distance * 5 / 4
-        } else {
-            err.abs() > Fx::FRAC_PI_2 && remaining <= p.backup_distance
-        };
+    let reverse = p.reverse_speed > Fx::ZERO
+        && !p.rotate_on_spot
+        && remaining < p.backup_distance
+        && err.abs() > Fx::PI * 2 / 3;
     // Backing up points the tail at the target.
     let e = if reverse { wrap(err - Fx::PI) } else { err };
     let pivot = p.rotate_on_spot && !reverse && e.abs() > p.rotate_threshold;
@@ -4191,6 +4188,26 @@ mod tests {
         let heading = facing(w.get(ship).unwrap()).to_num::<f64>();
         assert!((heading.abs() - std::f64::consts::FRAC_PI_2).abs() < 0.03, "broadside on: heading {heading}");
         assert_eq!(w.get(ship).unwrap().position(), FxVec3::default(), "turned on the spot");
+    }
+
+    /// Moho's spline (0x101a231d..0x101a2407): reverse past 120 degrees off
+    /// (cos < -0.5), nearer than `BackUpDistance`, hovercraft included.
+    #[test]
+    fn reverse_past_120_degrees_hovercraft_too() {
+        let p = MotionParams { kind: MotionKind::Land, max_speed: Fx::from_num(3), turn_rate: Fx::PI, reverse_speed: Fx::from_num(2), backup_distance: Fx::from_num(6), ..Default::default() };
+        // Facing +z (heading 0): the point `deg` round towards +x, 4 away.
+        let at = |deg: f64| match deg as u32 {
+            100 => FxVec3::from_f64(3.939, 0.0, -0.695),
+            130 => FxVec3::from_f64(3.064, 0.0, -2.571),
+            _ => FxVec3::from_f64(0.695, 0.0, -3.939),
+        };
+        let reverse = |p: &MotionParams, deg: f64, remaining: f64| drive(p, MotionState::default(), Fx::ZERO, p.turn_rate, Fx::ZERO, FxVec3::default(), at(deg), Fx::from_num(remaining), false).reverse;
+        assert!(!reverse(&p, 100.0, 4.0), "100 degrees: turns");
+        assert!(reverse(&p, 130.0, 4.0), "130 degrees: backs up");
+        assert!(!reverse(&p, 130.0, 6.0), "not nearer than BackUpDistance");
+        assert!(!reverse(&MotionParams { rotate_on_spot: true, rotate_threshold: Fx::ONE / 2, ..p }, 130.0, 4.0), "RotateOnSpot pivots instead");
+        let hover = MotionParams { kind: MotionKind::Hover, facing_rate: Fx::FRAC_PI_4, ..p };
+        assert!(reverse(&hover, 170.0, 4.0), "a hovercraft with TurnFacingRate backs up");
     }
 
     #[test]
