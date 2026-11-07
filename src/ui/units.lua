@@ -15,7 +15,11 @@ methods.GetEntityId = function(self) return tostring(self._id) end
 methods.GetUnitId = function(self) local u = d(self) return u and u.bp end
 methods.GetBlueprint = function(self) local u = d(self) return u and __blueprints[u.bp] end
 methods.GetArmy = function(self) local u = d(self) return u and u.army or -1 end
+-- The sim's current maximum (a buff or script may have changed it from
+-- the blueprint's).
 methods.GetMaxHealth = function(self)
+    local u = d(self)
+    if u and u.max_health then return u.max_health end
     local bp = self:GetBlueprint()
     return bp and bp.Defense and bp.Defense.MaxHealth or 1
 end

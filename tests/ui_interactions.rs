@@ -113,7 +113,7 @@ fn hud() -> Option<UserVm> {
         distance: 80.0,
         terrain: Some(Arc::new(terrain)),
     }]);
-    let unit = |id: u32, blueprint: &str, x: f32| UnitInfo { id, blueprint: blueprint.into(), army: 1, health: 1.0, build: 1.0, position: [x, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None };
+    let unit = |id: u32, blueprint: &str, x: f32| UnitInfo { id, blueprint: blueprint.into(), army: 1, health: 1.0, max_health: 100.0, build: 1.0, position: [x, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None };
     vm.update_units(&[unit(1, "uel0001", 390.0), unit(2, "uel0105", 395.0), unit(3, "uel0201", 400.0), unit(4, "ueb0101", 410.0), unit(5, "uea0203", 405.0)]).unwrap();
     // The mouse over the middle of the screen (the world view).
     vm.lua().load("rawset(_G, '__engine_mouse_x', 512) rawset(_G, '__engine_mouse_y', 384)").exec().unwrap();
@@ -382,7 +382,7 @@ fn unit_toggles_read_details_and_set() {
     use rts_core_engine::engine::snapshot::UnitDetail;
     let Some(vm) = hud() else { return };
     let detail = UnitDetail { id: 4, auto_mode: true, submerged: false, cargo: vec![2], assisters: vec![3], ..Default::default() };
-    vm.update_units(&[UnitInfo { id: 4, blueprint: "ueb0101".into(), army: 1, health: 1.0, build: 1.0, position: [410.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: Some(detail) }]).unwrap();
+    vm.update_units(&[UnitInfo { id: 4, blueprint: "ueb0101".into(), army: 1, health: 1.0, max_health: 100.0, build: 1.0, position: [410.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: Some(detail) }]).unwrap();
     let (auto, sub, cargo, assist): (bool, i64, String, String) = vm
         .lua()
         .load(

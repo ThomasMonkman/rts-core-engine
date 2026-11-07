@@ -53,6 +53,9 @@ pub struct EntityView {
     pub half: [f32; 3],
     /// 0..1.
     pub health: f32,
+    /// Its maximum health now (`GetMaxHealth`: a buff or script may have
+    /// changed it from the blueprint's).
+    pub max_health: f32,
     /// 0..1 (1 = finished).
     pub build: f32,
     /// 0..1 of its current job (`GetWorkProgress`: building, an upgrade, an
@@ -970,6 +973,7 @@ fn view_of(e: &crate::engine::sim::entity::Entity, structure: Option<&crate::eng
         center,
         half,
         health,
+        max_health: f(e.max_health),
         build: f(e.fraction_complete),
         work: e.unit.as_deref().map_or(0.0, |u| f(u.work_progress)),
         shield: e.unit.as_deref().filter(|u| u.has_shield).map_or(-1.0, |u| f(u.shield_ratio)),

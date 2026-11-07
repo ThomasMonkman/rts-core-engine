@@ -78,6 +78,8 @@ pub struct UnitInfo {
     pub army: u32,
     /// 0..1.
     pub health: f32,
+    /// Its maximum health now (the blueprint's unless changed).
+    pub max_health: f32,
     /// 0..1 (1 = finished).
     pub build: f32,
     pub position: [f32; 3],
@@ -99,6 +101,7 @@ impl UnitInfo {
             blueprint,
             army: e.army,
             health: e.health,
+            max_health: e.max_health,
             build: e.build,
             position: e.position,
             work: e.work,
@@ -220,6 +223,8 @@ struct UnitBasics<'a> {
     army: u32,
     /// 0..1.
     health: f32,
+    /// Its maximum health now.
+    max_health: f32,
     /// 0..1 (1 = finished).
     build: f32,
     x: f32,
@@ -238,13 +243,13 @@ fn write_unit_basics(lua: &Lua, data: &LuaTable, u: &UnitInfo) -> LuaResult<(Lua
     let (t, fresh) = match data.raw_get::<Option<LuaTable>>(u.id)? {
         Some(t) => (t, false),
         None => {
-            let t = lua.create_table_with_capacity(0, 9)?;
+            let t = lua.create_table_with_capacity(0, 10)?;
             data.raw_set(u.id, t.clone())?;
             (t, true)
         }
     };
     let [x, y, z] = u.position;
-    UnitBasics { bp: &u.blueprint, army: u.army, health: u.health, build: u.build, x, y, z, work: u.work, shield: u.shield }.write_into(lua, &t)?;
+    UnitBasics { bp: &u.blueprint, army: u.army, health: u.health, max_health: u.max_health, build: u.build, x, y, z, work: u.work, shield: u.shield }.write_into(lua, &t)?;
     Ok((t, fresh))
 }
 
