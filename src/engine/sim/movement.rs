@@ -112,6 +112,10 @@ pub struct MotionParams {
     /// does it only when the blueprint's raw `TurnRadius` > `TurnRate`
     /// (0x101a2256, 0x101a29a6; FAF's Tempest and Atlantis).
     pub corner_slowdown: bool,
+    /// `RULEUMT_AmphibiousFloating` units with a negative
+    /// `LayerChangeOffsetHeight`: 3 x that offset (else 0), the depth
+    /// within which they slow in the shallows ([`shallows_factor`]).
+    pub shallows_depth: Fx,
     pub rotate_on_spot: bool,
     pub rotate_threshold: Fx,
     pub facing_rate: Fx,
@@ -900,6 +904,17 @@ fn corner_slow(want: Fx, err: Fx) -> Fx {
     want.saturating_mul(Fx::ONE + c.max(-Fx::ONE / 2)) / 2
 }
 
+/// Speed factor of a floating amphibious unit (the Salem) in the shallows:
+/// with the ground `d` under the water surface (negative) and `depth` = 3 x
+/// its `LayerChangeOffsetHeight`, max(d / depth, 0.5) between the two, else
+/// 1 (moho's path spline, 0x101a24a5..0x101a255a: `GetElevation` minus
+/// `GetWaterElevation`, constant 3.0), so it's slowest at the waterline.
+pub fn shallows_factor(depth: Fx, terrain: &Terrain, x: Fx, z: Fx) -> Fx {
+    let Some(water) = terrain.water_surface else { return Fx::ONE };
+    let d = terrain.height_at(x, z) - water;
+    if d > depth && d < Fx::ZERO { (d / depth).max(Fx::ONE / 2) } else { Fx::ONE }
+}
+
 /// Fastest speed at which a unit turning at `rate` (rad/s) can still reach a
 /// point `dist` away that is `err` off its nose: the point must lie outside
 /// its turning circle (`dist >= 2 v / rate * sin|err|`), else it circles
@@ -1200,6 +1215,10 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     }
     let mult = data.motion;
     let mut max_speed = p.max_speed.saturating_mul(mult.speed);
+    if let Some(t) = env.terrain.filter(|_| p.shallows_depth < Fx::ZERO) {
+        let pos = e.position();
+        max_speed = max_speed.saturating_mul(shallows_factor(p.shallows_depth, t, pos.x, pos.z));
+    }
     let engaged = env.engaged.is_some_and(|set| set.contains(&unit));
     // A travelling formation sets the pace (members may go faster to catch
     // up with their slot); one gathering at the target moves at its slowest
@@ -4223,6 +4242,20 @@ mod tests {
         assert!(!reverse(&MotionParams { rotate_on_spot: true, rotate_threshold: Fx::ONE / 2, ..p }, 130.0, 4.0), "RotateOnSpot pivots instead");
         let hover = MotionParams { kind: MotionKind::Hover, facing_rate: Fx::FRAC_PI_4, ..p };
         assert!(reverse(&hover, 170.0, 4.0), "a hovercraft with TurnFacingRate backs up");
+    }
+
+    #[test]
+    fn floating_amphibians_slow_in_the_shallows() {
+        use crate::engine::assets::scmap::Heightmap;
+        // Ground from 0 (x = 0) up to 32 (x = 32); water at 20.
+        let samples = (0..33 * 33).map(|i| ((i % 33) * 128) as u16).collect();
+        let t = Terrain::from_heightmap(&Heightmap { width: 32, height: 32, scale: 1.0 / 128.0, samples }).with_water(Some(20.0));
+        let depth = Fx::from_num(-3); // LayerChangeOffsetHeight -1 (URS0201)
+        let at = |x: i32| shallows_factor(depth, &t, Fx::from_num(x), Fx::from_num(5));
+        assert_eq!(at(10), Fx::ONE, "deep water");
+        assert_eq!(at(25), Fx::ONE, "on land");
+        assert_eq!(at(18), Fx::from_num(2) / 3, "2 under: 2/3");
+        assert_eq!(at(19), Fx::ONE / 2, "1 under: at least half");
     }
 
     #[test]

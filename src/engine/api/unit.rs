@@ -266,6 +266,7 @@ fn motion_of(bp: &LuaTable, motion_type: &str) -> LuaResult<(crate::engine::sim:
         rotate_threshold: if rotate_on_spot { fx(Some(get("RotateOnSpotThreshold")?.unwrap_or(0.5))).max(Fx::from_num(0.01)) } else { Fx::ZERO },
         facing_rate: surface_fx("TurnFacingRate")? * Fx::PI / Fx::from_num(180),
         layer_change_offset: surface_fx("LayerChangeOffsetHeight")?,
+        shallows_depth: if motion_type == "RULEUMT_AmphibiousFloating" { (surface_fx("LayerChangeOffsetHeight")? * 3).min(Fx::ZERO) } else { Fx::ZERO },
         attack_angle: if surface {
             fx(bp.get::<Option<LuaTable>>("AI")?.map(|ai| ai.get::<Option<f64>>("AttackAngle")).transpose()?.flatten()).max(Fx::ZERO) * Fx::PI / Fx::from_num(180)
         } else {
