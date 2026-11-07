@@ -109,8 +109,9 @@ pub struct MotionParams {
     pub backup_distance: Fx,
     pub steer_force: Fx,
     /// Slows off course, by (1 + max(cos, -0.5)) / 2: moho's path spline
-    /// does it only when the blueprint's raw `TurnRadius` > `TurnRate`
-    /// (0x101a2256, 0x101a29a6; FAF's Tempest and Atlantis).
+    /// flags it when the blueprint's raw `TurnRadius` > `TurnRate`
+    /// (0x101a2256, 0x101a29a6; FAF's Tempest and Atlantis), though FAF's
+    /// tanks slow this way too (see `corner_slow`'s caller).
     pub corner_slowdown: bool,
     /// `RULEUMT_AmphibiousFloating` units with a negative
     /// `LayerChangeOffsetHeight`: 3 x that offset (else 0), the depth
@@ -899,8 +900,8 @@ fn drive(p: &MotionParams, state: MotionState, heading: Fx, turn: Fx, radius: Fx
 /// The speed a `corner_slowdown` unit wants `err` off course: x (1 +
 /// max(cos, -0.5)) / 2, so all of it ahead, half at 90 degrees, a quarter
 /// past 120 (moho's path spline, 0x101a29a6; `err` is from the tail when
-/// reversing, as moho negates the cos). Moho cuts no other unit's speed
-/// (ours still does; see the caller).
+/// reversing, as moho negates the cos). FAF's game slows other units the
+/// same way; ours still cuts them to a quarter (see the caller).
 fn corner_slow(want: Fx, err: Fx) -> Fx {
     let (_, c) = crate::engine::sim::math::sin_cos(err);
     want.saturating_mul(Fx::ONE + c.max(-Fx::ONE / 2)) / 2
@@ -1808,10 +1809,10 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
                 } else if p.corner_slowdown {
                     want = corner_slow(want, d.err);
                 } else if !d.aligned {
-                    // Ours, not moho's: moho gives these units no cut, but
-                    // its spline's turn limits shape their arc, which ours
-                    // doesn't model; without the cut they swing wide
-                    // (`occupy_rects`, `assist_spread`, `trees` scenarios).
+                    // A stand-in: FAF's tanks slow by `corner_slow` too
+                    // (probe_motion), but with it ours arcs wide without
+                    // the spline's path (`occupy_rects`, `assist_spread`,
+                    // `trees`, `land_bodies` scenarios).
                     want /= 4;
                 }
                 if let Some(v) = squad_pace.filter(|_| !winged && !d.reverse) {
