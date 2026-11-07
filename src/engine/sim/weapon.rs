@@ -1295,6 +1295,11 @@ fn advance_target(
     let order_target = ordered.get(&w.unit).filter(|o| o.silo.is_none()).map(|o| o.target);
     let new_order = order_target.is_some() && order_target != w.order_seen;
     w.order_seen = order_target;
+    // A target an earlier order forced halts fire first, as when an order
+    // re-points (below).
+    if new_order && w.target_from_order && w.target.is_some() {
+        push(&mut events, WeaponEventKind::HaltFire);
+    }
     let order_reset = new_order && w.target.take().is_some();
     if order_reset {
         w.target_from_order = false;
