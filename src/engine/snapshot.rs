@@ -569,8 +569,10 @@ pub mod caps {
     /// Can board a transport (right-clicking one walks it aboard:
     /// `TransportLoadUnits`).
     pub const CALL_TRANSPORT: u16 = 512;
+    /// Can dock at an air staging platform (`IssueDockCommand`).
+    pub const DOCK: u16 = 1024;
     /// `RULEUCC_*` name of each bit, in bit order.
-    pub const NAMES: [&str; 10] = ["Move", "Attack", "Guard", "Patrol", "Reclaim", "Repair", "Capture", "Stop", "Transport", "CallTransport"];
+    pub const NAMES: [&str; 11] = ["Move", "Attack", "Guard", "Patrol", "Reclaim", "Repair", "Capture", "Stop", "Transport", "CallTransport", "Dock"];
 }
 
 /// A selected unit's state for the interface (FAF's unit panels).
