@@ -19,8 +19,8 @@
 //!    unit in the footprint is ordered out and the start holds until the
 //!    units are clear (but not past [`WALK_OUT_PATIENCE`] ticks of a unit
 //!    that cannot move: the build starts around it).
-//! 2. Progress: `time` from the builder's `GetBuildCosts(targetBp)` (FAF's
-//!    Lua economy model); fraction += `dt / time * resource_consumed`; health
+//! 2. Progress: `time` = the target's `Economy.BuildTime` / the builder's
+//!    build rate; fraction += `dt / time * resource_consumed`; health
 //!    grows in step; `OnBuildProgress` / `OnBeingBuiltProgress` fire.
 //! 3. Finish: `OnStopBeingBuilt(builder, layer)` on the target,
 //!    `OnStopBuild(target, order)` on the builder, the order pops (a factory
@@ -35,8 +35,15 @@
 //! does, at the end of that tick while the target can still be passed: FAF
 //! takes the build beams down in `OnStopBuild`.
 //!
-//! Inferred, not verified against the binary: the progress formula's use of
-//! `resource_consumed`, progress callbacks every tick, no site snapping.
+//! The progress step is moho's (the build-task work step, MohoEngine.dll
+//! 0x101e1ace..0x101e1af9: `BuildRate / BuildTime x GetResourceConsumed x
+//! 0.1`). Repairing an aircraft also refuels it, at half speed for both while
+//! it's damaged (`assists`). Not done: assisting a shield generator
+//! regenerating its bubble (0x101e1b33..0x101e1c76: `RegenRate x BuildRate /
+//! Defense.Shield.RegenAssistMult`, needs the owner's shield link).
+//!
+//! Inferred, not verified against the binary: progress callbacks every tick,
+//! no site snapping.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -212,6 +219,9 @@ fn cap_used(lua: &Lua, army: u32, cache: &mut BTreeMap<u32, Fx>) -> Fx {
 /// Whether `builder` may start a unit of blueprint `bp` under its army's
 /// unit cap (upgrades replace a unit, so they always may). Else the brain
 /// hears `OnUnitCapLimitReached` (once per order) and the builder waits.
+/// The test is moho's `Sim::CreateUnit` one (MohoEngine.dll 0x10317ac0, from
+/// the build tasks 0x101e3806 / 0x101e60bd): `used + CapCost > cap` refuses,
+/// so a cap of 0 refuses every unit with a cost.
 fn under_cap(lua: &Lua, builder: EntityId, order: BuildOrder, command: CommandId, bp: &str, cache: &mut BTreeMap<u32, Fx>) -> LuaResult<bool> {
     if order == BuildOrder::Upgrade {
         return Ok(true);
@@ -221,7 +231,7 @@ fn under_cap(lua: &Lua, builder: EntityId, order: BuildOrder, command: CommandId
         Some(c) => c,
         None => return Ok(true),
     };
-    if ignore || cap == 0 {
+    if ignore {
         return Ok(true);
     }
     let cost = match entity::blueprint_table(lua, crate::engine::api::blueprints::BlueprintKind::Unit, &bp.to_lowercase())?.get::<Option<LuaTable>>("General")? {
@@ -964,34 +974,22 @@ pub(crate) fn guard_task_target(lua: &Lua, unit: EntityId) -> Option<EntityId> {
     }
 }
 
-/// Seconds to build `target` for `builder`: the builder's
-/// `GetBuildCosts(targetBp)` (time first), else `BuildTime / BuildRate`.
+/// Seconds to build `target` for `builder`: the target blueprint's
+/// `Economy.BuildTime` over the builder's build rate. Moho reads both
+/// natively (the work step, MohoEngine.dll 0x101e1ace: bp +0x4e4 and the
+/// builder's attribute +0x58); it never calls FAF's `GetBuildCosts`
+/// ("GetBuildCosts" isn't in the binary), so a mod overriding it doesn't
+/// change build speed. 0 rate: never.
 fn build_time(lua: &Lua, builder: &LuaTable, target: EntityId) -> LuaResult<Fx> {
     let bp_id = entity::world(lua).get(target).map(|e| e.cold.blueprint_id.clone()).unwrap_or_default();
     let bp = entity::blueprint_table(lua, crate::engine::api::blueprints::BlueprintKind::Unit, &bp_id)?;
-    let from_script = match builder.get::<Option<LuaFunction>>("GetBuildCosts")? {
-        Some(f) => match f.call::<LuaMultiValue>((builder.clone(), bp.clone())) {
-            Ok(v) => match v.front() {
-                Some(LuaValue::Number(n)) => Some(*n),
-                Some(LuaValue::Integer(i)) => Some(*i as f64),
-                _ => None,
-            },
-            Err(e) => {
-                tracing::warn!(target: "lua", "Error running GetBuildCosts script in unit: {e}");
-                None
-            }
-        },
-        None => None,
-    };
-    let time = match from_script {
-        Some(t) => t,
-        None => {
-            let bt = bp.get::<Option<LuaTable>>("Economy")?.map(|e| e.get::<Option<f64>>("BuildTime")).transpose()?.flatten().unwrap_or(1.0);
-            let rate = entity::world(lua).get(entity::entity_id(builder)?).and_then(|e| e.unit.as_deref().map(|u| u.build_rate)).unwrap_or(Fx::ONE);
-            bt / rate.to_num::<f64>().max(1e-6)
-        }
-    };
-    Ok(crate::engine::sim::math::from_lua(time.max(0.1)))
+    // FAF's `GetConstructEconomyModel` default for a missing BuildTime.
+    let bt = bp.get::<Option<LuaTable>>("Economy")?.map(|e| e.get::<Option<f64>>("BuildTime")).transpose()?.flatten().unwrap_or(0.1);
+    let rate = entity::world(lua).get(entity::entity_id(builder)?).and_then(|e| e.unit.as_deref().map(|u| u.build_rate)).unwrap_or(Fx::ONE);
+    if rate <= Fx::ZERO {
+        return Ok(Fx::MAX);
+    }
+    Ok(crate::engine::sim::math::from_lua(bt).saturating_div(rate).max(Fx::from_num(0.1)))
 }
 
 pub fn tick(lua: &Lua) -> LuaResult<()> {
@@ -1700,6 +1698,21 @@ fn assists(lua: &Lua) -> LuaResult<()> {
             }
             continue;
         }
+        // A finished aircraft in the air can't be repaired: moho's repair
+        // task ends at once (`CUnitRepairTask` tick, MohoEngine.dll
+        // 0x101e4ddf..0x101e4dfe: target blueprint `Air` +0x368 set and
+        // layer +0x120 == Air -> done). FAF probe `probe_econ`: an engineer
+        // ordered to repair a hovering transport never repaired it.
+        if kind == CommandKind::Repair
+            && entity::world(lua).get(target).is_some_and(|t| t.fraction_complete >= Fx::ONE && t.unit.as_deref().is_some_and(|u| u.layer == crate::engine::sim::layer::Layer::Air)) {
+            stop_assist(lua, assister)?;
+            end_repair_task(lua, assister)?;
+            let mut c = lua.app_data_mut::<Commands>().expect("Commands");
+            if c.current(assister).is_some_and(|cmd| cmd.id == command) {
+                c.pop_front(assister);
+            }
+            continue;
+        }
         let work = work_target(lua, kind, target);
         // An engineer's guard with nothing to work on ends when an order is
         // queued behind it (or its guarded unit, once built, went idle).
@@ -1810,6 +1823,25 @@ fn assists(lua: &Lua) -> LuaResult<()> {
                 t.health = (t.health + t.max_health * (new - old)).min(t.max_health);
                 (new >= Fx::ONE, false)
             } else {
+                // Repairing something with fuel refuels it, at
+                // `Physics.FuelRechargeRate / FuelUseTime` a second of the
+                // tank; while it's damaged both that and the repair go at
+                // half speed (MohoEngine.dll 0x101e1c82..0x101e1d1b, unit bp
+                // +0x304 / +0x308 = Physics +0x8c / +0x90; fuel ratio unit
+                // +0x284, `GetFuelRatio` 0x10168c60). Only while served.
+                let mut delta = delta;
+                let damaged = t.health < t.max_health;
+                if let Some(u) = t.unit.as_deref_mut()
+                    && served > Fx::ZERO
+                    && u.fuel_use_time > Fx::ZERO
+                    && u.fuel_ratio < Fx::ONE {
+                    let mut refuel = u.fuel_recharge / u.fuel_use_time / Fx::from_num(10);
+                    if damaged {
+                        refuel /= 2;
+                        delta /= 2;
+                    }
+                    u.fuel_ratio = (u.fuel_ratio + refuel).min(Fx::ONE);
+                }
                 t.health = (t.health + t.max_health * delta).min(t.max_health);
                 (false, t.health >= t.max_health)
             }

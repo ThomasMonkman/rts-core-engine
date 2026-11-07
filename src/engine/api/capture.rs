@@ -3,9 +3,14 @@
 //! Per tick (after movement has brought the captor into build range):
 //! 1. Start: `OnStartCapture(target)` on the captor (`Capturing` state),
 //!    `OnStartBeingCaptured(captor)` on the target (`BeingCaptured`).
-//! 2. Progress: `time` from the captor's `GetCaptureCosts(target)` (FAF's
-//!    Lua, per tick); progress += `dt / time`, shown as the captor's work
-//!    progress.
+//! 2. Progress: at the start, the captor's `GetCaptureCosts` (FAF's Lua:
+//!    time, energy, mass) on the target and on each unit attached to it
+//!    (cargo) are summed: ticks `trunc(ticks + max(1, time * 10))` per call,
+//!    the costs as they are. An economy event asks `max(0, cost) / ticks` a
+//!    tick, and each tick it's granted all of it the capture moves one whole
+//!    tick on, so a capture drains the target's `BuildCostEnergy` and stalls
+//!    with the army's energy (`AiUnitCapture.cpp`, MohoEngine.dll
+//!    0x101efd32..0x101f00d9). Shown as the captor's work progress.
 //! 3. Finish (progress 1): `OnStopCapture(target)` / `OnStopBeingCaptured
 //!    (captor)`, then `target:OnCaptured(captor)` (FAF's script transfers it
 //!    with `ChangeUnitArmy`), and the order pops.
@@ -15,9 +20,10 @@
 //! capture time (`GetCaptureCosts` 0: unfinished units) end the order.
 //! Captors are kept by id, so callbacks run in a fixed order.
 //!
-//! Inferred, not verified against the binary: the energy cost isn't charged
-//! (and so doesn't slow capture when short), each captor progresses on its
-//! own (moho combines several captors), range = build range + 2.
+//! Inferred, not verified against the binary: each captor progresses on its
+//! own (FAF's `CheckCaptor` syncs the bars through `SetWorkProgress`, which
+//! ours doesn't read back), a paused captor holds (its event asks for
+//! nothing), range = build range + 2.
 
 use std::collections::BTreeMap;
 
@@ -27,6 +33,7 @@ use crate::engine::api::callbacks::UnitCallbacks;
 use crate::engine::api::entity;
 use crate::lua_api::Obj;
 use crate::engine::sim::command::{CommandId, CommandKind, CommandTarget, Commands};
+use crate::engine::sim::economy::EconomyEvents;
 use crate::engine::sim::entity::{EntityId, EntityWorld};
 use crate::engine::sim::math::Fx;
 use crate::engine::sim::unit_state::UnitStates;
@@ -35,7 +42,8 @@ use crate::engine::sim::unit_state::UnitStates;
 struct Job {
     target: EntityId,
     command: CommandId,
-    progress: Fx,
+    /// The economy event paying for it, one whole tick at a time.
+    event: u32,
 }
 
 /// Captors and their capture in progress.
@@ -73,6 +81,7 @@ fn in_reach(world: &EntityWorld, captor: EntityId, target: EntityId) -> bool {
 /// Ends a capture: `OnStop*` when it succeeded, `OnFailed*` otherwise.
 fn end(lua: &Lua, captor: EntityId, success: bool) -> LuaResult<()> {
     let Some(job) = lua.app_data_mut::<Captures>().expect("Captures").0.remove(&captor) else { return Ok(()) };
+    lua.app_data_mut::<EconomyEvents>().expect("EconomyEvents").remove(job.event);
     set_work(lua, captor, None, Fx::ZERO)?;
     set_state(lua, captor, "Capturing", false);
     set_state(lua, job.target, "BeingCaptured", false);
@@ -93,16 +102,47 @@ fn end(lua: &Lua, captor: EntityId, success: bool) -> LuaResult<()> {
     Ok(())
 }
 
-/// `GetCaptureCosts(target)` on the captor: time in seconds (0 = can't).
-fn capture_time(captor: &LuaTable, target: &LuaTable) -> LuaResult<Fx> {
-    let Some(f) = captor.get::<Option<LuaFunction>>("GetCaptureCosts")? else { return Ok(Fx::ZERO) };
+/// `GetCaptureCosts(target)` on the captor: (time in seconds, energy,
+/// mass); time 0 = can't.
+fn capture_costs(captor: &LuaTable, target: &LuaTable) -> LuaResult<(Fx, Fx, Fx)> {
+    let Some(f) = captor.get::<Option<LuaFunction>>("GetCaptureCosts")? else { return Ok((Fx::ZERO, Fx::ZERO, Fx::ZERO)) };
+    let fx = crate::engine::sim::math::from_lua;
     match f.call::<(Option<f64>, Option<f64>, Option<f64>)>((captor.clone(), target.clone())) {
-        Ok((t, _, _)) => Ok(crate::engine::sim::math::from_lua(t.unwrap_or(0.0))),
+        Ok((t, e, m)) => Ok((fx(t.unwrap_or(0.0)), fx(e.unwrap_or(0.0)), fx(m.unwrap_or(0.0)))),
         Err(e) => {
             tracing::warn!(target: "lua", "Error running GetCaptureCosts script in unit: {e}");
-            Ok(Fx::ZERO)
+            Ok((Fx::ZERO, Fx::ZERO, Fx::ZERO))
         }
     }
+}
+
+/// Ticks a capture call adds: moho sums `max(1, time * 10)` onto the integer
+/// count and truncates (0x101efd79..0x101efdac).
+fn add_ticks(ticks: u32, time: Fx) -> u32 {
+    (Fx::from_num(ticks) + (time * Fx::from_num(10)).max(Fx::ONE)).to_num::<u32>()
+}
+
+/// The whole capture's (ticks, energy, mass): the target's costs plus those
+/// of each live unit attached to it; `None` when the target can't be
+/// captured (time 0).
+fn total_costs(lua: &Lua, captor: &LuaTable, target: EntityId, t_obj: &LuaTable) -> LuaResult<Option<(u32, Fx, Fx)>> {
+    let (time, mut energy, mut mass) = capture_costs(captor, t_obj)?;
+    if time <= Fx::ZERO {
+        return Ok(None);
+    }
+    let mut ticks = add_ticks(0, time);
+    let cargo: Vec<EntityId> = {
+        let w = entity::world(lua);
+        w.attached_to(target).into_iter().filter(|&c| w.get(c).is_some_and(|e| e.unit.is_some() && !e.destroyed)).collect()
+    };
+    for c in cargo {
+        let Some(obj) = entity::object(lua, c)? else { continue };
+        let (t, e, m) = capture_costs(captor, &obj)?;
+        ticks = add_ticks(ticks, t);
+        energy = energy.saturating_add(e);
+        mass = mass.saturating_add(m);
+    }
+    Ok(Some((ticks, energy.max(Fx::ZERO), mass.max(Fx::ZERO))))
 }
 
 pub fn tick(lua: &Lua) -> LuaResult<()> {
@@ -127,7 +167,6 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             end(lua, captor, false)?;
         }
     }
-    let dt = Fx::ONE / Fx::from_num(10);
     for (captor, target, command) in orders {
         let capturable = entity::world(lua).get(target).is_some_and(|t| t.unit.as_deref().is_some_and(|u| u.capturable));
         if !capturable {
@@ -143,16 +182,15 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             continue;
         }
         let (Some(c_obj), Some(t_obj)) = (entity::object(lua, captor)?, entity::object(lua, target)?) else { continue };
-        let time = capture_time(&c_obj, &t_obj)?;
-        if time <= Fx::ZERO {
-            end(lua, captor, false)?;
-            pop_order(lua, captor, command);
-            continue;
-        }
-        let mut job = match current {
+        let job = match current {
             Some(j) => j,
             None => {
-                let job = Job { target, command, progress: Fx::ZERO };
+                let Some((ticks, energy, mass)) = total_costs(lua, &c_obj, target, &t_obj)? else {
+                    pop_order(lua, captor, command);
+                    continue;
+                };
+                let event = lua.app_data_mut::<EconomyEvents>().expect("EconomyEvents").create_ticks(captor, energy, mass, ticks);
+                let job = Job { target, command, event };
                 lua.app_data_mut::<Captures>().expect("Captures").0.insert(captor, job);
                 set_work(lua, captor, Some(target), Fx::ZERO)?;
                 set_state(lua, captor, "Capturing", true);
@@ -163,15 +201,18 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                 job
             }
         };
-        if entity::world(lua).get(captor).and_then(|e| e.unit.as_deref().map(|u| u.paused)).unwrap_or(false) {
+        let paused = entity::world(lua).get(captor).and_then(|e| e.unit.as_deref().map(|u| u.paused)).unwrap_or(false);
+        let state = lua.app_data_mut::<EconomyEvents>().expect("EconomyEvents").map.get_mut(&job.event).map(|ev| {
+            ev.held = paused;
+            (ev.progress(), ev.done())
+        });
+        // Its event gone (it can't be): the capture fails.
+        let Some((progress, done)) = state else {
+            end(lua, captor, false)?;
             continue;
-        }
-        job.progress = (job.progress + dt / time).min(Fx::ONE);
-        set_work(lua, captor, Some(target), job.progress)?;
-        if job.progress < Fx::ONE {
-            if let Some(j) = lua.app_data_mut::<Captures>().expect("Captures").0.get_mut(&captor) {
-                j.progress = job.progress;
-            }
+        };
+        set_work(lua, captor, Some(target), progress)?;
+        if !done {
             continue;
         }
         end(lua, captor, true)?;

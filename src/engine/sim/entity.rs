@@ -270,6 +270,9 @@ pub struct UnitData {
     pub storage_energy: Fx,
     /// Fraction of its request served last tick (`GetResourceConsumed`).
     pub resource_consumed: Fx,
+    /// `Economy.NaturalProducer` (commanders, SACUs, pods): its production
+    /// isn't scaled down when its own consumption is short.
+    pub natural_producer: bool,
     /// Moho unit states (`SetBusy`, `SetUnitState`, ...).
     pub states: crate::engine::sim::unit_state::UnitStates,
     /// Current layer (`GetCurrentLayer`, `OnLayerChange`).
