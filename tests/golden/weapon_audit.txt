@@ -598,7 +598,7 @@
 419|xaa0305|2|uaa0101|pass|2|71
 420|xaa0305|3|uaa0101|pass|2|71
 421|xaa0305|4|-|non-attack|0|0
-422|xaa0306|1|ues0103|pass|12|1668
+422|xaa0306|1|ues0103|pass|12|834
 423|xaa0306|2|-|non-attack|0|0
 424|xab1401|1|-|non-attack|0|0
 425|xab2307|1|uab1101|pass|9|220
