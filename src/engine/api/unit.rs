@@ -538,7 +538,8 @@ pub fn spawn_unit_built_by(
             u.radius = crate::engine::sim::math::from_lua(radius) / 2;
             u.mass = crate::engine::sim::math::from_lua(mass.min(1.0e9));
             u.fuel_use_time = crate::engine::sim::math::from_lua(fuel_use_time);
-            u.armor_type = armor_type.map(std::sync::Arc::from);
+            // Lowercase: armour names match without regard to case (`api::armor`).
+            u.armor_type = armor_type.map(|a| std::sync::Arc::from(a.to_ascii_lowercase()));
             u.fuel_recharge = crate::engine::sim::math::from_lua(fuel_recharge);
             u.transport_class = transport_class.clamp(1.0, 3.0) as u8;
             u.jammer = jammer;
