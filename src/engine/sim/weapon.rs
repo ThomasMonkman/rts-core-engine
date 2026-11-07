@@ -1589,12 +1589,16 @@ fn advance_target(
         Some(WeaponTarget::Ground(p)) => Some(p),
         None => None,
     };
-    // Launch speed: reduced up close (`MuzzleVelocityReduceDistance`; moho
-    // measures the horizontal distance from the solution's start, the
-    // muzzle, to the target point, before leading: MohoEngine.dll
-    // 0x1021b60f..0x1021b67e).
+    // Launch speed: reduced up close (`MuzzleVelocityReduceDistance`).
+    // Moho's solution measures the horizontal distance from its start, the
+    // muzzle, to the target point, before leading (MohoEngine.dll
+    // 0x1021b60f..0x1021b67e); ours from the yaw bone for now: the shell's
+    // own launch speed (`api::weapon`, the 3D distance from the muzzle to
+    // the collision centre) isn't traced in moho, and moving only the aim
+    // to the muzzle made the UEF mobile heavy artillery shoot 4 long
+    // (audit 236@180).
     let speed = match target_pos {
-        Some(tp) if w.muzzle_velocity_reduce_distance > Fx::ZERO => w.muzzle_velocity_at(sqrt(dist2_xz(tp, w.muzzle_posed.or(w.aim_muzzle).unwrap_or(origin)))),
+        Some(tp) if w.muzzle_velocity_reduce_distance > Fx::ZERO => w.muzzle_velocity_at(sqrt(dist2_xz(tp, origin))),
         _ => w.muzzle_velocity,
     };
     // Moving unit targets are led (`LeadTarget`): aim where the target will
