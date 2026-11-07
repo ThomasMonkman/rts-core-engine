@@ -96,22 +96,39 @@ impl Scheduler {
         self.moho_waits = on;
     }
 
-    /// What a thread that yielded `value` (its first yielded value, if a
-    /// number) does next. The real game's sim (FAF ForgedAlliance.exe,
-    /// dev/probes probe_ticks, `GetGameTick()` either side): a yield of `n`
-    /// waits `floor(n) - 1` ticks, at least 1 (`WaitTicks(2)` and `(1)` 1
-    /// tick, `(3)` 2, `(10)` 9; 2.5 1, 3.9 2); below 1 it runs again in the
-    /// same tick (`WaitTicks(0)` 0 ticks); a bare `coroutine.yield()` never
-    /// came back (suspended, as `SuspendCurrentThread`). FAF's sim
-    /// `WaitSeconds(n)` is `WaitTicks(n * 10 + 1)`, so it waits `n` seconds.
-    /// Without moho waits: `max(n, 1)` steps, and a bare yield one.
-    pub fn wait(&self, value: Option<f64>) -> ResumeOutcome {
+    /// What a thread that yielded `value` does next. The real game's sim
+    /// (FAF ForgedAlliance.exe, dev/probes probe_ticks, `GetGameTick()`
+    /// either side): a yield of `n` waits `floor(n) - 1` ticks, at least 1
+    /// (`WaitTicks(2)` and `(1)` 1 tick, `(3)` 2, `(10)` 9; 2.5 1, 3.9 2);
+    /// from 0 to below 1 it runs again at once, before any other thread
+    /// (`WaitTicks(0)`; the caller loops). FAF's sim `WaitSeconds(n)` is
+    /// `WaitTicks(n * 10 + 1)`, so it waits `n` seconds. `CLuaTask::Execute`
+    /// (MohoEngine.dll 0x100bb8e0) ends the thread on a bare
+    /// `coroutine.yield()` (no value: -1, finished), and on a value that isn't
+    /// a number ("Invalid args to yield(); expected tick count", 0x107285e4)
+    /// or is negative ("tick count must be >=0", 0x10728614), both logged.
+    /// Without moho waits (the interface's frames): `max(n, 1)` steps, and
+    /// anything else one.
+    pub fn wait(&self, value: Yield) -> ResumeOutcome {
+        if !self.moho_waits {
+            return ResumeOutcome::Yielded(match value {
+                Yield::Number(n) if n >= 1.0 => n as u64,
+                _ => 1,
+            });
+        }
         match value {
-            _ if !self.moho_waits => ResumeOutcome::Yielded(value.filter(|n| *n >= 1.0).map_or(1, |n| n as u64)),
-            None => ResumeOutcome::Suspended,
-            Some(n) if n.is_nan() => ResumeOutcome::Yielded(1),
-            Some(n) if n < 1.0 => ResumeOutcome::Yielded(0),
-            Some(n) => ResumeOutcome::Yielded((n.floor() as u64).saturating_sub(1).max(1)),
+            Yield::Nothing => ResumeOutcome::Finished,
+            Yield::NotANumber => {
+                tracing::warn!(target: "lua", "Invalid args to yield(); expected tick count");
+                ResumeOutcome::Finished
+            }
+            Yield::Number(n) if n.is_nan() => ResumeOutcome::Yielded(1),
+            Yield::Number(n) if n < 0.0 => {
+                tracing::warn!(target: "lua", "Invalid args to yield(); tick count must be >=0");
+                ResumeOutcome::Finished
+            }
+            Yield::Number(n) if n < 1.0 => ResumeOutcome::Yielded(0),
+            Yield::Number(n) => ResumeOutcome::Yielded((n.floor() as u64).saturating_sub(1).max(1)),
         }
     }
 
@@ -270,6 +287,12 @@ impl Scheduler {
         Some((task.thread.clone(), args))
     }
 
+    /// Whether task `id` is live and not suspended (one that yielded 0 runs
+    /// again at once only then).
+    pub fn runnable(&self, id: TaskId) -> bool {
+        self.tasks.get(&id).is_some_and(|t| !t.suspended)
+    }
+
     /// Records the outcome of a resume. `yielded` is the first yielded value.
     pub fn end_resume(&mut self, id: TaskId, outcome: ResumeOutcome) {
         let Some(task) = self.tasks.get_mut(&id) else { return };
@@ -283,7 +306,6 @@ impl Scheduler {
                     self.sleeping.push(Reverse((wake, id)));
                 }
             }
-            ResumeOutcome::Suspended => task.suspended = true,
             ResumeOutcome::Finished => {
                 let key = Self::key(&task.thread);
                 self.tasks.remove(&id);
@@ -359,13 +381,21 @@ impl Scheduler {
     }
 }
 
+/// What a thread's yield handed back (its first value).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Yield {
+    /// A bare `coroutine.yield()`.
+    Nothing,
+    Number(f64),
+    NotANumber,
+}
+
 pub enum ResumeOutcome {
-    /// Yielded, to wake this many ticks on (0: again this tick); see
+    /// Yielded, to wake this many ticks on (0: again at once); see
     /// [`Scheduler::wait`].
     Yielded(u64),
-    /// Yielded with no wait (a bare `coroutine.yield()`): until `ResumeThread`.
-    Suspended,
-    /// Returned or raised; either way the task is gone.
+    /// Returned, raised, or yielded nothing or something invalid: the task
+    /// is gone.
     Finished,
 }
 
@@ -398,20 +428,23 @@ mod tests {
     }
 
     #[test]
-    fn sim_waits_are_one_tick_shorter_and_a_bare_yield_suspends() {
+    fn sim_waits_are_one_tick_shorter_and_a_bare_yield_ends_the_thread() {
         let mut s = Scheduler::default();
-        let ticks = |s: &Scheduler, v: Option<f64>| match s.wait(v) {
+        let ticks = |s: &Scheduler, v: Yield| match s.wait(v) {
             ResumeOutcome::Yielded(n) => Some(n),
             _ => None,
         };
         // The interface's: n steps, a bare yield one.
-        assert_eq!([0.0, 1.0, 2.0, 3.0].map(|n| ticks(&s, Some(n))), [Some(1), Some(1), Some(2), Some(3)]);
-        assert_eq!(ticks(&s, None), Some(1));
+        assert_eq!([0.0, 1.0, 2.0, 3.0].map(|n| ticks(&s, Yield::Number(n))), [Some(1), Some(1), Some(2), Some(3)]);
+        assert_eq!(ticks(&s, Yield::Nothing), Some(1));
         // The sim's (the real game's, dev/probes probe_ticks).
         s.set_moho_waits(true);
-        let got = [0.0, 0.5, 1.0, 2.0, 2.5, 3.0, 3.9, 5.0, 10.0, 11.0].map(|n| ticks(&s, Some(n)));
+        let got = [0.0, 0.5, 1.0, 2.0, 2.5, 3.0, 3.9, 5.0, 10.0, 11.0].map(|n| ticks(&s, Yield::Number(n)));
         assert_eq!(got, [Some(0), Some(0), Some(1), Some(1), Some(1), Some(2), Some(2), Some(4), Some(9), Some(10)]);
-        assert!(matches!(s.wait(None), ResumeOutcome::Suspended));
+        // CLuaTask::Execute: nothing, a non-number or a negative count ends it.
+        for v in [Yield::Nothing, Yield::NotANumber, Yield::Number(-1.0)] {
+            assert!(matches!(s.wait(v), ResumeOutcome::Finished), "{v:?}");
+        }
     }
 
     #[test]
@@ -419,11 +452,13 @@ mod tests {
         let lua = Lua::new();
         let mut s = Scheduler::default();
         let f = lua.create_function(|_, ()| Ok(())).unwrap();
-        let (a, b) = (s.fork(lua.create_thread(f.clone()).unwrap(), LuaMultiValue::new()), s.fork(lua.create_thread(f).unwrap(), LuaMultiValue::new()));
+        let tb = lua.create_thread(f.clone()).unwrap();
+        let (a, b) = (s.fork(lua.create_thread(f).unwrap(), LuaMultiValue::new()), s.fork(tb.clone(), LuaMultiValue::new()));
         assert_eq!(s.next_pending(), Some(a));
         s.end_resume(a, ResumeOutcome::Yielded(0));
         assert_eq!(s.next_pending(), Some(b));
-        s.end_resume(b, ResumeOutcome::Suspended);
+        assert!(s.suspend(&tb));
+        s.end_resume(b, ResumeOutcome::Yielded(1));
         // a again, after b, in the same drain.
         assert_eq!(s.next_pending(), Some(a));
         s.end_resume(a, ResumeOutcome::Yielded(1));

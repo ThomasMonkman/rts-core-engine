@@ -53,7 +53,7 @@ To add one: write a new pass module, add it to `translate()`, and test it agains
 FAF uses `ForkThread` / `WaitSeconds` extensively. Key design:
 - `ForkThread(fn, ...)` pushes to a `pending_fork` queue; picked up at end of tick
 - `WaitSeconds(n)` yields with a resume tick target
-- Sim waits are moho's (`Scheduler::wait`, measured in the real game): `coroutine.yield(n)` (FAF's sim `WaitTicks`) wakes `floor(n) - 1` ticks later, at least 1; below 1 it runs again the same tick; a bare yield suspends until `ResumeThread`. `ResumeThread` also cuts a `WaitTicks` short: the thread runs this tick if the pass hasn't reached it yet, else next tick (`Scheduler::resume`). FAF's `WaitSeconds(n)` is `WaitTicks(n * 10 + 1)`, so `n` seconds. The interface VM's yields still wait `max(n, 1)` frames (unmeasured)
+- Sim waits are moho's (`Scheduler::wait`, measured in the real game): `coroutine.yield(n)` (FAF's sim `WaitTicks`) wakes `floor(n) - 1` ticks later, at least 1; below 1 it runs again at once, before any other thread; a bare yield, or one of a non-number or a negative count, ends the thread (`CLuaTask::Execute`). `ResumeThread` also cuts a `WaitTicks` short: the thread runs this tick if the pass hasn't reached it yet, else next tick (`Scheduler::resume`). FAF's `WaitSeconds(n)` is `WaitTicks(n * 10 + 1)`, so `n` seconds. The interface VM's yields still wait `max(n, 1)` frames (unmeasured)
 - Scheduler: `BinaryHeap` (sleeping by tick) + `VecDeque` (ready to run)
 - Run `drain_ready_queue()` each tick, then `wake_sleeping_tasks(current_tick)`
 - Collect pending forks **after each resume** so children are visible same tick

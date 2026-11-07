@@ -2,7 +2,7 @@
 
 use mlua::prelude::*;
 
-use crate::engine::sim::scheduler::{ResumeOutcome, Scheduler, TaskId};
+use crate::engine::sim::scheduler::{ResumeOutcome, Scheduler, TaskId, Yield};
 use crate::lua_api::{FnEntry, LuaArgs, Scope, Status, lua_fn};
 
 /// Profiling builds (`--features lua-profile`, which implies `tracy`): each
@@ -94,12 +94,17 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         })?;
     lua_fn!(lua, global,
         /// Kills a thread. `KillThread(nil)` is a no-op: FAF kills threads
-        /// that may never have started (uel0307's shield thread).
+        /// that may never have started (uel0307's shield thread); so is an
+        /// already dead thread. A live coroutine not made by `ForkThread`
+        /// raises, as moho's does (MohoEngine.dll string 0x10728838).
         KillThread = move |lua, thread: Option<LuaThread>| {
             let Some(thread) = thread else { return Ok(()) };
-            lua.app_data_mut::<Scheduler>()
+            let killed = lua.app_data_mut::<Scheduler>()
                 .expect("Scheduler not in app_data")
                 .kill(&thread);
+            if !killed && thread.status() == LuaThreadStatus::Resumable {
+                return Err(LuaError::runtime("KillThread: Can't kill a thread that wasn't created with ForkThread."));
+            }
             #[cfg(feature = "lua-profile")]
             profile::killed(lua, &thread);
             // Free the coroutine's stack now. A running thread can't be closed;
@@ -115,8 +120,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         lua.app_data_mut::<Scheduler>().expect("Scheduler not in app_data").suspend(&thread);
         Ok(())
     })?;
+    // It yields 1, as moho's (MohoEngine.dll 0x100bca70), not nothing: a bare
+    // yield ends a thread.
     let suspend: LuaFunction = lua
-        .load("local mark, running, yield = ... return function() mark(running()) return yield() end")
+        .load("local mark, running, yield = ... return function() mark(running()) return yield(1) end")
         .set_name("=[engine SuspendCurrentThread]")
         .call((mark, coroutine.get::<LuaFunction>("running")?, coroutine.get::<LuaFunction>("yield")?))?;
     globals.set("SuspendCurrentThread", suspend)?;
@@ -147,7 +154,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 tracing::warn!(target: "lua", "Attempted to resume a thread that was already killed");
                 return Ok(());
             };
-            lua.app_data_mut::<Scheduler>().expect("Scheduler not in app_data").resume(&thread);
+            let known = lua.app_data_mut::<Scheduler>().expect("Scheduler not in app_data").resume(&thread);
+            if !known && thread.status() == LuaThreadStatus::Resumable {
+                return Err(LuaError::runtime("Can't resume a thread that wasn't created with ForkThread."));
+            }
             Ok(())
         })?;
     Ok(())
@@ -195,40 +205,55 @@ pub fn run_due(lua: &Lua) -> LuaResult<()> {
 
 fn resume(lua: &Lua, id: TaskId) -> LuaResult<()> {
     let _s = crate::prof_span!("lua thread resume");
-    // Never hold the scheduler borrow while Lua runs: the thread may call
-    // ForkThread/KillThread.
-    let Some((thread, args)) = lua
-        .app_data_mut::<Scheduler>()
-        .expect("Scheduler not in app_data")
-        .begin_resume(id)
-    else {
-        return Ok(());
-    };
-    #[cfg(feature = "lua-profile")]
-    let result = profile::zoned(lua, &thread, || thread.resume::<LuaMultiValue>(args));
-    #[cfg(not(feature = "lua-profile"))]
-    let result = thread.resume::<LuaMultiValue>(args);
-    let outcome = match result {
-        Ok(values) => match thread.status() {
-            LuaThreadStatus::Resumable => {
-                let value = match values.front() {
-                    Some(LuaValue::Integer(n)) => Some(*n as f64),
-                    Some(LuaValue::Number(n)) => Some(*n),
-                    _ => None,
-                };
-                lua.app_data_ref::<Scheduler>().expect("Scheduler not in app_data").wait(value)
+    // A thread that yields 0 runs again at once, before any other thread
+    // (moho's per-thread step loops, MohoEngine.dll 0x10008cdf).
+    loop {
+        // Never hold the scheduler borrow while Lua runs: the thread may call
+        // ForkThread/KillThread.
+        let Some((thread, args)) = lua
+            .app_data_mut::<Scheduler>()
+            .expect("Scheduler not in app_data")
+            .begin_resume(id)
+        else {
+            return Ok(());
+        };
+        #[cfg(feature = "lua-profile")]
+        let result = profile::zoned(lua, &thread, || thread.resume::<LuaMultiValue>(args));
+        #[cfg(not(feature = "lua-profile"))]
+        let result = thread.resume::<LuaMultiValue>(args);
+        let outcome = match result {
+            Ok(values) => match thread.status() {
+                LuaThreadStatus::Resumable => {
+                    let value = match values.front() {
+                        None => Yield::Nothing,
+                        Some(LuaValue::Integer(n)) => Yield::Number(*n as f64),
+                        Some(LuaValue::Number(n)) => Yield::Number(*n),
+                        Some(_) => Yield::NotANumber,
+                    };
+                    lua.app_data_ref::<Scheduler>().expect("Scheduler not in app_data").wait(value)
+                }
+                _ => ResumeOutcome::Finished,
+            },
+            Err(e) => {
+                tracing::warn!(target: "lua", "thread error: {}", crate::lua_api::errors::Explained(lua, &e));
+                ResumeOutcome::Finished
             }
-            _ => ResumeOutcome::Finished,
-        },
-        Err(e) => {
-            tracing::warn!(target: "lua", "thread error: {}", crate::lua_api::errors::Explained(lua, &e));
-            ResumeOutcome::Finished
+        };
+        let mut s = lua.app_data_mut::<Scheduler>().expect("Scheduler not in app_data");
+        if matches!(outcome, ResumeOutcome::Yielded(0)) && s.runnable(id) {
+            continue;
         }
-    };
-    lua.app_data_mut::<Scheduler>()
-        .expect("Scheduler not in app_data")
-        .end_resume(id, outcome);
-    Ok(())
+        s.end_resume(id, outcome);
+        // Killed while it ran, or ended by its yield: it's parked at a yield,
+        // so free it (and `KillThread` on it later finds a dead thread).
+        let parked = thread.status() == LuaThreadStatus::Resumable && !s.contains(&thread);
+        drop(s);
+        if parked {
+            let close: LuaFunction = lua.globals().raw_get::<LuaTable>("coroutine")?.raw_get("close")?;
+            let _ = close.call::<LuaMultiValue>(thread);
+        }
+        return Ok(());
+    }
 }
 
 #[cfg(test)]
@@ -356,6 +381,48 @@ mod tests {
         tick(&lua);
         tick(&lua);
         assert_eq!(log(&lua), "sleeper@1,sleeper@3,sleeper@5,sleeper@6,sleeper@7");
+    }
+
+    /// `CLuaTask::Execute` (0x100bb8e0): a bare yield, a non-number or a
+    /// negative count ends the thread (it doesn't park until `ResumeThread`);
+    /// `WaitTicks(0)` runs it again at once, before the next thread.
+    #[test]
+    fn yield_edge_cases() {
+        let lua = sim_vm();
+        lua.load(
+            "bare = ForkThread(function() note('bare') coroutine.yield() note('never') end)
+             text = ForkThread(function() note('text') coroutine.yield('x') note('never') end)
+             neg = ForkThread(function() note('neg') coroutine.yield(-1) note('never') end)
+             ForkThread(function() note('zero') coroutine.yield(0) note('again') end)
+             ForkThread(function() note('next') end)",
+        )
+        .exec()
+        .unwrap();
+        tick(&lua);
+        lua.load("ResumeThread(bare) KillThread(text)").exec().unwrap();
+        tick(&lua);
+        assert_eq!(log(&lua), "bare@1,text@1,neg@1,zero@1,again@1,next@1");
+        assert_eq!(lua.app_data_ref::<Scheduler>().unwrap().task_count(), 0);
+    }
+
+    /// `KillThread` / `ResumeThread` on a coroutine `ForkThread` didn't make
+    /// raise (moho's "Can't kill a thread that wasn't created with
+    /// ForkThread."); on nil or a dead thread they don't.
+    #[test]
+    fn kill_and_resume_want_forked_threads() {
+        let lua = sim_vm();
+        let err = lua.load("local co = coroutine.create(function() coroutine.yield() end) coroutine.resume(co) KillThread(co)").exec().unwrap_err();
+        assert!(err.to_string().contains("wasn't created with ForkThread"), "{err}");
+        let err = lua.load("local co = coroutine.create(function() coroutine.yield() end) coroutine.resume(co) ResumeThread(co)").exec().unwrap_err();
+        assert!(err.to_string().contains("wasn't created with ForkThread"), "{err}");
+        lua.load(
+            "self_kill = ForkThread(function() KillThread(self_kill) coroutine.yield(1) end)
+             done = ForkThread(function() end)",
+        )
+        .exec()
+        .unwrap();
+        tick(&lua);
+        lua.load("KillThread(nil) KillThread(done) KillThread(self_kill) ResumeThread(self_kill) KillThread(self_kill)").exec().unwrap();
     }
 
     /// A suspended thread resumed by another thread goes to the end of the
