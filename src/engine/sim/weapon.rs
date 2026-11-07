@@ -917,24 +917,65 @@ pub fn step_with(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Arm
             *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, terrain, &mut buf);
         }
     }
-    // The list is sorted by unit, then index: a unit's first weapon is its
-    // primary.
-    let mut buf = Vec::new();
-    let mut primary: Option<(EntityId, u32, Option<EntityId>)> = None;
-    for (w, ev) in list.iter_mut().zip(scratch.iter_mut()) {
-        let first = primary.is_none_or(|(u, ..)| u != w.unit);
-        if follows(w) {
-            w.primary_target = if first { None } else { primary.and_then(|(.., t)| t) };
-            *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, terrain, &mut buf);
-        }
-        if first {
-            let target = match w.target {
-                Some(WeaponTarget::Entity(t)) => Some(t),
-                _ => None,
-            };
-            primary = Some((w.unit, w.index, target));
+    // Followers. The list is sorted by unit, then index: a unit's first
+    // weapon is its primary. A follower depends only on its own unit's
+    // primary, so when that primary is not a follower its target is final
+    // after the pass above: copy it in (serial, cheap), then advance those
+    // followers in parallel. Units whose primary is itself a follower
+    // (rare) keep the in-order serial walk: primary first, then siblings.
+    let _followers = crate::prof_span!("weapons followers");
+    let entity_target = |w: &WeaponState| match w.target {
+        Some(WeaponTarget::Entity(t)) => Some(t),
+        _ => None,
+    };
+    // Units whose primary follows, ascending (the list is in unit order).
+    let mut serial_units: Vec<EntityId> = Vec::new();
+    let mut any_parallel = false;
+    let mut primary: Option<(EntityId, Option<EntityId>)> = None;
+    for w in list.iter_mut() {
+        if primary.is_none_or(|(u, _)| u != w.unit) {
+            if follows(w) {
+                serial_units.push(w.unit);
+            }
+            primary = Some((w.unit, entity_target(w)));
+        } else if follows(w) && serial_units.last() != Some(&w.unit) {
+            w.primary_target = primary.and_then(|(_, t)| t);
+            any_parallel = true;
         }
     }
+    // Followers whose primary does not follow: they are never a unit's
+    // first weapon, and their unit is not in `serial_units`.
+    let ready = |w: &WeaponState| follows(w) && serial_units.binary_search(&w.unit).is_err();
+    if any_parallel {
+        if list.len() >= parallel_min {
+            list.par_iter_mut()
+                .zip(scratch.par_iter_mut())
+                .with_min_len(64)
+                .filter(|(w, _)| ready(w))
+                .for_each_init(|| (Vec::new(), crate::prof_span!("weapons follower (worker)")), |(buf, _), (w, ev)| *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, terrain, buf));
+        } else {
+            let mut buf = Vec::new();
+            for (w, ev) in list.iter_mut().zip(scratch.iter_mut()).filter(|(w, _)| ready(w)) {
+                *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, terrain, &mut buf);
+            }
+        }
+    }
+    let mut buf = Vec::new();
+    for &unit in &serial_units {
+        let start = list.partition_point(|w| w.unit < unit);
+        let end = start + list[start..].partition_point(|w| w.unit == unit);
+        let mut primary = None;
+        for (i, (w, ev)) in list[start..end].iter_mut().zip(scratch[start..end].iter_mut()).enumerate() {
+            if follows(w) {
+                w.primary_target = if i == 0 { None } else { primary };
+                *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, terrain, &mut buf);
+            }
+            if i == 0 {
+                primary = entity_target(w);
+            }
+        }
+    }
+    drop(_followers);
     for (w, ev) in list.iter().zip(scratch.iter()) {
         for kind in ev.iter().flatten() {
             out.push(WeaponEvent { unit: w.unit, index: w.index, kind: *kind });
@@ -2461,6 +2502,25 @@ mod tests {
                 let (x, z) = ((rng.next_u64() % 400) as f64 + 50.0, (rng.next_u64() % 400) as f64 + 50.0);
                 let id = unit(&mut w, 1 + i % 2, x, z);
                 gun(&mut ws, id);
+                // Followers: a second gun preferring the primary's target or
+                // stopping when it is busy; and units whose primary itself
+                // follows (the in-order serial walk).
+                match i % 5 {
+                    1 => {
+                        second_gun(&mut ws, id);
+                        ws.get_mut(id, 2).prefers_primary_target = true;
+                    }
+                    2 => {
+                        second_gun(&mut ws, id);
+                        ws.get_mut(id, 2).stop_on_primary_busy = true;
+                    }
+                    3 => {
+                        ws.get_mut(id, 1).prefers_primary_target = true;
+                        second_gun(&mut ws, id);
+                        ws.get_mut(id, 2).prefers_primary_target = true;
+                    }
+                    _ => {}
+                }
             }
             (w, ws)
         };
@@ -2475,11 +2535,13 @@ mod tests {
                 }
                 step_with(&mut ws, &w, None, None, None, &mut out, min);
             }
-            let aims: Vec<_> = ws.iter().map(|s| (s.target, s.aim_heading, s.aim_pitch, s.fire_clock)).collect();
+            let aims: Vec<_> = ws.iter().map(|s| (s.unit, s.index, s.target, s.primary_target, s.aim_heading, s.aim_pitch, s.fire_clock)).collect();
             (out, aims)
         };
         let serial = run(usize::MAX);
         assert!(serial.0.iter().any(|e| e.kind == WeaponEventKind::Fire));
+        assert!(serial.1.iter().any(|a| a.1 == 2 && a.3.is_some()), "followers saw their primary's target");
+        assert!(serial.0.iter().any(|e| e.index == 2 && e.kind == WeaponEventKind::Fire), "followers fired");
         assert_eq!(run(0), serial);
     }
 
