@@ -831,6 +831,8 @@ struct Drive {
     reverse: bool,
     /// Stopped to rotate on the spot.
     pivot: bool,
+    /// Within 45 degrees of the way it's going.
+    aligned: bool,
     /// Heading error left to turn (radians; reversing: from the tail).
     err: Fx,
     /// Turn rate it could use (rad/s, before the steer-force limit).
@@ -891,14 +893,14 @@ fn drive(p: &MotionParams, state: MotionState, heading: Fx, turn: Fx, radius: Fx
     } else {
         (wrap(heading + turned_by), None)
     };
-    Drive { heading: heading2, course: course2, turned: heading2 != heading, reverse, pivot, err: e, rate: turn, radius }
+    Drive { heading: heading2, course: course2, turned: heading2 != heading, reverse, pivot, aligned: e.abs() <= Fx::FRAC_PI_4, err: e, rate: turn, radius }
 }
 
 /// The speed a `corner_slowdown` unit wants `err` off course: x (1 +
 /// max(cos, -0.5)) / 2, so all of it ahead, half at 90 degrees, a quarter
 /// past 120 (moho's path spline, 0x101a29a6; `err` is from the tail when
-/// reversing, as moho negates the cos). Other units keep their speed and
-/// arc round.
+/// reversing, as moho negates the cos). Moho cuts no other unit's speed
+/// (ours still does; see the caller).
 fn corner_slow(want: Fx, err: Fx) -> Fx {
     let (_, c) = crate::engine::sim::math::sin_cos(err);
     want.saturating_mul(Fx::ONE + c.max(-Fx::ONE / 2)) / 2
@@ -1805,6 +1807,12 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
                     want = Fx::ZERO;
                 } else if p.corner_slowdown {
                     want = corner_slow(want, d.err);
+                } else if !d.aligned {
+                    // Ours, not moho's: moho gives these units no cut, but
+                    // its spline's turn limits shape their arc, which ours
+                    // doesn't model; without the cut they swing wide
+                    // (`occupy_rects`, `assist_spread`, `trees` scenarios).
+                    want /= 4;
                 }
                 if let Some(v) = squad_pace.filter(|_| !winged && !d.reverse) {
                     want = want.min(v);

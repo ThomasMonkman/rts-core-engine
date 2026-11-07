@@ -920,7 +920,6 @@ mod tests {
         }
         assert!(c.is_done(ca) && c.is_done(cb), "both got there");
         assert!(closest > 0.9, "they passed rather than ramming through: closest {closest}");
-        // (-0.24 since corners no longer cut it to 1/4 speed: it arcs.)
-        assert!(a_side < -0.2, "a kept to its right (-z) passing b: {a_side}");
+        assert!(a_side < -0.3, "a kept to its right (-z) passing b: {a_side}");
     }
 }
