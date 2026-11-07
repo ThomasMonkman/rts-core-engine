@@ -1,0 +1,39 @@
+name: Feature request
+description: Suggest an improvement or new capability for the engine.
+title: "feat: "
+labels: [enhancement]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Please search existing issues before opening a request. For engine behavior, explain how the proposal fits the game's existing behavior where possible.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the use case or limitation behind the request.
+      placeholder: I want to ... because ...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe what you would like the engine to do.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any workarounds or alternative approaches you've considered.
+    validations:
+      required: false
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Engine constraints
+      description: If relevant, note implications for lockstep determinism, hot-path performance, parallelism, or the sim/render boundary.
+    validations:
+      required: false
