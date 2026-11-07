@@ -4,7 +4,11 @@
 //! Per tick (moho stores per-tick amounts, i.e. per-second rates / 10):
 //! 1. every live, complete unit adds its production to its army's income, its
 //!    active consumption to the army's request and its blueprint storage to
-//!    the army's capacity;
+//!    the army's capacity. Production is scaled by the share of its own
+//!    consumption the unit was served last tick (`GetResourceConsumed`), so
+//!    a mex in an energy stall makes less mass; `Economy.NaturalProducer`
+//!    units (commanders, SACUs, pods) produce in full
+//!    (`Unit::HandleResourceManagement`, MohoEngine.dll 0x1028a150);
 //! 2. armies settle one at a time in ascending army index, as moho's
 //!    `Sim::AdvanceBeat` ticks them (`CEconomy::ProcessArmyEconomy`):
 //!    - what allies shared to it (`banked`) joins its income;
@@ -257,8 +261,13 @@ pub fn step(world: &mut EntityWorld, armies: &mut Armies, events: &mut EconomyEv
         econ.mass.capacity += u.storage_mass;
         econ.energy.capacity += u.storage_energy;
         if u.production_active {
-            econ.mass.income += per_tick(u.production_mass);
-            econ.energy.income += per_tick(u.production_energy);
+            // Production goes at the share of its own consumption it was
+            // served (moho's node ratio, MohoEngine.dll 0x1028a194..0x1028a1ac:
+            // a mex in an energy stall, a mass fabricator); natural producers
+            // in full.
+            let ratio = if u.natural_producer { Fx::ONE } else { u.resource_consumed };
+            econ.mass.income += per_tick(u.production_mass) * ratio;
+            econ.energy.income += per_tick(u.production_energy) * ratio;
         }
         if u.consumption_active {
             econ.request(per_tick(u.consumption_mass), per_tick(u.consumption_energy));
@@ -382,7 +391,40 @@ mod tests {
 
     fn unit(w: &mut EntityWorld, army: u32, f: impl FnOnce(&mut crate::engine::sim::entity::UnitData)) {
         let id = w.spawn(EntityKind::Unit, BlueprintKind::Unit, "u".into(), Some(army), FxVec3::default(), FxQuat::IDENTITY);
-        f(w.get_mut(id).unwrap().unit.as_mut().unwrap());
+        let u = w.get_mut(id).unwrap().unit.as_mut().unwrap();
+        // As `spawn_unit` makes it.
+        u.resource_consumed = Fx::ONE;
+        f(u);
+    }
+
+    /// A mex (mass out, energy upkeep) in an energy stall makes only the
+    /// served share of its mass, a tick behind; a natural producer
+    /// (`Economy.NaturalProducer`) makes all of it.
+    #[test]
+    fn production_follows_the_served_share_of_upkeep() {
+        for natural in [false, true] {
+            let mut w = EntityWorld::default();
+            // 1 energy a tick of income against 4 asked: 25% served.
+            unit(&mut w, 1, |u| {
+                u.production_active = true;
+                u.production_energy = fx(10.0);
+                u.natural_producer = true;
+            });
+            unit(&mut w, 1, |u| {
+                u.production_active = true;
+                u.production_mass = fx(20.0);
+                u.consumption_active = true;
+                u.consumption_energy = fx(40.0);
+                u.natural_producer = natural;
+            });
+            let mut a = armies(1);
+            a.list[0].economy.mass.granted_storage = fx(100.0);
+            step(&mut w, &mut a, &mut EconomyEvents::default());
+            assert_eq!(a.list[0].economy.mass.income, fx(2.0), "fully served before the first settle");
+            step(&mut w, &mut a, &mut EconomyEvents::default());
+            let want = if natural { fx(2.0) } else { fx(0.5) };
+            assert_eq!(a.list[0].economy.mass.income, want, "natural producer: {natural}");
+        }
     }
 
     #[test]

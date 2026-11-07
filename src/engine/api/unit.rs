@@ -367,12 +367,13 @@ pub fn spawn_unit_built_by(
         }
         None => (1.0, 1.0),
     };
-    let (storage_mass, storage_energy) = match bp.get::<Option<LuaTable>>("Economy")? {
+    let (storage_mass, storage_energy, natural_producer) = match bp.get::<Option<LuaTable>>("Economy")? {
         Some(econ) => (
             econ.get::<Option<f64>>("StorageMass")?.unwrap_or(0.0),
             econ.get::<Option<f64>>("StorageEnergy")?.unwrap_or(0.0),
+            econ.get::<Option<bool>>("NaturalProducer")?.unwrap_or(false),
         ),
-        None => (0.0, 0.0),
+        None => (0.0, 0.0, false),
     };
     // Capturable unless the blueprint lists the "Not Capturable" ability
     // (the rule FAF's UI uses; inferred for the engine).
@@ -525,6 +526,7 @@ pub fn spawn_unit_built_by(
             u.storage_mass = crate::engine::sim::math::from_lua(storage_mass);
             u.storage_energy = crate::engine::sim::math::from_lua(storage_energy);
             u.resource_consumed = Fx::ONE;
+            u.natural_producer = natural_producer;
             u.layer = layer;
             u.threat = threat;
             u.cap_cost = crate::engine::sim::math::from_lua(cap_cost);
