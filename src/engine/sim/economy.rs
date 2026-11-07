@@ -12,10 +12,15 @@
 //! 2. armies settle one at a time in ascending army index, as moho's
 //!    `Sim::AdvanceBeat` ticks them (`CEconomy::ProcessArmyEconomy`):
 //!    - what allies shared to it (`banked`) joins its income;
-//!    - per resource, it can serve `ratio = min(1, (stored + income) /
-//!      requested)`; a consumer gets the smallest ratio over the resources it
-//!      asks for (`GetResourceConsumed`) and consumes that fraction of each
-//!      request;
+//!    - the stall split (MohoEngine.dll 0x1033d040..0x1033d3ff): with `A =
+//!      stored + income` and `T = requested` per resource, `served = min(1,
+//!      A / T)` over both resources, and the resource that set it limits
+//!      (energy, moho's first, on a tie). Every consumer asking for the
+//!      limiting resource, alone or with the other, gets `served` of each
+//!      request. Those asking for the other resource only share what the
+//!      throttled dual consumers left of it: `min(1, max(0, A - dual *
+//!      served) / single)`. A consumer's fraction is its
+//!      `GetResourceConsumed`;
 //!    - what's left above capacity (`max(0, stored + income - expense -
 //!      capacity)` per resource) overflows to allies when the army shares
 //!      (`SetResourceSharing`, on by default): the allies (ascending index,
@@ -27,11 +32,10 @@
 //!    - `stored = clamp(stored + income - expense, 0, capacity)`; what no ally
 //!      took is the excess (`Economy_AccumExcess_*`).
 //!
-//! The stall rule is inferred from FAF's docs ("when stalling, usage is the
-//! same as the current income"); moho pools requests wanting both resources
-//! apart from those wanting one. Moho uses `f32`
-//! here, so values agree with FAF only approximately; the sim is fixed-point
-//! for cross-platform determinism.
+//! Moho pools each consumer's need as its request less what it was granted
+//! and hasn't used; a unit uses its grant every tick, so its need is its
+//! whole request. Moho uses `f32` here, so values agree with FAF only
+//! approximately; the sim is fixed-point for cross-platform determinism.
 
 use std::collections::BTreeMap;
 
@@ -115,8 +119,6 @@ pub struct ResourceState {
     /// The part of `requested` from consumers asking for this resource only
     /// (the rest also asks for the other one).
     pub requested_single: Fx,
-    /// Fraction of requests for this resource served this tick.
-    pub served: Fx,
     /// What was actually consumed (`GetEconomyUsage`).
     pub expense: Fx,
     /// Overflow allies shared in, reclaim and `GiveResource` gifts, not yet
@@ -140,12 +142,9 @@ pub struct ResourceState {
 }
 
 impl ResourceState {
-    /// Fraction of requests that can be served this tick.
-    fn serve_ratio(&self) -> Fx {
-        if self.requested <= Fx::ZERO {
-            return Fx::ONE;
-        }
-        (self.stored + self.income).saturating_div(self.requested).clamp(Fx::ZERO, Fx::ONE)
+    /// What it can spend this tick.
+    fn available(&self) -> Fx {
+        (self.stored + self.income).max(Fx::ZERO)
     }
 
     /// Reclaimed resources: banked as income, as moho's reclaim task does
@@ -167,6 +166,12 @@ impl ResourceState {
 pub struct Economy {
     pub mass: ResourceState,
     pub energy: ResourceState,
+    /// This tick's stall split (`settle`): consumers asking for the limiting
+    /// resource (mass when `mass_limits`, else energy) get `served`; those
+    /// asking for the other one only get `served_other`.
+    pub served: Fx,
+    pub served_other: Fx,
+    pub mass_limits: bool,
 }
 
 impl Economy {
@@ -223,16 +228,17 @@ impl Economy {
     }
 
     /// The fraction served this tick to a consumer asking for these amounts:
-    /// the smallest ratio over the resources it asks for.
+    /// `served` if it asks for the limiting resource, else `served_other`
+    /// (moho's per-node grant, 0x1033d2c0..0x1033d3ff).
     fn served_fraction(&self, mass: Fx, energy: Fx) -> Fx {
-        let mut fraction = Fx::ONE;
-        if mass > Fx::ZERO {
-            fraction = fraction.min(self.mass.served);
+        let (limiting, other) = if self.mass_limits { (mass, energy) } else { (energy, mass) };
+        if limiting > Fx::ZERO {
+            self.served
+        } else if other > Fx::ZERO {
+            self.served_other
+        } else {
+            Fx::ONE
         }
-        if energy > Fx::ZERO {
-            fraction = fraction.min(self.energy.served);
-        }
-        fraction
     }
 }
 
@@ -324,6 +330,37 @@ fn takes_overflow(armies: &Armies, donor: u32, j: usize) -> bool {
         && (a.economy.mass.room() > Fx::ZERO || a.economy.energy.room() > Fx::ZERO)
 }
 
+/// The stall split (MohoEngine.dll 0x1033d1da..0x1033d29a): one ratio for
+/// every consumer of the limiting resource, then what the dual consumers
+/// left of the other resource shared by those wanting only it. Sets the
+/// ratios and each resource's expense.
+fn split(econ: &mut Economy) {
+    // `min(1, A / T)` over both resources, energy first (moho's pair order;
+    // a later resource only takes over when strictly scarcer).
+    let mut served = Fx::ONE;
+    let mut mass_limits = false;
+    for (is_mass, r) in [(false, &econ.energy), (true, &econ.mass)] {
+        let available = r.available();
+        if r.requested.saturating_mul(served) > available {
+            served = available.saturating_div(r.requested).clamp(Fx::ZERO, Fx::ONE);
+            mass_limits = is_mass;
+        }
+    }
+    let (limiting, other) = if mass_limits { (&mut econ.mass, &mut econ.energy) } else { (&mut econ.energy, &mut econ.mass) };
+    limiting.expense = limiting.requested * served;
+    let dual = other.requested - other.requested_single;
+    let left = (other.available() - dual * served).max(Fx::ZERO);
+    let served_other = if other.requested_single > left {
+        left.saturating_div(other.requested_single).clamp(Fx::ZERO, Fx::ONE)
+    } else {
+        Fx::ONE
+    };
+    other.expense = dual * served + other.requested_single * served_other;
+    econ.served = served;
+    econ.served_other = served_other;
+    econ.mass_limits = mass_limits;
+}
+
 /// One army's turn (list position `i`): `CEconomy::ProcessArmyEconomy`.
 fn settle(armies: &mut Armies, i: usize) {
     let a = &mut armies.list[i];
@@ -332,12 +369,10 @@ fn settle(armies: &mut Armies, i: usize) {
     for r in [&mut econ.mass, &mut econ.energy] {
         r.income += r.banked;
         r.banked = Fx::ZERO;
-        r.served = r.serve_ratio();
     }
-    let dual = econ.mass.served.min(econ.energy.served);
+    split(econ);
     let mut excess = [Fx::ZERO; 2];
     for (r, excess) in [&mut econ.mass, &mut econ.energy].into_iter().zip(&mut excess) {
-        r.expense = r.requested_single * r.served + (r.requested - r.requested_single) * dual;
         *excess = (r.stored + r.income - r.expense - r.capacity.max(Fx::ZERO)).max(Fx::ZERO);
     }
 
@@ -567,6 +602,36 @@ mod tests {
         assert_eq!(econ.mass.stored, fx(99.75));
         let consumed = w.iter().nth(1).unwrap().unit.as_ref().unwrap().resource_consumed;
         assert_eq!(consumed, fx(0.25));
+    }
+
+    /// Short of both: everything asking for the scarcer resource gets its
+    /// ratio, and those wanting only the other share what the throttled dual
+    /// consumers left of it (moho's split), not their own `A / T`.
+    #[test]
+    fn double_stall_gives_the_rest_to_the_other_resources_consumers() {
+        let mut w = EntityWorld::default();
+        // Dual: 10 mass and 10 energy a tick; energy only: 10 a tick.
+        unit(&mut w, 1, |u| {
+            u.consumption_active = true;
+            u.consumption_mass = fx(100.0);
+            u.consumption_energy = fx(100.0);
+        });
+        unit(&mut w, 1, |u| {
+            u.consumption_active = true;
+            u.consumption_energy = fx(100.0);
+        });
+        let mut a = armies(1);
+        let e = &mut a.list[0].economy;
+        // Mass 3 of 10 (0.3), energy 8 of 20 (0.4): mass limits.
+        (e.mass.granted_storage, e.mass.stored) = (fx(100.0), fx(3.0));
+        (e.energy.granted_storage, e.energy.stored) = (fx(100.0), fx(8.0));
+        step(&mut w, &mut a, &mut EconomyEvents::default());
+        let consumed: Vec<f64> = w.iter().map(|e| e.unit.as_ref().unwrap().resource_consumed.to_num()).collect();
+        assert!((consumed[0] - 0.3).abs() < 1e-6, "the dual consumer at the mass ratio: {consumed:?}");
+        // 8 - 3 energy left for the 10 asked: 0.5, not energy's own 0.4.
+        assert!((consumed[1] - 0.5).abs() < 1e-6, "the energy consumer gets what's left: {consumed:?}");
+        let e = &a.list[0].economy;
+        assert!(e.energy.stored < fx(1e-6) && e.mass.stored < fx(1e-6), "both drawn dry: {:?}", (e.mass.stored, e.energy.stored));
     }
 
     /// Allies both ways between every pair in `group`.
