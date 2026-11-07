@@ -54,7 +54,9 @@ ForkThread(function()
     IssueMove({ bq }, { 400, GetTerrainHeight(400, 580), 580 })
     WaitTicks(10)
     local p = bq:GetPosition()
-    check(math.abs(p[1] - 390) < 0.01, string.format('a blocked unit doesn\'t start its move (x %.2f)', p[1]))
+    -- Not even one tick's step: the move is given from a thread, after
+    -- this tick's dispatch, and movement runs after the threads.
+    check(p[1] == 390 and p[3] == 580, string.format('a blocked unit doesn\'t start its move (%.4f, %.4f)', p[1], p[3]))
     bq:SetBlockCommandQueue(false)
     WaitTicks(10)
     check(bq:GetPosition()[1] > 390.05, 'it moves once unblocked')

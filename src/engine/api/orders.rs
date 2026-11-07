@@ -66,6 +66,19 @@ fn dispatch(lua: &Lua) {
     commands.cycle_ground_attacks(now);
 }
 
+/// Holds the new current commands of held units ([`held`]) before
+/// movement, without starting any: an order a Lua thread gives this tick
+/// (the script stage runs after dispatch) mustn't move a blocked unit for
+/// a tick before the next dispatch holds it. Unheld ones still act at once.
+pub fn hold_new(lua: &Lua) {
+    let (Some(world), Some(mut commands)) = (lua.app_data_ref::<EntityWorld>(), lua.app_data_mut::<Commands>()) else { return };
+    for u in commands.undispatched() {
+        if held(&world, u) {
+            commands.hold(u);
+        }
+    }
+}
+
 /// Moho's `IAiAttacker::AttackerStop` (MohoEngine.dll 0x10168390: the
 /// attacker's desired target set to none, vt+0x20): the unit's weapons
 /// drop their targets and search again. `IssueClearCommands` does it at

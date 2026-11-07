@@ -98,6 +98,7 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
     // next tick. Then intel from where everything ended up (the recon
     // refresh, 0x1031913b).
     enter(Phase::Movement);
+    crate::engine::api::orders::hold_new(lua);
     crate::engine::api::movement::tick(lua)?;
     crate::engine::api::movement::fuel_tick(lua)?;
     // Attached entities (cargo, shields, effect entities) follow their parent.
