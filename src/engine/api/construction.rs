@@ -212,6 +212,9 @@ fn cap_used(lua: &Lua, army: u32, cache: &mut BTreeMap<u32, Fx>) -> Fx {
 /// Whether `builder` may start a unit of blueprint `bp` under its army's
 /// unit cap (upgrades replace a unit, so they always may). Else the brain
 /// hears `OnUnitCapLimitReached` (once per order) and the builder waits.
+/// The test is moho's `Sim::CreateUnit` one (MohoEngine.dll 0x10317ac0, from
+/// the build tasks 0x101e3806 / 0x101e60bd): `used + CapCost > cap` refuses,
+/// so a cap of 0 refuses every unit with a cost.
 fn under_cap(lua: &Lua, builder: EntityId, order: BuildOrder, command: CommandId, bp: &str, cache: &mut BTreeMap<u32, Fx>) -> LuaResult<bool> {
     if order == BuildOrder::Upgrade {
         return Ok(true);
@@ -221,7 +224,7 @@ fn under_cap(lua: &Lua, builder: EntityId, order: BuildOrder, command: CommandId
         Some(c) => c,
         None => return Ok(true),
     };
-    if ignore || cap == 0 {
+    if ignore {
         return Ok(true);
     }
     let cost = match entity::blueprint_table(lua, crate::engine::api::blueprints::BlueprintKind::Unit, &bp.to_lowercase())?.get::<Option<LuaTable>>("General")? {

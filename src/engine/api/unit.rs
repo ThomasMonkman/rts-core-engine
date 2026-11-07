@@ -1120,6 +1120,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// saves keep a unit's facing in `Orientation[2]`).
         CreateUnitHPR = |lua, (bp, army, x, y, z, p, h, r): (String, shapes::Army, f64, f64, f64, f64, f64, f64)| {
             let index = resolve_army(lua, &army)?;
+            script_spawn_cap(lua, &bp, index)?;
             let fx = crate::engine::sim::math::from_lua;
             let q = FxQuat::from_hpr(fx(h), fx(p), fx(r));
             spawn_unit(lua, &bp, index, FxVec3::from_f64(x, y, z), q)
@@ -1130,6 +1131,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// every spawn; the argument is ignored.
         CreateUnit = |lua, (bp, army, x, y, z, qx, qy, qz, qw, _layer): (String, shapes::Army, f64, f64, f64, f64, f64, f64, f64, Option<String>)| {
             let index = resolve_army(lua, &army)?;
+            script_spawn_cap(lua, &bp, index)?;
             let fx = crate::engine::sim::math::from_lua;
             let q = FxQuat { x: fx(qx), y: fx(qy), z: fx(qz), w: fx(qw) };
             spawn_unit(lua, &bp, index, FxVec3::from_f64(x, y, z), q)
@@ -1451,21 +1453,45 @@ pub fn health_changes_tick(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
-/// Would unit `id` put army `to` over its unit cap (none, 0, or ignored:
-/// never)?
+/// Would unit `id` put army `to` over its unit cap?
 fn over_cap(lua: &Lua, id: crate::engine::sim::entity::EntityId, to: u32) -> bool {
+    let cost = world(lua).get(id).and_then(|e| e.unit.as_deref().map(|u| u.cap_cost)).unwrap_or(Fx::ONE);
+    over_cap_by(lua, to, cost)
+}
+
+/// Would a unit costing `cost` put army `to` over its unit cap? Moho's
+/// `Sim::CreateUnit` test (MohoEngine.dll 0x10317ac0): unless the army
+/// ignores the cap, `used + CapCost > cap` refuses, so a cap of 0 refuses
+/// every unit with a cost.
+fn over_cap_by(lua: &Lua, to: u32, cost: Fx) -> bool {
     let Some((cap, ignore)) = lua.app_data_ref::<crate::engine::sim::army::Armies>().and_then(|a| a.get(to).map(|a| (a.unit_cap, a.ignore_unit_cap))) else { return false };
-    if ignore || cap == 0 {
+    if ignore {
         return false;
     }
-    let w = world(lua);
-    let cost = w.get(id).and_then(|e| e.unit.as_deref().map(|u| u.cap_cost)).unwrap_or(Fx::ONE);
-    let used = w
+    let used = world(lua)
         .units()
         .filter(|e| !e.destroyed && e.army == Some(to))
         .filter_map(|e| e.unit.as_deref().map(|u| u.cap_cost))
         .fold(Fx::ZERO, |a, b| a.saturating_add(b));
     used.saturating_add(cost) > Fx::from_num(cap)
+}
+
+/// `CreateUnit` / `CreateUnitHPR` past the army's unit cap: moho's bindings
+/// (0x102ac820, 0x102acbaf, 0x102acf03) ask `Sim::CreateUnit` to notify, so
+/// the brain hears `OnUnitCapLimitReached`, and raise `CreateUnit(%s)
+/// failed` on its null.
+fn script_spawn_cap(lua: &Lua, bp: &str, army: u32) -> LuaResult<()> {
+    let cost = match blueprint_table(lua, BlueprintKind::Unit, &bp.to_lowercase())?.get::<Option<LuaTable>>("General")? {
+        Some(g) => crate::engine::sim::math::from_lua(g.get::<Option<f64>>("CapCost")?.unwrap_or(1.0)),
+        None => Fx::ONE,
+    };
+    if !over_cap_by(lua, army, cost) {
+        return Ok(());
+    }
+    if let LuaValue::Table(brain) = crate::engine::api::army::brain(lua, army)? {
+        AIBrainCallbacks::on_unit_cap_limit_reached(lua, &brain, "brain")?;
+    }
+    Err(LuaError::runtime(format!("CreateUnit({bp}) failed")))
 }
 
 #[cfg(test)]
