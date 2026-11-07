@@ -670,11 +670,35 @@ pub struct Weapons {
     /// The map's water surface height (set by the caller), for weapons
     /// that only fire above or below it.
     pub water: Option<Fx>,
+    /// What target searches pass over (set by the caller).
+    pub filters: SearchFilters,
     /// Per-weapon events of the last pass, reused (indexed like `list`).
     scratch: Vec<[Option<WeaponEventKind>; 3]>,
     /// Posed muzzles (and clip-posed barrel pitches) of the last
     /// [`Weapons::pose_muzzles`], reused.
     posed: Vec<Option<(FxVec3, Option<crate::engine::sim::pose::AimBase>)>>,
+}
+
+/// Candidates moho's target search passes over (MohoEngine.dll 0x101c4ca0).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SearchFilters {
+    /// The `BENIGN` category (civilian and campaign structures, walls;
+    /// 0x101c4eca, the category named at 0x101c4d40).
+    pub benign: Option<CategorySet>,
+    /// The playable area (x0, z0, x1, z1), edges included: a candidate
+    /// outside it is passed over unless it's in the air (0x101c4f78..
+    /// 0x101c4fd7). `None`: the whole map.
+    pub playable: Option<(Fx, Fx, Fx, Fx)>,
+}
+
+impl SearchFilters {
+    /// Whether the search may take `e`.
+    fn allow(&self, e: &crate::engine::sim::entity::Entity, layer: crate::engine::sim::layer::Layer) -> bool {
+        let benign = self.benign.as_ref().is_some_and(|b| e.category_index.is_some_and(|c| b.contains(c)));
+        let p = e.position();
+        let outside = layer != crate::engine::sim::layer::Layer::Air && self.playable.is_some_and(|(x0, z0, x1, z1)| p.x < x0 || p.z < z0 || p.x > x1 || p.z > z1);
+        !benign && !outside
+    }
 }
 
 /// What [`Weapons::range_for`] picks a weapon for.
@@ -898,8 +922,8 @@ pub fn step(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Armies>,
 /// ([`Terrain::blocks_fire`]); none, no test.
 pub fn step_with(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Armies>, intel: Option<&IntelGrids>, terrain: Option<&Terrain>, out: &mut Vec<WeaponEvent>, parallel_min: usize) {
     use rayon::prelude::*;
-    let Weapons { list, scratch, ordered, projectiles, tick, water, .. } = weapons;
-    let (ordered, projectiles, tick, water) = (&*ordered, &projectiles[..], *tick, *water);
+    let Weapons { list, scratch, ordered, projectiles, tick, water, filters, .. } = weapons;
+    let (ordered, projectiles, tick, water, filters) = (&*ordered, &projectiles[..], *tick, *water, &*filters);
     scratch.clear();
     scratch.resize(list.len(), [None; 3]);
     // Weapons that follow their unit's primary weapon run after the rest,
@@ -910,11 +934,11 @@ pub fn step_with(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Arm
             .zip(scratch.par_iter_mut())
             .with_min_len(64)
             .filter(|(w, _)| !follows(w))
-            .for_each_init(|| (Vec::new(), crate::prof_span!("weapons advance (worker)")), |(buf, _), (w, ev)| *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, terrain, buf));
+            .for_each_init(|| (Vec::new(), crate::prof_span!("weapons advance (worker)")), |(buf, _), (w, ev)| *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, buf));
     } else {
         let mut buf = Vec::new();
         for (w, ev) in list.iter_mut().zip(scratch.iter_mut()).filter(|(w, _)| !follows(w)) {
-            *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, terrain, &mut buf);
+            *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, &mut buf);
         }
     }
     // The list is sorted by unit, then index: a unit's first weapon is its
@@ -925,7 +949,7 @@ pub fn step_with(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Arm
         let first = primary.is_none_or(|(u, ..)| u != w.unit);
         if follows(w) {
             w.primary_target = if first { None } else { primary.and_then(|(.., t)| t) };
-            *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, terrain, &mut buf);
+            *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, &mut buf);
         }
         if first {
             let target = match w.target {
@@ -1079,11 +1103,12 @@ fn advance(
     projectiles: &[ProjectileView],
     tick: u64,
     water: Option<Fx>,
+    filters: &SearchFilters,
     terrain: Option<&Terrain>,
     buf: &mut Vec<EntityId>,
 ) -> [Option<WeaponEventKind>; 3] {
     let before = w.target;
-    let events = advance_target(w, world, armies, intel, ordered, projectiles, tick, water, terrain, buf);
+    let events = advance_target(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, buf);
     if let Some(m) = w.retarget.as_deref_mut().filter(|_| w.target != before) {
         m.misses = 0;
         if w.target.is_some() && !m.ignored.is_empty() {
@@ -1105,6 +1130,7 @@ fn advance_target(
     projectiles: &[ProjectileView],
     tick: u64,
     water: Option<Fx>,
+    filters: &SearchFilters,
     terrain: Option<&Terrain>,
     buf: &mut Vec<EntityId>,
 ) -> [Option<WeaponEventKind>; 3] {
@@ -1480,8 +1506,10 @@ fn advance_target(
                 let k = (class, range, current != Some(id), score, id);
                 beat.is_none_or(|b| k < b).then_some((k, e))
             };
-            let passes = |id: EntityId, e: &crate::engine::sim::entity::Entity| !ignored.iter().any(|&(i, _)| i == id) && targetable(e);
-            let (x0, z0, x1, z1) = (origin.x - r, origin.z - r, origin.x + r, origin.z + r);
+            let passes = |id: EntityId, e: &crate::engine::sim::entity::Entity| {
+                !ignored.iter().any(|&(i, _)| i == id) && e.unit.as_deref().is_some_and(|d| filters.allow(e, d.layer)) && targetable(e)
+            };
+            let (x0, z0, x1, z1) = (at.x - r, at.z - r, at.x + r, at.z + r);
             // The least key over the grid's candidates, streamed: one no
             // better than the best so far is passed over before the costly
             // checks (targetable, intel), which can't change the least.

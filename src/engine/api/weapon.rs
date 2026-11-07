@@ -312,6 +312,12 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         let _section = crate::prof_span!("weapons step");
         weapons.tick = crate::engine::api::sim_time::current_tick(lua);
         weapons.water = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>().and_then(|t| t.water_surface);
+        // What target searches pass over: `BENIGN` units, and units outside
+        // the playable area (`SetPlayableRect`).
+        if weapons.filters.benign.is_none() {
+            weapons.filters.benign = lua.app_data_ref::<std::sync::Arc<crate::engine::sim::category::CategoryDomain>>().and_then(|d| d.named.get("BENIGN").cloned());
+        }
+        weapons.filters.playable = lua.app_data_ref::<crate::engine::api::terrain::PlayableRect>().map(|r| (r.min_x, r.min_z, r.max_x, r.max_z));
         let intel = lua.app_data_ref::<crate::engine::sim::vision::IntelGrids>();
         // Target searches skip what the terrain blocks (moho's
         // `WeaponTerrainBlockageTest`, on by default).
