@@ -1031,18 +1031,20 @@ enum Reach {
     BeyondMaxRadius,
 }
 
-/// `d` is `p`'s squared distance from `origin` (XZ); `max2` / `min2` the
-/// squared radii; `height` the unit's height and the weapon's height limit,
-/// if it has one (tested after `MinRadius`: a target that close passes as
-/// too close whatever its height).
-fn range_test(max2: Fx, min2: Fx, height: Option<(Fx, Fx)>, heading_arc: HeadingTest, origin: FxVec3, p: FxVec3, d: Fx) -> Reach {
+/// `d` is `p`'s squared distance from the unit's position (XZ; moho's range
+/// test measures from the unit, not a bone, MohoEngine.dll 0x102b19bd);
+/// `max2` / `min2` the squared radii; `height` the unit's height and the
+/// weapon's height limit, if it has one (tested after `MinRadius`: a target
+/// that close passes as too close whatever its height); `arc_origin` where
+/// the heading arc's bearing is taken from (the weapon bone, 0x102b1ac3).
+fn range_test(max2: Fx, min2: Fx, height: Option<(Fx, Fx)>, heading_arc: HeadingTest, arc_origin: FxVec3, p: FxVec3, d: Fx) -> Reach {
     if d > max2 {
         Reach::BeyondMaxRadius
     } else if min2 > Fx::ZERO && d <= min2 {
         Reach::TooClose
     } else if height.is_some_and(|(y, limit)| (p.y - y).abs() > limit) {
         Reach::BeyondMaxRadius
-    } else if !heading_arc.contains(p.x - origin.x, p.z - origin.z) {
+    } else if !heading_arc.contains(p.x - arc_origin.x, p.z - arc_origin.z) {
         Reach::OutsideArc
     } else {
         Reach::InRange
@@ -1139,7 +1141,13 @@ fn advance_target(
     // Whether this update gave the weapon a new target: it fires on it from
     // the next update at the earliest (FAF probe probe_firsttick).
     let mut took_target = false;
+    // The aim's pivot: where leads and bomb drops are worked out from.
     let origin = unit.bone_world_position(w.aim_bone);
+    // Ranges are measured from the unit's position, not the turret: moho's
+    // range test (MohoEngine.dll 0x102b19bd) and target search (0x101c4d06)
+    // both take the unit's own position, so a battleship's forward turret
+    // reaches no further forward than its rear one.
+    let at = unit.position();
     // Arcs are measured in the aim bone's rest frame (the aim itself in its
     // posed one, below).
     let frame = unit.bone_world_rotation(w.aim_bone);
@@ -1214,8 +1222,15 @@ fn advance_target(
     };
     let (max2, min2) = (w.max_radius.saturating_mul(w.max_radius), w.min_radius.saturating_mul(w.min_radius));
     let height = w.max_height_diff.map(|limit| (unit.position().y, limit));
-    let range_at = |p: FxVec3, d: Fx| range_test(max2, min2, height, heading_arc, origin, p, d);
-    let range_of = |p: FxVec3| range_at(p, dist2_xz(p, origin));
+    // The heading arc's bearing is from the weapon bone (moho's +0xa8: the
+    // last aim's muzzle, else its pitch, else its yaw bone; ours the fire
+    // control's), as posed when the weapon has a target (0x102b1adc).
+    let arc_origin = match w.heading_arc {
+        Some(_) => w.muzzle_posed.unwrap_or_else(|| unit.bone_world_position(w.muzzle_bone.or(w.pitch_bone).or(w.aim_bone))),
+        None => at,
+    };
+    let range_at = |p: FxVec3, d: Fx| range_test(max2, min2, height, heading_arc, arc_origin, p, d);
+    let range_of = |p: FxVec3| range_at(p, dist2_xz(p, at));
     let turns_to = (w.slaved_to_body || w.auto_initiate) && data.motion_params.kind != crate::engine::sim::movement::MotionKind::None;
     let need_unpack = w.need_unpack;
     let accepts = |r: Reach| match r {
@@ -1266,12 +1281,12 @@ fn advance_target(
             if w.targets_projectiles { view_of(t).is_some() } else { world.get(t).is_some_and(|e| !e.destroyed) }
         } else if w.targets_projectiles {
             view_of(t).is_some_and(|v| {
-                let d = dist2_xz(v.position, origin);
+                let d = dist2_xz(v.position, at);
                 projectile_ok(v) && d <= reach.saturating_mul(reach) && accepts(range_at(v.position, d))
             })
         } else {
             world.get(t).is_some_and(|e| {
-                let d = dist2_xz(e.position(), origin);
+                let d = dist2_xz(e.position(), at);
                 targetable(e) && d <= reach.saturating_mul(reach) && (w.target_from_order || accepts(range_at(e.position(), d)))
             })
         };
@@ -1289,8 +1304,8 @@ fn advance_target(
     let order = ordered.get(&w.unit);
     let overcharging = order.is_some_and(|o| o.overcharge == Some(w.index));
     let forced = order.filter(|o| enabled && o.overcharge.map_or(o.silo == w.silo, |i| i == w.index) && from_primary.is_none()).map(|o| o.target).filter(|t| match *t {
-        WeaponTarget::Entity(id) => world.get(id).is_some_and(|e| targetable(e) && dist2_xz(e.position(), origin) <= reach.saturating_mul(reach)),
-        WeaponTarget::Ground(p) => !w.cannot_attack_ground && dist2_xz(p, origin) <= reach.saturating_mul(reach),
+        WeaponTarget::Entity(id) => world.get(id).is_some_and(|e| targetable(e) && dist2_xz(e.position(), at) <= reach.saturating_mul(reach)),
+        WeaponTarget::Ground(p) => !w.cannot_attack_ground && dist2_xz(p, at) <= reach.saturating_mul(reach),
     });
     if enabled && w.target_from_order && w.target.is_some() && forced != w.target && from_primary.is_none() {
         if forced.is_some() {
@@ -1340,7 +1355,7 @@ fn advance_target(
         let best = projectiles
             .iter()
             .filter(|v| projectile_ok(v) && range_of(v.position) == Reach::InRange)
-            .map(|v| (dist2_xz(v.position, origin), v))
+            .map(|v| (dist2_xz(v.position, at), v))
             .min_by_key(|&(d, v)| (d, v.id));
         if let Some((_, v)) = best {
             w.target = Some(WeaponTarget::Entity(v.id));
@@ -1393,7 +1408,7 @@ fn advance_target(
             let key = |id: EntityId, beat: Option<SearchKey>| -> Option<(SearchKey, &crate::engine::sim::entity::Entity)> {
                 let e = world.get(id)?;
                 let p = e.position();
-                let d = dist2_xz(p, origin);
+                let d = dist2_xz(p, at);
                 if d > r2 {
                     return None;
                 }
@@ -1492,9 +1507,11 @@ fn advance_target(
     };
     let target_at = target_pos;
     // Launch speed: reduced up close (`MuzzleVelocityReduceDistance`; moho
-    // measures the horizontal distance to the target, before leading).
+    // measures the horizontal distance from the solution's start, the
+    // muzzle, to the target point, before leading: MohoEngine.dll
+    // 0x1021b60f..0x1021b67e).
     let speed = match target_pos {
-        Some(tp) if w.muzzle_velocity_reduce_distance > Fx::ZERO => w.muzzle_velocity_at(sqrt(dist2_xz(tp, origin))),
+        Some(tp) if w.muzzle_velocity_reduce_distance > Fx::ZERO => w.muzzle_velocity_at(sqrt(dist2_xz(tp, w.muzzle_posed.or(w.aim_muzzle).unwrap_or(origin)))),
         _ => w.muzzle_velocity,
     };
     // Moving unit targets are led (`LeadTarget`): aim where the target will
