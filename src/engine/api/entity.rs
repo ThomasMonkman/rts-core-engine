@@ -1099,17 +1099,34 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(world(lua).get(id).and_then(|e| e.cold.skeleton.as_ref()).map_or(0, |s| s.bones.len()))
         })?;
     lua_method!(lua, moho::Entity,
-        /// Falling trees: a `moho.MotorFallDown` to `Whack`. The fall itself is
-        /// presentation only (not simulated); the tree stays where it is until
-        /// FAF's script destroys it.
+        /// Falling trees: gives the entity a new fall motor (upright, still;
+        /// `sim::fall_down`) and returns it as a `moho.MotorFallDown` to
+        /// `Whack`. Moho reads none of the arguments (0x10277260).
         FallDown = |lua, this: Obj<moho::Entity>| {
             let id = entity_id(&this)?;
+            if lua.app_data_ref::<crate::engine::sim::fall_down::FallMotors>().is_none() {
+                lua.set_app_data(crate::engine::sim::fall_down::FallMotors::default());
+            }
+            if let Some(mut m) = lua.app_data_mut::<crate::engine::sim::fall_down::FallMotors>() {
+                m.0.insert(id, Default::default());
+            }
             Ok(Obj::<moho::MotorFallDown>::new(script_object::create(lua, EntityHandle(id), moho::class_table(lua, "MotorFallDown")?)?))
         })?;
     lua_method!(lua, moho::MotorFallDown,
-        /// Does nothing: the fall is presentation only.
-        #[lua(partial = "no visual push yet")]
-        Whack = |_, _args: LuaMultiValue| Ok(()))?;
+        /// `Whack(nx, ny, nz, f, dobreak)`: unless already falling, lean
+        /// towards `(nx, nz)` (`ny` is dropped) and fall over if `dobreak`
+        /// (else sway back up); `f` is added to the lean speed, radians per
+        /// tick (MohoEngine.dll 0x10277460; `sim::fall_down`).
+        Whack = |lua, (this, nx, _ny, nz, force, fall): (Obj<moho::MotorFallDown>, f64, f64, f64, f64, Option<bool>)| {
+            let id = entity_id(&this)?;
+            let fx = crate::engine::sim::math::from_lua;
+            if let Some(mut m) = lua.app_data_mut::<crate::engine::sim::fall_down::FallMotors>()
+                && let Some(motor) = m.0.get_mut(&id)
+            {
+                motor.whack(fx(nx), fx(nz), fx(force), fall.unwrap_or(false));
+            }
+            Ok(())
+        })?;
     lua_method!(lua, moho::Entity,
         /// Sinking into the ground is presentation only too (FAF destroys the
         /// prop shortly after).

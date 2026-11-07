@@ -65,6 +65,7 @@ saved_types! {
     "projectiles" => sim::projectile::Projectiles,
     "rng" => sim::rng::SimRng,
     "scrolled" => sim::scroller::Scrolled,
+    "fall_motors" => sim::fall_down::FallMotors,
     "terrain" => sim::terrain::Terrain,
     "threat" => sim::threat::ThreatMap,
     "weapons" => sim::weapon::Weapons,
