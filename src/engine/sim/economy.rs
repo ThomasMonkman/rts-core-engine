@@ -107,6 +107,18 @@ impl EconomyEvent {
         }
         self.granted_mass += need.0 * fraction;
         self.granted_energy += need.1 * fraction;
+    }
+
+    /// A whole-step event whose last grant is complete uses it and moves
+    /// one tick on. Moho's event tick runs from `Unit::MotionTick`
+    /// (0x1028873d), ahead of the army's economy pass in the beat, so it
+    /// sees the grant a tick after it was made: an event of `n` ticks is
+    /// done on tick `n + 1` (FAF probe `probe_econ`: 2.0 s -> 21 ticks,
+    /// 0.5 s -> 6, 0.05 s -> 2).
+    fn take_grant(&mut self) {
+        if !self.whole_steps || self.held || self.done() {
+            return;
+        }
         // Moho compares f32 sums, which reach the request a few steps into a
         // steady stall; fixed point would stay a fraction of an ulp short for
         // ever. A gap below f32's precision (2^-24 of the request) is full.
@@ -360,6 +372,10 @@ pub fn step(world: &mut EntityWorld, armies: &mut Armies, events: &mut EconomyEv
     // Economy events of live units request too (events of gone units are
     // dropped: nothing can wait on them any more).
     events.map.retain(|_, ev| world.get(ev.unit).is_some_and(|e| !e.destroyed));
+    // Last tick's complete grants first, as moho's unit tick does.
+    for ev in events.map.values_mut() {
+        ev.take_grant();
+    }
     for ev in events.map.values() {
         if ev.done() || ev.held {
             continue;
@@ -551,15 +567,17 @@ mod tests {
         let mut events = EconomyEvents::default();
         // 300 energy over 3 s = 30 ticks of 10.
         let ev = events.create(id, fx(300.0), Fx::ZERO, fx(3.0));
-        for _ in 0..29 {
+        for _ in 0..30 {
             step(&mut w, &mut a, &mut events);
         }
         assert!(!events.is_done(ev));
+        assert_eq!(a.list[0].economy.energy.stored, fx(700.0), "paid exactly 300 over 30 ticks");
         step(&mut w, &mut a, &mut events);
-        assert!(events.is_done(ev), "done on tick 30");
-        assert_eq!(a.list[0].economy.energy.stored, fx(700.0), "paid exactly 300");
-        // Instant events (time 0) take one tick.
+        assert!(events.is_done(ev), "done on tick 31: each grant is used the tick after");
+        // Instant events (time 0): granted on the first tick, done on the second.
         let ov = events.create(id, fx(100.0), Fx::ZERO, Fx::ZERO);
+        step(&mut w, &mut a, &mut events);
+        assert!(!events.is_done(ov));
         step(&mut w, &mut a, &mut events);
         assert!(events.is_done(ov));
     }
@@ -608,6 +626,8 @@ mod tests {
         assert_eq!(a.list[0].economy.energy.expense, fx(5.0), "but drawn");
         step(&mut w, &mut a, &mut events);
         assert_eq!(a.list[0].economy.energy.requested, fx(5.0), "only the missing half asked for");
+        assert_eq!(events.map[&ev].paid, Fx::ZERO, "complete, used next tick");
+        step(&mut w, &mut a, &mut events);
         assert_eq!(events.map[&ev].paid, Fx::ONE, "one whole step of 10");
         // A steady stall still gets there (f32-like rounding of the last bit).
         let mut events = EconomyEvents::default();
@@ -618,7 +638,8 @@ mod tests {
         assert!(events.is_done(ev));
     }
 
-    /// Moho truncates an event's ticks: 2.55 s is 25 ticks, not 26.
+    /// Moho truncates an event's ticks: 2.55 s is 25 paid ticks (done on
+    /// the 26th, as each grant is used a tick late).
     #[test]
     fn economy_event_ticks_truncate() {
         let mut events = EconomyEvents::default();
