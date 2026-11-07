@@ -252,9 +252,10 @@ fn motion_of(bp: &LuaTable, motion_type: &str) -> LuaResult<(crate::engine::sim:
         backup_distance: surface_fx("BackUpDistance")?,
         steer_force: surface_fx("MaxSteerForce")?,
         rotate_on_spot,
-        // Unset: 0.1 rad, the value most blueprints that set it use
-        // (inferred). A zero threshold would pivot forever.
-        rotate_threshold: if rotate_on_spot { fx(Some(get("RotateOnSpotThreshold")?.unwrap_or(0.1))).max(Fx::from_num(0.01)) } else { Fx::ZERO },
+        // Unset: 0.5 rad (the `RUnitBlueprintPhysics` ctor, 0x1010dbbd;
+        // copied raw by the motion setup, 0x1027ace6). A zero threshold
+        // would pivot forever in ours (how moho compares it is untraced).
+        rotate_threshold: if rotate_on_spot { fx(Some(get("RotateOnSpotThreshold")?.unwrap_or(0.5))).max(Fx::from_num(0.01)) } else { Fx::ZERO },
         facing_rate: surface_fx("TurnFacingRate")? * Fx::PI / Fx::from_num(180),
         layer_change_offset: surface_fx("LayerChangeOffsetHeight")?,
         attack_angle: if surface {
