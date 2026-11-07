@@ -8,7 +8,9 @@
 //!    consumption the unit was served last tick (`GetResourceConsumed`), so
 //!    a mex in an energy stall makes less mass; `Economy.NaturalProducer`
 //!    units (commanders, SACUs, pods) produce in full
-//!    (`Unit::HandleResourceManagement`, MohoEngine.dll 0x1028a150);
+//!    (`Unit::HandleResourceManagement`, MohoEngine.dll 0x1028a150). Storage
+//!    and production count only while production is active
+//!    (`SetProductionActive(false)` takes the storage away too);
 //! 2. armies settle one at a time in ascending army index, as moho's
 //!    `Sim::AdvanceBeat` ticks them (`CEconomy::ProcessArmyEconomy`):
 //!    - what allies shared to it (`banked`) joins its income;
@@ -337,9 +339,11 @@ pub fn step(world: &mut EntityWorld, armies: &mut Armies, events: &mut EconomyEv
         }
         let Some(a) = armies.get_mut(army) else { continue };
         let econ = &mut a.economy;
-        econ.mass.capacity += u.storage_mass;
-        econ.energy.capacity += u.storage_energy;
         if u.production_active {
+            // Storage counts only while production runs: `SetProductionActive
+            // (false)` takes it away (0x1028a274 -> 0x1028a467).
+            econ.mass.capacity += u.storage_mass;
+            econ.energy.capacity += u.storage_energy;
             // Production goes at the share of its own consumption it was
             // served (moho's node ratio, MohoEngine.dll 0x1028a194..0x1028a1ac:
             // a mex in an energy stall, a mass fabricator); natural producers
@@ -569,7 +573,10 @@ mod tests {
     fn give_storage_replaces_the_script_storage() {
         let mut w = EntityWorld::default();
         let mut a = armies(1);
-        unit(&mut w, 1, |u| u.storage_energy = fx(3900.0));
+        unit(&mut w, 1, |u| {
+            u.production_active = true;
+            u.storage_energy = fx(3900.0);
+        });
         step(&mut w, &mut a, &mut EconomyEvents::default());
         let e = &mut a.list[0].economy;
         assert_eq!(e.energy.capacity, fx(3900.0));
@@ -732,6 +739,28 @@ mod tests {
         assert!((consumed[1] - 0.5).abs() < 1e-6, "the energy consumer gets what's left: {consumed:?}");
         let e = &a.list[0].economy;
         assert!(e.energy.stored < fx(1e-6) && e.mass.stored < fx(1e-6), "both drawn dry: {:?}", (e.mass.stored, e.energy.stored));
+    }
+
+    /// `SetProductionActive(false)` takes the unit's storage away with its
+    /// production; turning it back on restores it.
+    #[test]
+    fn storage_counts_only_with_production_active() {
+        let mut w = EntityWorld::default();
+        unit(&mut w, 1, |u| {
+            u.production_active = true;
+            u.storage_energy = fx(500.0);
+        });
+        let mut a = armies(1);
+        step(&mut w, &mut a, &mut EconomyEvents::default());
+        assert_eq!(a.list[0].economy.energy.capacity, fx(500.0));
+        a.list[0].economy.energy.stored = fx(400.0);
+        w.iter_mut().next().unwrap().unit.as_mut().unwrap().production_active = false;
+        step(&mut w, &mut a, &mut EconomyEvents::default());
+        let e = &a.list[0].economy.energy;
+        assert_eq!((e.capacity, e.stored), (Fx::ZERO, Fx::ZERO), "no storage, so nothing kept");
+        w.iter_mut().next().unwrap().unit.as_mut().unwrap().production_active = true;
+        step(&mut w, &mut a, &mut EconomyEvents::default());
+        assert_eq!(a.list[0].economy.energy.capacity, fx(500.0));
     }
 
     /// Allies both ways between every pair in `group`.
