@@ -200,7 +200,7 @@ fn capture() {
 
 #[test]
 fn repair_refuel() {
-    scenario("repair_refuel", 300);
+    scenario("repair_refuel", 1200);
 }
 
 #[test]

@@ -1698,6 +1698,21 @@ fn assists(lua: &Lua) -> LuaResult<()> {
             }
             continue;
         }
+        // A finished aircraft in the air can't be repaired: moho's repair
+        // task ends at once (`CUnitRepairTask` tick, MohoEngine.dll
+        // 0x101e4ddf..0x101e4dfe: target blueprint `Air` +0x368 set and
+        // layer +0x120 == Air -> done). FAF probe `probe_econ`: an engineer
+        // ordered to repair a hovering transport never repaired it.
+        if kind == CommandKind::Repair
+            && entity::world(lua).get(target).is_some_and(|t| t.fraction_complete >= Fx::ONE && t.unit.as_deref().is_some_and(|u| u.layer == crate::engine::sim::layer::Layer::Air)) {
+            stop_assist(lua, assister)?;
+            end_repair_task(lua, assister)?;
+            let mut c = lua.app_data_mut::<Commands>().expect("Commands");
+            if c.current(assister).is_some_and(|cmd| cmd.id == command) {
+                c.pop_front(assister);
+            }
+            continue;
+        }
         let work = work_target(lua, kind, target);
         // An engineer's guard with nothing to work on ends when an order is
         // queued behind it (or its guarded unit, once built, went idle).
