@@ -35,8 +35,15 @@
 //! does, at the end of that tick while the target can still be passed: FAF
 //! takes the build beams down in `OnStopBuild`.
 //!
-//! Inferred, not verified against the binary: the progress formula's use of
-//! `resource_consumed`, progress callbacks every tick, no site snapping.
+//! The progress step is moho's (the build-task work step, MohoEngine.dll
+//! 0x101e1ace..0x101e1af9: `BuildRate / BuildTime x GetResourceConsumed x
+//! 0.1`). Repairing an aircraft also refuels it, at half speed for both while
+//! it's damaged (`assists`). Not done: assisting a shield generator
+//! regenerating its bubble (0x101e1b33..0x101e1c76: `RegenRate x BuildRate /
+//! Defense.Shield.RegenAssistMult`, needs the owner's shield link).
+//!
+//! Inferred, not verified against the binary: progress callbacks every tick,
+//! no site snapping.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1813,6 +1820,25 @@ fn assists(lua: &Lua) -> LuaResult<()> {
                 t.health = (t.health + t.max_health * (new - old)).min(t.max_health);
                 (new >= Fx::ONE, false)
             } else {
+                // Repairing something with fuel refuels it, at
+                // `Physics.FuelRechargeRate / FuelUseTime` a second of the
+                // tank; while it's damaged both that and the repair go at
+                // half speed (MohoEngine.dll 0x101e1c82..0x101e1d1b, unit bp
+                // +0x304 / +0x308 = Physics +0x8c / +0x90; fuel ratio unit
+                // +0x284, `GetFuelRatio` 0x10168c60). Only while served.
+                let mut delta = delta;
+                let damaged = t.health < t.max_health;
+                if let Some(u) = t.unit.as_deref_mut()
+                    && served > Fx::ZERO
+                    && u.fuel_use_time > Fx::ZERO
+                    && u.fuel_ratio < Fx::ONE {
+                    let mut refuel = u.fuel_recharge / u.fuel_use_time / Fx::from_num(10);
+                    if damaged {
+                        refuel /= 2;
+                        delta /= 2;
+                    }
+                    u.fuel_ratio = (u.fuel_ratio + refuel).min(Fx::ONE);
+                }
                 t.health = (t.health + t.max_health * delta).min(t.max_health);
                 (false, t.health >= t.max_health)
             }

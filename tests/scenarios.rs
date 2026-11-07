@@ -199,6 +199,11 @@ fn capture() {
 }
 
 #[test]
+fn repair_refuel() {
+    scenario("repair_refuel", 300);
+}
+
+#[test]
 fn reclaim() {
     scenario("reclaim", 600);
 }
