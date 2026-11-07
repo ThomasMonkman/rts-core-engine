@@ -252,6 +252,8 @@ fn motion_of(bp: &LuaTable, motion_type: &str) -> LuaResult<(crate::engine::sim:
         backup_distance: surface_fx("BackUpDistance")?,
         steer_force: surface_fx("MaxSteerForce")?,
         rotate_on_spot,
+        // Raw blueprint values, as the path spline compares them (0x101a2256).
+        corner_slowdown: surface && fx(Some(get("TurnRadius")?.unwrap_or(5.0))) > fx(Some(get("TurnRate")?.unwrap_or(0.0))),
         // Unset: 0.5 rad (the `RUnitBlueprintPhysics` ctor, 0x1010dbbd;
         // copied raw by the motion setup, 0x1027ace6). A zero threshold
         // would pivot forever in ours (how moho compares it is untraced).

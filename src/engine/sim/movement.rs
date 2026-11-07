@@ -105,6 +105,10 @@ pub struct MotionParams {
     pub reverse_speed: Fx,
     pub backup_distance: Fx,
     pub steer_force: Fx,
+    /// Slows off course, by (1 + max(cos, -0.5)) / 2: moho's path spline
+    /// does it only when the blueprint's raw `TurnRadius` > `TurnRate`
+    /// (0x101a2256, 0x101a29a6; FAF's Tempest and Atlantis).
+    pub corner_slowdown: bool,
     pub rotate_on_spot: bool,
     pub rotate_threshold: Fx,
     pub facing_rate: Fx,
@@ -820,8 +824,6 @@ struct Drive {
     reverse: bool,
     /// Stopped to rotate on the spot.
     pivot: bool,
-    /// Within 45 degrees of the way it's going (else it creeps at 1/4).
-    aligned: bool,
     /// Heading error left to turn (radians; reversing: from the tail).
     err: Fx,
     /// Turn rate it could use (rad/s, before the steer-force limit).
@@ -882,7 +884,17 @@ fn drive(p: &MotionParams, state: MotionState, heading: Fx, turn: Fx, radius: Fx
     } else {
         (wrap(heading + turned_by), None)
     };
-    Drive { heading: heading2, course: course2, turned: heading2 != heading, reverse, pivot, aligned: e.abs() <= Fx::FRAC_PI_4, err: e, rate: turn, radius }
+    Drive { heading: heading2, course: course2, turned: heading2 != heading, reverse, pivot, err: e, rate: turn, radius }
+}
+
+/// The speed a `corner_slowdown` unit wants `err` off course: x (1 +
+/// max(cos, -0.5)) / 2, so all of it ahead, half at 90 degrees, a quarter
+/// past 120 (moho's path spline, 0x101a29a6; `err` is from the tail when
+/// reversing, as moho negates the cos). Other units keep their speed and
+/// arc round.
+fn corner_slow(want: Fx, err: Fx) -> Fx {
+    let (_, c) = crate::engine::sim::math::sin_cos(err);
+    want.saturating_mul(Fx::ONE + c.max(-Fx::ONE / 2)) / 2
 }
 
 /// Fastest speed at which a unit turning at `rate` (rad/s) can still reach a
@@ -1769,8 +1781,8 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
                     };
                 } else if d.pivot {
                     want = Fx::ZERO;
-                } else if !d.aligned {
-                    want /= 4;
+                } else if p.corner_slowdown {
+                    want = corner_slow(want, d.err);
                 }
                 if let Some(v) = squad_pace.filter(|_| !winged && !d.reverse) {
                     want = want.min(v);
@@ -4208,6 +4220,15 @@ mod tests {
         assert!(!reverse(&MotionParams { rotate_on_spot: true, rotate_threshold: Fx::ONE / 2, ..p }, 130.0, 4.0), "RotateOnSpot pivots instead");
         let hover = MotionParams { kind: MotionKind::Hover, facing_rate: Fx::FRAC_PI_4, ..p };
         assert!(reverse(&hover, 170.0, 4.0), "a hovercraft with TurnFacingRate backs up");
+    }
+
+    #[test]
+    fn corner_slowdown_is_smooth() {
+        let v = Fx::from_num(4);
+        assert_eq!(corner_slow(v, Fx::ZERO), v);
+        assert!((corner_slow(v, Fx::FRAC_PI_2) - Fx::from_num(2)).abs() < Fx::from_num(0.001), "half at 90 degrees");
+        assert_eq!(corner_slow(v, Fx::PI), Fx::ONE, "a quarter past 120");
+        assert_eq!(corner_slow(v, Fx::PI * 3 / 4), Fx::ONE);
     }
 
     #[test]
