@@ -21,16 +21,20 @@
 //!   is Luau's `singlestep`; a vendored-Luau patch carries a step from a
 //!   breakpoint into the single-step interpreter (`MOHO_PATCHES.md`).
 //!
-//! **Determinism.** The debugger only reads: no value is written, no Lua
-//! function is called (`__index` tables are followed raw, metamethods never
-//! run), and no object is made in a VM (chunks are kept alive by registry
-//! refs; values shown are read from the stack). A paused sim stalls
+//! **Determinism.** Debugging only reads: hovers, watches, conditions and
+//! the variables views write no value, call no Lua function (`__index`
+//! tables are followed raw, metamethods never run) and make no object in a
+//! VM (chunks are kept alive by registry refs; values shown are read from
+//! the stack). The exceptions are what you ask to change: code run in the
+//! Debug Console ([`console`]) and values set in the variables view. A sim
+//! changed that way won't replay the same (logged once per VM). A paused sim stalls
 //! lockstep, so pause a multiplayer game only if every peer can wait. A
 //! debugged run's heap differs from an undebugged one's by those refs, so
 //! its keyframes don't match one recorded without `--lua-debug`.
 //!
 //! See docs/guides/debugging-lua.md.
 
+mod console;
 mod dap;
 mod expr;
 mod inspect;
@@ -131,6 +135,8 @@ struct Vm {
     stop_seq: AtomicU64,
     pause: AtomicBool,
     step: Mutex<Option<Step>>,
+    /// The console or a set variable has changed this VM.
+    modified: AtomicBool,
 }
 
 #[derive(Default)]
@@ -248,6 +254,7 @@ pub fn attach(lua: &Lua, name: &str) {
             stop_seq: AtomicU64::new(0),
             pause: AtomicBool::new(false),
             step: Mutex::new(None),
+            modified: AtomicBool::new(false),
         });
         st.next_vm += 1;
         st.vms.push(vm.clone());
@@ -341,20 +348,25 @@ fn vm_of(state: *mut ffi::lua_State) -> Option<Arc<Vm>> {
 }
 
 /// From the Lua interrupt (a safe point, not a GC step): picks up new
-/// breakpoints and pause requests.
-pub(crate) unsafe fn on_interrupt(state: *mut ffi::lua_State) {
+/// breakpoints and pause requests. True: console code has run too long, so
+/// the caller raises an error to stop it.
+pub(crate) unsafe fn on_interrupt(state: *mut ffi::lua_State) -> bool {
+    if console::running() {
+        return console::over_time();
+    }
     thread_local! {
         static SEEN: Cell<u64> = const { Cell::new(0) };
     }
     let work = WORK.load(Ordering::Relaxed);
     if SEEN.with(|s| s.replace(work)) == work {
-        return;
+        return false;
     }
-    let Some(vm) = vm_of(state) else { return };
+    let Some(vm) = vm_of(state) else { return false };
     unsafe { apply_breakpoints(&vm, state) };
     if vm.pause.swap(false, Ordering::Relaxed) {
         unsafe { stop(&vm, state, "pause") };
     }
+    false
 }
 
 fn connected() -> bool {
@@ -362,7 +374,8 @@ fn connected() -> bool {
 }
 
 unsafe extern "C-unwind" fn on_break(state: *mut ffi::lua_State, _ar: *mut ffi::lua_Debug) {
-    if !connected() {
+    // Console code runs with breakpoints off.
+    if !connected() || console::running() {
         return;
     }
     let Some(vm) = vm_of(state) else { return };
@@ -419,7 +432,7 @@ unsafe fn should_stop(vm: &Vm, state: *mut ffi::lua_State) -> bool {
 }
 
 unsafe extern "C-unwind" fn on_step(state: *mut ffi::lua_State, _ar: *mut ffi::lua_Debug) {
-    if !STEPPING.load(Ordering::Relaxed) {
+    if !STEPPING.load(Ordering::Relaxed) || console::running() {
         return;
     }
     let Some(vm) = vm_of(state) else { return };

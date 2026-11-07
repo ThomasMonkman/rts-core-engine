@@ -224,8 +224,12 @@ pub(crate) unsafe extern "C-unwind" fn interrupt(state: *mut ffi::lua_State, gc:
     if gc >= 0 {
         return;
     }
-    if crate::engine::lua::debugger::enabled() {
-        unsafe { crate::engine::lua::debugger::on_interrupt(state) };
+    if crate::engine::lua::debugger::enabled() && unsafe { crate::engine::lua::debugger::on_interrupt(state) } {
+        // Debug Console code past its time limit.
+        unsafe {
+            ffi::lua_checkstack(state, 2);
+            ffi::luaL_error(state, c"console: stopped".as_ptr())
+        }
     }
     if !BREAK_LUA.load(Ordering::Relaxed) {
         return;

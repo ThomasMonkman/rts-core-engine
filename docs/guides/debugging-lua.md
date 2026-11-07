@@ -2,7 +2,7 @@
 
 The engine has a built-in Lua debugger for the sim VM and the interface VM. It supports breakpoints
 (with conditions and hit counts), step over / in / out, pause, the call stack, locals, upvalues, module globals, expandable tables,
-and hover / watch expressions. It speaks the
+hover / watch expressions, and a Debug Console that runs Lua in the stopped function. It speaks the
 [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) over TCP, so VS Code
 talks to the engine directly. A small extension in `dev/vscode-lua-debug/` declares the debug
 type. The code is in `src/engine/lua/debugger/`.
@@ -59,9 +59,31 @@ Each time the line runs the condition is checked, which costs microseconds: fine
 like `OnDamage`, noticeable on a line in a tight loop. Breakpoints without a condition cost nothing
 until hit.
 
+### The Debug Console
+
+Type Lua while stopped and it runs in the selected stack frame, as a browser's console does:
+
+```lua
+self:GetHealth()              -- 12000
+self:SetHealth(self, 500)     -- the unit now has 500 HP
+count = count + 1             -- a local of the stopped function: it carries on with the new value
+LOG(self.UnitId)              -- print / LOG / WARN / SPEW show in the console too
+```
+
+Names are the frame's locals, then upvalues, then the module's globals, and assigning one
+changes it. In the **Variables** view, double-click a value to set it. Plain reads (names,
+fields, comparisons) run no code, so looking changes nothing.
+
+- **It changes the game**: a sim changed this way won't replay the same (the log says so the
+  first time), and in a network game it desyncs you.
+- Breakpoints don't stop inside console code, it can't wait (`WaitSeconds`), and it's stopped
+  after 5 seconds.
+- Luau folds a local set to a constant and never reassigned (`local n = 10`) into the code, so
+  assigning it has no effect. Parameters and locals set from calls are fine.
+
 ### Expressions
 
-Conditions, the watch list, the debug console and hovers share one read-only subset of Lua:
+Conditions, the watch list and hovers share one read-only subset of Lua:
 
 - names and fields, `self.Blueprint.General`, `units[1]["EntityId"]`, `t[i]` (`a:b` reads the
   field `b`);
@@ -71,7 +93,7 @@ Conditions, the watch list, the debug console and hovers share one read-only sub
 Names are looked up as locals, then upvalues, then the function's module environment. `__index`
 tables are followed (so methods and class fields show), but nothing is called: no function calls
 (`self:GetHealth()` won't work, `self.MaxHealth` or the like will), no metamethods (`==` compares
-tables by identity, `#` is the raw length), no `..`. You can't set variables. The code is
+tables by identity, `#` is the raw length), no `..`. For more, use the Debug Console. The code is
 `src/engine/lua/debugger/expr.rs`.
 
 ## Limits

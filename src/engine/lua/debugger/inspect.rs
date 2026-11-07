@@ -12,7 +12,7 @@ use mlua::ffi;
 use serde_json::{Value, json};
 
 use super::expr::{self, BinOp, Expr, UnOp};
-use super::{DEBUGGER, Vm};
+use super::{DEBUGGER, Vm, console};
 use crate::engine::vfs::normalise;
 
 unsafe extern "C" {
@@ -35,7 +35,10 @@ pub(super) enum Request {
     StackTrace,
     Scopes(c_int),
     Variables(usize),
-    Evaluate(c_int, String),
+    /// An expression at a frame level; true: typed in the console (may run code).
+    Evaluate(c_int, String, bool),
+    /// variablesReference, the variable's name, the new value's source.
+    SetVariable(usize, String, String),
 }
 
 enum Ref {
@@ -81,7 +84,9 @@ impl<'a> Stopped<'a> {
                 Request::StackTrace => Ok(self.stack_trace()),
                 Request::Scopes(level) => self.scopes(level),
                 Request::Variables(i) => self.variables(i),
-                Request::Evaluate(level, expr) => self.evaluate(level, &expr),
+                Request::Evaluate(level, expr, false) => self.evaluate(level, &expr),
+                Request::Evaluate(level, expr, true) => self.console(level, &expr),
+                Request::SetVariable(r, name, value) => self.set_variable(r, &name, &value),
             }
         }
     }
@@ -384,6 +389,146 @@ impl<'a> Stopped<'a> {
                 ffi::LUA_TTHREAD => format!("thread #{}", lua_gcid(s, idx)),
                 t => text(ffi::lua_typename(s, t)),
             }
+        }
+    }
+
+    /// Typed in the Debug Console. What only reads (names, fields,
+    /// comparisons: [`expr`]) is read raw, so looking changes nothing;
+    /// anything else (calls, assignments, statements) runs as Lua.
+    unsafe fn console(&mut self, level: c_int, src: &str) -> Result<Value, String> {
+        if expr::parse(src).is_ok() {
+            return unsafe { self.evaluate(level, src) };
+        }
+        let s = self.state;
+        unsafe {
+            self.mark_modified();
+            let n = console::run(s, level, src)?;
+            let result = match n {
+                0 => (String::new(), String::new(), 0),
+                1 => self.take_top(),
+                _ => {
+                    // Several results: shown in a line, the first kept to expand.
+                    let rest: Vec<String> = (2..=n).map(|i| self.describe(-n - 1 + i)).collect();
+                    ffi::lua_pop(s, n - 1);
+                    let (first, ty, r) = self.take_top();
+                    (format!("{first}, {}", rest.join(", ")), ty, r)
+                }
+            };
+            Ok(json!({ "result": result.0, "type": result.1, "variablesReference": result.2 }))
+        }
+    }
+
+    /// The first change a VM gets from the debugger is logged: a sim run
+    /// changed by hand won't replay the same.
+    fn mark_modified(&self) {
+        if !self.vm.modified.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(vm = self.vm.name, "Lua debugger: code run from the Debug Console or a set variable changes this VM; a replay of this game won't play back the same");
+        }
+    }
+
+    /// `setVariable`: `name` in variables view `r` becomes the value of the
+    /// Lua expression `value`. Locals and upvalues are set in their frame;
+    /// table entries and globals raw.
+    unsafe fn set_variable(&mut self, r: usize, name: &str, value: &str) -> Result<Value, String> {
+        let s = self.state;
+        let (level, target) = match self.refs.get(r.wrapping_sub(1)).ok_or("unknown variables reference")? {
+            Ref::Locals(l) => (*l, Ref::Locals(*l)),
+            Ref::Upvalues(l) => (*l, Ref::Upvalues(*l)),
+            Ref::Env(l) => (*l, Ref::Env(*l)),
+            Ref::Value(i) => (0, Ref::Value(*i)),
+        };
+        let numbered = name.strip_prefix('[').and_then(|n| n.strip_suffix(']')).is_some_and(|n| n.parse::<f64>().is_ok());
+        if name.starts_with('[') && !numbered {
+            return Err(format!("can't set {name} (only names and numbered entries)"));
+        }
+        unsafe {
+            let base = ffi::lua_gettop(s);
+            self.mark_modified();
+            let n = console::run(s, level, &format!("({value})"))?;
+            // Exactly one value, on top.
+            if n == 0 {
+                ffi::lua_pushnil(s);
+            } else if n > 1 {
+                ffi::lua_pop(s, n - 1);
+            }
+            let v = ffi::lua_gettop(s);
+            let fail = |m: String| {
+                ffi::lua_settop(s, base);
+                Err(m)
+            };
+            ffi::lua_checkstack(s, 6);
+            let name_b = name.as_bytes();
+            match target {
+                Ref::Locals(level) => {
+                    let mut found = 0;
+                    for i in 1.. {
+                        let p = ffi::lua_getlocal(s, level, i);
+                        if p.is_null() {
+                            break;
+                        }
+                        ffi::lua_pop(s, 1);
+                        if CStr::from_ptr(p).to_bytes() == name_b {
+                            found = i;
+                        }
+                    }
+                    if found == 0 {
+                        return fail(format!("no local {name} here"));
+                    }
+                    ffi::lua_pushvalue(s, v);
+                    ffi::lua_setlocal(s, level, found);
+                }
+                Ref::Upvalues(level) => {
+                    if !self.info_push_function(level) {
+                        return fail("no function".into());
+                    }
+                    let f = ffi::lua_gettop(s);
+                    let mut found = 0;
+                    for i in 1.. {
+                        let p = ffi::lua_getupvalue(s, f, i);
+                        if p.is_null() {
+                            break;
+                        }
+                        ffi::lua_pop(s, 1);
+                        let pn = CStr::from_ptr(p).to_bytes();
+                        if pn == name_b || (pn.is_empty() && name == format!("upvalue {i}")) {
+                            found = i;
+                            break;
+                        }
+                    }
+                    if found == 0 {
+                        return fail(format!("no upvalue {name}"));
+                    }
+                    ffi::lua_pushvalue(s, v);
+                    ffi::lua_setupvalue(s, f, found);
+                }
+                Ref::Env(level) => {
+                    if !self.info_push_function(level) {
+                        return fail("no function".into());
+                    }
+                    ffi::lua_getfenv(s, -1);
+                    let t = ffi::lua_gettop(s);
+                    ffi::lua_pushlstring(s, name.as_ptr() as *const _, name.len());
+                    ffi::lua_pushvalue(s, v);
+                    ffi::lua_rawset(s, t);
+                }
+                Ref::Value(t) => {
+                    if ffi::lua_type(s, t) != ffi::LUA_TTABLE {
+                        return fail("only a table's entries can be set".into());
+                    }
+                    match name.strip_prefix('[').and_then(|n| n.strip_suffix(']')).and_then(|n| n.parse::<f64>().ok()) {
+                        Some(k) => ffi::lua_pushnumber(s, k),
+                        None => {
+                            ffi::lua_pushlstring(s, name.as_ptr() as *const _, name.len());
+                        }
+                    }
+                    ffi::lua_pushvalue(s, v);
+                    ffi::lua_rawset(s, t);
+                }
+            }
+            // The new value, as the view shows it.
+            ffi::lua_settop(s, v);
+            let (value, ty, r) = self.take_top();
+            Ok(json!({ "value": value, "type": ty, "variablesReference": r }))
         }
     }
 

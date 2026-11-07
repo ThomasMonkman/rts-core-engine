@@ -1,7 +1,8 @@
 //! The Lua debugger end to end (`engine::lua::debugger`): a DAP client over
 //! TCP sets breakpoints in a script and in its hook, and the VM stops there,
 //! shows its stack and locals, evaluates, steps over and out, stops at
-//! conditional breakpoints only where they hold, and carries on
+//! conditional breakpoints only where they hold, runs Lua typed into the
+//! console (assigning the stopped function's locals), and carries on
 //! to the right result. Its own test binary: `--lua-debug` changes how every
 //! script in the process compiles.
 
@@ -49,6 +50,13 @@ impl Client {
     }
 
     fn request(&mut self, command: &str, arguments: Value) -> Value {
+        let msg = self.try_request(command, arguments);
+        assert_eq!(msg["success"], true, "{command} failed: {msg}");
+        msg["body"].clone()
+    }
+
+    /// The whole response, failed or not.
+    fn try_request(&mut self, command: &str, arguments: Value) -> Value {
         let seq = self.seq;
         self.seq += 1;
         let body = json!({ "seq": seq, "type": "request", "command": command, "arguments": arguments }).to_string();
@@ -56,8 +64,7 @@ impl Client {
         loop {
             let msg = self.read();
             if msg["type"] == "response" && msg["request_seq"] == seq {
-                assert_eq!(msg["success"], true, "{command} failed: {msg}");
-                return msg["body"].clone();
+                return msg;
             }
             self.events.push(msg);
         }
@@ -83,9 +90,19 @@ impl Client {
         (f["name"].as_str().unwrap().into(), f["source"]["path"].as_str().unwrap_or("").into(), f["line"].as_i64().unwrap(), f["id"].as_i64().unwrap())
     }
 
-    fn locals(&mut self, frame: i64) -> Vec<(String, String)> {
+    /// Runs `code` in the Debug Console at `frame`: its result, or the error.
+    fn console(&mut self, frame: i64, code: &str) -> Result<String, String> {
+        let msg = self.try_request("evaluate", json!({ "expression": code, "frameId": frame, "context": "repl" }));
+        if msg["success"] == true { Ok(msg["body"]["result"].as_str().unwrap().into()) } else { Err(msg["message"].as_str().unwrap().into()) }
+    }
+
+    fn locals_ref(&mut self, frame: i64) -> Value {
         let scopes = self.request("scopes", json!({ "frameId": frame }));
-        let r = scopes["scopes"][0]["variablesReference"].clone();
+        scopes["scopes"][0]["variablesReference"].clone()
+    }
+
+    fn locals(&mut self, frame: i64) -> Vec<(String, String)> {
+        let r = self.locals_ref(frame);
         let vars = self.request("variables", json!({ "variablesReference": r }));
         vars["variables"].as_array().unwrap().iter().map(|v| (v["name"].as_str().unwrap().into(), v["value"].as_str().unwrap().into())).collect()
     }
@@ -105,7 +122,9 @@ for i = 1, 5 do
 end
 ";
 
-const HOOK: &str = "local h = 10
+// `h` from a call: a local set to a constant and never assigned is folded
+// into the code by Luau, so assigning it from the console wouldn't show.
+const HOOK: &str = "local h = tonumber('10')
 Result = Result + h
 ";
 
@@ -192,11 +211,35 @@ fn breakpoints_stack_variables_and_stepping() {
     assert_eq!(c.request("evaluate", json!({ "expression": "i", "frameId": frame }))["result"], "4");
     assert_eq!(c.request("evaluate", json!({ "expression": "i * 2 + t.n - #t", "frameId": frame }))["result"], "11");
     assert_eq!(c.request("evaluate", json!({ "expression": "t.name == \"x\" and not missing", "frameId": frame }))["result"], "true");
+
+    // The Debug Console runs Lua: calls, assignments (of the frame's locals,
+    // fields and globals), print; errors and endless loops come back as errors.
+    assert_eq!(c.console(frame, "i * 10"), Ok("40".into()));
+    assert_eq!(c.console(frame, "string.format('%d-%s', i, t.name)"), Ok("\"4-x\"".into()));
+    assert_eq!(c.console(frame, "t.n = 5"), Ok(String::new()));
+    assert_eq!(c.console(frame, "t.n"), Ok("5".into()));
+    assert_eq!(c.console(frame, "Answer = i + 38"), Ok(String::new()));
+    assert_eq!(c.console(frame, "Answer"), Ok("42".into()));
+    assert_eq!(c.console(frame, "local a, b = i, i + 1 return a, b"), Ok("4, 5".into()));
+    assert_eq!(c.console(frame, "print('hello', i)"), Ok(String::new()));
+    let out = c.event("output");
+    assert_eq!(out["output"], "hello\t4\n", "{out}");
+    assert!(c.console(frame, "error('boom')").unwrap_err().contains("boom"));
+    assert!(c.console(frame, "self:Nope(").is_err(), "a syntax error");
+    assert!(c.console(frame, "while true do end").unwrap_err().contains("stopped after"));
+    // Still stopped where it was, and still works.
+    assert_eq!(c.top(thread).2, 10);
+    assert_eq!(c.console(frame, "i"), Ok("4".into()));
     c.request("continue", json!({ "threadId": thread }));
     assert_eq!(c.event("stopped")["reason"], "breakpoint");
     let (_, _, line, frame) = c.top(thread);
     assert_eq!(line, 11);
     assert_eq!(c.request("evaluate", json!({ "expression": "sq", "frameId": frame }))["result"], "25");
+    // Setting a local from the variables view.
+    let r = c.locals_ref(frame);
+    let set = c.request("setVariable", json!({ "variablesReference": r, "name": "sq", "value": "7 * 7" }));
+    assert_eq!(set["value"], "49");
+    assert!(c.locals(frame).contains(&("sq".into(), "49".into())));
 
     // Continue: the breakpoint in the hook, shown in the hook's own file.
     c.request("continue", json!({ "threadId": thread }));
@@ -205,9 +248,11 @@ fn breakpoints_stack_variables_and_stepping() {
     assert_eq!(std::path::Path::new(&file), hook);
     assert_eq!(line, 2);
     assert!(c.locals(frame).contains(&("h".into(), "10".into())));
+    // Assigned from the console: the script goes on with the new value.
+    assert_eq!(c.console(frame, "h = 100"), Ok(String::new()));
 
     c.request("continue", json!({ "threadId": thread }));
-    assert_eq!(vm.join().unwrap(), 16);
+    assert_eq!(vm.join().unwrap(), 106);
     c.request("disconnect", json!({}));
     std::fs::remove_dir_all(dir).ok();
 }

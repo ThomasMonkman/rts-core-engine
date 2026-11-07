@@ -83,7 +83,7 @@ impl Debugger {
                         "supportsConditionalBreakpoints": true,
                         "supportsHitConditionalBreakpoints": true,
                         "supportsEvaluateForHovers": true,
-                        "supportsSetVariable": false,
+                        "supportsSetVariable": true,
                         "supportsStepBack": false,
                     })),
                 );
@@ -111,7 +111,29 @@ impl Debugger {
                 let (vm, i) = split_id(args["variablesReference"].as_i64().unwrap_or(0));
                 self.ask(vm, Request::Variables(i as usize))
             }
-            "evaluate" => self.evaluate(args),
+            "evaluate" => {
+                let repl = args["context"] == "repl";
+                let r = self.evaluate(args);
+                let changed = repl && r.is_ok();
+                self.respond(req, r);
+                // Console code may have changed anything shown.
+                if changed {
+                    self.event("invalidated", json!({ "areas": ["variables"] }));
+                }
+                return true;
+            }
+            "setVariable" => {
+                let (vm, i) = split_id(args["variablesReference"].as_i64().unwrap_or(0));
+                let name = args["name"].as_str().unwrap_or("").to_string();
+                let value = args["value"].as_str().unwrap_or("").to_string();
+                let r = self.ask(vm, Request::SetVariable(i as usize, name, value));
+                let ok = r.is_ok();
+                self.respond(req, r);
+                if ok {
+                    self.event("invalidated", json!({ "areas": ["variables"] }));
+                }
+                return true;
+            }
             "continue" => self.resume(args, None).map(|_| json!({ "allThreadsContinued": false })),
             "next" => self.resume(args, Some(StepKind::Over)),
             "stepIn" => self.resume(args, Some(StepKind::In)),
@@ -206,7 +228,7 @@ impl Debugger {
                 (vm.id, 0)
             }
         };
-        self.ask(vm, Request::Evaluate(level as i32, expr))
+        self.ask(vm, Request::Evaluate(level as i32, expr, args["context"] == "repl"))
     }
 
     fn resume(&self, args: &Value, step: Option<StepKind>) -> Result<Value, String> {
