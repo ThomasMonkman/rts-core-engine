@@ -1010,9 +1010,9 @@ fn seabed_target_ok((above, below): (bool, bool), e: &crate::engine::sim::entity
     }
 }
 
-/// A search candidate's rank: priority class, whether it isn't the current
-/// target, score, id (the least wins).
-type SearchKey = (usize, bool, Fx, EntityId);
+/// A search candidate's rank: priority class, range code, whether it isn't
+/// the current target, score, id (the least wins).
+type SearchKey = (usize, Reach, bool, Fx, EntityId);
 
 /// What a candidate beyond the weapon's range scores worse by (added to an
 /// angle score, times a distance one; MohoEngine.dll 0x1071c1f0).
@@ -1335,8 +1335,15 @@ fn advance_target(
     }
 
     // Search (moho's, MohoEngine.dll 0x101c4ca0): the first priority class
-    // with a candidate wins; within it the current target, else the best
-    // score, ties to the lowest id. Turreted and body-slaved weapons score
+    // with a candidate wins; within it the best range code (in range, too
+    // close, outside the arc, beyond `MaxRadius`), then the current target,
+    // else the best score, ties to the lowest id. Moho's loop
+    // (0x101c5185..0x101c5236) is order-dependent: a candidate whose range
+    // code is worse than the best so far never replaces it, whatever its
+    // priority, and at equal priority the current target, once best, isn't
+    // replaced. Ranking the range code before the current target is the
+    // deterministic reading: a tracked target out of range gives way to one
+    // in range (as moho's does when that one comes first). Turreted and body-slaved weapons score
     // by the angle off the barrel as it points now (the target nearest its
     // line), others by distance; a candidate out of range scores 4 worse
     // (x4 on distance), unless the weapon starts attacks of its own.
@@ -1402,11 +1409,11 @@ fn advance_target(
                 Some(WeaponTarget::Entity(t)) => Some(t),
                 _ => None,
             };
-            // A candidate's key (priority class, not the current target,
-            // score, id; the least wins) when it's in the search radius, a
-            // class the weapon takes and a range it accepts, and its key is
-            // less than `beat` (the penalty only adds, so the unpenalised
-            // key bounds it: one that can't win skips the range test).
+            // A candidate's key ([`SearchKey`]; the least wins) when it's in
+            // the search radius, a class the weapon takes and a range it
+            // accepts, and its key is less than `beat` (the in-range,
+            // unpenalised key of its class bounds it: one that can't win
+            // skips the range test).
             let key = |id: EntityId, beat: Option<SearchKey>| -> Option<(SearchKey, &crate::engine::sim::entity::Entity)> {
                 let e = world.get(id)?;
                 let p = e.position();
@@ -1418,6 +1425,15 @@ fn advance_target(
                 if class == usize::MAX {
                     return None;
                 }
+                // A candidate the army has never seen (a radar or sonar
+                // contact only) has no priority class: it ranks below every
+                // identified one (moho counts the class only when the blip's
+                // `IsSeenEver` holds, MohoEngine.dll 0x101c5152 ->
+                // 0x10169500, 0x101c51c6).
+                let identified = || match (intel, army) {
+                    (Some(g), Some(a)) => g.ever_seen(a, id) || g.detect(a, e).seen,
+                    _ => true,
+                };
                 let score = match barrel {
                     // dot(unit -> candidate reversed, barrel): -1 dead ahead.
                     Some(b) => {
@@ -1427,7 +1443,7 @@ fn advance_target(
                     }
                     None => d,
                 };
-                let bound = (class, current != Some(id), score, id);
+                let bound = (class, Reach::InRange, current != Some(id), score, id);
                 if beat.is_some_and(|b| bound >= b) {
                     return None;
                 }
@@ -1435,12 +1451,13 @@ fn advance_target(
                 if !accepts(range) {
                     return None;
                 }
+                let class = if identified() { class } else { w.priorities.len() };
                 let score = match (range != Reach::InRange && penalised, barrel) {
                     (false, _) => score,
                     (true, Some(_)) => score + SEARCH_PENALTY,
                     (true, None) => score.saturating_mul(SEARCH_PENALTY),
                 };
-                let k = (class, current != Some(id), score, id);
+                let k = (class, range, current != Some(id), score, id);
                 beat.is_none_or(|b| k < b).then_some((k, e))
             };
             let passes = |id: EntityId, e: &crate::engine::sim::entity::Entity| !ignored.iter().any(|&(i, _)| i == id) && targetable(e);
