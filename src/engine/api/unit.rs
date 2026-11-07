@@ -136,8 +136,8 @@ fn motion_of(bp: &LuaTable, motion_type: &str) -> LuaResult<(crate::engine::sim:
         }
     };
     let mut max_speed = fx(get("MaxSpeed")?);
-    // `RUnitBlueprintPhysics` ctor (0x1010db00): TurnRate 0, TurnRadius 5,
-    // RotateOnSpotThreshold 0.5 unless set.
+    // `RUnitBlueprintPhysics` ctor (0x1010db00): TurnRate 0 and TurnRadius
+    // 5 unless set.
     let mut turn = get("TurnRate")?.unwrap_or(0.0);
     let (mut winged, mut min_speed, mut lift, mut break_trigger, mut break_distance) = (false, Fx::ZERO, Fx::ZERO, Fx::ZERO, Fx::ZERO);
     let mut air_params = AirParams::default();
@@ -260,10 +260,12 @@ fn motion_of(bp: &LuaTable, motion_type: &str) -> LuaResult<(crate::engine::sim:
         rotate_on_spot,
         // Raw blueprint values, as the path spline compares them (0x101a2256).
         corner_slowdown: surface && fx(Some(get("TurnRadius")?.unwrap_or(5.0))) > fx(Some(get("TurnRate")?.unwrap_or(0.0))),
-        // Unset: 0.5 rad (the `RUnitBlueprintPhysics` ctor, 0x1010dbbd;
-        // copied raw by the motion setup, 0x1027ace6). A zero threshold
-        // would pivot forever in ours (how moho compares it is untraced).
-        rotate_threshold: if rotate_on_spot { fx(Some(get("RotateOnSpotThreshold")?.unwrap_or(0.5))).max(Fx::from_num(0.01)) } else { Fx::ZERO },
+        // Unset: 0.1 rad (inferred). The physics constructor stores 0.5
+        // (0x1010dbbd), but the real game's Mantis still pivots 16.6
+        // degrees off course (dev/probes probe_motion), so that isn't what
+        // the motion compares; untraced. A zero threshold would pivot
+        // forever.
+        rotate_threshold: if rotate_on_spot { fx(Some(get("RotateOnSpotThreshold")?.unwrap_or(0.1))).max(Fx::from_num(0.01)) } else { Fx::ZERO },
         facing_rate: surface_fx("TurnFacingRate")? * Fx::PI / Fx::from_num(180),
         layer_change_offset: surface_fx("LayerChangeOffsetHeight")?,
         shallows_depth: if motion_type == "RULEUMT_AmphibiousFloating" { (surface_fx("LayerChangeOffsetHeight")? * 3).min(Fx::ZERO) } else { Fx::ZERO },
