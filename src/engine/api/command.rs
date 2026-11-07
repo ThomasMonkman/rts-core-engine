@@ -637,7 +637,6 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         ("IssueNuke", K::Nuke),
         ("IssueTactical", K::Tactical),
         ("IssueTeleport", K::Teleport),
-        ("IssueTeleportToBeacon", K::Teleport),
         ("IssueOverCharge", K::OverCharge),
         ("IssueSacrifice", K::Sacrifice),
         ("IssueTransportLoad", K::TransportLoadUnits),
@@ -648,6 +647,25 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     ] {
         targeted(lua, name, kind)?;
     }
+    lua_fn!(lua, global,
+        /// Not a teleport: moho issues the transports among `units`
+        /// (`RULEUCC_Transport`) an unload order (type 24) on `beacon`
+        /// (MohoEngine.dll 0x102d2200..0x102d2358, `push 0x18` at
+        /// 0x102d2306). Ours unloads at the beacon's position (how moho's
+        /// unload treats an entity target isn't traced). FAF never calls it.
+        IssueTeleportToBeacon = |lua, (units, beacon): (shapes::Units, shapes::OrderTarget)| {
+            let mut units = capable(lua, "IssueTeleportToBeacon", units_of(lua, &units)?);
+            let target = match target_of(&beacon)? {
+                CommandTarget::Entity(b) => entity::world(lua).get(b).filter(|e| !e.destroyed).map_or(CommandTarget::None, |e| CommandTarget::Ground(e.position())),
+                t => t,
+            };
+            if target == CommandTarget::None {
+                units.clear();
+            }
+            let all = sorted_unique(&units);
+            units.retain(|&u| !refuses(lua, u, K::TransportUnloadUnits, target, false, &all));
+            Ok(issue(lua, &units, K::TransportUnloadUnits, target, None, 0))
+        })?;
     for (name, kind) in [
         ("IssueDive", K::Dive),
         ("IssuePause", K::Pause),
