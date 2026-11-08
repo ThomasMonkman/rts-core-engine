@@ -127,6 +127,7 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
     crate::engine::api::blip::intel_callbacks(lua)?;
     // Last in the beat, as moho's `Sim::AdvanceBeat` (0x103194a1): the
     // `OnDestroy` of everything destroyed this tick, in order.
+    enter(Phase::Destroy);
     crate::engine::api::entity::run_destroy_queue(lua)?;
     enter(Phase::Sync);
     sync_beat(lua)?;

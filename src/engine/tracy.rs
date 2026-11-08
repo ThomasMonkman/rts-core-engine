@@ -110,5 +110,6 @@ pub fn stage_span(phase: crate::engine::watchdog::Phase) -> tracing::Span {
         P::Intel => tracing::trace_span!("Intel"),
         P::Input => tracing::trace_span!("Input"),
         P::LuaGc => tracing::trace_span!("LuaGc"),
+        P::Destroy => tracing::trace_span!("Destroy"),
     }
 }
