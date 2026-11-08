@@ -1,6 +1,7 @@
 //! Command-line options (`--help` lists them). See docs/guides/running.md.
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
@@ -317,6 +318,67 @@ pub struct Cli {
     /// case's row.
     #[arg(long, value_name = "N[@B]", value_parser = parse_audit_key)]
     pub audit_test: Option<String>,
+
+    /// The game's own `/switch` arguments that had no meaning here and
+    /// were dropped (see [`moho_args`]), logged at startup.
+    #[arg(skip)]
+    pub ignored_moho_args: Vec<String>,
+}
+
+/// Translates the real game's command line (`SupremeCommander.exe /log
+/// <file> /init <file>`, as LOUD's launcher and shortcuts run it) into
+/// ours, so this program can stand in for `bin/SupremeCommander.exe`:
+/// `/init` becomes `--fa`, `/log` becomes `--log`. Relative paths are read
+/// from the program's folder: LOUD's launcher starts the game from the
+/// Forged Alliance folder with `/init "..\LOUD\bin\LoudDataPath.lua"`,
+/// which only names the file from `bin/`. Any other `/switch` (one word
+/// after the slash, so `/maps/x/x_scenario.lua` stays a value) is dropped
+/// with the values after it, as moho ignores switches it doesn't read.
+/// Returns the new arguments and the dropped ones.
+pub fn moho_args(args: Vec<OsString>, exe_dir: Option<&Path>) -> (Vec<OsString>, Vec<String>) {
+    let is_switch = |a: &OsString| {
+        let a = a.to_string_lossy();
+        a.strip_prefix('/').is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+    };
+    let is_value = |a: &OsString| !is_switch(a) && !a.to_string_lossy().starts_with('-');
+    let resolve = |p: &OsString| -> OsString {
+        let p = Path::new(p);
+        match exe_dir {
+            Some(dir) if p.is_relative() => dir.join(p).into_os_string(),
+            _ => p.as_os_str().to_owned(),
+        }
+    };
+    let mut out = Vec::with_capacity(args.len());
+    let mut ignored = Vec::new();
+    let mut it = args.into_iter().peekable();
+    // The program's own path.
+    out.extend(it.next());
+    while let Some(arg) = it.next() {
+        if !is_switch(&arg) {
+            out.push(arg);
+            continue;
+        }
+        let name = arg.to_string_lossy().to_ascii_lowercase();
+        let ours = match name.as_str() {
+            "/init" => Some("--fa"),
+            "/log" => Some("--log"),
+            _ => None,
+        };
+        match (ours, it.next_if(is_value)) {
+            (Some(flag), Some(value)) => {
+                out.push(flag.into());
+                out.push(resolve(&value));
+            }
+            (_, value) => {
+                ignored.push(arg.to_string_lossy().into_owned());
+                ignored.extend(value.map(|v| v.to_string_lossy().into_owned()));
+                while let Some(v) = it.next_if(is_value) {
+                    ignored.push(v.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    (out, ignored)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -390,7 +452,11 @@ impl Cli {
 
     /// Parses the process arguments (exits on `--help` or an error).
     pub fn parse_args() -> Self {
-        Self::from_matches(&Self::command().get_matches()).unwrap_or_else(|e| e.exit())
+        let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf));
+        let (args, ignored) = moho_args(std::env::args_os().collect(), exe_dir.as_deref());
+        let mut cli = Self::from_matches(&Self::command().get_matches_from(args)).unwrap_or_else(|e| e.exit());
+        cli.ignored_moho_args = ignored;
+        cli
     }
 
     #[cfg(test)]
@@ -538,6 +604,25 @@ mod tests {
         assert!(!menu(&["--player", "1"]));
         assert!(!menu(&["--seed", "0"]), "a session option counts even at its default value");
         assert!(!menu(&["--auto-teams", "north-south"]));
+    }
+
+    /// LOUD's launcher command line: `/init` and `/log` map to ours, read
+    /// from the program's folder; other switches drop with their values;
+    /// our own flags and VFS paths pass through.
+    #[test]
+    fn translates_the_real_games_command_line() {
+        let args = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
+        let bin = Path::new("C:/FA/bin");
+        let (out, ignored) = moho_args(args(&["exe", "/log", "..\\LOUD\\bin\\LOUD.log", "/init", "..\\LOUD\\bin\\LoudDataPath.lua", "/nobugreport", "/gpgnet", "127.0.0.1:1", "--map", "/maps/x/x_scenario.lua"]), Some(bin));
+        assert_eq!(
+            out,
+            args(&["exe", "--log"]).into_iter().chain([bin.join("..\\LOUD\\bin\\LOUD.log").into_os_string(), "--fa".into(), bin.join("..\\LOUD\\bin\\LoudDataPath.lua").into_os_string(), "--map".into(), "/maps/x/x_scenario.lua".into()]).collect::<Vec<_>>()
+        );
+        assert_eq!(ignored, ["/nobugreport", "/gpgnet", "127.0.0.1:1"]);
+        let abs = if cfg!(windows) { "C:\\x\\init.lua" } else { "/x/init.lua" };
+        assert_eq!(moho_args(args(&["exe", "/INIT", abs]), Some(bin)).0, args(&["exe", "--fa", abs]));
+        let c = Cli::try_parse_from(moho_args(args(&["exe", "/init", "a.lua", "/log", "b.log"]), Some(bin)).0).unwrap();
+        assert_eq!((c.fa, c.log), (Some(bin.join("a.lua")), Some(bin.join("b.log"))));
     }
 
     #[test]
