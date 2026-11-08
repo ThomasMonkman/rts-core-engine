@@ -21,6 +21,7 @@ ForkThread(function()
     -- Hold fire: point blank, the tank would kill the engineer first.
     tank:SetFireState(1)
     WaitTicks(2)
+    local energy = brain:GetEconomyStored('ENERGY')
     IssueCapture({eng}, tank)
     WaitTicks(20)
     check(eng:IsUnitState('Capturing'), 'capturing once in range')
@@ -30,6 +31,10 @@ ForkThread(function()
     end
     WaitTicks(2)
     check(tank:BeenDestroyed(), 'the enemy tank was transferred (old unit gone)')
+    -- Moho's capture task draws the target's capture energy (FAF's
+    -- `GetBlueprintCaptureCost`: its BuildCostEnergy, 266) over the capture.
+    local spent = energy - brain:GetEconomyStored('ENERGY')
+    check(math.abs(spent - 266) < 1, 'the capture cost its energy: ' .. tostring(spent))
     check(table.getn(brain:GetListOfUnits(categories.uel0201, false) or {}) == 1, 'army 3 now owns a tank')
     done()
 end)

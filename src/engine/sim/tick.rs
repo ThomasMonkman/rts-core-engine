@@ -1,10 +1,11 @@
 //! The sim tick: one fixed 100 ms step of the simulation (moho's sim beat).
 //!
 //! Order per tick (docs/architecture/sim.md, the stages in [`step`]): player input, economy,
-//! threat, order resolution, movement (and attachments, animators), intel, construction and the
-//! other work orders, reclaim and capture, weapons and beams, projectiles + `OnImpact`, then the Lua
-//! threads due this tick, the sync beat, compaction, the Lua collection at fixed ticks, and the
-//! snapshot for the renderer. The tick number goes up before any stage runs
+//! threat, order resolution, construction and the other work orders, reclaim and capture, weapons
+//! and beams, the Lua threads due this tick, then (moho's motion stage) movement with attachments
+//! and animators, projectiles + `OnImpact`, intel, then the `OnDestroy` of what was destroyed this
+//! tick, the sync beat, compaction, the Lua collection at fixed ticks, and the snapshot for the
+//! renderer. The tick number goes up before any stage runs
 //! (`Scheduler::begin_tick`), so every stage of beat `n` reads `GetGameTick() == n`. Nothing here
 //! reads wall clock time; pacing to real time is the caller's job.
 
@@ -69,7 +70,35 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
     enter(Phase::Orders);
     crate::engine::api::orders::tick(lua)?;
     crate::engine::api::transport::surface_tasks(lua);
+    enter(Phase::Construction);
+    crate::engine::api::construction::tick(lua)?;
+    crate::engine::api::manipulator::builder_arms_tick(lua);
+    crate::engine::api::manipulator::collision_detectors_tick(lua)?;
+    crate::engine::api::silo::tick(lua)?;
+    crate::engine::api::teleport::tick(lua)?;
+    crate::engine::api::script_task::tick(lua)?;
+    crate::engine::api::transport::tick(lua)?;
+    enter(Phase::Reclaim);
+    crate::engine::api::reclaim::tick(lua)?;
+    crate::engine::api::capture::tick(lua)?;
+    crate::engine::api::sacrifice::tick(lua)?;
+    crate::engine::api::special_action::tick(lua)?;
+    enter(Phase::Weapons);
+    crate::engine::api::overcharge::tick(lua)?;
+    crate::engine::api::weapon::tick(lua)?;
+    crate::engine::api::beam::tick(lua)?;
+    enter(Phase::LuaThreads);
+    crate::engine::api::entity::end_emptied_platoons(lua)?;
+    crate::engine::api::threads::run_due(lua)?;
+    // Moho's motion stage runs after the script stage (`Sim::AdvanceBeat`
+    // 0x1031911e..0x10319134: command dispatch +0x968, script +0x954, motion
+    // +0x940): every entity's motion task (`Entity::StandardInit` 0x1025cee3
+    // puts it in the motion stage) moves units, flies projectiles and runs
+    // their impacts, so a thread forked from `OnImpact` or a death first runs
+    // next tick. Then intel from where everything ended up (the recon
+    // refresh, 0x1031913b).
     enter(Phase::Movement);
+    crate::engine::api::orders::hold_new(lua);
     crate::engine::api::movement::tick(lua)?;
     crate::engine::api::movement::fuel_tick(lua)?;
     // Attached entities (cargo, shields, effect entities) follow their parent.
@@ -90,38 +119,20 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
     if let (Some(mut w), Some(mut s)) = (lua.app_data_mut::<crate::engine::sim::entity::EntityWorld>(), lua.app_data_mut::<crate::engine::sim::scroller::Scrolled>()) {
         crate::engine::sim::scroller::tick(&mut w, &mut s);
     }
-    // Then intel coverage from where everything ended up.
-    enter(Phase::Intel);
-    intel(lua);
-    crate::engine::api::blip::intel_callbacks(lua)?;
-    enter(Phase::Construction);
-    crate::engine::api::construction::tick(lua)?;
-    crate::engine::api::manipulator::builder_arms_tick(lua);
-    crate::engine::api::manipulator::collision_detectors_tick(lua)?;
-    crate::engine::api::silo::tick(lua)?;
-    crate::engine::api::teleport::tick(lua)?;
-    crate::engine::api::script_task::tick(lua)?;
-    crate::engine::api::transport::tick(lua)?;
-    enter(Phase::Reclaim);
-    crate::engine::api::reclaim::tick(lua)?;
-    crate::engine::api::capture::tick(lua)?;
-    crate::engine::api::sacrifice::tick(lua)?;
-    crate::engine::api::special_action::tick(lua)?;
-    enter(Phase::Weapons);
-    crate::engine::api::overcharge::tick(lua)?;
-    crate::engine::api::weapon::tick(lua)?;
-    crate::engine::api::beam::tick(lua)?;
     enter(Phase::Projectiles);
     crate::engine::api::projectile::tick(lua)?;
     crate::engine::api::unit::health_changes_tick(lua)?;
-    enter(Phase::LuaThreads);
-    crate::engine::api::entity::end_emptied_platoons(lua)?;
-    crate::engine::api::threads::run_due(lua)?;
+    enter(Phase::Intel);
+    intel(lua);
+    crate::engine::api::blip::intel_callbacks(lua)?;
+    // Last in the beat, as moho's `Sim::AdvanceBeat` (0x103194a1): the
+    // `OnDestroy` of everything destroyed this tick, in order.
+    crate::engine::api::entity::run_destroy_queue(lua)?;
     enter(Phase::Sync);
     sync_beat(lua)?;
     // An `EndGame` this tick: the game is over from the next tick on.
     crate::engine::api::sim_time::latch(lua);
-    // Last: entities destroyed this tick are gone from the next tick on
+    // Last: entities freed this tick are gone from the next tick on
     // (effects attached to them end first, while their final transform
     // is still known).
     enter(Phase::Compact);

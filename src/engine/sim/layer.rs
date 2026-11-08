@@ -106,8 +106,10 @@ impl Layer {
     }
 
     /// Layer of a unit spawned with blueprint `Physics.MotionType`, standing
-    /// over water (`wet`) or dry land. Inferred from the motion types' names
-    /// and FAF's layer handling, not verified against the binary.
+    /// over water (`wet`) or dry land. Moho's spawn layer (MohoEngine.dll
+    /// 0x10214aa0, in the Confirmed table) takes Sub first over water when
+    /// the footprint's caps include it (not for experimentals): this returns
+    /// Water for a `SurfacingSub` and `api::unit` moves it under.
     /// `build_caps`: the blueprint's `Physics.BuildOnLayerCaps`
     /// ([`LayerMask::build_caps`]), which places a structure on water.
     pub fn initial(motion_type: &str, wet: bool, build_caps: LayerMask) -> Self {

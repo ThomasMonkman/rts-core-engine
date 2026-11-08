@@ -54,7 +54,9 @@ impl MotionKind {
 
     pub fn parse(s: &str) -> Self {
         match s {
-            "RULEUMT_Land" => MotionKind::Land,
+            // moho treats Biped as Land (its footprint caps, 0x1010e540
+            // enum value 4); no FAF unit uses it.
+            "RULEUMT_Land" | "RULEUMT_Biped" => MotionKind::Land,
             "RULEUMT_Water" | "RULEUMT_SurfacingSub" => MotionKind::Water,
             "RULEUMT_Hover" | "RULEUMT_AmphibiousFloating" => MotionKind::Hover,
             "RULEUMT_Amphibious" => MotionKind::Amphibious,
@@ -98,13 +100,23 @@ pub struct MotionParams {
     /// Surface units (`Physics.*`; see `drive`): reverse top speed
     /// (`MaxSpeedReverse`) and how far back a target may be to be reached
     /// in reverse (`BackUpDistance`); lateral acceleration cap
-    /// (`MaxSteerForce`, 0 = none); stop and pivot past `rotate_threshold`
+    /// (`MaxSteerForce`; 0 = the acceleration, moho's motion setup
+    /// 0x1027ac9b); stop and pivot past `rotate_threshold`
     /// radians off course (`RotateOnSpot`, `RotateOnSpotThreshold`); facing
     /// turn rate when it's decoupled from the course (`TurnFacingRate`,
     /// rad/s; 0 = faces its course).
     pub reverse_speed: Fx,
     pub backup_distance: Fx,
     pub steer_force: Fx,
+    /// Slows off course, by (1 + max(cos, -0.5)) / 2: moho's path spline
+    /// flags it when the blueprint's raw `TurnRadius` > `TurnRate`
+    /// (0x101a2256, 0x101a29a6; FAF's Tempest and Atlantis), though FAF's
+    /// tanks slow this way too (see `corner_slow`'s caller).
+    pub corner_slowdown: bool,
+    /// `RULEUMT_AmphibiousFloating` units with a negative
+    /// `LayerChangeOffsetHeight`: 3 x that offset (else 0), the depth
+    /// within which they slow in the shallows ([`shallows_factor`]).
+    pub shallows_depth: Fx,
     pub rotate_on_spot: bool,
     pub rotate_threshold: Fx,
     pub facing_rate: Fx,
@@ -820,7 +832,7 @@ struct Drive {
     reverse: bool,
     /// Stopped to rotate on the spot.
     pivot: bool,
-    /// Within 45 degrees of the way it's going (else it creeps at 1/4).
+    /// Within 45 degrees of the way it's going.
     aligned: bool,
     /// Heading error left to turn (radians; reversing: from the tail).
     err: Fx,
@@ -839,9 +851,11 @@ struct Drive {
 ///   0x101a25cd), then capped by `MaxSteerForce` (a lateral acceleration:
 ///   rate <= force / speed), so units arc wide when fast and turn tight
 ///   when slow;
-/// - a target behind it (> 90 degrees off) within `BackUpDistance` is
-///   reached in reverse, tail first, at up to `MaxSpeedReverse` (with a
-///   little hysteresis so it doesn't flip);
+/// - a target more than 120 degrees off its nose (cos < -0.5) and nearer
+///   than `BackUpDistance` is reached in reverse, tail first, at up to
+///   `MaxSpeedReverse`; moho's path spline gates it only on
+///   `MaxSpeedReverse > 0` and not `RotateOnSpot` (0x101a231d..0x101a2407),
+///   so hovercraft with a `TurnFacingRate` back up too;
 /// - `RotateOnSpot` units more than `RotateOnSpotThreshold` off course stop
 ///   and pivot first;
 /// - with a `TurnFacingRate` the course turns at the turn rate and the
@@ -864,15 +878,10 @@ fn drive(p: &MotionParams, state: MotionState, heading: Fx, turn: Fx, radius: Fx
     if p.steer_force > Fx::ZERO && rate.saturating_mul(state.speed.abs()) > p.steer_force {
         rate = p.steer_force / state.speed.abs();
     }
-    let reversing = state.speed < Fx::ZERO;
-    let reverse = !decoupled
-        && p.reverse_speed > Fx::ZERO
-        && p.backup_distance > Fx::ZERO
-        && if reversing {
-            err.abs() > Fx::FRAC_PI_2 - Fx::PI / 9 && remaining <= p.backup_distance * 5 / 4
-        } else {
-            err.abs() > Fx::FRAC_PI_2 && remaining <= p.backup_distance
-        };
+    let reverse = p.reverse_speed > Fx::ZERO
+        && !p.rotate_on_spot
+        && remaining < p.backup_distance
+        && err.abs() > Fx::PI * 2 / 3;
     // Backing up points the tail at the target.
     let e = if reverse { wrap(err - Fx::PI) } else { err };
     let pivot = p.rotate_on_spot && !reverse && e.abs() > p.rotate_threshold;
@@ -886,6 +895,27 @@ fn drive(p: &MotionParams, state: MotionState, heading: Fx, turn: Fx, radius: Fx
         (wrap(heading + turned_by), None)
     };
     Drive { heading: heading2, course: course2, turned: heading2 != heading, reverse, pivot, aligned: e.abs() <= Fx::FRAC_PI_4, err: e, rate: turn, radius }
+}
+
+/// The speed a `corner_slowdown` unit wants `err` off course: x (1 +
+/// max(cos, -0.5)) / 2, so all of it ahead, half at 90 degrees, a quarter
+/// past 120 (moho's path spline, 0x101a29a6; `err` is from the tail when
+/// reversing, as moho negates the cos). FAF's game slows other units the
+/// same way; ours still cuts them to a quarter (see the caller).
+fn corner_slow(want: Fx, err: Fx) -> Fx {
+    let (_, c) = crate::engine::sim::math::sin_cos(err);
+    want.saturating_mul(Fx::ONE + c.max(-Fx::ONE / 2)) / 2
+}
+
+/// Speed factor of a floating amphibious unit (the Salem) in the shallows:
+/// with the ground `d` under the water surface (negative) and `depth` = 3 x
+/// its `LayerChangeOffsetHeight`, max(d / depth, 0.5) between the two, else
+/// 1 (moho's path spline, 0x101a24a5..0x101a255a: `GetElevation` minus
+/// `GetWaterElevation`, constant 3.0), so it's slowest at the waterline.
+pub fn shallows_factor(depth: Fx, terrain: &Terrain, x: Fx, z: Fx) -> Fx {
+    let Some(water) = terrain.water_surface else { return Fx::ONE };
+    let d = terrain.height_at(x, z) - water;
+    if d > depth && d < Fx::ZERO { (d / depth).max(Fx::ONE / 2) } else { Fx::ONE }
 }
 
 /// Fastest speed at which a unit turning at `rate` (rad/s) can still reach a
@@ -1188,12 +1218,18 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     }
     let mult = data.motion;
     let mut max_speed = p.max_speed.saturating_mul(mult.speed);
+    if let Some(t) = env.terrain.filter(|_| p.shallows_depth < Fx::ZERO) {
+        let pos = e.position();
+        max_speed = max_speed.saturating_mul(shallows_factor(p.shallows_depth, t, pos.x, pos.z));
+    }
     let engaged = env.engaged.is_some_and(|set| set.contains(&unit));
     // A travelling formation sets the pace (members may go faster to catch
     // up with their slot); one gathering at the target moves at its slowest
     // unit's speed.
-    // The unit's current order, looked up once (a double map lookup).
-    let cmd = commands.current(unit);
+    // The unit's current order, looked up once (a double map lookup); one
+    // the dispatcher hasn't started yet (the unit is held:
+    // `api::orders::held`) isn't acted on.
+    let cmd = commands.dispatched(unit);
     // An aircraft's move with another move queued behind it flies through
     // its point (moho's speed-through: D at top speed outright,
     // `CalcMoveAir` 0x1029d6d0): no slowing onto it, and it's done a turn's
@@ -1772,7 +1808,13 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
                     };
                 } else if d.pivot {
                     want = Fx::ZERO;
+                } else if p.corner_slowdown {
+                    want = corner_slow(want, d.err);
                 } else if !d.aligned {
+                    // A stand-in: FAF's tanks slow by `corner_slow` too
+                    // (probe_motion), but with it ours arcs wide without
+                    // the spline's path (`occupy_rects`, `assist_spread`,
+                    // `trees`, `land_bodies` scenarios).
                     want /= 4;
                 }
                 if let Some(v) = squad_pace.filter(|_| !winged && !d.reverse) {
@@ -3274,15 +3316,17 @@ pub fn apply(world: &mut EntityWorld, commands: &mut Commands, moved: &[Moved], 
             static RUN: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("MakingAttackRun").expect("state"));
             u.states.set(*RUN, matches!(m.state.combat, 1 | 2));
         }
-        if m.arrived {
+        if m.arrived && commands.dispatched(m.unit).is_some() {
             use crate::engine::sim::command::CommandKind as K;
             let patrol = commands.current(m.unit).filter(|c| matches!(c.kind, K::Patrol | K::FormPatrol)).map(|c| (c.kind, c.target));
             match patrol {
                 Some((kind, target)) => {
-                    // Patrols loop: with other patrol points queued, this one
-                    // goes to the back; alone, it's followed by a leg back to
-                    // where the unit started.
-                    let others = commands.queue(m.unit).skip(1).any(|c| matches!(c.kind, K::Patrol | K::FormPatrol));
+                    // Patrols loop: with anything queued after it, this one
+                    // goes to the back (moho's dispatcher, MohoEngine.dll
+                    // 0x101893d7..0x1018952b: any next command, of any
+                    // kind); alone, it's followed by a leg back to where the
+                    // unit started.
+                    let others = commands.queue(m.unit).nth(1).is_some();
                     let origin = world.get(m.unit).and_then(|e| e.unit.as_deref()).and_then(|u| u.patrol_origin);
                     if others {
                         commands.requeue_front(m.unit);
@@ -4191,6 +4235,49 @@ mod tests {
         let heading = facing(w.get(ship).unwrap()).to_num::<f64>();
         assert!((heading.abs() - std::f64::consts::FRAC_PI_2).abs() < 0.03, "broadside on: heading {heading}");
         assert_eq!(w.get(ship).unwrap().position(), FxVec3::default(), "turned on the spot");
+    }
+
+    /// Moho's spline (0x101a231d..0x101a2407): reverse past 120 degrees off
+    /// (cos < -0.5), nearer than `BackUpDistance`, hovercraft included.
+    #[test]
+    fn reverse_past_120_degrees_hovercraft_too() {
+        let p = MotionParams { kind: MotionKind::Land, max_speed: Fx::from_num(3), turn_rate: Fx::PI, reverse_speed: Fx::from_num(2), backup_distance: Fx::from_num(6), ..Default::default() };
+        // Facing +z (heading 0): the point `deg` round towards +x, 4 away.
+        let at = |deg: f64| match deg as u32 {
+            100 => FxVec3::from_f64(3.939, 0.0, -0.695),
+            130 => FxVec3::from_f64(3.064, 0.0, -2.571),
+            _ => FxVec3::from_f64(0.695, 0.0, -3.939),
+        };
+        let reverse = |p: &MotionParams, deg: f64, remaining: f64| drive(p, MotionState::default(), Fx::ZERO, p.turn_rate, Fx::ZERO, FxVec3::default(), at(deg), Fx::from_num(remaining), false).reverse;
+        assert!(!reverse(&p, 100.0, 4.0), "100 degrees: turns");
+        assert!(reverse(&p, 130.0, 4.0), "130 degrees: backs up");
+        assert!(!reverse(&p, 130.0, 6.0), "not nearer than BackUpDistance");
+        assert!(!reverse(&MotionParams { rotate_on_spot: true, rotate_threshold: Fx::ONE / 2, ..p }, 130.0, 4.0), "RotateOnSpot pivots instead");
+        let hover = MotionParams { kind: MotionKind::Hover, facing_rate: Fx::FRAC_PI_4, ..p };
+        assert!(reverse(&hover, 170.0, 4.0), "a hovercraft with TurnFacingRate backs up");
+    }
+
+    #[test]
+    fn floating_amphibians_slow_in_the_shallows() {
+        use crate::engine::assets::scmap::Heightmap;
+        // Ground from 0 (x = 0) up to 32 (x = 32); water at 20.
+        let samples = (0..33 * 33).map(|i| ((i % 33) * 128) as u16).collect();
+        let t = Terrain::from_heightmap(&Heightmap { width: 32, height: 32, scale: 1.0 / 128.0, samples }).with_water(Some(20.0));
+        let depth = Fx::from_num(-3); // LayerChangeOffsetHeight -1 (URS0201)
+        let at = |x: i32| shallows_factor(depth, &t, Fx::from_num(x), Fx::from_num(5));
+        assert_eq!(at(10), Fx::ONE, "deep water");
+        assert_eq!(at(25), Fx::ONE, "on land");
+        assert_eq!(at(18), Fx::from_num(2) / 3, "2 under: 2/3");
+        assert_eq!(at(19), Fx::ONE / 2, "1 under: at least half");
+    }
+
+    #[test]
+    fn corner_slowdown_is_smooth() {
+        let v = Fx::from_num(4);
+        assert_eq!(corner_slow(v, Fx::ZERO), v);
+        assert!((corner_slow(v, Fx::FRAC_PI_2) - Fx::from_num(2)).abs() < Fx::from_num(0.001), "half at 90 degrees");
+        assert_eq!(corner_slow(v, Fx::PI), Fx::ONE, "a quarter past 120");
+        assert_eq!(corner_slow(v, Fx::PI * 3 / 4), Fx::ONE);
     }
 
     #[test]

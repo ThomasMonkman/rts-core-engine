@@ -2,6 +2,14 @@
 //! as `math.random` (`/lua/system/config.lua`), so it follows Lua semantics:
 //! `Random()` → float in [0,1), `Random(n)` → int in [1,n], `Random(m,n)` →
 //! int in [m,n]. Bounds are truncated toward zero like Lua 5.0's checkint.
+//!
+//! It never raises. Moho's (MohoEngine.dll 0x10326d30) is
+//! `m + ((u32)MT() * (n + 1 - m)) >> 32` in unsigned 32-bit arithmetic with no
+//! check, and `Random(n)` is `((u32)MT() * n >> 32) + 1`: so an empty range
+//! (`Random(1, 0)`, `Random(0)`, FAF's `Random(1, table.getn(t))` on an empty
+//! table) gives `m`, and a reversed one wraps. Ours draws its in-range results
+//! its own way (an unbiased range), and the empty and reversed ranges with
+//! moho's formula.
 
 use mlua::prelude::*;
 
@@ -24,24 +32,18 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 (Some(min), Some(max)) => (min.trunc() as i64, max.trunc() as i64),
             };
             if lo > hi {
-                return Ok(empty_interval(&mut rng, lo, hi) as f64);
+                return Ok(wrapped(lo, hi, rng.next_u64() as u32) as f64);
             }
             Ok(rng.range_i64(lo, hi) as f64)
         })
 }
 
-/// `Random(m, n)` with `m > n` (and `Random(n)` with `n < 1`, as `(1, n)`):
-/// moho has no empty-interval check (MohoEngine binding 0x759010 in FAF's
-/// exe). It takes a 32-bit draw `u` and returns `m + ((u * w) >> 32)` with
-/// the width `w = n - m + 1` as an unsigned 32-bit number, in 32-bit
-/// integers. So `m = n + 1` (width 0) is always `m`: LOUD's death
-/// animations call `Random(min * 10, max * 10)` on blueprints whose min is
-/// above their max. A wider gap wraps to near the full 32-bit range.
-fn empty_interval(rng: &mut SimRng, lo: i64, hi: i64) -> i32 {
+/// Moho's `m + ((u32)r * (n + 1 - m)) >> 32` in 32-bit arithmetic, for a
+/// range with `m > n`: `m` when it's empty (`n = m - 1`), else wrapped.
+fn wrapped(lo: i64, hi: i64, r: u32) -> i32 {
     let (lo, hi) = (lo as i32, hi as i32);
-    let width = hi.wrapping_sub(lo).wrapping_add(1) as u32;
-    let u = (rng.next_u64() >> 32) as u32;
-    lo.wrapping_add(((u as u64 * width as u64) >> 32) as u32 as i32)
+    let span = hi.wrapping_add(1).wrapping_sub(lo) as u32;
+    lo.wrapping_add(((r as u64 * span as u64) >> 32) as u32 as i32)
 }
 
 #[cfg(test)]
@@ -64,25 +66,10 @@ mod tests {
             .eval()
             .unwrap();
         assert!(ok);
-    }
-
-    /// No empty-interval error, as moho: a width of 0 gives the low bound
-    /// (`Random(3, 2)` is 3, `Random(0)` is 1); a wider gap still returns a
-    /// whole number.
-    #[test]
-    fn empty_intervals_follow_moho() {
-        let lua = Lua::new();
-        register(&lua).unwrap();
-        let ok: bool = lua
-            .load(
-                "for i = 1, 50 do
-                    if Random(3, 2) ~= 3 or Random(0) ~= 1 or Random(1.9, 0.5) ~= 1 then return false end
-                    local w = Random(5, 1); if w % 1 ~= 0 then return false end
-                 end
-                 return true",
-            )
-            .eval()
-            .unwrap();
-        assert!(ok);
+        // Empty ranges give the lower bound, as moho's; reversed ones don't raise.
+        assert_eq!(lua.load("return Random(0), Random(1, 0), Random(5, 4)").eval::<(f64, f64, f64)>().unwrap(), (1.0, 1.0, 5.0));
+        assert!(lua.load("return Random(3, 1)").eval::<f64>().is_ok());
+        assert_eq!(wrapped(3, 1, 0), 3);
+        assert_eq!(wrapped(3, 1, u32::MAX), 3 + ((u32::MAX as u64 * 0xffff_ffff) >> 32) as u32 as i32);
     }
 }

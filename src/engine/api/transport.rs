@@ -333,19 +333,35 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
 }
 
 /// Slot size of an attach bone name, if it is one (1 small, 2 medium, 3
-/// large).
+/// large, 4 super). Moho's `SetUpAttachPoints` (0x101d11d0) tries
+/// `Attachpoint_Spr`, `Attachpoint_Lrg`, `Attachpoint_Med`, then plain
+/// `Attachpoint`, in that order.
 pub fn slot_class(bone: &str) -> Option<u8> {
     let b = bone.to_ascii_lowercase();
     if !b.contains("attachpoint") {
         return None;
     }
-    Some(if b.contains("lrg") { 3 } else if b.contains("med") { 2 } else { 1 })
+    Some(if b.contains("spr") { 4 } else if b.contains("lrg") { 3 } else if b.contains("med") { 2 } else { 1 })
+}
+
+/// The transport's `Transport.ClassGenericUpTo` (0 when unset).
+pub(crate) fn generic_up_to(lua: &Lua, transport: EntityId) -> u8 {
+    let bp_id = entity::world(lua).get(transport).map(|e| e.cold.blueprint_id.clone()).unwrap_or_default();
+    entity::blueprint_table(lua, crate::engine::api::blueprints::BlueprintKind::Unit, &bp_id)
+        .ok()
+        .and_then(|bp| bp.get::<Option<LuaTable>>("Transport").ok().flatten())
+        .and_then(|t| t.get::<Option<f64>>("ClassGenericUpTo").ok().flatten())
+        .map_or(0, |n| n.clamp(0.0, 255.0) as u8)
 }
 
 /// The transport's attach bones of `class` not holding a passenger, in bone
 /// order. Bones with a unit still rising to them (`Beaming`) are reserved,
-/// as moho's `ReserveBone`.
+/// as moho's `ReserveBone`. A class up to the transport's
+/// `ClassGenericUpTo` takes any of its generic points, the bones of class
+/// up to it (`TransportFindAttachList` 0x101d343f).
 pub(crate) fn free_slots(lua: &Lua, transport: EntityId, class: u8) -> Vec<u32> {
+    let up_to = generic_up_to(lua, transport);
+    let fits = |c: u8| if class <= up_to { c <= up_to } else { c == class };
     let w = entity::world(lua);
     let bones = match w.get(transport).and_then(|t| t.cold.skeleton.as_ref()) {
         Some(sk) => &sk.bones,
@@ -359,15 +375,15 @@ pub(crate) fn free_slots(lua: &Lua, transport: EntityId, class: u8) -> Vec<u32> 
     bones
         .iter()
         .enumerate()
-        .filter(|(i, b)| slot_class(&b.name) == Some(class) && !taken.contains(&(*i as u32)) && !reserved.contains(&(*i as u32)))
+        .filter(|(i, b)| slot_class(&b.name).is_some_and(fits) && !taken.contains(&(*i as u32)) && !reserved.contains(&(*i as u32)))
         .map(|(i, _)| i as u32)
         .collect()
 }
 
 /// A unit's transport class (blueprint `Transport.TransportClass`, 1 when
-/// unset).
+/// unset; not clamped: classes past 4 fit nowhere).
 pub(crate) fn class_of(lua: &Lua, unit: EntityId) -> u8 {
-    entity::world(lua).get(unit).and_then(|e| e.unit.as_deref()).map_or(1, |u| u.transport_class.clamp(1, 3))
+    entity::world(lua).get(unit).and_then(|e| e.unit.as_deref()).map_or(1, |u| u.transport_class)
 }
 
 /// `unit` and `transport` as the shared carry rule sees them
@@ -382,11 +398,12 @@ pub(crate) fn carry_sides_in(lua: &Lua, w: &crate::engine::sim::entity::EntityWo
     use crate::engine::sim::carry::{Carrier, Passenger};
     use crate::engine::sim::movement::MotionKind;
     let bp_id = w.get(transport).map(|e| e.cold.blueprint_id.as_str()).unwrap_or_default();
-    let storage = entity::blueprint_table(lua, crate::engine::api::blueprints::BlueprintKind::Unit, bp_id)
+    let transport_bp = entity::blueprint_table(lua, crate::engine::api::blueprints::BlueprintKind::Unit, bp_id)
         .ok()
-        .and_then(|bp| bp.get::<Option<LuaTable>>("Transport").ok().flatten())
-        .and_then(|t| t.get::<Option<f64>>("StorageSlots").ok().flatten())
-        .is_some_and(|n| n > 0.0);
+        .and_then(|bp| bp.get::<Option<LuaTable>>("Transport").ok().flatten());
+    let field = |name: &str| transport_bp.as_ref().and_then(|t| t.get::<Option<f64>>(name).ok().flatten());
+    let storage = field("StorageSlots").is_some_and(|n| n > 0.0);
+    let generic_up_to = field("ClassGenericUpTo").map_or(0, |n| n.clamp(0.0, 255.0) as u8);
     let domain = crate::engine::api::categories::domain(lua).ok();
     let is = |id: EntityId, name: &str| {
         let index = w.get(id).and_then(|e| e.category_index);
@@ -397,7 +414,7 @@ pub(crate) fn carry_sides_in(lua: &Lua, w: &crate::engine::sim::entity::EntityWo
         mobile: motion.is_some_and(|k| k != MotionKind::None),
         air: motion == Some(MotionKind::Air),
         commander: is(unit, "COMMAND"),
-        class: w.get(unit).and_then(|e| e.unit.as_deref()).map_or(1, |u| u.transport_class.clamp(1, 3)),
+        class: w.get(unit).and_then(|e| e.unit.as_deref()).map_or(1, |u| u.transport_class),
     };
     let slot_classes = w
         .get(transport)
@@ -406,7 +423,7 @@ pub(crate) fn carry_sides_in(lua: &Lua, w: &crate::engine::sim::entity::EntityWo
     let transport_caps = w.get(transport).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.blueprint_command_caps & 0x100 != 0);
     let carrier = Carrier {
         transport: transport_caps || is(transport, "PODSTAGINGPLATFORM"),
-        staging: is(transport, "AIRSTAGINGPLATFORM"), carries_commander: is(transport, "CANTRANSPORTCOMMANDER"), slot_classes, storage };
+        staging: is(transport, "AIRSTAGINGPLATFORM"), carries_commander: is(transport, "CANTRANSPORTCOMMANDER"), slot_classes, generic_up_to, storage };
     (passenger, carrier)
 }
 
@@ -1312,6 +1329,7 @@ mod tests {
             ("Attachpoint_Med01", Some(2)),
             ("Attachpoint_Lrg_02", Some(3)),
             ("Attachpoint_Lrg01", Some(3)),
+            ("Attachpoint_Spr01", Some(4)),
             ("Turret_Muzzle", None),
         ] {
             assert_eq!(slot_class(name), class, "{name}");

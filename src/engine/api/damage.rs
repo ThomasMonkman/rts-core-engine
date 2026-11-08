@@ -35,10 +35,25 @@ fn fx(v: f64) -> Fx {
     crate::engine::sim::math::from_lua(v)
 }
 
-/// Calls `target:OnDamage(instigator, amount, direction, type)`, direction =
-/// unit vector from `location` to the target (zero if they coincide).
+/// Moho's `DealDamage` (MohoEngine.dll 0x103074b0): nothing for an amount of
+/// 0 (0x103075f4); a unit's armour (`api::armor`), then for a unit damaged
+/// by an instigator with an army `OnDamageBy(army + 1)` (0x10307708) and
+/// `OnExtraDamageDealt(type)` when the armour multiplied it by 2 or more
+/// (0x10307761); the damage stats; and `target:OnDamage(instigator, amount,
+/// direction, type)` only when the amount is more than 0 (0x10308181), so
+/// negative damage doesn't heal and armour that takes it to 0 (the
+/// `Experimental` armour's `ExperimentalFootfall`) runs no `OnDamage`.
+/// Direction = unit vector from `location` to the target (zero if they
+/// coincide). Moho then divides by 1 + the target army's handicap, set only
+/// by the `DebugSetArmyHandicap` console command (0x103076b6): ours has
+/// none, so the divisor is 1, as in every normal game.
 fn deal(lua: &Lua, instigator: &LuaValue, location: FxVec3, target: EntityId, amount: f64, kind: &LuaValue) -> LuaResult<()> {
+    if amount == 0.0 {
+        return Ok(());
+    }
     let Some((pos, is_unit)) = world(lua).get(target).filter(|e| !e.destroyed).map(|e| (e.position(), e.unit.is_some())) else { return Ok(()) };
+    let source = entity_of(instigator);
+    let raw = amount;
     // Units take damage through their armor (`api::armor`).
     let amount = if is_unit {
         let kind = match kind {
@@ -49,10 +64,23 @@ fn deal(lua: &Lua, instigator: &LuaValue, location: FxVec3, target: EntityId, am
     } else {
         amount
     };
-    if amount != 0.0 {
-        crate::engine::api::unit_stats::damage(lua, entity_of(instigator), target, amount);
+    let obj = object(lua, target)?;
+    if is_unit && let Some(obj) = &obj {
+        let army = source.and_then(|id| world(lua).get(id).and_then(|e| e.army));
+        if amount > 0.0 && let Some(army) = army {
+            crate::engine::api::callbacks::UnitCallbacks::on_damage_by(lua, obj, "unit", army + 1)?;
+        }
+        if amount / raw >= 2.0 {
+            crate::engine::api::callbacks::UnitCallbacks::on_extra_damage_dealt(lua, obj, "unit", shapes::DamageType(kind.clone()))?;
+        }
     }
-    let Some(obj) = object(lua, target)? else { return Ok(()) };
+    if amount != 0.0 {
+        crate::engine::api::unit_stats::damage(lua, source, target, amount);
+    }
+    if amount <= 0.0 {
+        return Ok(());
+    }
+    let Some(obj) = obj else { return Ok(()) };
     let dir = (pos - location).normalized().unwrap_or_default();
     let dir = vector(lua, dir)?;
     EntityCallbacks::on_damage(lua, &obj, "entity", shapes::Instigator(instigator.clone()), amount, dir, shapes::DamageType(kind.clone()))
@@ -107,6 +135,13 @@ fn damage_shell(
     Ok(())
 }
 
+/// `Damage`, `DamageArea` and `DamageRing` raise on an amount of 0
+/// (MohoEngine.dll 0x10309a44, 0x10309d35, 0x1030a078; FAF's callers skip
+/// zero damage themselves).
+fn check_amount(amount: f64) -> LuaResult<()> {
+    if amount == 0.0 { Err(LuaError::runtime("0 damage specified.")) } else { Ok(()) }
+}
+
 pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
         /// Deprecated in FAF and used only by a projectile no unit fires
@@ -118,6 +153,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// An entity never damages itself through `Damage` (FAF's DamageArea.lua
         /// works around exactly this for `damageSelf`).
         Damage = |lua, (instigator, location, target, amount, kind): (shapes::Instigator, shapes::Vector, Obj<moho::Entity>, f64, shapes::DamageType)| {
+            check_amount(amount)?;
             let Some(target_id) = entity_of(&LuaValue::Table(target.into_table())) else { return Ok(()) };
             if entity_of(&instigator) == Some(target_id) {
                 return Ok(());
@@ -129,11 +165,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// first, in id order. The instigator only if `damageSelf`; its allies
         /// only if `damageFriendly` (both default false).
         DamageArea = |lua, (instigator, location, radius, amount, kind, damage_friendly, damage_self): (shapes::Instigator, shapes::Vector, f64, f64, shapes::DamageType, Option<bool>, Option<bool>)| {
+            check_amount(amount)?;
             damage_shell(lua, instigator.into_inner(), location.into_inner(), 0.0, radius, amount, kind.into_inner(), damage_friendly.unwrap_or(false), damage_self.unwrap_or(false))
         })?;
     lua_fn!(lua, global,
         /// Like `DamageArea`, but hits only `min_radius` < distance <= `max_radius`.
         DamageRing = |lua, (instigator, location, min_radius, max_radius, amount, kind, damage_friendly, damage_self): (shapes::Instigator, shapes::Vector, f64, f64, f64, shapes::DamageType, Option<bool>, Option<bool>)| {
+            check_amount(amount)?;
             damage_shell(lua, instigator.into_inner(), location.into_inner(), min_radius, max_radius, amount, kind.into_inner(), damage_friendly.unwrap_or(false), damage_self.unwrap_or(false))
         })?;
     Ok(())

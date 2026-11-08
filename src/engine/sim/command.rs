@@ -127,6 +127,11 @@ pub struct Command {
     /// `CUnitCommand` +0x158): a ferry route's beacon. Destroyed with the
     /// command (`~CUnitCommand`, MohoEngine.dll 0x102c34e0).
     pub focus: Option<EntityId>,
+    /// The count a repeating factory's build order goes round with (moho's
+    /// `CUnitCommand` +0xe0, the count as issued, beside the remaining one
+    /// at +0xe4): [`Commands::repeat_to_back`].
+    #[serde(default)]
+    pub repeat_count: u32,
 }
 
 /// A unit's place in a formation order: its goal is the target plus
@@ -177,11 +182,41 @@ pub struct Commands {
     /// (dragging its waypoint moves theirs too).
     #[serde(default)]
     factory_queues: BTreeMap<EntityId, Vec<CommandId>>,
+    /// Each unit's current command once moho's dispatcher has started it
+    /// ([`Commands::dispatch`]), and the units whose current command it
+    /// hasn't yet ([`Commands::undispatched`]), of which those the
+    /// dispatcher found held (`api::orders::held`, [`Commands::hold`]): a
+    /// held unit doesn't act on a new order until it's started.
+    #[serde(default)]
+    started: BTreeMap<EntityId, CommandId>,
+    #[serde(default)]
+    undispatched: std::collections::BTreeSet<EntityId>,
+    #[serde(default)]
+    waiting: std::collections::BTreeSet<EntityId>,
+    /// Ground attacks whose weapon has fired: (command, tick it ends at),
+    /// by unit ([`Commands::cycle_ground_attacks`]).
+    #[serde(default)]
+    ground_fired: BTreeMap<EntityId, (CommandId, u64)>,
 }
 
 impl Commands {
-    /// Re-indexes `unit` by its current command's kind.
+    /// Re-indexes `unit` by its current command's kind, and notes a new
+    /// current command as not yet dispatched.
     fn sync(&mut self, unit: EntityId) {
+        match self.current(unit).map(|c| c.id) {
+            Some(id) if self.started.get(&unit) != Some(&id) => {
+                self.undispatched.insert(unit);
+            }
+            Some(_) => {
+                self.undispatched.remove(&unit);
+                self.waiting.remove(&unit);
+            }
+            None => {
+                self.started.remove(&unit);
+                self.undispatched.remove(&unit);
+                self.waiting.remove(&unit);
+            }
+        }
         let now = self.current(unit).map(|c| c.kind);
         let before = match now {
             Some(k) => self.current_kind.insert(unit, k),
@@ -216,8 +251,32 @@ impl Commands {
         out
     }
 
-    /// Creates a command and appends it to the queue of each unit in `units`
-    /// (deduplicated; order kept for the queues, ids sorted in the command).
+    /// Adds command `id` (of `kind`) to `unit`'s queue as moho's
+    /// `CUnitCommandQueue::AddCommandToQueue` (MohoEngine.dll 0x102c8890):
+    /// appended, except a patrol point added while the unit patrols (more
+    /// than one command queued, the current one a Patrol / FormPatrol)
+    /// goes in before the earliest-issued command queued (the lowest id,
+    /// moho's issue sequence +0x13c), so the loop keeps the order the
+    /// points were given in after it has gone round; when that's the
+    /// current command it's appended.
+    fn add_to_queue(&mut self, unit: EntityId, id: CommandId, kind: CommandKind) {
+        let patrol = |k: CommandKind| matches!(k, CommandKind::Patrol | CommandKind::FormPatrol);
+        let q = self.queues.entry(unit).or_default();
+        let at = if q.len() > 1 && patrol(kind) && q.front().and_then(|f| self.map.get(f)).is_some_and(|f| patrol(f.kind)) {
+            q.iter().enumerate().min_by_key(|&(_, &c)| c).map_or(0, |(i, _)| i)
+        } else {
+            0
+        };
+        if at > 0 {
+            q.insert(at, id);
+        } else {
+            q.push_back(id);
+        }
+    }
+
+    /// Creates a command and adds it to the queue of each unit in `units`
+    /// (deduplicated; ids sorted in the command), at the back unless it's
+    /// a patrol point joining a patrol loop ([`Self::add_to_queue`]).
     pub fn issue(&mut self, units: &[EntityId], kind: CommandKind, target: CommandTarget, blueprint: Option<String>, count: u32) -> CommandId {
         let id = self.next_id;
         self.next_id += 1;
@@ -225,11 +284,11 @@ impl Commands {
         members.sort_unstable();
         members.dedup();
         for &u in &members {
-            self.queues.entry(u).or_default().push_back(id);
+            self.add_to_queue(u, id, kind);
         }
         // A command nobody received is done at once.
         if !members.is_empty() {
-            self.map.insert(id, Command { id, kind, target, blueprint, count, issued: members.len() as u32, units: members.clone(), formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None });
+            self.map.insert(id, Command { id, kind, target, blueprint, count, issued: members.len() as u32, units: members.clone(), formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count });
         }
         for u in members {
             self.sync(u);
@@ -300,6 +359,72 @@ impl Commands {
         self.queue(unit).next()
     }
 
+    /// `unit`'s current command once the dispatcher has started it (what
+    /// movement acts on); `None` while the dispatcher holds it
+    /// ([`Self::hold`]).
+    pub fn dispatched(&self, unit: EntityId) -> Option<&Command> {
+        if self.waiting.contains(&unit) {
+            return None;
+        }
+        self.current(unit)
+    }
+
+    /// Units whose current command the dispatcher hasn't started, ascending.
+    pub fn undispatched(&self) -> Vec<EntityId> {
+        self.undispatched.iter().copied().collect()
+    }
+
+    /// The dispatcher found `unit` held: its new current command waits.
+    pub fn hold(&mut self, unit: EntityId) {
+        self.waiting.insert(unit);
+    }
+
+    /// The dispatcher starts `unit`'s current command; returns it.
+    pub fn dispatch(&mut self, unit: EntityId) -> Option<&Command> {
+        let id = self.current(unit)?.id;
+        self.started.insert(unit, id);
+        self.undispatched.remove(&unit);
+        self.waiting.remove(&unit);
+        self.map.get(&id)
+    }
+
+    /// `unit`'s weapon fired while its current command `id` is an attack on
+    /// the ground: the attack task ends `delay` ticks on (once per time the
+    /// order comes round).
+    pub fn note_ground_fire(&mut self, unit: EntityId, id: CommandId, at: u64) {
+        if self.ground_fired.get(&unit).is_none_or(|&(c, _)| c != id) {
+            self.ground_fired.insert(unit, (id, at));
+        }
+    }
+
+    /// Ground attacks due to end at `now` with another command behind them
+    /// go to the back of the queue (moho's attack task ends, and the
+    /// dispatcher moves an Attack on the ground behind any next command:
+    /// `IAiCommandDispatchImpl::TaskTick` 0x101893d7..0x1018952b). Alone,
+    /// one carries on. Returns the units cycled.
+    pub fn cycle_ground_attacks(&mut self, now: u64) -> Vec<EntityId> {
+        if self.ground_fired.is_empty() {
+            return Vec::new();
+        }
+        let mut cycled = Vec::new();
+        let entries: Vec<(EntityId, CommandId, u64)> = self.ground_fired.iter().map(|(&u, &(c, t))| (u, c, t)).collect();
+        for (u, c, t) in entries {
+            if self.current(u).map(|x| x.id) != Some(c) {
+                self.ground_fired.remove(&u);
+            } else if now >= t && self.queue_len(u) > 1 {
+                self.ground_fired.remove(&u);
+                self.requeue_front(u);
+                cycled.push(u);
+            }
+        }
+        cycled
+    }
+
+    /// How many commands `unit` has queued.
+    pub fn queue_len(&self, unit: EntityId) -> usize {
+        self.queues.get(&unit).map_or(0, VecDeque::len)
+    }
+
     pub fn is_idle(&self, unit: EntityId) -> bool {
         self.queues.get(&unit).is_none_or(|q| q.is_empty())
     }
@@ -332,7 +457,7 @@ impl Commands {
         let id = self.next_id;
         self.next_id += 1;
         self.queues.entry(unit).or_default().push_front(id);
-        self.map.insert(id, Command { id, kind, target, blueprint, count, issued: 1, units: vec![unit], formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None });
+        self.map.insert(id, Command { id, kind, target, blueprint, count, issued: 1, units: vec![unit], formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count });
         self.sync(unit);
         id
     }
@@ -358,6 +483,22 @@ impl Commands {
         self.release(unit, id);
         self.sync(unit);
         true
+    }
+
+    /// A repeating factory finished the last of build order `id`: it goes
+    /// round again, its count reset to what it was issued with, at the back
+    /// of `unit`'s queue (moho's dispatcher, `IAiCommandDispatchImpl::
+    /// TaskTick` 0x101893d7..0x1018952b: a factory on repeat (+0x292) resets
+    /// a finished BuildFactory's count from +0xe0 and moves it to the back).
+    pub fn repeat_to_back(&mut self, unit: EntityId, id: CommandId) {
+        let Some(c) = self.map.get_mut(&id) else { return };
+        c.count = c.repeat_count.max(1);
+        if let Some(q) = self.queues.get_mut(&unit)
+            && let Some(i) = q.iter().position(|&q| q == id) {
+            q.remove(i);
+            q.push_back(id);
+        }
+        self.sync(unit);
     }
 
     /// Moves `unit`'s current command to the back of its queue (patrol loops).
@@ -414,6 +555,8 @@ impl Commands {
                 let id = self.own(unit, last);
                 if let Some(c) = self.map.get_mut(&id) {
                     c.count = c.count.max(1).saturating_add(delta as u32);
+                    // (Whether moho's +0xe0 follows isn't traced.)
+                    c.repeat_count = c.repeat_count.max(1).saturating_add(delta as u32);
                 }
             }
             return;
@@ -515,7 +658,7 @@ impl Commands {
             }
             self.factory_queues.entry(f).or_default().push(id);
         }
-        self.map.insert(id, Command { id, kind, target, blueprint: None, count: 0, issued: 1, units: members, formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None });
+        self.map.insert(id, Command { id, kind, target, blueprint: None, count: 0, issued: 1, units: members, formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: 0 });
         id
     }
 
@@ -571,7 +714,8 @@ impl Commands {
             let Some(c) = self.map.get_mut(&id) else { continue };
             let Err(i) = c.units.binary_search(&unit) else { continue };
             c.units.insert(i, unit);
-            self.queues.entry(unit).or_default().push_back(id);
+            let kind = c.kind;
+            self.add_to_queue(unit, id, kind);
         }
         self.sync(unit);
     }
@@ -682,6 +826,40 @@ mod tests {
         c.issue_factory(&[1], CommandKind::Move, at(40), false);
         c.remove_units(&[1]);
         assert!(c.factories_with_orders().next().is_none(), "a dead factory's go");
+    }
+
+    /// `AddCommandToQueue`: a patrol point added to a running patrol loop
+    /// goes in before the earliest-issued queued command, so the loop keeps
+    /// the points' order after it has gone round.
+    #[test]
+    fn patrol_points_join_the_loop_in_order() {
+        let mut c = Commands::default();
+        let at = |x: i32| CommandTarget::Ground(FxVec3 { x: crate::engine::sim::math::Fx::from_num(x), ..FxVec3::default() });
+        let a = c.issue(&[1], CommandKind::Patrol, at(1), None, 0);
+        let b = c.issue(&[1], CommandKind::Patrol, at(2), None, 0);
+        let d = c.issue(&[1], CommandKind::Patrol, at(3), None, 0);
+        assert_eq!(c.queue(1).map(|x| x.id).collect::<Vec<_>>(), vec![a, b, d], "not yet round: appended");
+        c.requeue_front(1); // reached a
+        let e = c.issue(&[1], CommandKind::Patrol, at(4), None, 0);
+        assert_eq!(c.queue(1).map(|x| x.id).collect::<Vec<_>>(), vec![b, d, e, a], "before a, the first issued");
+        // Not patrolling, or a lone patrol: appended.
+        let mut c = Commands::default();
+        let m = c.issue(&[1], CommandKind::Move, at(1), None, 0);
+        let p = c.issue(&[1], CommandKind::Patrol, at(2), None, 0);
+        let q = c.issue(&[1], CommandKind::Patrol, at(3), None, 0);
+        assert_eq!(c.queue(1).map(|x| x.id).collect::<Vec<_>>(), vec![m, p, q]);
+    }
+
+    /// A repeating factory's finished order goes round with its count reset.
+    #[test]
+    fn a_repeated_build_goes_round_whole() {
+        let mut c = Commands::default();
+        let tanks = c.issue(&[1], CommandKind::BuildFactory, CommandTarget::None, Some("tank".into()), 3);
+        let scouts = c.issue(&[1], CommandKind::BuildFactory, CommandTarget::None, Some("scout".into()), 1);
+        c.count_down(tanks);
+        c.count_down(tanks);
+        c.repeat_to_back(1, tanks);
+        assert_eq!(c.queue(1).map(|x| (x.id, x.count)).collect::<Vec<_>>(), vec![(scouts, 1), (tanks, 3)]);
     }
 
     #[test]
