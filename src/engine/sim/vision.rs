@@ -404,6 +404,7 @@ impl IntelGrids {
         }
         // Counts of stamps per (army, sensor) and the armies with any, and
         // every grid an op needs allocated, serially first.
+        let prepass = crate::prof_span!("intel apply prepass");
         for &(st, add) in ops {
             let a = st.army as usize;
             if self.stamp_count.len() <= a {
@@ -419,6 +420,7 @@ impl IntelGrids {
             }
             let _ = self.grids_for(st.army, st.sensor);
         }
+        drop(prepass);
         let dims = [VISION_SHIFT, CELL_SHIFT].map(|shift| self.dims(shift));
         let update = self.tick;
         let Self { armies, cover, explored, row_changed, .. } = self;
@@ -477,6 +479,7 @@ impl IntelGrids {
     /// each army sees. `jammer` gives a unit's jammer spec, if it has one.
     pub fn update(&mut self, world: &EntityWorld, jammer: impl Fn(&crate::engine::sim::entity::Entity) -> Option<JammerSpec>) {
         self.tick += 1;
+        let gather = crate::prof_span!("intel gather");
         let mut wanted = std::mem::take(&mut self.wanted);
         wanted.clear();
         self.own_flags.clear();
@@ -513,8 +516,10 @@ impl IntelGrids {
                 self.own_flags.push((e.id, flags));
             }
         }
+        drop(gather);
         // `wanted` is in (entity, sensor) order (world id order, intel types
         // in sensor order), like `stamps`: merge the two sorted lists.
+        let merge = crate::prof_span!("intel merge");
         let old = std::mem::take(&mut self.stamps);
         let mut ops = std::mem::take(&mut self.ops);
         ops.clear();
@@ -551,6 +556,7 @@ impl IntelGrids {
         for &(_, s, _) in &old[i..] {
             ops.push((s, false));
         }
+        drop(merge);
         self.apply_all(&ops);
         self.ops = ops;
         // Wanted becomes current; the old list's storage is reused next tick.
@@ -774,6 +780,7 @@ impl IntelGrids {
         let any = self.active[0] | self.active[1] | self.active[2] | self.active[3] | self.active[4];
         let mut next = std::mem::take(&mut self.now_next);
         next.clear();
+        let scan = crate::prof_span!("intel blip scan");
         if any != 0 {
             for e in world.units() {
                 let (Some(owner), Some(_)) = (e.army, e.unit.as_deref()) else { continue };
@@ -788,7 +795,9 @@ impl IntelGrids {
                 }
             }
         }
+        drop(scan);
         // Merge with last update's (both in id order).
+        let _diff = crate::prof_span!("intel blip diff");
         let prev = std::mem::take(&mut self.now);
         let (mut i, mut j) = (0, 0);
         while i < prev.len() || j < next.len() {
