@@ -409,6 +409,39 @@ pub struct MotionState {
     pub push: (Fx, Fx),
     /// Surface units: how it's coming to a stop on its goal.
     pub arrival: Arrival,
+    /// Surface units: stopped to turn where it can't drive on ([`Pivot`]).
+    pub pivot: Pivot,
+}
+
+/// A surface unit that can't turn where it is going stops, backs up a step
+/// and turns there (moho's path spline states 4-6,
+/// `CAiPathSpline::GenerateNormalSplinePoints` 0x101a1e80; the switch at
+/// 0x101a30d5, table 0x101a3414). Cruising (state 7, 0x101a32c2) more than
+/// 30 degrees off its point (cos < 0.866) with the point a body ahead
+/// blocked (max(`SizeX`, `SizeZ`) plus its stopping distance, speed^2 /
+/// (2 max(`MaxBrake`, `MaxAcceleration`)), along its velocity, off the map
+/// or where its footprint can't stand: 0x101a0f20, 0x10214800), it stops
+/// (4, wanting 0); stopped (under 1% of its top speed, 0x101a311d) it backs
+/// up if it can (`MaxSpeedReverse` > 0 and not `RotateOnSpot`: 5, else back
+/// to cruising), until the point is within 81 degrees of its nose (cos >
+/// 0.15) or the way behind is blocked (0x101a3159); then stops again (6)
+/// and cruises once stopped (0x101a3297). It turns toward the point at its
+/// turn rate all along. The real game's T1 engineer rolling off a factory
+/// placed off the grid: one step out, stopped, a step back, stopped, then
+/// off at its new heading, 18 degrees a tick from 90 to 150 (dev/probes
+/// `probe_rolloff`). Ours checks only units rolling off a factory (see the
+/// caller).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Pivot {
+    /// Under way as usual (state 7).
+    #[default]
+    None,
+    /// Stopping to turn (4).
+    Stopping,
+    /// Backing up while it turns (5).
+    Reversing,
+    /// Stopping after backing up (6).
+    Settling,
 }
 
 /// How a surface unit comes to a stop on its goal, as moho's path spline
@@ -897,6 +930,49 @@ fn drive(p: &MotionParams, state: MotionState, heading: Fx, turn: Fx, radius: Fx
     Drive { heading: heading2, course: course2, turned: heading2 != heading, reverse, pivot, aligned: e.abs() <= Fx::FRAC_PI_4, err: e, rate: turn, radius }
 }
 
+/// The next [`Pivot`] state of a surface unit now at `pos` facing
+/// `heading` (moving along `course`, else its facing, at `speed`), steering
+/// for `steer`; `open` tells whether its footprint can stand at a point.
+#[allow(clippy::too_many_arguments)]
+fn pivot_step(p: &MotionParams, now: Pivot, heading: Fx, course: Option<Fx>, speed: Fx, pos: FxVec3, steer: FxVec3, open: impl Fn(FxVec3) -> bool) -> Pivot {
+    let (hs, hc) = crate::engine::sim::math::sin_cos(heading);
+    let (dx, dz) = (steer.x - pos.x, steer.z - pos.z);
+    let len = sqrt(dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)));
+    // Cos of the angle between its nose and its point.
+    let cos = if len == Fx::ZERO { Fx::ONE } else { (dx * hs + dz * hc) / len };
+    // Under 1% of its top speed (moho: |v| x 10 / `MaxSpeed`).
+    let still = speed.abs() * 100 <= p.max_speed;
+    // The point a body plus its stopping distance along its velocity
+    // (where it stands, when still: moho's zero vector isn't scaled).
+    let blocked = || {
+        let v = speed.abs();
+        let reach = if v == Fx::ZERO {
+            Fx::ZERO
+        } else {
+            let stop = p.brake.max(p.acceleration);
+            let brake_dist = if stop > Fx::ZERO { v.saturating_mul(v) / (stop * 2) } else { Fx::ZERO };
+            p.ground.size_x.max(p.ground.size_z).saturating_add(brake_dist)
+        };
+        let (vs, vc) = crate::engine::sim::math::sin_cos(course.unwrap_or(heading));
+        let reach = if speed < Fx::ZERO { -reach } else { reach };
+        !open(FxVec3 { x: pos.x + vs.saturating_mul(reach), y: pos.y, z: pos.z + vc.saturating_mul(reach) })
+    };
+    match now {
+        Pivot::None if cos < Fx::from_num(0.866) && blocked() => Pivot::Stopping,
+        Pivot::None => Pivot::None,
+        Pivot::Stopping if still => {
+            if p.reverse_speed > Fx::ZERO && !p.rotate_on_spot {
+                Pivot::Reversing
+            } else {
+                Pivot::None
+            }
+        }
+        Pivot::Reversing if cos > Fx::from_num(0.15) || blocked() => Pivot::Settling,
+        Pivot::Settling if still => Pivot::None,
+        other => other,
+    }
+}
+
 /// The speed a `corner_slowdown` unit wants `err` off course: x (1 +
 /// max(cos, -0.5)) / 2, so all of it ahead, half at 90 degrees, a quarter
 /// past 120 (moho's path spline, 0x101a29a6; `err` is from the tail when
@@ -1300,10 +1376,9 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
         }
         (pace, ..) => (pace, pace.is_some()),
     };
-    // Rolling off a factory: straight for the roll-off point, through the
-    // factory (no path search).
+    // Rolling off a factory: through the factory (no path search; see the
+    // steering below).
     let off_factory = cmd.is_some_and(|c| c.off_factory);
-    let direct = direct || off_factory;
     if let Some(pc) = pace {
         // (Aircraft fly at the slot itself.)
         let at = if p.kind == MotionKind::Air { pc.slot } else { pc.aim };
@@ -1478,6 +1553,8 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     // acceleration multiplier (moho's motion limits, 0x1027ac7d; the real
     // game's Titan, accelerating at 4.2, brakes at its 3.8: probe_arrive).
     let brake = if p.brake > Fx::ZERO { p.brake.saturating_mul(mult.accel) } else { accel };
+    // Where a surface unit steers this tick, for its [`Pivot`] check.
+    let mut pivot_steer: Option<FxVec3> = None;
     let mut path_update = PathUpdate::Keep;
     let mut path_work = 0;
     let mut request = None;
@@ -1620,6 +1697,46 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
                         path_update = PathUpdate::Clear;
                     }
                     (p, p == g, false, Fx::ZERO)
+                }
+                // Rolling off a factory: out through it cell by cell
+                // (`NavGrid::roll_off_cells`); a cell's centre within half a
+                // unit counts as passed (the real game's engineers turn for
+                // the next cell about that far from its centre: dev/probes
+                // `probe_rolloff`, `probe_rolloff2`).
+                (Some(nav), Some(layer)) if off_factory => {
+                    let path = match data.path.as_deref().filter(|path| path.goal == g) {
+                        Some(path) => std::borrow::Cow::Borrowed(path),
+                        None => {
+                            let waypoints = nav.roll_off_cells(layer, pos, g);
+                            let p2 = UnitPath { goal: g, waypoints, next: 0, version: nav.version };
+                            path_update = PathUpdate::Replace(Box::new(p2.clone()));
+                            std::borrow::Cow::Owned(p2)
+                        }
+                    };
+                    let len = path.waypoints.len();
+                    let mut next = path.next;
+                    // (Or once past it, the way the next lies: a wide
+                    // turner, a frigate off a naval factory, circled a
+                    // cell it couldn't hit.)
+                    while next + 1 < len && {
+                        let (w, n) = (path.waypoints[next], path.waypoints[next + 1]);
+                        dist2(pos, w) <= Fx::ONE / 2 || (pos.x - w.x).saturating_mul(n.x - w.x).saturating_add((pos.z - w.z).saturating_mul(n.z - w.z)) > Fx::ZERO
+                    } {
+                        next += 1;
+                    }
+                    if next != path.next {
+                        path_update = match path_update {
+                            PathUpdate::Replace(mut b) => {
+                                b.next = next;
+                                PathUpdate::Replace(b)
+                            }
+                            _ => PathUpdate::Advance(next),
+                        };
+                    }
+                    match path.waypoints.get(next) {
+                        Some(&w) if next + 1 < len => (w, false, false, dist2(w, g)),
+                        _ => (g, true, false, Fx::ZERO),
+                    }
                 }
                 // Straight for a formation slot in sight. (A path to the
                 // formation's next waypoint is kept: the line to the slot
@@ -1808,7 +1925,12 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
                     };
                 } else if d.pivot {
                     want = Fx::ZERO;
-                } else if p.corner_slowdown {
+                } else if p.corner_slowdown || off_factory {
+                    // (Rolling off a factory, cell by cell as moho's
+                    // spline goes: the real game's engineer slows this way
+                    // through its turn out of the factory; a quarter put it
+                    // somewhere else, from where its next turn stopped it
+                    // again: dev/probes `probe_rolloff2`.)
                     want = corner_slow(want, d.err);
                 } else if !d.aligned {
                     // A stand-in: FAF's tanks slow by `corner_slow` too
@@ -1821,6 +1943,24 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
                     want = want.min(v);
                 }
                 target_speed = if d.reverse { -want } else { want };
+                // Stopped to turn ([`Pivot`]): it wants to stand, or backs
+                // up at its reverse speed (moho's spline asks the reverse
+                // top speed in state 5, 0x101a28fb). Ours only for units
+                // rolling off a factory: moho checks every surface unit
+                // along its spline path, but ours deliberately follows flow
+                // fields and steers instead, and the check there only added
+                // stalls next to blocked ground (in `assist_spread`, at the
+                // engineers' spawn by the shore and cliff, which changed the
+                // order they arrived in and left two 0.49 apart at the
+                // skirt).
+                if eases && !winged && off_factory {
+                    pivot_steer = Some(steer);
+                    match state.pivot {
+                        Pivot::None => {}
+                        Pivot::Reversing => target_speed = -p.reverse_speed.min(max_speed),
+                        Pivot::Stopping | Pivot::Settling => target_speed = Fx::ZERO,
+                    }
+                }
             }
         }
     }
@@ -2113,6 +2253,10 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     // real game's units go Stopped -> Cruise the tick their move order
     // starts, before they've turned to set off, and their walk cycles run
     // through the turn (dev/probes probe_walk).
+    let pivot = match (pivot_steer, nav, class) {
+        (Some(st), Some(nav), Some(layer)) => pivot_step(p, state.pivot, heading, course, speed, next, st, |q| nav.passable_at(layer, q)),
+        _ => Pivot::None,
+    };
     let horz = if speed == Fx::ZERO && turned && steering.is_some() {
         if state.horz == HorzState::Stopped { HorzState::Cruise } else { state.horz }
     } else if speed == Fx::ZERO {
@@ -2138,7 +2282,7 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
         patrolling: cmd.is_some_and(|c| matches!(c.kind, CommandKind::Patrol | CommandKind::FormPatrol)),
         position: next,
         orientation,
-        state: MotionState { speed, horz, course, vertical, combat, combat_until, combat_engaged, turn_ticks, heading: snapped_heading, wobble, bank, spin, climb: if winged { climb } else { Fx::ZERO }, arrival, ..state },
+        state: MotionState { speed, horz, course, vertical, combat, combat_until, combat_engaged, turn_ticks, heading: snapped_heading, wobble, bank, spin, climb: if winged { climb } else { Fx::ZERO }, arrival, pivot, ..state },
         arrived,
         event,
         vertical_event,
@@ -4158,6 +4302,52 @@ mod tests {
             assert!(c.is_done(cmd) || speed >= Fx::ZERO, "reversed along the path at {:?}", w.get(tk).unwrap().position());
         }
         assert!(c.is_done(cmd), "arrived");
+    }
+
+    #[test]
+    fn rolling_off_turns_on_the_spot_where_it_cant_drive_on() {
+        // The real game's T1 engineer off a UEF land factory placed off the
+        // grid (dev/probes probe_rolloff, one tick later there): its way out
+        // starts diagonally, 60 degrees off its nose, inside the factory, so
+        // it steps out, stops, backs a step, stops and sets off at 150.
+        let nav = crate::engine::sim::nav::tests::with_factory();
+        let goal = nav.goal_spot(crate::engine::sim::nav::NavClass(0), FxVec3::from_f64(19.0, 0.0, 16.0), 3).unwrap();
+        assert_eq!(goal, FxVec3::from_f64(19.5, 0.0, 15.5), "the open cell next to the roll-off point");
+        let roll = |min: usize| {
+            let mut w = EntityWorld::default();
+            let mut c = Commands::default();
+            let id = w.spawn(EntityKind::Unit, BlueprintKind::Unit, String::new(), Some(1), FxVec3::from_f64(15.999, 0.0, 16.332), FxQuat::from_heading(Fx::FRAC_PI_2).0);
+            w.get_mut(id).unwrap().unit.as_mut().unwrap().motion_params = MotionParams {
+                kind: MotionKind::Land,
+                max_speed: Fx::from_num(1.9),
+                acceleration: Fx::from_num(3.8),
+                brake: Fx::from_num(3.8),
+                reverse_speed: Fx::from_num(1.9),
+                turn_rate: Fx::PI,
+                ground: GroundParams { size_x: Fx::from_num(0.7), size_z: Fx::from_num(0.9), ..Default::default() },
+                ..Default::default()
+            };
+            let cmd = c.issue(&[id], CommandKind::Move, CommandTarget::Ground(goal), None, 0);
+            c.get_mut(cmd).unwrap().off_factory = true;
+            let (mut cands, mut moved, mut events) = (Vec::new(), Vec::new(), Vec::new());
+            let mut seen = Vec::new();
+            for _ in 0..60 {
+                candidates(&w, &c, &mut cands);
+                step(&w, &c, Env { nav: Some(&nav), ..Env::default() }, &cands, min, &mut moved);
+                apply(&mut w, &mut c, &moved, &mut events);
+                let e = w.get(id).unwrap();
+                seen.push((e.position(), e.unit.as_ref().unwrap().motion_state.speed, facing(e)));
+            }
+            (seen, c.is_done(cmd))
+        };
+        let (seen, done) = roll(usize::MAX);
+        let speeds: Vec<f64> = seen[..5].iter().map(|s| (s.1.to_num::<f64>() * 100.0).round() / 100.0).collect();
+        assert_eq!(speeds, [0.38, 0.0, -0.38, 0.0, 0.38], "out, stop, back, stop, off");
+        let headings: Vec<i32> = seen[..5].iter().map(|s| (s.2 * 180 / Fx::PI).round().to_num::<i32>()).collect();
+        assert_eq!(headings, [108, 126, 144, 150, 150], "turning 18 degrees a tick to the first cell");
+        assert!(done, "then on to the goal");
+        assert!(dist2(seen.last().unwrap().0, goal) < Fx::ONE / 2);
+        assert_eq!(roll(0), (seen, done), "the parallel pass matches the serial one");
     }
 
     #[test]

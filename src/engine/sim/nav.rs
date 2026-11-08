@@ -570,6 +570,75 @@ impl NavGrid {
         }
     }
 
+    /// Where moho puts a move's goal for a unit of `class` ordered to
+    /// `target`: the cell its footprint covers there (corner at
+    /// round(target - N / 2), halves to even), if `class` fits on it; else
+    /// the first that fits in square rings of cells round it, ring by ring,
+    /// each ring's cells by x then z from the low corner; the goal is that
+    /// cell's centre (for odd sizes). `None` past `rings` rings (moho stops
+    /// at 900 cells, about 10 rings). From
+    /// the real game (dev/probes `probe_goalsnap`, FAF's exe): goals on cell
+    /// edges and corners round halves to even, and a target at a factory's
+    /// centre goes to the first open cell of the ring outside it, its
+    /// low-x, low-z corner, wherever the unit comes from; the move task's
+    /// spot search is 0x102154c0 (called for every move with a position,
+    /// 0x10202d07).
+    pub fn goal_spot(&self, class: NavClass, target: FxVec3, rings: i64) -> Option<FxVec3> {
+        let n = self.classes.get(class.0 as usize).map_or(1, |c| c.size.max(1)) as i64;
+        let lo = (n - 1) / 2;
+        let half = Fx::from_num(n) / 2;
+        let (x0, z0) = (round_half_even(target.x - half), round_half_even(target.z - half));
+        let fits = |x: i64, z: i64| x + lo >= 0 && z + lo >= 0 && self.passable(class, (x + lo) as u32, (z + lo) as u32);
+        let at = |x: i64, z: i64| FxVec3 { x: Fx::from_num(x) + half, y: target.y, z: Fx::from_num(z) + half };
+        if fits(x0, z0) {
+            return Some(at(x0, z0));
+        }
+        for r in 1..=rings {
+            for dx in -r..=r {
+                let edge = dx.abs() == r;
+                let mut dz = -r;
+                while dz <= r {
+                    if fits(x0 + dx, z0 + dz) {
+                        return Some(at(x0 + dx, z0 + dz));
+                    }
+                    dz += if edge { 1 } else { 2 * r };
+                }
+            }
+        }
+        None
+    }
+
+    /// A unit's way out of the factory it was built in, from `from` to
+    /// `goal`: through the factory (its cells don't count), cell by cell,
+    /// the diagonal steps first, each cell's centre a waypoint and `goal`
+    /// the last. As the real game's T1 engineer leaves a factory placed off
+    /// the grid (dev/probes `probe_rolloff`: from cell (607, 80) to (611,
+    /// 79) it heads for the centre of (608, 79), then of (609, 79), and so
+    /// on; out of a grid-snapped one, `probe_rolloff2`, for the centre of
+    /// the next cell along).
+    pub fn roll_off_cells(&self, class: NavClass, from: FxVec3, goal: FxVec3) -> Vec<FxVec3> {
+        let (s, g) = (self.cell_for(class, from), self.cell_for(class, goal));
+        let (dx, dz) = (g.0 as i64 - s.0 as i64, g.1 as i64 - s.1 as i64);
+        let steps = dx.abs().max(dz.abs());
+        let diagonal = dx.abs().min(dz.abs());
+        let mut out = Vec::with_capacity(steps as usize + 1);
+        let (mut x, mut z) = (s.0 as i64, s.1 as i64);
+        for i in 0..steps {
+            if i < diagonal || dx.abs() > dz.abs() {
+                x += dx.signum();
+            }
+            if i < diagonal || dz.abs() > dx.abs() {
+                z += dz.signum();
+            }
+            if i + 1 < steps {
+                let (px, pz) = self.point_of(class, (x as u32, z as u32));
+                out.push(FxVec3 { x: px, y: goal.y, z: pz });
+            }
+        }
+        out.push(goal);
+        out
+    }
+
     fn cell(&self, p: FxVec3) -> (u32, u32) {
         let c = |v: Fx, max: u32| v.max(Fx::ZERO).floor().to_num::<u32>().min(max.saturating_sub(1));
         (c(p.x, self.width), c(p.z, self.height))
@@ -1101,7 +1170,7 @@ fn to_waypoints(grid: &NavGrid, layer: NavClass, points: &[u32], goal: Option<Fx
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// `Vehicle1x1` in the default class list.
@@ -1116,6 +1185,43 @@ mod tests {
         }
         let t = Terrain::from_heightmap(&Heightmap { width: 32, height: 32, scale: 1.0 / 128.0, samples });
         NavGrid::build(&t, &[false; 256])
+    }
+
+    /// A flat 32x32 map with a 5x5 structure on cells 14..=18 (a UEF land
+    /// factory placed off the grid at (16, 16)).
+    pub(crate) fn with_factory() -> NavGrid {
+        let t = Terrain::from_heightmap(&Heightmap { width: 32, height: 32, scale: 1.0 / 128.0, samples: vec![0u16; 33 * 33] });
+        let mut g = NavGrid::build(&t, &[false; 256]);
+        g.block_rect(Fx::from_num(14), Fx::from_num(14), Fx::from_num(19), Fx::from_num(19), true);
+        g
+    }
+
+    #[test]
+    fn move_goals_snap_to_cells_and_out_of_structures() {
+        let g = with_factory();
+        let spot = |x: f64, z: f64| g.goal_spot(LAND, FxVec3::from_f64(x, 0.0, z), 3).unwrap();
+        // Cell edges and corners round halves to even (probe_goalsnap).
+        assert_eq!(spot(25.0, 8.0), FxVec3::from_f64(24.5, 0.0, 8.5));
+        assert_eq!(spot(25.5, 9.0), FxVec3::from_f64(25.5, 0.0, 8.5));
+        // A roll-off point on the factory's edge: its cell (18, 16) is
+        // covered, so the first open one round it, (19, 15) (probe_rolloff:
+        // (611, 80) -> (611.5, 79.5)).
+        assert_eq!(spot(19.0, 16.0), FxVec3::from_f64(19.5, 0.0, 15.5));
+        // The factory's centre: the low corner of the ring outside it.
+        assert_eq!(spot(16.5, 16.5), FxVec3::from_f64(13.5, 0.0, 13.5));
+        assert_eq!(g.goal_spot(LAND, FxVec3::from_f64(16.5, 0.0, 16.5), 2), None, "not within 2 rings");
+    }
+
+    #[test]
+    fn roll_off_cells_take_the_diagonal_first() {
+        let g = with_factory();
+        let goal = FxVec3::from_f64(19.5, 0.0, 15.5);
+        // From the pad, cell (15, 16), through the factory to (19, 15).
+        let cells = g.roll_off_cells(LAND, FxVec3::from_f64(15.999, 0.0, 16.332), goal);
+        assert_eq!(cells, [(16.5, 15.5), (17.5, 15.5), (18.5, 15.5), (19.5, 15.5)].map(|(x, z)| FxVec3::from_f64(x, 0.0, z)));
+        // Straight out: every cell along.
+        let cells = g.roll_off_cells(LAND, FxVec3::from_f64(16.5, 0.0, 16.5), FxVec3::from_f64(19.5, 0.0, 16.5));
+        assert_eq!(cells, [(17.5, 16.5), (18.5, 16.5), (19.5, 16.5)].map(|(x, z)| FxVec3::from_f64(x, 0.0, z)));
     }
 
     #[test]

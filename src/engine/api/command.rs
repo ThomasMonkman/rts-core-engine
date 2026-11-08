@@ -393,20 +393,26 @@ pub(crate) fn refuses(lua: &Lua, unit: EntityId, kind: CommandKind, target: Comm
 }
 
 /// `IssueMoveOffFactory(units, position)`: a move order flagged to roll off
-/// the factory (straight, through the factory, down from the pad).
+/// the factory (`CUnitCommand` +0x142, set at MohoEngine.dll 0x102cd678).
 fn move_off_factory(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
-        /// A move order flagged to roll off the factory (straight, through
-        /// the factory, down from the pad).
+        /// A move order flagged to roll off the factory: to the open cell
+        /// at (or nearest round) the roll-off point, out through the
+        /// factory.
         IssueMoveOffFactory = |lua, (units, target): (shapes::Units, shapes::OrderTarget)| {
             let units = capable(lua, "IssueMoveOffFactory", units_of(lua, &units)?);
             let mut target = target_of(&target)?;
-            // FAF passes the factory's centre when it has no rally point:
-            // the unit still rolls out, along the factory's facing to just
-            // past its skirt.
-            if let (CommandTarget::Ground(p), Some(&unit)) = (target, units.first())
-                && let Some(out) = clear_of_factory(lua, unit, p)? {
-                target = CommandTarget::Ground(out);
+            if let (CommandTarget::Ground(p), Some(&unit)) = (target, units.first()) {
+                match roll_off_goal(lua, unit, p) {
+                    Some(spot) => target = CommandTarget::Ground(spot),
+                    // No open ground near (a factory a script put on a
+                    // slope or in the water): out past its skirt instead.
+                    None => {
+                        if let Some(out) = clear_of_factory(lua, unit, p)? {
+                            target = CommandTarget::Ground(out);
+                        }
+                    }
+                }
             }
             let handle = issue(lua, &units, CommandKind::Move, target, None, 0);
             if let Some(c) = commands(lua).get_mut(handle.0) {
@@ -416,13 +422,26 @@ fn move_off_factory(lua: &Lua) -> LuaResult<()> {
         })
 }
 
+/// The goal a unit rolling off a factory heads for: moho's move goal for
+/// `p` (`NavGrid::goal_spot`), the cell centre there, or the first open
+/// cell round it when the factory covers it (the real game's engineer sent
+/// to (611, 80), the edge of a UEF land factory placed at (608, 80), heads
+/// for (611.5, 79.5): dev/probes `probe_rolloff`). Moho snaps every move's
+/// goal this way; ours only this one. Ours looks only 3 rings out (moho:
+/// 900 cells), enough to clear a 5x5 factory from its centre. `None`
+/// without a grid or an open cell that near.
+fn roll_off_goal(lua: &Lua, unit: EntityId, p: FxVec3) -> Option<FxVec3> {
+    let nav = lua.app_data_ref::<crate::engine::sim::nav::NavGrid>()?;
+    let w = entity::world(lua);
+    let class = crate::engine::sim::movement::nav_class(w.get(unit)?.unit.as_deref()?, &nav)?;
+    nav.goal_spot(class, p, 3)
+}
+
 /// Where a unit rolling off the factory it's attached to should head when
-/// `p` lies within the factory's skirt: on past the skirt, a unit's length
-/// out, the way `p` lies from the factory's centre (FAF's
-/// `CalculateRollOffPoint` gives the `RollOffPoints` entry nearest the rally
-/// point, e.g. +-3 x for UEF: down the side ramps), or along the factory's
-/// facing for its centre (no rally point). `None`: `p` is outside (or no
-/// factory).
+/// `p` lies within the factory's skirt and the ground round it isn't
+/// ground it can stand on: on past the skirt, a unit's length out, the way
+/// `p` lies from the factory's centre, or along the factory's facing for
+/// its centre. `None`: `p` is outside (or no factory).
 fn clear_of_factory(lua: &Lua, unit: EntityId, p: FxVec3) -> LuaResult<Option<FxVec3>> {
     let parent = entity::world(lua).get(unit).and_then(|u| u.attachment).map(|a| a.parent);
     match parent {
