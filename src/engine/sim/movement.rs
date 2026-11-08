@@ -1946,10 +1946,13 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
                 // Stopped to turn ([`Pivot`]): it wants to stand, or backs
                 // up at its reverse speed (moho's spline asks the reverse
                 // top speed in state 5, 0x101a28fb). Ours only for units
-                // rolling off a factory: moho checks every surface unit,
-                // but ours steers without the spline's cell-by-cell path,
-                // so engineers parking at a skirt stopped and backed up
-                // where the real ones don't (`assist_spread` scenario).
+                // rolling off a factory: moho checks every surface unit
+                // along its spline path, but ours deliberately follows flow
+                // fields and steers instead, and the check there only added
+                // stalls next to blocked ground (in `assist_spread`, at the
+                // engineers' spawn by the shore and cliff, which changed the
+                // order they arrived in and left two 0.49 apart at the
+                // skirt).
                 if eases && !winged && off_factory {
                     pivot_steer = Some(steer);
                     match state.pivot {
