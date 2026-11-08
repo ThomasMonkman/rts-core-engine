@@ -176,7 +176,7 @@ pub fn exec_file_real_os_file(lua: &Lua, path: &str) -> LuaResult<()> {
         debug!(path = path, "dofile: refused (not a .lua file)");
         return Ok(());
     }
-    let Some(bytes) = std::fs::read(path).ok() else {
+    let Some(bytes) = std::fs::read(super::io::disk_path(path)).ok() else {
         debug!(path = path, "dofile: skip missing");
         return Ok(());
     };

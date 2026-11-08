@@ -443,7 +443,7 @@ impl Vfs {
         }
         // Compare canonical paths when the file exists, so `../x/..` and
         // absolute spellings of a mounted folder both match.
-        let lower = std::fs::canonicalize(path).map_or_else(|_| unixy.clone(), |c| c.to_string_lossy().replace('\\', "/")).to_lowercase();
+        let lower = std::fs::canonicalize(crate::engine::api::io::disk_path(path)).map_or_else(|_| unixy.clone(), |c| c.to_string_lossy().replace('\\', "/")).to_lowercase();
         for (src, mountpoint) in &self.index.folder_roots {
             if let Some(rest) = lower.strip_prefix(src.as_str())
                 && (rest.is_empty() || rest.starts_with('/')) {
