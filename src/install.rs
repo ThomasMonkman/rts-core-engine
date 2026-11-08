@@ -7,6 +7,8 @@
 //!    Alliance` beside the working directory;
 //! 3. the settings file (`settings.ini` in [`config_dir`]), which a folder
 //!    picked in the "not found" dialog is saved to;
+//!    (Between 2 and 3: the folder above the executable's, when it stands
+//!    in for the game's `bin/SupremeCommander.exe`.)
 //! 4. beside the executable (or beside the `.app` on macOS): `fa/`,
 //!    `FAForever/`, `Supreme Commander Forged Alliance/`;
 //! 5. the FAF client's data folder (`%ProgramData%\FAForever` on Windows,
@@ -113,6 +115,9 @@ fn fa_candidates(saved: Option<PathBuf>) -> Vec<PathBuf> {
 
 fn game_candidates(saved: Option<PathBuf>, init: Option<&Path>) -> Vec<PathBuf> {
     let mut c = vec![Path::new("..").join(GAME_FOLDER)];
+    // Standing in for the game's own `bin/SupremeCommander.exe` (as LOUD
+    // runs it): the install the program is in, ahead of a saved pick.
+    c.extend(exe_dirs().first().and_then(|d| d.parent()).map(Path::to_path_buf));
     c.extend(saved);
     c.extend(exe_dirs().into_iter().map(|d| d.join(GAME_FOLDER)));
     // The FAF client records the install it plays with in `fa_path.lua`,
