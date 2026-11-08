@@ -13,6 +13,12 @@
 /// `let _s =` that keeps the real span alive with the feature on.
 pub struct NoSpan;
 
+/// Empty, so `drop(span)` can close a span early in both builds without
+/// `clippy::drop_non_drop` firing when the feature is off.
+impl Drop for NoSpan {
+    fn drop(&mut self) {}
+}
+
 /// A profiling span entered for the rest of the enclosing scope:
 /// `let _s = prof_span!("receive");`. A no-op without the `tracy` feature.
 #[macro_export]
