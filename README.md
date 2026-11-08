@@ -12,6 +12,27 @@ No game data ships with it: you need your own copy of Forged Alliance (Steam or 
 
 A blog style posting of the progress can be found [HERE](https://forum.faforever.com/topic/10451/supcom-moho-engine-rewrite)
 
+## Just get me running
+
+To just get playing, download the latest ![release here](https://github.com/ThomasMonkman/rts-core-engine/releases)
+
+If you have faf installed it will auto pick up your maps and mods.
+
+### Multiplayer
+
+*Host:*
+Main Menu -> Mulitplayer LAN -> Create -> (input game name)
+
+_You will get an join code like so (its auto copied to your clip board)_
+![host code](docs/assets/iroh-join-console.webp)
+
+*Join:*
+Main Menu -> Mulitplayer LAN
+
+_at the bottom in the ip address box input the code, and in the port input 1_
+![join code](docs/assets/iroh-code-input.webp)
+
+
 ## Requirements
 
 - **Rust**: the pinned nightly in `rust-toolchain.toml` (rustup installs it on the first build).
@@ -23,8 +44,10 @@ A blog style posting of the progress can be found [HERE](https://forum.faforever
   For development, put `fa` and `Supreme Commander Forged Alliance` beside this repo.
 - **Linux**: `libasound2-dev` and `pkg-config`; Vulkan drivers.
 
-## Running
 
+## Running this repo
+
+_For development, put `fa` and `Supreme Commander Forged Alliance` beside this repo._
 ```sh
 cargo run --release                             # main menu
 cargo run --release -- --session                # straight into a skirmish against the AI
