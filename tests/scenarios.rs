@@ -66,6 +66,11 @@ fn bounded_props() {
 }
 
 #[test]
+fn tree_push() {
+    scenario("tree_push", 120);
+}
+
+#[test]
 fn game_tick_stages() {
     scenario("game_tick_stages", 150);
 }

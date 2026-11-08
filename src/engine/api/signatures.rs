@@ -259,9 +259,6 @@ signatures! {
         ScaleGetBuiltEmitter(emitter: Obj<moho::IEffect>);
         SetIsValidTarget(valid: bool);
     }
-    moho::MotorFallDown {
-        Whack(x: f64, y: f64, z: f64, depth: f64, fall: bool);
-    }
     moho::Projectile {
         SetDamage(amount: Option<f64>, radius: Option<f64>);
         /// Stub, from moho's binding (MohoEngine.dll 0x10283de0).

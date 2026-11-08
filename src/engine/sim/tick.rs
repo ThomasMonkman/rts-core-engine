@@ -119,6 +119,11 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
     if let (Some(mut w), Some(mut s)) = (lua.app_data_mut::<crate::engine::sim::entity::EntityWorld>(), lua.app_data_mut::<crate::engine::sim::scroller::Scrolled>()) {
         crate::engine::sim::scroller::tick(&mut w, &mut s);
     }
+    // Falling trees lean (`sim::fall_down`, moho's `MotorFallDown`, an
+    // entity motor ticked in the motion stage).
+    if let (Some(mut w), Some(mut m)) = (lua.app_data_mut::<crate::engine::sim::entity::EntityWorld>(), lua.app_data_mut::<crate::engine::sim::fall_down::FallMotors>()) {
+        crate::engine::sim::fall_down::tick(&mut w, &mut m);
+    }
     enter(Phase::Projectiles);
     crate::engine::api::projectile::tick(lua)?;
     crate::engine::api::unit::health_changes_tick(lua)?;
