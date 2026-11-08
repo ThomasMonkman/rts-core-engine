@@ -110,7 +110,9 @@ fn load_file_from_vfs(
         .app_data_ref::<Arc<ScriptCache>>()
         .expect("ScriptCache not in app_data")
         .clone();
-    // A script an active mod hooks: compiled with the mods' hooks.
+    // A script an active mod hooks: compiled with the hooks of the mods
+    // `__active_mods` lists now (moho reads it at every load).
+    crate::engine::mods::sync_hooks(lua, || Some(cache.vfs().clone()));
     let hooked = lua.app_data_ref::<crate::engine::mods::ModHooks>().and_then(|h| h.get(&cache, path));
     let bytecode = match hooked.unwrap_or_else(|| cache.get(path)) {
         Ok(Ok(bc)) => bc,
