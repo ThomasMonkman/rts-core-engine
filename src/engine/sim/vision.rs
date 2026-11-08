@@ -290,17 +290,19 @@ type Stamped = ((EntityId, usize), Stamp, FxVec3);
 const UPDATE_CHUNK: usize = 1024;
 
 /// The sizes from which [`IntelGrids::update`]'s passes go parallel. The
-/// gather costs ~40 ns per entity serially, so waking rayon (~100 µs) pays
-/// from a few thousand.
+/// gather costs ~40 ns per entity serially and the blip scan ~30 ns per
+/// unit, so waking rayon (~100 µs) pays from a few thousand.
 #[derive(Clone, Copy)]
 struct ParallelMin {
     /// Entities (all of them: props and projectiles too) for the gather
     /// and merge.
     update: usize,
+    /// Units for the blip scan.
+    scan: usize,
 }
 
 impl ParallelMin {
-    const DEFAULT: Self = Self { update: 4 * UPDATE_CHUNK };
+    const DEFAULT: Self = Self { update: 4 * UPDATE_CHUNK, scan: 4096 };
 }
 
 /// One chunk's gather and merge output (reused buffers).
@@ -406,6 +408,9 @@ pub struct IntelGrids {
     /// [`Recon`]: diffed each update into `changes`.
     now: Vec<(EntityId, [u64; 4])>,
     now_next: Vec<(EntityId, [u64; 4])>,
+    /// The parallel blip scan's per-unit results (scratch: not saved).
+    #[serde(skip)]
+    scan: Vec<Option<(EntityId, [u64; 4])>>,
     /// Per vision cell: the armies whose own exploring sensors
     /// ([`EXPLORING`], vision only) have ever covered it (set as stamps go down, never cleared).
     /// Presentation bookkeeping: nothing in the sim reads it.
@@ -634,7 +639,7 @@ impl IntelGrids {
         // Wanted becomes current; the old list's storage is reused next tick.
         self.stamps = wanted;
         self.wanted = old;
-        self.record_intel(world);
+        self.record_intel(world, min.scan);
     }
 
     /// Merges `out.wanted` (in (entity, sensor) order, as `stamps`) with
@@ -886,9 +891,26 @@ impl IntelGrids {
         [share(seen), share(radar), share(sonar), share(omni)]
     }
 
+    /// The enemy armies detecting unit `e` now (its own side doesn't count),
+    /// if any, for [`IntelGrids::record_intel`].
+    fn scan_unit(&self, e: &Entity) -> Option<(EntityId, [u64; 4])> {
+        let (Some(owner), Some(_)) = (e.army, e.unit.as_deref()) else { return None };
+        if e.destroyed {
+            return None;
+        }
+        let own = self.shared_by.get(owner as usize).copied().unwrap_or(1 << owner.min(MAX_ARMIES));
+        let m = self.masks(e).map(|m| m & !own);
+        (m != [0; 4]).then_some((e.id, m))
+    }
+
     /// Per unit: enemy intel now, diffed against last update into
     /// `changes`; first sightings into `seen_ever` and `first_seen`.
-    fn record_intel(&mut self, world: &EntityWorld) {
+    ///
+    /// The scan reads only the grids and the world, one unit at a time, so
+    /// from `parallel_min` units it runs in parallel into one slot per
+    /// unit, kept in id order; the diff is serial.
+    fn record_intel(&mut self, world: &EntityWorld, parallel_min: usize) {
+        use rayon::prelude::*;
         self.changes.clear();
         self.first_seen.clear();
         let any = self.active[0] | self.active[1] | self.active[2] | self.active[3] | self.active[4];
@@ -896,17 +918,16 @@ impl IntelGrids {
         next.clear();
         let scan = crate::prof_span!("intel blip scan");
         if any != 0 {
-            for e in world.units() {
-                let (Some(owner), Some(_)) = (e.army, e.unit.as_deref()) else { continue };
-                if e.destroyed {
-                    continue;
-                }
-                // Its own side doesn't count.
-                let own = self.shared_by.get(owner as usize).copied().unwrap_or(1 << owner.min(MAX_ARMIES));
-                let m = self.masks(e).map(|m| m & !own);
-                if m != [0; 4] {
-                    next.push((e.id, m));
-                }
+            let slots = world.unit_indices();
+            let ents = world.as_slice();
+            if slots.len() >= parallel_min {
+                let mut out = std::mem::take(&mut self.scan);
+                let this = &*self;
+                slots.par_iter().with_min_len(64).map(|&i| this.scan_unit(&ents[i as usize])).collect_into_vec(&mut out);
+                next.extend(out.iter().flatten());
+                self.scan = out;
+            } else {
+                next.extend(slots.iter().filter_map(|&i| self.scan_unit(&ents[i as usize])));
             }
         }
         drop(scan);
@@ -1262,8 +1283,8 @@ mod tests {
         assert!(run(&w).fake_blips(1).is_empty(), "omni exposes them");
     }
 
-    /// The parallel gather / merge (fixed entity chunks) give the serial
-    /// results bit for bit: every tick's whole state (stamps,
+    /// The parallel gather / merge (fixed entity chunks) and blip scan give
+    /// the serial results bit for bit: every tick's whole state (stamps,
     /// ops, flags, jammers, grids, detections, changes and first
     /// sightings) is the same. Units with several sensors, cloak and
     /// jammers, entities without intel between them (uneven chunks),
@@ -1321,8 +1342,8 @@ mod tests {
             assert!(changes > 1000 && !g.jammers.is_empty() && !g.own_flags.is_empty(), "the scene exercises it: {changes} changes");
             states
         };
-        let serial = run(ParallelMin { update: usize::MAX });
-        let parallel = run(ParallelMin { update: 0 });
+        let serial = run(ParallelMin { update: usize::MAX, scan: usize::MAX });
+        let parallel = run(ParallelMin { update: 0, scan: 0 });
         for (t, (s, p)) in serial.iter().zip(&parallel).enumerate() {
             assert!(s == p, "update {t}: parallel state differs from serial");
         }
