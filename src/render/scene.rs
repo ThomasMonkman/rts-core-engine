@@ -1839,8 +1839,11 @@ impl Scene {
                 orders.iter().map(|(u, marks)| (*u, marks.iter().map(|m| if m.command == command { super::player::moved_marker(m, node) } else { m.clone() }).collect())).collect()
             });
             let orders = dragged.as_deref().unwrap_or(orders);
-            // Selection brackets: each selected unit's selection box.
+            // Selection brackets: each selected unit's selection box, round
+            // its mesh's box (moho, 0x103c7726: the mesh box's centre across,
+            // the unit's height; the collision box until the mesh loads).
             let boxes = self.input.blueprint_selection.as_deref();
+            let models = &self.stage.models;
             let brackets: Vec<super::command_graph::Bracket> = self
                 .input
                 .selection
@@ -1848,10 +1851,11 @@ impl Scene {
                 .filter_map(|id| {
                     let e = &self.frame_entities[self.frame_entities.binary_search_by_key(id, |e| e.id).ok()?];
                     let [sx, sz, thickness, ox, oy, oz] = boxes.and_then(|b| b.get(e.blueprint as usize).copied()).unwrap_or([0.0; 6]);
+                    let mesh = super::selection_box::unit_box(e.position, e.rotation, e.scale, e.center, e.half, models.bounds(e.mesh));
                     Some(super::command_graph::Bracket {
-                        position: Vec3::from_array(e.position),
+                        position: Vec3::new(mesh.centre.x, e.position[1], mesh.centre.z),
                         rotation: Quat::from_array(e.rotation).normalize(),
-                        half: super::command_graph::bracket_half([sx, sz], [e.half[0], e.half[2]]),
+                        half: super::command_graph::bracket_half([sx, sz], [mesh.half.x, mesh.half.z]),
                         thickness,
                         offset: [ox, oy, oz],
                     })

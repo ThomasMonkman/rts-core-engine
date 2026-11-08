@@ -67,6 +67,11 @@ impl ScriptCache {
         }
     }
 
+    /// The VFS the scripts come from.
+    pub fn vfs(&self) -> &Arc<RwLock<Vfs>> {
+        &self.vfs
+    }
+
     fn key(path: &str) -> String {
         let s = path.replace('\\', "/").to_lowercase();
         if s.starts_with('/') { s } else { format!("/{s}") }

@@ -16,7 +16,7 @@ pub fn register_unsafe(lua: &Lua) -> LuaResult<()> {
         open = |lua, (path, mode): (String, Option<String>)| io_open(lua, (path, mode)))?;
     lua_fn!(lua, table(io, "io"),
         /// The file names matching a glob like `/dir/*.ext`, sorted, after
-        /// `"."` and `".."`.
+        /// `"."` and `".."` when the pattern matches them.
         dir = |lua, pattern: String| io_dir(lua, pattern))?;
 
     lua.globals().set("io", io)
@@ -75,15 +75,20 @@ fn io_open(lua: &Lua, (path, mode): (String, Option<String>)) -> LuaResult<LuaVa
 
 /// io.dir(pattern) — lists filenames matching a glob under a directory.
 /// Pattern: "/abs/or/real/path/*.ext"
-/// Always includes "." and ".." as FAF scripts expect.
+/// `"."` and `".."` come first, but only when the folder exists and the
+/// pattern matches them (`*`, `*.*`), as `FindFirstFile` lists them: FAF's
+/// init tests `IoDir(moddir .. "/mod_info.lua")[1]` for nil to skip a folder
+/// without a mod info file (or a stray file, like a `.7z`, in `mods/`).
 fn io_dir(lua: &Lua, pattern: String) -> LuaResult<LuaTable> {
     let table = lua.create_table()?;
 
     let (dir_str, glob) = split_disk_glob(&pattern);
 
     let mut names: BTreeSet<String> = BTreeSet::new();
+    let mut dots: Vec<&str> = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(&dir_str) {
+        dots = [".", ".."].into_iter().filter(|d| glob_match(d, glob)).collect();
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if glob_match(&name, glob) {
@@ -95,10 +100,10 @@ fn io_dir(lua: &Lua, pattern: String) -> LuaResult<LuaTable> {
     debug!(dir = %dir_str, glob = glob, count = names.len(), "io.dir");
 
     let mut i = 1i64;
-    table.set(i, ".")?;
-    i += 1;
-    table.set(i, "..")?;
-    i += 1;
+    for d in dots {
+        table.set(i, d)?;
+        i += 1;
+    }
     for name in names {
         table.set(i, name)?;
         i += 1;
@@ -224,6 +229,34 @@ mod tests {
         }
         assert_eq!(expand_disk_glob(&format!("{}\\*.scd", dir.display())), vec![dir.join("A.scd"), dir.join("b.scd")]);
         assert_eq!(expand_disk_glob(&format!("{}\\c.txt", dir.display())), vec![dir.join("c.txt")]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `io.dir` lists `.` and `..` only for a folder that exists and a
+    /// pattern they match, so FAF's `IoDir(moddir .. "/mod_info.lua")[1]`
+    /// is nil for a stray archive in `mods/` and init skips it.
+    #[test]
+    fn io_dir_lists_dots_only_when_they_match() {
+        let dir = std::env::temp_dir().join(format!("io_dir_dots_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("mod")).unwrap();
+        std::fs::write(dir.join("mod/mod_info.lua"), "").unwrap();
+        std::fs::write(dir.join("stray.7z"), "not a zip").unwrap();
+        let lua = Lua::new();
+        crate::engine::api::register_unsafe(&lua).unwrap();
+        lua.globals().set("d", dir.to_string_lossy().replace('\\', "/")).unwrap();
+        let (stray, info, all, missing): (Option<String>, Option<String>, String, Option<String>) = lua
+            .load(
+                r#"
+                local all = table.concat(io.dir(d .. '/mod/*.*'), ',')
+                return io.dir(d .. '/stray.7z/mod_info.lua')[1], io.dir(d .. '/mod/mod_info.lua')[1], all, io.dir(d .. '/nope/*')[1]
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(stray, None);
+        assert_eq!(info.as_deref(), Some("mod_info.lua"));
+        assert_eq!(all, ".,..,mod_info.lua");
+        assert_eq!(missing, None);
         std::fs::remove_dir_all(&dir).ok();
     }
 
