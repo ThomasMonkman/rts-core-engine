@@ -458,6 +458,12 @@ pub fn spawn_prop(lua: &Lua, bp_path: &str, position: FxVec3, orientation: FxQua
     let skeleton = crate::engine::api::mesh::skeleton_for(lua, &bp)?;
     let render_mesh = crate::engine::api::mesh::render_index_for(lua, &bp)?;
     let id = world(lua).spawn(EntityKind::Prop, BlueprintKind::Prop, bp_id, None, position, orientation);
+    // Props have their blueprint's box from the start, as units do: FAF's
+    // `Prop` never sets one but reads it back (`CacheAndRemoveCollisionExtents`),
+    // and area damage gathers by shape (moho 0x102f5d30), so a tree group is
+    // hit where its trees are, not only at its origin.
+    let shape = crate::engine::api::unit::blueprint_collision(&bp)?;
+    world(lua).set_base_collision(id, shape);
     let scale = blueprint_scale(&bp)?;
     if let Some(e) = world(lua).get_mut(id) {
         e.cold.skeleton = skeleton;

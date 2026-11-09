@@ -322,10 +322,10 @@ fn unit_threat(lua: &Lua, bp: &LuaTable, category_index: Option<u32>) -> LuaResu
     Ok(unit_threat(level("AirThreatLevel")?, level("SurfaceThreatLevel")?, level("SubThreatLevel")?, level("EconomyThreatLevel")?, kinds))
 }
 
-/// A unit's collision box from its blueprint: half-extents `Size*/2`,
-/// sitting on `CollisionOffset*` (bottom face at the offset's y). Units with
-/// `SizeSphere` get their sphere from FAF's `OnStopBeingBuilt`.
-fn blueprint_collision(bp: &LuaTable) -> LuaResult<crate::engine::sim::entity::CollisionShape> {
+/// A unit's or prop's collision box from its blueprint: half-extents
+/// `Size*/2`, sitting on `CollisionOffset*` (bottom face at the offset's y).
+/// Units with `SizeSphere` get their sphere from FAF's `OnStopBeingBuilt`.
+pub(crate) fn blueprint_collision(bp: &LuaTable) -> LuaResult<crate::engine::sim::entity::CollisionShape> {
     let num = |k: &str| -> LuaResult<Fx> { Ok(crate::engine::sim::math::from_lua(bp.get::<Option<f64>>(k)?.unwrap_or(0.0))) };
     let half = FxVec3 { x: num("SizeX")? / 2, y: num("SizeY")? / 2, z: num("SizeZ")? / 2 };
     if half == FxVec3::default() {
