@@ -622,7 +622,7 @@ mod bar_tests {
     use crate::engine::snapshot::{EntityView, Sighting, ViewKind};
 
     fn unit(health: f32, build: f32) -> EntityView {
-        EntityView { id: 7, kind: ViewKind::Unit, army: 1, position: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0; 3], half: [1.0; 3], health, build, work: 0.0, shield: -1.0, blueprint: 0, mesh: 0, scale: [1.0; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 }
+        EntityView { id: 7, kind: ViewKind::Unit, army: 1, position: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0; 3], half: [1.0; 3], health, max_health: 100.0, build_rate: 0.0, build, work: 0.0, shield: -1.0, blueprint: 0, mesh: 0, scale: [1.0; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 }
     }
 
     use crate::render::scene::shows_bar;

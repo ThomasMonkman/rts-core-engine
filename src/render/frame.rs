@@ -1230,6 +1230,14 @@ fn update_ui(s: &mut RenderState, dt: f32) {
         }
         s.ui_army_display = Some(c.clone());
     }
+    // Units named by the sim (`SetCustomName`: AI and campaign commanders).
+    if let Some(n) = &s.world.custom_names
+        && !s.ui_custom_names.as_ref().is_some_and(|u| std::sync::Arc::ptr_eq(u, n)) {
+        if let Err(e) = vm.set_custom_names(n) {
+            tracing::warn!("UI custom names: {e}");
+        }
+        s.ui_custom_names = Some(n.clone());
+    }
     // The player's team colours (`TeamColorMode`: FAF's team colour button).
     let (version, team) = vm.team_colors();
     if version != s.ui_team_colors {
@@ -2137,7 +2145,7 @@ mod follow_middle_tests {
     #[test]
     fn middle_follows_the_entities_left() {
         use rts_core_engine::engine::snapshot::{EntityView, Sighting, ViewKind};
-        let at = |id, x, z| EntityView { id, kind: ViewKind::Unit, army: 1, position: [x, 0.0, z], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0; 3], half: [1.0; 3], health: 1.0, build: 1.0, work: 0.0, shield: -1.0, blueprint: 0, mesh: 0, scale: [1.0; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 };
+        let at = |id, x, z| EntityView { id, kind: ViewKind::Unit, army: 1, position: [x, 0.0, z], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0; 3], half: [1.0; 3], health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, work: 0.0, shield: -1.0, blueprint: 0, mesh: 0, scale: [1.0; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 };
         let entities = [at(2, 10.0, 20.0), at(5, 30.0, 40.0)];
         let mut ids = vec![2, 4, 5];
         assert_eq!(super::middle(&entities, &mut ids), Some([20.0, 30.0]));

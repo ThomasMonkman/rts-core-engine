@@ -286,6 +286,11 @@ pub fn with_raw_state(lua: &Lua, f: impl FnMut(*mut mlua::ffi::lua_State)) -> Lu
     raw_call(lua, f)
 }
 
+/// [`with_raw_state`] with `args` on the stack (from index 1) for `f`.
+pub fn with_raw_state_args(lua: &Lua, args: impl IntoLuaMulti, f: impl FnMut(*mut mlua::ffi::lua_State)) -> LuaResult<()> {
+    raw_call_with(lua, args, f)
+}
+
 /// While alive, objects `lua` makes take no gcid: wrap work only some runs
 /// of a game do (the renderer's snapshot building reads blueprints through
 /// mlua, whose protected calls make closures), so the gcid counter, table

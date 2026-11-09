@@ -286,6 +286,8 @@ pub struct World {
     pub upgraded: Vec<(u32, u32)>,
     /// Launches for cameras following their launcher (`frame::camera_follows`).
     pub camera_follows: Vec<rts_core_engine::engine::sim::presentation::CameraFollow>,
+    /// Units' custom names (`Snapshot::custom_names`).
+    pub custom_names: Option<Arc<Vec<(u32, String)>>>,
     pub army_display: Option<Arc<Vec<crate::engine::snapshot::ArmyDisplay>>>,
     pub team_colors: Option<Vec<u32>>,
     pub army_rgb: Arc<Vec<[f32; 3]>>,
@@ -351,6 +353,7 @@ impl World {
             focus_army_changed: None,
             upgraded: Vec::new(),
             camera_follows: Vec::new(),
+            custom_names: None,
             army_display: None,
             team_colors: None,
             army_rgb: Arc::new(Vec::new()),
@@ -700,6 +703,9 @@ impl World {
             if let Some(a) = snap.alliances.take() {
                 self.alliances = Some(a);
             }
+            if let Some(n) = snap.custom_names.take() {
+                self.custom_names = Some(n);
+            }
             if let Some(c) = snap.army_display.take() {
                 self.army_display = Some(c);
                 self.rebuild_army_rgb();
@@ -1044,7 +1050,7 @@ mod pick_timing {
         use glam::Vec3;
         let mut w = super::World::new(1920, 1080);
         let units: Vec<EntityView> = (0..48_000u32)
-            .map(|i| EntityView { id: i + 1, kind: ViewKind::Unit, army: 1, position: [(i % 220) as f32 * 4.0, 20.0, (i / 220) as f32 * 4.0], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0, 0.5, 0.0], half: [0.5, 0.5, 0.7], health: 1.0, build: 1.0, work: 0.0, shield: -1.0, blueprint: 0, mesh: i % 50, scale: [0.1; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 })
+            .map(|i| EntityView { id: i + 1, kind: ViewKind::Unit, army: 1, position: [(i % 220) as f32 * 4.0, 20.0, (i / 220) as f32 * 4.0], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0, 0.5, 0.0], half: [0.5, 0.5, 0.7], health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, work: 0.0, shield: -1.0, blueprint: 0, mesh: i % 50, scale: [0.1; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 })
             .collect();
         w.frame.entities = std::sync::Arc::new(units);
         w.add_mesh_bounds(&(0..50).map(|m| (m, [-5.0, 0.0, -7.0, 5.0, 8.0, 7.0])).collect::<Vec<_>>());

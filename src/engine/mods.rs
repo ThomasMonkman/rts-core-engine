@@ -346,6 +346,11 @@ impl ModHooks {
         Some(compiled)
     }
 
+    /// The mods' hook folders that apply to `path` (none when no mod hooks it).
+    pub fn dirs_for(&self, path: &str) -> &[String] {
+        if self.hooked.contains(&normalise(path)) { &self.dirs } else { &[] }
+    }
+
     /// `path`'s source with the VFS's and the mods' hooks (scripts run
     /// from source: `RuleInit.lua`).
     pub fn source(&self, vfs: &Vfs, path: &str) -> io::Result<Vec<u8>> {

@@ -182,6 +182,17 @@ pub struct Cli {
     #[arg(long, value_name = "SECS", default_value_t = 30)]
     pub stall_timeout: u64,
 
+    /// Lua debugger: listen on 127.0.0.1:PORT (default 4711) for VS Code
+    /// (or any Debug Adapter Protocol client). Breakpoints, stepping and
+    /// variables in the sim and interface Lua. See docs/guides/debugging-lua.md.
+    #[arg(long, value_name = "PORT", num_args = 0..=1, default_missing_value = "4711")]
+    pub lua_debug: Option<u16>,
+
+    /// With --lua-debug (implied): wait for the debugger to attach before
+    /// running any Lua, so breakpoints in start-up code are hit.
+    #[arg(long)]
+    pub lua_debug_wait: bool,
+
     /// Log file (also shown in the window's Logs panel). Give separate runs
     /// separate files so they don't overwrite each other. Defaults to
     /// game.log: in the working directory in a source checkout, else beside

@@ -233,6 +233,8 @@ and a map from a vault needs the same `--vault`. File format and internals:
 | `--record <file>` / `--no-record` | record to this file / don't record | windowed: `replays/` |
 | `--replay <file>` | play a recording (headless too; `--ticks` still applies) | off |
 | `--stall-timeout <secs>` | seconds without a tick before the watchdog reports a stall; 0 = off | 30 |
+| `--lua-debug [port]` | serve the Lua debugger (Debug Adapter Protocol) on `127.0.0.1:port` for VS Code: [debugging-lua.md](debugging-lua.md) | off; 4711 |
+| `--lua-debug-wait` | with `--lua-debug` (implied): run no Lua until the debugger has attached | off |
 
 The run-ahead process for replay seeking uses `--keyframes-out`, `--keyframe-every`, `--background`
 and `--parent-pid` ([replays.md](../architecture/replays.md)). Networked games use `--net-host`,

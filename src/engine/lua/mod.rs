@@ -1,3 +1,4 @@
+pub mod debugger;
 pub mod det_math;
 pub mod error;
 pub mod execute;

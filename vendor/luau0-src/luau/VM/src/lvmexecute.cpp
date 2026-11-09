@@ -194,8 +194,10 @@ inline bool luau_skipstep(uint8_t op)
     return op == LOP_PREPVARARGS || op == LOP_BREAK;
 }
 
+// RTS-CORE-ENGINE DEBUGGER: `resumeop` >= 0 resumes a call at the LOP_BREAK
+// it stopped on, running the patched-out opcode `resumeop` first (see LOP_BREAK).
 template<bool SingleStep>
-static void luau_execute(lua_State* L)
+static void luau_execute(lua_State* L, int resumeop = -1)
 {
 #if VM_USE_CGOTO
     static const void* kDispatchTable[256] = {VM_DISPATCH_TABLE()};
@@ -232,6 +234,16 @@ reentry:
     base = L->base;
     k = cl->l.p->k;
 
+#if !VM_USE_CGOTO
+    size_t dispatchOp; // RTS-CORE-ENGINE DEBUGGER: declared before `resumeop`'s jump to dispatchContinue
+#endif
+
+    // RTS-CORE-ENGINE DEBUGGER
+    if (LUAU_UNLIKELY(resumeop >= 0))
+    {
+        VM_CONTINUE(resumeop);
+    }
+
     VM_NEXT(); // starts the interpreter "loop"
 
     {
@@ -259,7 +271,7 @@ reentry:
         }
 
 #if !VM_USE_CGOTO
-        size_t dispatchOp = LUAU_INSN_OP(*pc);
+        dispatchOp = LUAU_INSN_OP(*pc);
 
     dispatchContinue:
         switch (dispatchOp)
@@ -2977,6 +2989,19 @@ reentry:
                     // allow debugbreak hook to put thread into error/yield state
                     if (L->status != 0)
                         goto exit;
+
+                    // RTS-CORE-ENGINE DEBUGGER: the hook turned single-stepping on
+                    // (a step from a breakpoint): this interpreter only checks
+                    // `singlestep` on entry, so the rest of this call runs in the
+                    // single-step one, starting with the patched-out opcode. It
+                    // returns when the call this one was entered for does (or the
+                    // thread yields or errors), which is where this one would end.
+                    if (!SingleStep && L->singlestep)
+                    {
+                        L->ci->savedpc = pc;
+                        luau_execute<true>(L, op);
+                        goto exit;
+                    }
                 }
 
                 VM_CONTINUE(op);

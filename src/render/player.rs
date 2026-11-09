@@ -1044,7 +1044,7 @@ mod tests {
     #[test]
     fn dock_goes_to_the_nearest_platform() {
         use crate::engine::snapshot::{order_categories as oc, Sighting};
-        let view = |id, army, x: f32, bp, build| EntityView { id, kind: ViewKind::Unit, army, position: [x, 0.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0; 3], half: [0.5; 3], health: 1.0, build, work: 0.0, shield: -1.0, blueprint: bp, mesh: 0, scale: [1.0; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 };
+        let view = |id, army, x: f32, bp, build| EntityView { id, kind: ViewKind::Unit, army, position: [x, 0.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0; 3], half: [0.5; 3], health: 1.0, max_health: 100.0, build_rate: 0.0, build, work: 0.0, shield: -1.0, blueprint: bp, mesh: 0, scale: [1.0; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 };
         // Blueprints: 0 a plane, 1 a tank, 2 a platform.
         let mut w = World::new(64, 64);
         w.blueprint_caps = Some(std::sync::Arc::new(vec![caps::MOVE | caps::DOCK, caps::MOVE, caps::STOP]));

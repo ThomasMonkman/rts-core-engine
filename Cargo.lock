@@ -4956,6 +4956,7 @@ dependencies = [
  "rtrb",
  "rustls",
  "serde",
+ "serde_json",
  "socket2",
  "sysinfo",
  "texpresso",

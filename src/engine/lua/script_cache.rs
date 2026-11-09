@@ -54,8 +54,13 @@ fn prewarm_group(path: &str) -> u8 {
 /// 0.2% over a 6000-tick AI game) and would shift `debug.getinfo` stack
 /// levels. Changing it makes existing replay keyframes unloadable (their
 /// heap names protos by creation order).
+///
+/// Debug level 2 (local and upvalue names) with the Lua debugger on
+/// (`--lua-debug`), else 1 (line numbers and function names). Names only:
+/// the code is the same.
 pub fn compiler() -> Compiler {
-    Compiler::new().set_optimization_level(1)
+    let debug = if crate::engine::lua::debugger::enabled() { 2 } else { 1 };
+    Compiler::new().set_optimization_level(1).set_debug_level(debug)
 }
 
 impl ScriptCache {

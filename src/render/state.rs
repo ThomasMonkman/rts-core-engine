@@ -121,6 +121,8 @@ pub struct RenderState {
     pub ui_alliances: Option<std::sync::Arc<Vec<(u32, u32, crate::engine::sim::army::Alliance)>>>,
     /// The army display the user layer has (`Scene::army_display`).
     pub ui_army_display: Option<std::sync::Arc<Vec<crate::engine::snapshot::ArmyDisplay>>>,
+    /// The custom names the user layer has (`Scene::custom_names`).
+    pub ui_custom_names: Option<std::sync::Arc<Vec<(u32, String)>>>,
     /// The `TeamColorMode` version the scene has.
     pub ui_team_colors: u64,
     /// The interface's draw list this frame (physical pixels), drawn over
@@ -516,6 +518,7 @@ impl RenderState {
             ui_selection: Vec::new(),
             ui_alliances: None,
             ui_army_display: None,
+            ui_custom_names: None,
             ui_team_colors: 0,
             ui_shift: false,
             build_drag: None,

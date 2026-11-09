@@ -110,6 +110,7 @@ impl Engine {
         sim_lua.set_app_data(script_cache.clone());
         api::register_safe(&sim_lua)?;
         keyframe::prepare(&sim_lua)?;
+        lua::debugger::attach(&sim_lua, "Sim");
         let watchdog = Arc::new(watchdog::Watchdog::default());
         sim_lua.set_app_data(watchdog.clone());
 

@@ -137,7 +137,12 @@ fn load_file_from_vfs(
         chunk = chunk.set_environment(env);
     }
     match chunk.into_function() {
-        Ok(f) => Ok((Some(f), None)),
+        Ok(f) => {
+            if crate::engine::lua::debugger::enabled() {
+                crate::engine::lua::debugger::on_chunk(lua, path, &f);
+            }
+            Ok((Some(f), None))
+        }
         Err(e) => Ok((None, Some(e.to_string()))),
     }
 }

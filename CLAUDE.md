@@ -28,6 +28,7 @@ A from-scratch reimplementation of the Supreme Commander: Forged Alliance engine
 | `docs/architecture/overview.md` | Threads, data flow, where the code lives |
 | `docs/guides/running.md` | Run commands: windowed, headless, screenshots, replays, flags, Tracy, stress maps |
 | `docs/guides/testing.md` | The test suites, goldens and re-recording, scenario tests, determinism checks (trace / dump variables), CI |
+| `docs/guides/debugging-lua.md` | The Lua debugger: `--lua-debug`, the VS Code extension in `dev/vscode-lua-debug/`, how breakpoints/stepping work, limits |
 | `docs/guides/probing.md` | Differential probes in the real game (`dev/probes/`, Windows + FAF) |
 | `docs/guides/lua-api-types.md` | The typed Lua API: registering functions/methods/callbacks (`lua_fn!`, `lua_method!`, `callbacks!`), typed tables/enums, `--dump-api` Luau/EmmyLua output, the checks |
 | `docs/guides/benchmarks.md` | Running the criterion benches, comparing against a saved `develop` baseline, whole-game timing runs |

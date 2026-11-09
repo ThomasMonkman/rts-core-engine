@@ -418,6 +418,12 @@ LUA_API const char* lua_setupvalue(lua_State* L, int funcindex, int n);
 
 LUA_API void lua_singlestep(lua_State* L, int enabled);
 LUA_API int lua_breakpoint(lua_State* L, int funcindex, int line, int enabled);
+// RTS-CORE-ENGINE DEBUGGER: `lua_breakpoint` for the Lua closure `closure`
+// (`lua_topointer` of a function the caller keeps alive) instead of a stack
+// slot, so the engine's debugger can set breakpoints without pushing a value
+// (from the interrupt, and with no object made in the sim VM). Returns the
+// line set, or -1.
+LUA_API int lua_breakpointclosure(lua_State* L, const void* closure, int line, int enabled);
 
 typedef void (*lua_Coverage)(void* context, const char* function, int linedefined, int depth, const int* hits, size_t size);
 

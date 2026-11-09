@@ -189,7 +189,8 @@ pub fn spawn(wd: Arc<Watchdog>, config: Config) -> std::io::Result<()> {
         while Arc::strong_count(&wd) > 1 {
             std::thread::sleep(Duration::from_millis(500));
             let beat = wd.beat.load(Ordering::Relaxed);
-            if beat != last || !wd.armed.load(Ordering::Relaxed) {
+            // A sim stopped in the Lua debugger isn't stalled.
+            if beat != last || !wd.armed.load(Ordering::Relaxed) || crate::engine::lua::debugger::is_paused() {
                 if reported {
                     tracing::warn!(tick = wd.tick.load(Ordering::Relaxed), "sim progressing again after a stall");
                 }
@@ -219,9 +220,21 @@ pub fn spawn(wd: Arc<Watchdog>, config: Config) -> std::io::Result<()> {
     Ok(())
 }
 
-unsafe extern "C-unwind" fn interrupt(state: *mut ffi::lua_State, gc: c_int) {
+/// The Lua interrupt of the sim VM (and of every VM the Lua debugger
+/// attaches, which picks up its own work here: `engine::lua::debugger`).
+pub(crate) unsafe extern "C-unwind" fn interrupt(state: *mut ffi::lua_State, gc: c_int) {
     // gc >= 0: a GC step, not a safe point to raise errors from.
-    if gc >= 0 || !BREAK_LUA.load(Ordering::Relaxed) {
+    if gc >= 0 {
+        return;
+    }
+    if crate::engine::lua::debugger::enabled() && unsafe { crate::engine::lua::debugger::on_interrupt(state) } {
+        // Debug Console code past its time limit.
+        unsafe {
+            ffi::lua_checkstack(state, 2);
+            ffi::luaL_error(state, c"console: stopped".as_ptr())
+        }
+    }
+    if !BREAK_LUA.load(Ordering::Relaxed) {
         return;
     }
     BREAK_LUA.store(false, Ordering::Relaxed);

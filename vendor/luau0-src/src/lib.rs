@@ -336,4 +336,6 @@ pub const _MOHO_PATCHED_SOURCES: &[&str] = &[
     include_str!("../luau/VM/src/laux.cpp"),
     include_str!("../luau/VM/include/lua.h"),
     include_str!("../luau/VM/src/lsnapshot.cpp"),
+    include_str!("../luau/VM/src/ldebug.cpp"),
+    include_str!("../luau/VM/src/lvmexecute.cpp"),
 ];

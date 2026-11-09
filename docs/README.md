@@ -12,6 +12,7 @@ New here? Read [CONTRIBUTING.md](../CONTRIBUTING.md) first, then [the architectu
 | [benchmarks.md](guides/benchmarks.md) | Running the benches and comparing a change against a baseline; whole-game timing runs |
 | [packaging.md](guides/packaging.md) | Shipping builds: how the game and FAF folders are found, what's built into the binary, the package scripts |
 | [audits.md](guides/audits.md) | The scripts that find missing APIs, callbacks, blueprint fields and weapon failures, and how to re-run them |
+| [debugging-lua.md](guides/debugging-lua.md) | Debugging the game's Lua in VS Code: breakpoints, stepping, the stack and variables (`--lua-debug`) |
 | [probing.md](guides/probing.md) | Running the same script in the real game and ours to compare behaviour (needs Windows and FAF) |
 
 ## Architecture: how it works

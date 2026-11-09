@@ -2017,6 +2017,8 @@ fn lua_api(c: &mut Criterion) {
             blueprint: Arc::from("uel0201"),
             army: 1 + i % 8,
             health: 0.5,
+            max_health: 100.0,
+            build_rate: 0.0,
             build: 1.0,
             position: [i as f32, 0.0, 0.0],
             work: 0.0,
@@ -2049,7 +2051,7 @@ fn lua_api(c: &mut Criterion) {
     let vm = rts_core_engine::ui::UserVm::new(empty_vfs()).unwrap();
     vm.lua().set_app_data(Arc::new(domain(1700)));
     let units: Vec<rts_core_engine::ui::UnitInfo> = (0..2000u32)
-        .map(|i| rts_core_engine::ui::UnitInfo { id: i + 1, blueprint: Arc::from(format!("u{:04}", i % 1700)), army: 1, health: 1.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: None })
+        .map(|i| rts_core_engine::ui::UnitInfo { id: i + 1, blueprint: Arc::from(format!("u{:04}", i % 1700)), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: None })
         .collect();
     vm.update_units(&units).unwrap();
     let filter: mlua::Function = vm
@@ -2064,7 +2066,7 @@ fn lua_api(c: &mut Criterion) {
     let vm = rts_core_engine::ui::UserVm::new(empty_vfs()).unwrap();
     vm.lua().set_app_data(Arc::new(domain(1700)));
     let units: Vec<rts_core_engine::ui::UnitInfo> = (0..2000u32)
-        .map(|i| rts_core_engine::ui::UnitInfo { id: i + 1, blueprint: Arc::from(format!("u{:04}", i % 9)), army: 1, health: 1.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: None })
+        .map(|i| rts_core_engine::ui::UnitInfo { id: i + 1, blueprint: Arc::from(format!("u{:04}", i % 9)), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: None })
         .collect();
     vm.update_units(&units).unwrap();
     let command_data: mlua::Function = vm

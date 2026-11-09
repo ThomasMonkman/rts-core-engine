@@ -31,6 +31,7 @@ Every dependency in `Cargo.toml` and what it's for. Keep this in step when addin
 | `texpresso` | Decoding DXT textures where the GPU has no BC support |
 | `png` | Screenshots, and PNG textures |
 | `serde`, `postcard` | Keyframe and replay serialisation |
+| `serde_json` | The Lua debugger's Debug Adapter Protocol messages (`engine::lua::debugger`) |
 | `bytemuck` | Zero-copy byte views for GPU uploads and hashing |
 
 ## Rendering and interface

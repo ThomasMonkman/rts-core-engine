@@ -638,6 +638,31 @@ impl Vfs {
         Ok(())
     }
 
+    /// The files a script's chunk is made of, as [`append_hooks`](Self::append_hooks)
+    /// joins them: the script, then each hook (with `extra`'s), each with
+    /// the chunk line its first line lands on. The translation keeps every
+    /// line where it was, so a chunk line maps back to a line of one of
+    /// these files (the Lua debugger, `engine::lua::debugger`).
+    pub fn chunk_segments(&self, path: &str, extra: &[String]) -> io::Result<Vec<(String, u32)>> {
+        let key = normalise(path);
+        let loc = self.index.file_system.get(&key).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("not in VFS: {path}")))?;
+        let mut out = vec![(key.clone(), 1)];
+        if !matches!(extension(&key), Some("lua" | "bp")) || self.index.hook_dirs.iter().chain(extra).any(|d| key.starts_with(d.as_str()) && key[d.len()..].starts_with('/')) {
+            return Ok(out);
+        }
+        let lines = |bytes: &[u8]| bytes.iter().filter(|&&b| b == b'\n').count() as u32;
+        let mut prev = loc;
+        for dir in self.index.hook_dirs.iter().chain(extra) {
+            let hook_path = format!("{dir}{key}");
+            let Some(hook) = self.index.file_system.get(&hook_path) else { continue };
+            // The previous part's lines, then the `\n` that joins them.
+            let start = out.last().unwrap().1 + lines(&prev.get_file(&self.index.archieves)?) + 1;
+            out.push((hook_path, start));
+            prev = hook;
+        }
+        Ok(out)
+    }
+
     /// All VFS file paths in sorted order.
     pub fn sorted_paths(&self) -> &[String] {
         &self.index.sorted_paths

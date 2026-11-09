@@ -15,7 +15,11 @@ methods.GetEntityId = function(self) return tostring(self._id) end
 methods.GetUnitId = function(self) local u = d(self) return u and u.bp end
 methods.GetBlueprint = function(self) local u = d(self) return u and __blueprints[u.bp] end
 methods.GetArmy = function(self) local u = d(self) return u and u.army or -1 end
+-- The sim's current maximum (a buff or script may have changed it from
+-- the blueprint's).
 methods.GetMaxHealth = function(self)
+    local u = d(self)
+    if u and u.max_health then return u.max_health end
     local bp = self:GetBlueprint()
     return bp and bp.Defense and bp.Defense.MaxHealth or 1
 end
@@ -69,7 +73,10 @@ methods.GetEconData = function(self)
 end
 methods.GetFuelRatio = function(self) local u = d(self) return u and u.fuel or -1 end
 methods.GetShieldRatio = function(self) local u = d(self) return u and u.shield or 0 end
+-- The sim's current rate (enhancements, buffs and veterancy change it).
 methods.GetBuildRate = function(self)
+    local u = d(self)
+    if u and u.build_rate then return u.build_rate end
     local bp = self:GetBlueprint()
     return bp and bp.Economy and bp.Economy.BuildRate or 0
 end
@@ -81,7 +88,13 @@ methods.GetStat = function(self, name, default)
     if v == nil then v = default or 0 end
     return { Value = v }
 end
-methods.GetCustomName = function(self) return self._customName end
+-- A name given here (FAF's rename dialog) wins over the sim's
+-- (`SetCustomName`: AI and campaign commanders).
+methods.GetCustomName = function(self)
+    if self._customName then return self._customName end
+    local names = rawget(_G, '__engine_custom_names')
+    return names and names[self._id]
+end
 methods.SetCustomName = function(self, name) self._customName = name end
 -- Selection sets (control groups) the unit belongs to: FAF's selection.lua
 -- keeps the sets and tags units through these.
