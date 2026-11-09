@@ -153,16 +153,22 @@ crates come from `about.toml`'s accepted licences and targets, the vendored text
 
 The workflow is `.github/workflows/release.yml`.
 
-- **Every push to `main`** (and a manual run from the Actions tab, `workflow_dispatch`) runs the three
-  package scripts above on GitHub's runners: `ubuntu-24.04`, `macos-latest` (arm64, building the
-  universal binary) and `windows-latest`, each with the `dist` profile and no build cache. The
-  archives appear as artifacts (`rts-core-engine-linux`, `rts-core-engine-macos`, `rts-core-engine-windows`) on the
-  run's summary page, kept 30 days. Pull requests never run it.
+- **Every push to `main`** (and a manual run from the Actions tab, `workflow_dispatch`) runs the
+  Linux and Windows package scripts above on GitHub's runners (`ubuntu-24.04`, `windows-latest`),
+  each with the `dist` profile and no build cache. The archives appear as artifacts
+  (`rts-core-engine-linux`, `rts-core-engine-windows`) on the run's summary page, kept 30 days.
+  Pull requests never run it.
+- **macOS is off by default**: GitHub's arm64 Mac runners are often at capacity (a job waits 15
+  minutes, then is cancelled), and a missing leg would block the release. A manual run with the
+  `macos` box ticked (`gh workflow run release.yml --ref main -f macos=true`) adds a `macos-latest`
+  leg building the universal binary (artifact `rts-core-engine-macos`). Otherwise build it locally
+  with `dev/package/package-macos.sh` and attach it to the release:
+  `gh release upload v0.1.0 dist/rts-core-engine-*-macos.zip`.
 - The Linux leg also runs the built binary's `--dump-api` and uploads the Lua type files
-  (`sim`/`user` `.d.luau` and EmmyLua `.lua`, see [lua-api-types.md](lua-api-types.md)) as a
-  fourth artifact, `rts-core-engine-lua-api` (`rts-core-engine-<version>-<commit>-lua-api.zip`).
-- **A `v*` tag** builds the same and then creates a GitHub release for that tag holding the three
-  archives and the Lua API zip, with notes generated from the merged PRs. To cut one, from an up-to-date `main`:
+  (`sim`/`user` `.d.luau` and EmmyLua `.lua`, see [lua-api-types.md](lua-api-types.md)) as another
+  artifact, `rts-core-engine-lua-api` (`rts-core-engine-<version>-<commit>-lua-api.zip`).
+- **A `v*` tag** builds the same and then creates a GitHub release for that tag holding the Linux
+  and Windows archives and the Lua API zip (add the macOS zip by hand, above), with notes generated from the merged PRs. To cut one, from an up-to-date `main`:
   `git tag v0.1.0 && git push origin v0.1.0`.
 - A tag with a `-` in it (`v0.2.0-rc1`) is published as a **prerelease**.
 

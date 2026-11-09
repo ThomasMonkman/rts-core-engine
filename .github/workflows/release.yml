@@ -1,6 +1,6 @@
-# Builds the player downloads (dev/package) on Linux, macOS and Windows and
-# keeps them as workflow artifacts; a `v*` tag also publishes them as a
-# GitHub release. No game data is needed: the scripts only build and zip.
+# Builds the player downloads (dev/package) on Linux and Windows (macOS on a
+# manual run that asks for it) and keeps them as workflow artifacts; a `v*`
+# tag also publishes them as a GitHub release. No game data is needed: the scripts only build and zip.
 # See docs/guides/packaging.md "Builds in CI and releases".
 name: Release
 
@@ -9,6 +9,11 @@ on:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      macos:
+        description: Also build macOS (its runners are often unavailable; upload the zip to a release by hand otherwise)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -25,23 +30,16 @@ env:
 jobs:
   package:
     name: package (${{ matrix.os }})
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.os == 'linux' && 'ubuntu-24.04' || matrix.os == 'macos' && 'macos-latest' || 'windows-latest' }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: linux
-            runner: ubuntu-24.04
-            archive: dist/*.tar.gz
-          # One leg: package-macos.sh builds a universal binary (Apple
-          # silicon + Intel, lipo) on the arm64 runner.
-          - os: macos
-            runner: macos-latest
-            archive: dist/*.zip
-          - os: windows
-            runner: windows-latest
-            archive: dist/*.zip
+        # macOS only on a manual run with `macos` ticked: GitHub's arm64 Mac
+        # runners are often at capacity, and a missing leg would block the
+        # release. Build it locally (dev/package/package-macos.sh, a
+        # universal binary) and `gh release upload` the zip instead.
+        os: ${{ fromJSON(inputs.macos && '["linux", "windows", "macos"]' || '["linux", "windows"]') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -75,7 +73,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: rts-core-engine-${{ matrix.os }}
-          path: ${{ matrix.archive }}
+          path: ${{ matrix.os == 'linux' && 'dist/*.tar.gz' || 'dist/*.zip' }}
           if-no-files-found: error
           retention-days: 30
           # Already compressed.
