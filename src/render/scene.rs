@@ -1561,9 +1561,9 @@ impl Scene {
         let alpha = self.fixed_alpha.unwrap_or_else(|| (self.arrived.elapsed().as_secs_f32() / interval.max(1e-3)).clamp(0.0, 1.0));
         // Game seconds the frame shows: tread marks are born and fade by it.
         self.frame_game_seconds = (latest.sim_tick as f32 - 1.0 + alpha) * TICK_SECONDS;
-        if !self.pending_marks.is_empty() {
+        if !self.pending_marks.is_empty() || self.map.treads_waiting() {
             let marks = std::mem::take(&mut self.pending_marks);
-            self.map.lay_treads(device, queue, &marks);
+            self.map.lay_treads(device, queue, &marks, self.frame_game_seconds);
         }
         {
             let stage = &mut *self.stage;

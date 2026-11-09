@@ -398,6 +398,12 @@ struct TreadRing {
 #[derive(Default)]
 struct Treads {
     rings: BTreeMap<String, TreadRing>,
+    /// Marks whose texture was still loading when laid: retried each
+    /// `lay_treads` until it's in (dropped if it fails, or once their
+    /// lifetime has run out). Without this a one-off splat (`CreateSplat`)
+    /// with a texture not seen before never showed: its own request is what
+    /// starts the load.
+    waiting: Vec<TreadMark>,
 }
 
 /// A run of decals drawn in one call: same texture and pass, adjacent
@@ -842,6 +848,13 @@ impl TerrainRenderer {
         self.treads.rings.keys().cloned().collect()
     }
 
+    /// Marks laid into the tread ring of each texture whose path contains
+    /// `name` (render-state tests).
+    #[allow(dead_code)]
+    pub fn tread_count(&self, name: &str) -> u32 {
+        self.treads.rings.iter().filter(|(t, _)| t.contains(name)).map(|(_, r)| r.count).sum()
+    }
+
     /// Decals built into the map's layer and into the sim's (render-state
     /// tests).
     #[allow(dead_code)]
@@ -948,19 +961,39 @@ impl TerrainRenderer {
         script.layer = Some(DecalLayer::build(device, &view, &source, |d| request_group(script, gpu, device, layout, no_spec, &vfs, bc, d.textures.first()?, spec_path(d).map_or("", String::as_str))));
     }
 
-    /// Lays tread marks and footprints (marks whose texture is still
-    /// loading are skipped). Each texture's ring is written where its head
-    /// is, in at most two runs.
-    pub fn lay_treads(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, marks: &[TreadMark]) {
-        if marks.is_empty() {
+    /// Marks wait for their texture (`lay_treads` should run even with no
+    /// new ones).
+    pub fn treads_waiting(&self) -> bool {
+        !self.treads.waiting.is_empty()
+    }
+
+    /// Lays tread marks and footprints at game seconds `now`, with those
+    /// still waiting for their texture. A mark whose texture is loading
+    /// waits; one whose texture failed, or whose lifetime is over, is
+    /// dropped. Each texture's ring is written where its head is, in at
+    /// most two runs.
+    pub fn lay_treads(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, marks: &[TreadMark], now: f32) {
+        if marks.is_empty() && self.treads.waiting.is_empty() {
             return;
         }
-        let Some(view) = self.view.clone() else { return };
+        let Some(view) = self.view.clone() else {
+            self.treads.waiting.extend_from_slice(marks);
+            return;
+        };
         let _s = rts_core_engine::prof_span!("lay tread marks");
         let (vfs, bc) = (self.vfs.clone(), self.bc);
-        let mut by_texture: BTreeMap<&str, Vec<TreadInstance>> = BTreeMap::new();
-        for m in marks {
-            let Some(group) = request_group(&mut self.script, &self.gpu, device, &self.decal_layout, &self.no_spec, &vfs, bc, &m.texture, "") else { continue };
+        let waiting = std::mem::take(&mut self.treads.waiting);
+        let mut by_texture: BTreeMap<String, Vec<TreadInstance>> = BTreeMap::new();
+        for m in waiting.iter().chain(marks) {
+            if m.born + m.lifetime <= now {
+                continue;
+            }
+            let Some(group) = request_group(&mut self.script, &self.gpu, device, &self.decal_layout, &self.no_spec, &vfs, bc, &m.texture, "") else {
+                if matches!(self.script.textures.get(&m.texture), Some(DecalTexture::Loading)) {
+                    self.treads.waiting.push(m.clone());
+                }
+                continue;
+            };
             // No marks under water.
             if view.water.is_some_and(|w| height(&view, m.centre[0], m.centre[1]) < w) {
                 continue;
@@ -974,11 +1007,11 @@ impl TerrainRenderer {
                 radius: 0.0,
             });
             ring.radius = ring.radius.max(hx.hypot(hz));
-            by_texture.entry(m.texture.as_str()).or_default().push(TreadInstance { centre_half: [m.centre[0], m.centre[1], hx, hz], heading_time: [m.heading, m.born, m.lifetime, m.lod] });
+            by_texture.entry(m.texture.clone()).or_default().push(TreadInstance { centre_half: [m.centre[0], m.centre[1], hx, hz], heading_time: [m.heading, m.born, m.lifetime, m.lod] });
         }
         let stride = std::mem::size_of::<TreadInstance>() as u64;
         for (texture, marks) in by_texture {
-            let Some(ring) = self.treads.rings.get_mut(texture) else { continue };
+            let Some(ring) = self.treads.rings.get_mut(&texture) else { continue };
             // More than a ring's worth at once: keep the newest.
             let marks = &marks[marks.len().saturating_sub(TREAD_RING as usize)..];
             let n = marks.len() as u32;
