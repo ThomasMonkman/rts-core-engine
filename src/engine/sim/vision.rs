@@ -288,6 +288,8 @@ type Stamped = ((EntityId, usize), Stamp, FxVec3);
 /// so the split (and the order outputs are joined in) never depends on the
 /// thread count.
 const UPDATE_CHUNK: usize = 1024;
+/// Units per task of the parallel blip scan.
+const SCAN_CHUNK: usize = 1024;
 
 /// The sizes from which [`IntelGrids::update`]'s passes go parallel. The
 /// gather costs ~40 ns per entity serially and the blip scan ~30 ns per
@@ -521,6 +523,7 @@ impl IntelGrids {
                 stamp_disc(&st, add, cols as i32, rows as i32, &mut grids.counts[st.sensor], cover[st.sensor], explored, row_changed, update);
             }
         };
+        let _discs = crate::prof_span!("intel discs");
         if ops.len() >= APPLY_PARALLEL_MIN {
             // (Each task filters the op list for its army: cheap next to
             // the discs, and keeps every army's ops in merge order.)
@@ -599,6 +602,7 @@ impl IntelGrids {
             // (Each task is a whole chunk of entities: no `with_min_len`.)
             let gather = crate::prof_span!("intel gather");
             chunks.par_iter_mut().enumerate().for_each(|(k, c)| {
+                let _s = crate::prof_span!("intel gather (worker)");
                 c.clear();
                 gather_chunk(&ents[k * UPDATE_CHUNK..((k + 1) * UPDATE_CHUNK).min(ents.len())], &jammer, c);
             });
@@ -606,6 +610,7 @@ impl IntelGrids {
             let merge = crate::prof_span!("intel merge");
             let this = &*self;
             chunks.par_iter_mut().enumerate().for_each(|(k, c)| {
+                let _s = crate::prof_span!("intel merge (worker)");
                 // The old stamps of entity ids from this chunk's first up to
                 // the next chunk's first (the first chunk from the start,
                 // the last to the end: freed entities' stamps fall in
@@ -615,6 +620,7 @@ impl IntelGrids {
                 this.merge_chunk(&old[lo..hi], c);
             });
             // Serial apply: the chunks' outputs in chunk order.
+            let _join = crate::prof_span!("intel merge join");
             for c in &chunks {
                 out.wanted.extend_from_slice(&c.wanted);
                 out.ops.extend_from_slice(&c.ops);
@@ -923,7 +929,16 @@ impl IntelGrids {
             if slots.len() >= parallel_min {
                 let mut out = std::mem::take(&mut self.scan);
                 let this = &*self;
-                slots.par_iter().with_min_len(64).map(|&i| this.scan_unit(&ents[i as usize])).collect_into_vec(&mut out);
+                // Fixed chunks, each a task with its own zone; slot i stays
+                // unit i, so the order is the serial one.
+                out.clear();
+                out.resize(slots.len(), None);
+                out.par_chunks_mut(SCAN_CHUNK).zip(slots.par_chunks(SCAN_CHUNK)).for_each(|(o, s)| {
+                    let _s = crate::prof_span!("intel blip scan (worker)");
+                    for (o, &i) in o.iter_mut().zip(s) {
+                        *o = this.scan_unit(&ents[i as usize]);
+                    }
+                });
                 next.extend(out.iter().flatten());
                 self.scan = out;
             } else {

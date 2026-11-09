@@ -184,7 +184,10 @@ fn intel(lua: &Lua) {
     ) else {
         return;
     };
-    grids.set_alliances_from((armies.alliance_version(), armies.list.len() as u32), |a, b| armies.alliance(a, b) == Alliance::Ally);
+    {
+        let _s = crate::prof_span!("intel alliances");
+        grids.set_alliances_from((armies.alliance_version(), armies.list.len() as u32), |a, b| armies.alliance(a, b) == Alliance::Ally);
+    }
     grids.update(&world, |e| e.unit.as_deref().and_then(|u| u.jammer));
 }
 
