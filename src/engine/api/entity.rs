@@ -89,6 +89,21 @@ pub fn posed_bone(lua: &Lua, e: &crate::engine::sim::entity::Entity, bone: Optio
     crate::engine::sim::pose::bone_world(e, bone, manips.as_deref(), weapons.as_deref(), clips.as_deref())
 }
 
+/// Where a prop made at `bone` goes (`CreatePropAtBone`, `SplitProp`): the
+/// posed bone, turned relative to the mesh's root rest frame, not in mesh
+/// space. A `.scm` root carries the exporter's -90 degree X turn (Z-up to
+/// Y-up; a single tree's mesh has it too, and stands at identity), so the
+/// bone's mesh-space rotation would lay every tree of a split group flat,
+/// pointing north. With it taken out, a group bone with no turn of its own
+/// gives the group's orientation (inferred: FAF's split trees stand).
+pub fn prop_at_bone(lua: &Lua, e: &crate::engine::sim::entity::Entity, bone: Option<u32>) -> (FxVec3, FxQuat) {
+    let (pos, rot) = posed_bone(lua, e, bone);
+    let root = e.cold.skeleton.as_ref().and_then(|s| s.model.first()).map_or(FxQuat::IDENTITY, |&(_, r)| r);
+    // world = O * M; wanted O * R0^-1 * M.
+    let o = e.orientation;
+    (pos, o.mul(root.conjugate()).mul(o.conjugate()).mul(rot).normalized())
+}
+
 /// An aircraft let go on the ground (off a factory's pad) takes off: it's in
 /// the air from here and climbs to its flying height (FAF leaves new
 /// aircraft to "fly off the factory by themselves").
@@ -443,6 +458,12 @@ pub fn spawn_prop(lua: &Lua, bp_path: &str, position: FxVec3, orientation: FxQua
     let skeleton = crate::engine::api::mesh::skeleton_for(lua, &bp)?;
     let render_mesh = crate::engine::api::mesh::render_index_for(lua, &bp)?;
     let id = world(lua).spawn(EntityKind::Prop, BlueprintKind::Prop, bp_id, None, position, orientation);
+    // Props have their blueprint's box from the start, as units do: FAF's
+    // `Prop` never sets one but reads it back (`CacheAndRemoveCollisionExtents`),
+    // and area damage gathers by shape (moho 0x102f5d30), so a tree group is
+    // hit where its trees are, not only at its origin.
+    let shape = crate::engine::api::unit::blueprint_collision(&bp)?;
+    world(lua).set_base_collision(id, shape);
     let scale = blueprint_scale(&bp)?;
     if let Some(e) = world(lua).get_mut(id) {
         e.cold.skeleton = skeleton;
@@ -1152,15 +1173,16 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 .and_then(|b| world(lua).get(id).and_then(|e| e.cold.skeleton.as_ref()).and_then(|s| s.bones.get(b).map(|b| b.name.clone()))))
         })?;
     lua_method!(lua, moho::Entity,
-        /// A prop at `bone`, oriented as the entity times the bone's rest
-        /// rotation (tree groups split into single trees this way).
+        /// A prop at `bone`, oriented as the entity times the bone's turn from
+        /// the mesh's root rest frame (`prop_at_bone`; tree groups split into
+        /// single trees this way).
         CreatePropAtBone = |lua, (this, bone, bp): (Obj<moho::Entity>, shapes::Bone, String)| {
             let id = entity_id(&this)?;
             let index = crate::engine::api::manipulator::resolve_bone(lua, id, &bone)?;
             let (pos, rot) = {
                 let w = world(lua);
                 let e = w.get(id).ok_or_else(|| LuaError::runtime("CreatePropAtBone: entity is gone"))?;
-                posed_bone(lua, e, index)
+                prop_at_bone(lua, e, index)
             };
             spawn_prop(lua, &bp, pos, rot)
         })?;
@@ -1176,7 +1198,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 let w = world(lua);
                 let Some(e) = w.get(id).filter(|e| !e.destroyed) else { return Ok(shapes::List::new(lua.create_table()?)) };
                 let bones = e.cold.skeleton.as_ref().map_or(0, |s| s.bones.len());
-                (1..bones).map(|i| posed_bone(lua, e, Some(i as u32))).collect()
+                (1..bones).map(|i| prop_at_bone(lua, e, Some(i as u32))).collect()
             };
             let props = lua.create_table_with_capacity(posed.len(), 0)?;
             for (i, (pos, rot)) in posed.into_iter().enumerate() {
