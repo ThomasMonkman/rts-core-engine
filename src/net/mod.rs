@@ -3,6 +3,7 @@
 //! - [`link`]: a reliable, ordered channel to one peer over UDP.
 //! - [`transport`]: where packets go: the UDP socket, or iroh (internet
 //!   join codes: no port forwarding).
+//! - [`conditioner`]: latency, jitter and loss on demand (testing).
 //! - [`core`]: the lobby mesh (host, join, every client connected to every
 //!   other) and its events.
 //! - [`discovery`]: LAN game beacons and the listener behind FAF's LAN
@@ -17,6 +18,7 @@
 
 pub mod core;
 pub mod bot;
+pub mod conditioner;
 pub mod discovery;
 pub mod harness;
 pub mod link;
