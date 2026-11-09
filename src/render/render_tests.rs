@@ -2218,25 +2218,25 @@ fn tanks_and_commanders_mark_the_ground() {
     h.ticks(60);
     h.settle();
     h.ticks(10);
-    let textures = h.scene.map.tread_textures();
+    let textures = h.scene.map.splat_textures();
     assert!(textures.iter().any(|t| t.contains("tank_treads")), "tank tread marks: {textures:?}");
     assert!(textures.iter().any(|t| t.contains("commanderprint")), "ACU footprints: {textures:?}");
 }
 
 /// A one-off `CreateSplat` whose texture hasn't been used yet still lands
-/// in a tread ring: its own request starts the texture's load, and it waits
+/// in a splat ring: its own request starts the texture's load, and it waits
 /// for it instead of being dropped.
 #[test]
 fn a_first_splat_waits_for_its_texture() {
     let Some(mut h) = Harness::new(None, false, None) else { return };
     h.ticks(1);
     h.settle();
-    assert_eq!(h.scene.map.tread_count("scorch_001"), 0, "no scorch splat yet");
+    assert_eq!(h.scene.map.splat_count("scorch_001"), 0, "no scorch splat yet");
     h.engine.sim_lua().load("CreateSplat({400, GetSurfaceHeight(400, 580), 580}, 0, 'scorch_001_albedo', 2, 2, 200, 60, -1)").exec().expect("splat");
     h.ticks(1);
     h.settle();
     h.ticks(3);
-    assert_eq!(h.scene.map.tread_count("scorch_001"), 1, "the first splat of a new texture is laid");
+    assert_eq!(h.scene.map.splat_count("scorch_001"), 1, "the first splat of a new texture is laid");
 }
 
 /// The command graph: the selected units' queued orders draw as FAF's

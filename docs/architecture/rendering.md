@@ -71,7 +71,7 @@ Every wgpu object is labelled, and the labels reach the backend, so a frame capt
 A frame's command buffers, in submit order:
 - `frame: start (GPU timing)`: the start of the GPU timing bracket (`GPU timing: frame start`, on adapters with timestamp queries; `GPU timing: frame end` closes it in the last buffer).
 - `frame: shadows + terrain normals`: one pass per sun cascade (`shadows: cascade 0 (near)` ...), then `terrain: normals + depth` (groups `terrain`, `decals: map`, `decals: sim (scorch marks, ...)`, `decals: interface`), then the ground-depth copy for the range overlays.
-- `frame: world`: the `world` pass, in debug groups in draw order: `sky`, `terrain` (then the albedo decals and `tread marks + footprints`), `boxes (models still loading) + icons`, `models`, `particles: underwater`, `water`, `models: shields + effect techniques`, then (after `ranges: mask` and `ranges: composite`, or the refraction copy, each resuming the pass as `world (after ...)`) `particles: beams`, `particles`, `particles: lights`, `ghosts: queued builds`, `resource icons`, `command graph (order lines)`, `ghosts: placement`.
+- `frame: world`: the `world` pass, in debug groups in draw order: `sky`, `terrain` (then the albedo decals and `splats`), `boxes (models still loading) + icons`, `models`, `particles: underwater`, `water`, `models: shields + effect techniques`, then (after `ranges: mask` and `ranges: composite`, or the refraction copy, each resuming the pass as `world (after ...)`) `particles: beams`, `particles`, `particles: lights`, `ghosts: queued builds`, `resource icons`, `command graph (order lines)`, `ghosts: placement`.
 - `frame: post (bloom, SMAA)`: group `bloom` (`bloom: copy glow`, the blur passes), `bloom: add to frame`, then `SMAA: edges`, `SMAA: blend weights`, `SMAA: resolve`.
 - `frame: overlays + interface + debug windows`: `world overlays (selection, drag box)`, `interface`, `debug windows (egui)`.
 
@@ -95,15 +95,16 @@ FA/FAF's terrain as `effects/terrain.fx` draws it, from the map's `.scmap` (read
 - Not yet: the terrain casting into the shadow map (moho's `TTerrainDepth`; ours bakes a horizon map), glow and water-albedo decals, skybox, biplanar mapping, FA's screen-space refraction, decal mask textures (`DecalMaskTexture`).
 - Check against the `.scmap`'s own preview image (the editor's top-down render, first blob in the file).
 
-## Tread marks and footprints (`render/terrain.rs` `lay_treads`)
-FAF lays both itself, as timed splats: tread marks from `TreadComponent` (a thread per
+## Splats: tread marks, footprints (`render/terrain.rs` `lay_splats`)
+Moho calls them splats (`CreateSplat`, `CreateSplatOnBone`; drawn by `TSplats`). FAF lays most
+of them itself: tread marks from `TreadComponent` (a thread per
 `Treads.TreadMarks` entry calling `CreateSplatOnBone` every `TreadMarksInterval`, life
 `TreadLifeTime` or 1 s; it starts only once the engine has reported the terrain type the unit
 is on, `OnTerrainTypeChange`), footprints from `OnAnimCollision`. Timed splats skip the decal
 layer and come with the next snapshot (`Snapshot::splats`); the terrain renderer puts them in a
-ring of 16384 instances per texture (`TreadInstance`: centre, half extents, heading, birth,
+ring of 16384 instances per texture (`SplatInstance`: centre, half extents, heading, birth,
 lifetime, LOD distance), written where its head is (nothing rebuilt per frame), drawn after the
-albedo decals and lit like them (FA's `TSplats`). Like a decal, `vs_tread` lays each mark on the
+albedo decals and lit like them (FA's `TSplats`). Like a decal, `vs_splat` lays each mark on the
 terrain's own cells under it from the height buffer (every instance draws the grid the ring's
 largest mark needs at this frame's step; the rest collapse), so marks follow the ground exactly
 It fades a mark as moho does (opaque, eased
@@ -113,6 +114,9 @@ range. No
 marks under water. Splat sizes are full extents (moho's `CreateSplat` places the corner at the
 centre minus half the size), so small units' tracks (engineers: 0.55 x 0.4 of a two-strip
 texture) are faint by design.
+A splat whose texture is still loading waits (`Splats::waiting`, retried each frame) rather than
+being dropped: its own request starts the load, so a one-off splat would otherwise never show.
+It is dropped if the texture fails or its lifetime runs out first.
 
 ## Shoreline waves (`render/particles.rs` `emit_waves`)
 The `.scmap`'s wave generators (`scmap::WaveGenerator`, field order as moho's

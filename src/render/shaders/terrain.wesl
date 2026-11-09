@@ -620,27 +620,27 @@ fn spec_alpha(spec: vec4<f32>) -> f32 {
     return vec4<f32>(to_target(overlay(i.world.xz, c)), alpha);
 }
 
-// Tread marks and footprints (timed splats): lit like albedo decals. Moho
+// Splats (timed: tread marks, footprints, CreateSplat): lit like albedo decals. Moho
 // keeps a splat opaque and eases it out (`CWldTerrainDecal::AdjustAlpha`;
 // here the last quarter of its life, in game seconds `g.params.z`), and
 // fades it out over the last quarter of its LOD distance
 // (`GetLODAlpha`, `ren_DecalFadeFraction`); marks not born yet, expired or
 // beyond their LOD collapse. Each lies on the terrain's own cells under it,
 // built from the height buffer like a decal's (`vs_decal`).
-struct TreadOut {
+struct SplatOut {
     @builtin(position) @invariant clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) world: vec3<f32>,
     @location(2) fade: f32,
 };
 
-// One mark (an instance, `terrain::TreadInstance`): centre and half
+// One mark (an instance, `terrain::SplatInstance`): centre and half
 // extents, its z axis along (sin, cos) of the heading; the cells of the
 // terrain mesh under it at this frame's step, cell `vertex / 6` (the draw
 // sizes every instance's grid for the ring's largest mark; the rest and
 // cells wholly off the mark collapse).
-@vertex fn vs_tread(@builtin(vertex_index) vi: u32, @location(0) centre_half: vec4<f32>, @location(1) heading_time: vec4<f32>) -> TreadOut {
-    var o: TreadOut;
+@vertex fn vs_splat(@builtin(vertex_index) vi: u32, @location(0) centre_half: vec4<f32>, @location(1) heading_time: vec4<f32>) -> SplatOut {
+    var o: SplatOut;
     o.clip = NOWHERE;
     let born = heading_time.y;
     let life = max(heading_time.z, 1e-3);
@@ -668,8 +668,8 @@ struct TreadOut {
     let cj = j0 + cell / cols;
     let at = terrain_cell_corner(ci, cj, vi % 6u);
     let pos = terrain_vertex(at.x, at.y);
-    o.uv = tread_uv(pos.xz, centre, half, s, c);
-    let corners = array<vec2<f32>, 4>(tread_uv(vec2<f32>(f32(ci * step), f32(cj * step)), centre, half, s, c), tread_uv(vec2<f32>(f32((ci + 1u) * step), f32(cj * step)), centre, half, s, c), tread_uv(vec2<f32>(f32(ci * step), f32((cj + 1u) * step)), centre, half, s, c), tread_uv(vec2<f32>(f32((ci + 1u) * step), f32((cj + 1u) * step)), centre, half, s, c));
+    o.uv = splat_uv(pos.xz, centre, half, s, c);
+    let corners = array<vec2<f32>, 4>(splat_uv(vec2<f32>(f32(ci * step), f32(cj * step)), centre, half, s, c), splat_uv(vec2<f32>(f32((ci + 1u) * step), f32(cj * step)), centre, half, s, c), splat_uv(vec2<f32>(f32(ci * step), f32((cj + 1u) * step)), centre, half, s, c), splat_uv(vec2<f32>(f32((ci + 1u) * step), f32((cj + 1u) * step)), centre, half, s, c));
     if (cell_off(vec4<f32>(corners[0].x, corners[1].x, corners[2].x, corners[3].x), vec4<f32>(corners[0].y, corners[1].y, corners[2].y, corners[3].y))) { return o; }
     let pdepth = dot(pos - g.camera.xyz, g.forward.xyz) * g.forward.w;
     let lod_fade = select(1.0, clamp((lod - pdepth) / (0.25 * lod), 0.0, 1.0), lod > 0.0);
@@ -679,15 +679,15 @@ struct TreadOut {
     return o;
 }
 
-// A tread mark's texture coordinates at world `xz`: its x axis along
+// A splat's texture coordinates at world `xz`: its x axis along
 // (cos, -sin), z along (sin, cos) of the heading, 0..1 across its extents.
-fn tread_uv(xz: vec2<f32>, centre: vec2<f32>, half: vec2<f32>, s: f32, c: f32) -> vec2<f32> {
+fn splat_uv(xz: vec2<f32>, centre: vec2<f32>, half: vec2<f32>, s: f32, c: f32) -> vec2<f32> {
     let d = xz - centre;
     let l = vec2<f32>(d.x * c - d.y * s, d.x * s + d.y * c);
     return l / (2.0 * half) + 0.5;
 }
 
-@fragment fn fs_tread(i: TreadOut) -> @location(0) vec4<f32> {
+@fragment fn fs_splat(i: SplatOut) -> @location(0) vec4<f32> {
     let albedo = textureSample(decal_tex, clamp_smp, i.uv);
     let n = normalize(textureLoad(decal_normal_buffer, vec2<i32>(i.clip.xy), 0).xyz * 2.0 - 1.0);
     let c = shade(i.world, n, vec4<f32>(albedo.rgb, spec_alpha(vec4<f32>(0.0))), 0.5, textureLoad(decal_light_buffer, vec2<i32>(i.clip.xy), 0));
