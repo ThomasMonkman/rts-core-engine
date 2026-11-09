@@ -491,7 +491,11 @@ impl Engine {
                 control.set_speed(c.percent);
             }
         }
-        let Some(mut l) = self.sim_lua.app_data_mut::<crate::net::lockstep::Lockstep>() else { return };
+        let Some(mut l) = self.sim_lua.app_data_mut::<crate::net::lockstep::Lockstep>() else {
+            control.set_speed_fixed(false);
+            return;
+        };
+        control.set_speed_fixed(!l.speed_adjustable());
         let (wanted, agreed) = (control.speed(), l.agreed_speed());
         if wanted != agreed && !l.request_speed(wanted) {
             info!("game speed is fixed by the lobby's Game Speed option");

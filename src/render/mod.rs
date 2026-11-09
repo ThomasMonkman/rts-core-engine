@@ -120,6 +120,7 @@ pub mod shadows;
 pub mod sky;
 pub mod smaa;
 pub mod state;
+pub mod status_bar;
 pub mod terrain;
 pub mod texture_load;
 pub mod ui;

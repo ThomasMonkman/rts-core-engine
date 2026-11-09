@@ -21,7 +21,7 @@
     - Entities are interpolated between the last two snapshots (merge-walk by id; lerp + slerp), one tick of latency.
 - `render/camera.rs`: RTS camera (WASD/arrows, wheel zoom with tilt, middle-drag pan, hold Space and move the mouse to turn and tilt it while zoomed in closer than 125, eased back on letting go unless `cam_Free` (FAF's Ctrl-V) is on; Insert / Delete turn it and it stays turned until the view is reset (FAF's V) or the interface reverts it). 
     - Zoom is moho's: the ground across the view's longer side, which the field of view also spans.
-- egui: status bar (FPS, tick, entity counts), Logs and VFS as collapsible windows; the windows hidden until Ctrl+` (`RenderState::show_debug`), the bar shown with its own toggle at the bottom right (`show_status`).
+- egui: status bar (`status_bar.rs`: FPS, sim, tick, entity counts, the network panel), Logs and VFS as collapsible windows; the windows hidden until Ctrl+` (`RenderState::show_debug`), the bar shown with its own toggle at the bottom right (`show_status`).
 - Stage 3, debug views
     - left-click picks an entity (camera ray vs its box)
     - the **Selected** window shows blueprint, army, layer, speed, health/build, focus, its order queue and weapon states, with its path drawn. 

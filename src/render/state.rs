@@ -160,6 +160,8 @@ pub struct RenderState {
     pub show_debug: bool,
     /// The egui stats bar along the bottom (its own button toggles it).
     pub show_status: bool,
+    /// The stats bar's network panel and its view of the links.
+    pub bar: crate::render::status_bar::BarUi,
     /// `--no-aa`: anti-aliasing off whatever the interface's settings say.
     pub no_aa: bool,
     /// `--window-size`: the window keeps that size (the profile's display
@@ -551,6 +553,7 @@ impl RenderState {
             rollover: None,
             show_debug: false,
             show_status: true,
+            bar: Default::default(),
             ui_cursor: rts_core_engine::ui::cursor::Wanted::System,
             os_cursor: rts_core_engine::ui::cursor::Wanted::System,
             os_cursors: Default::default(),
@@ -1079,6 +1082,11 @@ impl Percentiles {
             self.samples.pop_front();
         }
         self.samples.push_back(v);
+    }
+
+    /// The window, oldest first.
+    pub fn samples(&self) -> impl Iterator<Item = f32> + '_ {
+        self.samples.iter().copied()
     }
 
     /// The `q` (0..1) percentile of the window, 0 when empty.

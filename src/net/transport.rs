@@ -27,6 +27,7 @@ use iroh::dns::{DnsResolver, FallbackMode};
 use iroh::endpoint::{Connection, presets};
 use iroh::{Endpoint, EndpointId};
 
+use super::conditioner::{Dir, Fate, HoldQueue, fate};
 use super::wire::PathKind;
 
 /// The game's QUIC protocol id: peers on anything else are refused.
@@ -82,74 +83,50 @@ pub fn format_code(id: EndpointId) -> String {
 
 pub struct Transport {
     udp: UdpSocket,
-    iroh: Option<Iroh>,
-    lag: Option<Lag>,
+    iroh: Option<Arc<Iroh>>,
+    /// Sends held by the [conditioner](super::conditioner), for the
+    /// `net-hold` thread to make when due.
+    held_out: Sender<(std::time::Instant, Vec<u8>, SocketAddr)>,
+    /// Arrivals held by the conditioner, delivered by `recv_from` when due.
+    held_in: Mutex<HoldQueue<(Vec<u8>, SocketAddr)>>,
 }
 
-/// Dev: `RTS_NET_LAG=<base>:<jitter>[:<n>:<spike>]` (milliseconds) holds
-/// every UDP packet this client sends for `base` plus up to `jitter`, and
-/// one in `n` for `spike` more: a bad connection (wifi, another country)
-/// on one machine. Packets overtake each other as on a real link.
-struct Lag {
-    base_ms: u64,
-    jitter_ms: u64,
-    spike_every: u64,
-    spike_ms: u64,
-    rng: std::sync::atomic::AtomicU64,
-    tx: std::sync::mpsc::Sender<(std::time::Instant, Vec<u8>, SocketAddr)>,
-}
-
-impl Lag {
-    fn from_env(udp: &UdpSocket) -> Option<Lag> {
-        let spec = std::env::var("RTS_NET_LAG").ok()?;
-        let n: Vec<u64> = spec.split(':').map(|v| v.trim().parse().ok()).collect::<Option<_>>()?;
-        let (base_ms, jitter_ms) = (*n.first()?, n.get(1).copied().unwrap_or(0));
-        let (spike_every, spike_ms) = (n.get(2).copied().unwrap_or(0), n.get(3).copied().unwrap_or(0));
-        let socket = udp.try_clone().ok()?;
-        let (tx, rx) = std::sync::mpsc::channel::<(std::time::Instant, Vec<u8>, SocketAddr)>();
-        std::thread::Builder::new()
-            .name("net-lag".into())
-            .spawn(move || {
-                let mut queue: std::collections::BinaryHeap<std::cmp::Reverse<(std::time::Instant, u64, Vec<u8>, SocketAddr)>> = Default::default();
-                let mut seq = 0u64;
-                loop {
-                    let wait = queue.peek().map(|std::cmp::Reverse(p)| p.0.saturating_duration_since(std::time::Instant::now()));
-                    let got = match wait {
-                        Some(w) => rx.recv_timeout(w).map_err(|e| matches!(e, std::sync::mpsc::RecvTimeoutError::Disconnected)),
-                        None => rx.recv().map_err(|_| true),
-                    };
-                    match got {
-                        Ok((due, bytes, to)) => {
-                            seq += 1;
-                            queue.push(std::cmp::Reverse((due, seq, bytes, to)));
-                        }
-                        Err(true) => return,
-                        Err(false) => {}
-                    }
-                    while queue.peek().is_some_and(|std::cmp::Reverse(p)| p.0 <= std::time::Instant::now()) {
-                        let std::cmp::Reverse((_, _, bytes, to)) = queue.pop().unwrap();
-                        let _ = socket.send_to(&bytes, to);
-                    }
-                }
-            })
-            .ok()?;
-        tracing::warn!(base_ms, jitter_ms, spike_every, spike_ms, "network: RTS_NET_LAG holds every packet we send");
-        Some(Lag { base_ms, jitter_ms, spike_every, spike_ms, rng: std::sync::atomic::AtomicU64::new(0x2545_f491_4f6c_dd1d), tx })
+/// A packet out now: over iroh for a stand-in address, else UDP.
+fn send_now(udp: &UdpSocket, iroh: Option<&Iroh>, bytes: &[u8], to: SocketAddr) -> io::Result<()> {
+    match index_of(to) {
+        Some(index) => match iroh {
+            Some(i) => i.send(index, bytes),
+            None => Err(io::Error::new(io::ErrorKind::Unsupported, "iroh is off")),
+        },
+        None => udp.send_to(bytes, to).map(|_| ()),
     }
+}
 
-    fn send(&self, bytes: &[u8], to: SocketAddr) {
-        // xorshift: test noise, never sim state.
-        let mut x = self.rng.load(std::sync::atomic::Ordering::Relaxed);
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.rng.store(x, std::sync::atomic::Ordering::Relaxed);
-        let mut ms = self.base_ms + if self.jitter_ms > 0 { x % (self.jitter_ms + 1) } else { 0 };
-        if self.spike_every > 0 && (x >> 32).is_multiple_of(self.spike_every) {
-            ms += self.spike_ms;
+/// The thread that sends held packets when they're due (ends with the
+/// transport). Its failures are the link's to notice, as a lost packet.
+fn spawn_holder(udp: UdpSocket, iroh: Option<Arc<Iroh>>) -> Sender<(std::time::Instant, Vec<u8>, SocketAddr)> {
+    let (tx, rx) = channel::<(std::time::Instant, Vec<u8>, SocketAddr)>();
+    let spawned = std::thread::Builder::new().name("net-hold".into()).spawn(move || {
+        let mut queue: HoldQueue<(Vec<u8>, SocketAddr)> = HoldQueue::default();
+        loop {
+            let got = match queue.next_due() {
+                Some(due) => rx.recv_timeout(due.saturating_duration_since(std::time::Instant::now())).map_err(|e| matches!(e, std::sync::mpsc::RecvTimeoutError::Disconnected)),
+                None => rx.recv().map_err(|_| true),
+            };
+            match got {
+                Ok((due, bytes, to)) => queue.push(due, (bytes, to)),
+                Err(true) => return,
+                Err(false) => {}
+            }
+            while let Some((bytes, to)) = queue.pop_due(std::time::Instant::now()) {
+                let _ = send_now(&udp, iroh.as_deref(), &bytes, to);
+            }
         }
-        let _ = self.tx.send((std::time::Instant::now() + std::time::Duration::from_millis(ms), bytes.to_vec(), to));
+    });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "network: no thread for held packets (conditions apply as loss)");
     }
+    tx
 }
 
 impl Transport {
@@ -162,8 +139,16 @@ impl Transport {
         } else {
             None
         };
-        let lag = Lag::from_env(&udp);
-        Transport { udp, iroh, lag }
+        let iroh = iroh.map(Arc::new);
+        super::conditioner::init_from_env();
+        let held_out = match udp.try_clone() {
+            Ok(u) => spawn_holder(u, iroh.clone()),
+            Err(e) => {
+                tracing::warn!(error = %e, "network: no socket for held packets");
+                channel().0
+            }
+        };
+        Transport { udp, iroh, held_out, held_in: Mutex::new(HoldQueue::default()) }
     }
 
     pub fn local_port(&self) -> io::Result<u16> {
@@ -176,31 +161,44 @@ impl Transport {
     }
 
     pub fn send_to(&self, bytes: &[u8], to: SocketAddr) -> io::Result<()> {
-        match index_of(to) {
-            Some(index) => match &self.iroh {
-                Some(i) => i.send(index, bytes),
-                None => Err(io::Error::new(io::ErrorKind::Unsupported, "iroh is off")),
-            },
-            None => match &self.lag {
-                Some(lag) => {
-                    lag.send(bytes, to);
-                    Ok(())
-                }
-                None => self.udp.send_to(bytes, to).map(|_| ()),
-            },
+        match fate(Dir::Out) {
+            Fate::Pass => send_now(&self.udp, self.iroh.as_deref(), bytes, to),
+            Fate::Drop => Ok(()),
+            Fate::Hold(due) => {
+                let _ = self.held_out.send((due, bytes.to_vec(), to));
+                Ok(())
+            }
         }
     }
 
-    /// The next packet: one iroh already delivered, else from the UDP
-    /// socket (waiting up to its read timeout).
+    /// The next packet: a held one now due, one iroh already delivered,
+    /// else from the UDP socket (waiting up to its read timeout). The
+    /// conditioner may drop or hold what arrives.
     pub fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        if let Some(i) = &self.iroh
-            && let Some((from, data)) = i.rx.lock().ok().and_then(|rx| rx.try_recv().ok()) {
+        let deliver = |buf: &mut [u8], data: &[u8], from: SocketAddr| {
             let n = data.len().min(buf.len());
             buf[..n].copy_from_slice(&data[..n]);
-            return Ok((n, from));
+            (n, from)
+        };
+        loop {
+            if let Some((data, from)) = self.held_in.lock().ok().and_then(|mut q| q.pop_due(std::time::Instant::now())) {
+                return Ok(deliver(buf, &data, from));
+            }
+            let iroh = self.iroh.as_ref().and_then(|i| i.rx.lock().ok().and_then(|rx| rx.try_recv().ok()));
+            let (n, from) = match iroh {
+                Some((from, data)) => deliver(buf, &data, from),
+                None => self.udp.recv_from(buf)?,
+            };
+            match fate(Dir::In) {
+                Fate::Pass => return Ok((n, from)),
+                Fate::Drop => {}
+                Fate::Hold(due) => {
+                    if let Ok(mut q) = self.held_in.lock() {
+                        q.push(due, (buf[..n].to_vec(), from));
+                    }
+                }
+            }
         }
-        self.udp.recv_from(buf)
     }
 
     /// A member address or Direct Connect entry: `iroh:<code>` (or a bare

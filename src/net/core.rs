@@ -206,6 +206,8 @@ pub struct NetCore {
     /// Desyncs for the interface (FAF's `uimain.ShowDesyncDialog`): the
     /// tick and a line per differing checksum.
     desyncs: Mutex<VecDeque<(u64, Vec<String>)>>,
+    /// Desyncs this game so far (the stats bar's badge).
+    desync_count: std::sync::atomic::AtomicU64,
     /// When the game started (a peer that hasn't sent a turn yet counts as
     /// loading for a while, not quiet).
     session_started: Mutex<Option<Instant>>,
@@ -353,6 +355,7 @@ impl NetCore {
             session_paused: AtomicBool::new(false),
             pause_events: Mutex::new(VecDeque::new()),
             desyncs: Mutex::new(VecDeque::new()),
+            desync_count: std::sync::atomic::AtomicU64::new(0),
             session_started: Mutex::new(None),
             local_mods: Mutex::new(None),
             local_mods_pending: AtomicBool::new(false),
@@ -652,9 +655,15 @@ impl NetCore {
 
     /// The checksums after `tick` differ: the interface is told.
     pub fn push_desync(&self, tick: u64, lines: Vec<String>) {
+        self.desync_count.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut q) = self.desyncs.lock() {
             q.push_back((tick, lines));
         }
+    }
+
+    /// Desyncs this game so far.
+    pub fn desync_count(&self) -> u64 {
+        self.desync_count.load(Ordering::Relaxed)
     }
 
     pub fn take_desyncs(&self) -> Vec<(u64, Vec<String>)> {
