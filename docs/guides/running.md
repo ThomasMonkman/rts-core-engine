@@ -104,9 +104,20 @@ With FAF's interface up, its own key map and panels work as in the real game
 - **Selected**: the first selected unit's state.
 - **Logs** and **VFS**: the log and the mounted game files.
 
-The status bar along the bottom shows FPS; the CPU and GPU time per frame and which of CPU, GPU or
-vsync limits the frame rate; process and GPU memory; sim ms/tick and ticks/s; the speed selector,
-tick and entity counts. The ⏷ at its right end hides it; ⏶ in the bottom-right corner brings it back.
+The status bar along the bottom is one line of fixed-width readouts (`src/render/status_bar.rs`):
+pause and game speed; FPS, the time a frame took to make (the slowest of main thread, render thread and GPU; not the gap between frames) and what limits it (`cpu`, `gpu` or `vsync`); sim ms/tick,
+its p99, ticks/s now and `max`, the ticks/s the
+sim's typical tick cost allows; game time and tick; entity counts. Hover a readout for the detail:
+the CPU / render / GPU split, memory, draw calls and a frame-time graph; p50 and a tick-cost graph.
+On a narrow window the readouts that don't fit wrap onto a second line (entities first). `copy` puts a one-line summary for bug
+reports on the clipboard. The ⏷ at its right end hides the bar; ⏶ in the bottom-right corner brings it back.
+
+The `net` readout shows the worst round trip and our input delay in a lobby or a game (`offline`
+outside one), and flags `shaped` (conditions on, below), `DESYNC` and `waiting on <player>`. It's
+always there, in every build, so conditions can be set before hosting or joining. Click `net` for the network
+panel: each peer's path, ping, p99, input delay and max speed, and **conditions**: latency, jitter,
+loss and spikes on this client's packets, each way, with presets (LAN, Wi-Fi, intercontinental,
+awful). They apply at once to UDP and iroh alike and aren't saved (`src/net/conditioner.rs`).
 
 ### Test scenes
 

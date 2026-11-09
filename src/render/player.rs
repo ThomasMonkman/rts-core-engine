@@ -139,6 +139,8 @@ pub struct PlayerControl {
     /// Index into [`FORMATIONS`]. Reserved: the sim ignores it for
     /// hand-issued orders (they always go out plain).
     pub formation: usize,
+    /// When F last changed `formation` (the cursor hint shows it a moment).
+    pub formation_changed: Option<std::time::Instant>,
     /// Left press (box selection start), screen px.
     pub left_press: Option<(f64, f64)>,
     /// Right press: screen px and the ground under it (order target).
@@ -273,6 +275,7 @@ impl PlayerControl {
             groups: Default::default(),
             mode: Mode::Normal,
             formation: 0,
+            formation_changed: None,
             left_press: None,
             right_press: None,
             right_pressed_at: None,
@@ -305,6 +308,17 @@ impl PlayerControl {
         if self.player.is_none() && !replay {
             self.player = local_army;
         }
+    }
+
+    /// The hint by the cursor: the click a mode waits for, or the
+    /// formation just picked (for a moment).
+    pub fn cursor_hint(&self) -> Option<String> {
+        match self.mode {
+            Mode::AttackMove => return Some("attack-move: click a target".into()),
+            Mode::Patrol => return Some("patrol: click a point".into()),
+            Mode::Normal => {}
+        }
+        self.formation_changed.filter(|t| t.elapsed().as_secs_f32() < 1.5).map(|_| format!("formation: {}", self.formation_name()))
     }
 
     pub fn formation_name(&self) -> &'static str {
@@ -480,7 +494,10 @@ impl PlayerControl {
             }
             KeyCode::KeyT if !self.selection.is_empty() => self.mode = Mode::AttackMove,
             KeyCode::KeyP if !self.selection.is_empty() => self.mode = Mode::Patrol,
-            KeyCode::KeyF => self.formation = (self.formation + 1) % FORMATIONS.len(),
+            KeyCode::KeyF => {
+                self.formation = (self.formation + 1) % FORMATIONS.len();
+                self.formation_changed = Some(std::time::Instant::now());
+            }
             _ => {}
         }
     }

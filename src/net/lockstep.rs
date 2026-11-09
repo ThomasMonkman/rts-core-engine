@@ -413,6 +413,11 @@ impl Lockstep {
         speed
     }
 
+    /// The lobby's Game Speed option lets players change it.
+    pub fn speed_adjustable(&self) -> bool {
+        self.speed_adjustable
+    }
+
     /// The game speed every client applied (percent).
     pub fn agreed_speed(&self) -> u32 {
         self.speed_percent

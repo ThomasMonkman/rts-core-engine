@@ -338,6 +338,9 @@ pub struct SimControl {
     /// The player left the session (the interface's `SessionEndGame`: the
     /// score screen, quitting): this client's sim runs no more ticks.
     left: std::sync::atomic::AtomicBool,
+    /// A networked game whose lobby fixed the game speed (`normal`, `fast`):
+    /// the speed selector is off.
+    speed_fixed: std::sync::atomic::AtomicBool,
     /// The renderer is done with the session (back to the main menu, or
     /// launching another): the real-time loop returns and the engine
     /// thread starts the next session.
@@ -350,7 +353,7 @@ impl SimControl {
     pub const STEPS: [u32; 8] = [25, 50, 100, 200, 400, 800, 1600, Self::MAX];
 
     pub fn new(speed: u32) -> Arc<Self> {
-        Arc::new(Self { speed: speed.into(), paused: false.into(), hold_at: u64::MAX.into(), agreed: 0.into(), changed_by: 1.into(), effective: 0.into(), left: false.into(), closed: false.into() })
+        Arc::new(Self { speed: speed.into(), paused: false.into(), hold_at: u64::MAX.into(), agreed: 0.into(), changed_by: 1.into(), effective: 0.into(), left: false.into(), speed_fixed: false.into(), closed: false.into() })
     }
 
     pub fn speed(&self) -> u32 {
@@ -401,6 +404,15 @@ impl SimControl {
 
     pub fn set_paused(&self, on: bool) {
         self.paused.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The lobby fixed the game speed (a networked game).
+    pub fn speed_fixed(&self) -> bool {
+        self.speed_fixed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_speed_fixed(&self, on: bool) {
+        self.speed_fixed.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The player left the session (`SessionEndGame`).
