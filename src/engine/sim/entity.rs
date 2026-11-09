@@ -886,6 +886,12 @@ impl EntityWorld {
         self.unit_slots.iter().map(|&i| &self.dense[i as usize])
     }
 
+    /// The units' indices into [`EntityWorld::as_slice`], in id order (for
+    /// parallel passes over the units).
+    pub fn unit_indices(&self) -> &[u32] {
+        &self.unit_slots
+    }
+
     /// [`EntityWorld::units`], mutably.
     pub fn for_each_unit_mut(&mut self, mut f: impl FnMut(&mut Entity)) {
         for &i in &self.unit_slots {

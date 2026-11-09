@@ -40,6 +40,20 @@ macro_rules! prof_span {
     }};
 }
 
+/// A value plotted in Tracy per call: `prof_plot!("intel changes", n)`.
+/// A no-op without the `tracy` feature.
+#[macro_export]
+macro_rules! prof_plot {
+    ($name:literal, $value:expr) => {{
+        #[cfg(feature = "tracy")]
+        if let Some(c) = tracy_client::Client::running() {
+            c.plot(tracy_client::plot_name!($name), $value as f64);
+        }
+        #[cfg(not(feature = "tracy"))]
+        let _ = &$value;
+    }};
+}
+
 /// Names the calling thread in Tracy's timeline (nothing without the
 /// feature).
 pub fn name_thread(name: &str) {
@@ -116,5 +130,6 @@ pub fn stage_span(phase: crate::engine::watchdog::Phase) -> tracing::Span {
         P::Intel => tracing::trace_span!("Intel"),
         P::Input => tracing::trace_span!("Input"),
         P::LuaGc => tracing::trace_span!("LuaGc"),
+        P::Destroy => tracing::trace_span!("Destroy"),
     }
 }

@@ -51,10 +51,12 @@ pub enum Phase {
     /// The sim VM's full Lua collection (`sim::gc`), every `gc::EVERY`
     /// ticks at the end of the tick.
     LuaGc,
+    /// The destroy queue at the end of the beat (`OnDestroy`).
+    Destroy,
 }
 
 impl Phase {
-    const ALL: [Phase; 16] = [
+    const ALL: [Phase; 17] = [
         Phase::Idle,
         Phase::Economy,
         Phase::Threat,
@@ -71,6 +73,7 @@ impl Phase {
         Phase::Intel,
         Phase::Input,
         Phase::LuaGc,
+        Phase::Destroy,
     ];
 
     pub const COUNT: usize = Phase::ALL.len();

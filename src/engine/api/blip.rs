@@ -307,7 +307,10 @@ fn asking_army(lua: &Lua, this: &LuaTable, army: &LuaValue) -> LuaResult<u32> {
 /// campaign intel triggers), and a unit hears the armies that saw it for the
 /// first time (`OnDetectedBy(army)`).
 pub fn intel_callbacks(lua: &Lua) -> LuaResult<()> {
-    destroy_dying(lua)?;
+    {
+        let _s = crate::prof_span!("intel dying blips");
+        destroy_dying(lua)?;
+    }
     let (changes, first_seen) = match lua.app_data_mut::<IntelGrids>() {
         Some(mut g) if !g.changes.is_empty() || !g.first_seen.is_empty() => (std::mem::take(&mut g.changes), std::mem::take(&mut g.first_seen)),
         _ => return Ok(()),
@@ -319,6 +322,9 @@ pub fn intel_callbacks(lua: &Lua) -> LuaResult<()> {
     // big battle makes thousands of changes a tick; the brain fetch and the
     // method's metatable lookup were half this pass).
     let mut handlers: std::collections::BTreeMap<u32, Option<(LuaTable, LuaFunction)>> = std::collections::BTreeMap::new();
+    crate::prof_plot!("intel changes", changes.len());
+    crate::prof_plot!("intel first seen", first_seen.len());
+    let on_change = crate::prof_span!("lua OnIntelChange");
     for c in &changes {
         let handler = match handlers.get(&c.army) {
             Some(h) => h.clone(),
@@ -337,6 +343,8 @@ pub fn intel_callbacks(lua: &Lua) -> LuaResult<()> {
             tracing::warn!(target: "lua", "Error running OnIntelChange script in brain: {e}");
         }
     }
+    drop(on_change);
+    let _detected = crate::prof_span!("lua OnDetectedBy");
     for &(unit, army) in &first_seen {
         if let Some(obj) = crate::engine::api::entity::object(lua, unit)? {
             UnitCallbacks::on_detected_by(lua, &obj, "unit", army)?;

@@ -132,6 +132,7 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
     crate::engine::api::blip::intel_callbacks(lua)?;
     // Last in the beat, as moho's `Sim::AdvanceBeat` (0x103194a1): the
     // `OnDestroy` of everything destroyed this tick, in order.
+    enter(Phase::Destroy);
     crate::engine::api::entity::run_destroy_queue(lua)?;
     enter(Phase::Sync);
     sync_beat(lua)?;
@@ -188,7 +189,10 @@ fn intel(lua: &Lua) {
     ) else {
         return;
     };
-    grids.set_alliances_from((armies.alliance_version(), armies.list.len() as u32), |a, b| armies.alliance(a, b) == Alliance::Ally);
+    {
+        let _s = crate::prof_span!("intel alliances");
+        grids.set_alliances_from((armies.alliance_version(), armies.list.len() as u32), |a, b| armies.alliance(a, b) == Alliance::Ally);
+    }
     grids.update(&world, |e| e.unit.as_deref().and_then(|u| u.jammer));
 }
 

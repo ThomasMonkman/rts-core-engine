@@ -26,7 +26,7 @@ real game and what is inferred) are in the module comments of its file, listed b
 | Movement | units move, air units fly, submarines dive; attached entities follow their parents | `sim/movement.rs`, `api/movement.rs` |
 | Projectiles | flight, collisions, `OnImpact` | `sim/projectile.rs`, `sim/collision.rs` |
 | Intel | vision, radar, sonar and the rest are re-stamped; who sees what | `sim/vision.rs` |
-| (end of Intel) | the destroy queue: the `OnDestroy` of everything destroyed this tick, first destroyed first (moho's end-of-beat drain) | `api/entity.rs` (`run_destroy_queue`) |
+| Destroy | the destroy queue: the `OnDestroy` of everything destroyed this tick, first destroyed first (moho's end-of-beat drain) | `api/entity.rs` (`run_destroy_queue`) |
 | Sync | the `Sync` table for the interface | `engine/sync.rs` |
 | Compact | destroyed entities removed; their effects end | `sim/entity.rs` |
 | LuaGc | the Lua garbage collection, at fixed ticks only | `sim/gc.rs` |
