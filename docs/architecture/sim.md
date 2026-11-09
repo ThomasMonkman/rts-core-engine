@@ -19,19 +19,22 @@ real game and what is inferred) are in the module comments of its file, listed b
 | Economy | production, consumption and stalls; economy events; regen | `sim/economy.rs`, `api/economy_event.rs` |
 | Threat | the AI threat map; animators (manipulators) step | `sim/threat.rs`, `sim/manipulator.rs` |
 | Orders | orders whose target is gone end | `api/orders.rs` |
-| Movement | units move, air units fly, submarines dive; attached entities follow their parents | `sim/movement.rs`, `api/movement.rs` |
-| Intel | vision, radar, sonar and the rest are re-stamped; who sees what | `sim/vision.rs` |
 | Construction | building, upgrades, assisting; silos, teleport, script tasks, transports | `api/construction.rs`, `api/transport.rs`, ... |
 | Reclaim | reclaim, capture, sacrifice | `api/reclaim.rs`, `api/capture.rs` |
 | Weapons | targeting, aim and the fire clock; beams | `sim/weapon.rs`, `api/weapon.rs`, `api/beam.rs` |
-| Projectiles | flight, collisions, `OnImpact` | `sim/projectile.rs`, `sim/collision.rs` |
 | LuaThreads | FAF's Lua threads due this tick | `sim/scheduler.rs`, `api/threads.rs` |
+| Movement | units move, air units fly, submarines dive; attached entities follow their parents | `sim/movement.rs`, `api/movement.rs` |
+| Projectiles | flight, collisions, `OnImpact` | `sim/projectile.rs`, `sim/collision.rs` |
+| Intel | vision, radar, sonar and the rest are re-stamped; who sees what | `sim/vision.rs` |
+| Destroy | the destroy queue: the `OnDestroy` of everything destroyed this tick, first destroyed first (moho's end-of-beat drain) | `api/entity.rs` (`run_destroy_queue`) |
 | Sync | the `Sync` table for the interface | `engine/sync.rs` |
 | Compact | destroyed entities removed; their effects end | `sim/entity.rs` |
 | LuaGc | the Lua garbage collection, at fixed ticks only | `sim/gc.rs` |
 | Snapshot | the state handed to the renderer (windowed runs only) | `engine/snapshot/` |
 
 The stage names are the ones in the log's `stage ms` lines and in Tracy.
+
+Movement, projectiles and intel come after the Lua threads, as in moho: `Sim::AdvanceBeat` runs its command dispatch stage, then the script stage, then the motion stage where every entity's motion task lives (units' motion, projectile flight and `OnImpact`, attachments), then the recon refresh. So a thread forked from `OnImpact` or from a death first runs the next tick.
 
 ## Patterns every system follows
 
@@ -63,9 +66,12 @@ Not an ECS: an id-ordered **sparse set** with a **hot/cold split**.
 - `Entity` holds only what per-tick systems and spatial queries scan (id, kind, army, transform,
   health, ...). Cold data (blueprint, bones, mesh, intel, reclaim) is behind `Box<EntityCold>`, and
   unit-only state behind `Option<Box<UnitData>>`. A test caps the hot struct's size.
-- Destroyed entities stay flagged, so scripts can still query them from `OnDestroy`, until `compact`
-  removes them with an order-preserving `retain` at the end of a tick (once at least 1/8 are
-  destroyed). So iteration is always in id order with no sorting.
+- Destroying is moho's: `Destroy` only flags the entity (`destroyed`: `BeenDestroyed`, and systems
+  skip it) and queues it. At the end of the tick the queue drains in order: each `OnDestroy` runs with
+  the entity still attached, then it's detached; a destroy made meanwhile joins the same drain, so
+  `OnDestroy` never nests. Then the entities are freed (`gone`: `IsDestroyed`), and `compact`
+  removes freed ones with an order-preserving `retain` at the end of a tick (once at least 1/8 are
+  freed). So iteration is always in id order with no sorting.
 
 **Why not an ECS:** an ECS makes a system pass faster, but every Lua method call looks an entity up
 by id, and that lookup is several times faster in a dense array. Archetype iteration order also

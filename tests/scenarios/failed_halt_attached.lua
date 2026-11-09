@@ -1,7 +1,7 @@
 -- Scenario test (tests/scenarios.rs): OnFailedToBeBuilt on a factory build
 -- that's cancelled (FAF destroys it), parent:OnAttachedKilled(unit) when an
--- attached unit dies, and a weapon's OnHaltFire when its attack order's
--- ground target moves.
+-- attached unit dies, and no OnHaltFire when an attack order is cleared and
+-- replaced (clearing drops the weapon's target).
 rawset(_G, "ScenarioResult", { done = false, failures = {}, notes = {} })
 local function check(ok, msg) if not ok then table.insert(ScenarioResult.failures, msg) end end
 ForkThread(function()
@@ -48,9 +48,15 @@ ForkThread(function()
     IssueAttack({tank}, {408, GetTerrainHeight(408, 640), 640})
     WaitTicks(10)
     check(halts == 0, 'no halt while the target holds')
+    -- Clearing drops the weapon's target first (moho's `AttackerStop`; the
+    -- real game's probe_queue), so a new attack order isn't a moved target.
+    -- (Moving the order's target in place, `SetCommandTarget`, still halts
+    -- fire; that's an interface path, not reachable from here.)
     IssueClearCommands({tank})
     IssueAttack({tank}, {408, GetTerrainHeight(408, 646), 646})
     WaitTicks(3)
-    check(halts == 1, 'one OnHaltFire when the target moved: ' .. halts)
+    check(halts == 0, 'no OnHaltFire after clearing: ' .. halts)
+    local tp = w:GetCurrentTargetPos()
+    check(tp ~= nil and math.abs(tp[3] - 646) < 0.5, 'the weapon takes the new order\'s target')
     ScenarioResult.done = true
 end)

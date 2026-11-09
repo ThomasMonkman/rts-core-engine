@@ -66,6 +66,11 @@ fn bounded_props() {
 }
 
 #[test]
+fn tree_push() {
+    scenario("tree_push", 120);
+}
+
+#[test]
 fn game_tick_stages() {
     scenario("game_tick_stages", 150);
 }
@@ -196,6 +201,11 @@ fn enhancement() {
 #[test]
 fn capture() {
     scenario("capture", 1000);
+}
+
+#[test]
+fn repair_refuel() {
+    scenario("repair_refuel", 1200);
 }
 
 #[test]
@@ -1062,6 +1072,14 @@ fn build_target_destroyed() {
     scenario("build_target_destroyed", 600);
 }
 
+/// Moho's destroy queue: `OnDestroy` at the end of the beat, in order and
+/// not nested, still attached; `IsDestroyed` after it; the attachment
+/// notifications of `Destroy` and `Kill`.
+#[test]
+fn destroy_queue() {
+    scenario("destroy_queue", 100);
+}
+
 /// An engineer's assist ends once it has nothing to help with and an order
 /// queued behind it, so a shift-queued build takes over.
 #[test]
@@ -1269,4 +1287,9 @@ fn build_site_snap() {
 #[test]
 fn mobile_placement() {
     scenario("mobile_placement", 100);
+}
+
+#[test]
+fn dispatch_hold() {
+    scenario("dispatch_hold", 1200);
 }

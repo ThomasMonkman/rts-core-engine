@@ -172,6 +172,9 @@ fn main() -> std::process::ExitCode {
     }
     rts_core_engine::diagnostics::log_panics();
     rts_core_engine::diagnostics::log_system();
+    if !cli.ignored_moho_args.is_empty() {
+        tracing::info!("ignored the game's command-line switches: {}", cli.ignored_moho_args.join(" "));
+    }
 
     // FAF's Lua and the game's data: found, or (windowed) asked for.
     let overrides = install::Overrides { fa: cli.fa.clone(), game: cli.game_dir.clone() };

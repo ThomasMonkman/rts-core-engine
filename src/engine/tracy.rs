@@ -13,6 +13,12 @@
 /// `let _s =` that keeps the real span alive with the feature on.
 pub struct NoSpan;
 
+/// Empty, so `drop(span)` can close a span early in both builds without
+/// `clippy::drop_non_drop` firing when the feature is off.
+impl Drop for NoSpan {
+    fn drop(&mut self) {}
+}
+
 /// A profiling span entered for the rest of the enclosing scope:
 /// `let _s = prof_span!("receive");`. A no-op without the `tracy` feature.
 #[macro_export]
@@ -31,6 +37,20 @@ macro_rules! prof_span {
         #[cfg(not(feature = "tracy"))]
         let s = $crate::engine::tracy::NoSpan;
         s
+    }};
+}
+
+/// A value plotted in Tracy per call: `prof_plot!("intel changes", n)`.
+/// A no-op without the `tracy` feature.
+#[macro_export]
+macro_rules! prof_plot {
+    ($name:literal, $value:expr) => {{
+        #[cfg(feature = "tracy")]
+        if let Some(c) = tracy_client::Client::running() {
+            c.plot(tracy_client::plot_name!($name), $value as f64);
+        }
+        #[cfg(not(feature = "tracy"))]
+        let _ = &$value;
     }};
 }
 
@@ -110,5 +130,6 @@ pub fn stage_span(phase: crate::engine::watchdog::Phase) -> tracing::Span {
         P::Intel => tracing::trace_span!("Intel"),
         P::Input => tracing::trace_span!("Input"),
         P::LuaGc => tracing::trace_span!("LuaGc"),
+        P::Destroy => tracing::trace_span!("Destroy"),
     }
 }

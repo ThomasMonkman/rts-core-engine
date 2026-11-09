@@ -2,10 +2,13 @@
 //! and their hooks.
 //!
 //! A game's sim mods come from the lobby's launch (`gameConfig.GameMods`)
-//! or `--mod`; the interface adds the player's UI-only mods (preference
-//! `active_mods`). Each VM gets its mods as `__active_mods` and their hook
-//! folders (`<location>/hook`) appended to the scripts they hook, as moho
-//! does, after the init file's hooks and the engine's own.
+//! or `--mod`. The interface starts with them, and the game's own
+//! `/lua/SessionInit.lua` adds the player's UI mods (its `mods.lua`
+//! `GetUiMods`, so FAF's and LOUD's rules each apply). A VM's mods are its
+//! `__active_mods`: as moho's script loader (FA exe 0x4ce2c0), each script
+//! is hooked, when it loads, by the hook folders (`<location><hookdir>`,
+//! default `/hook`) of the mods `__active_mods` lists then ([`sync_hooks`]),
+//! after the init file's hooks and the engine's own.
 //!
 //! Determinism: every peer runs the same sim mods, ordered the same way
 //! (by uid, then each mod's `before` / `after`; see [`resolve`]), so the
@@ -47,9 +50,12 @@ pub struct ModInfo {
 /// Every mod in the VFS, by uid.
 pub type Mods = BTreeMap<String, Arc<ModInfo>>;
 
-/// Finds and reads every `mod_info.lua` under `/mods` (FAF's `AllMods`:
-/// disabled ones and `Hotstats` left out; of two with one uid, the later
-/// path wins). Each file runs in its own throwaway VM, in parallel.
+/// Finds and reads every `mod_info.lua` under `/mods` (as `mods.lua`'s
+/// `AllMods`, disabled ones left out; of two with one uid, the later path
+/// wins), for what the engine resolves itself: launch uids, `--mod`, the
+/// lobby's hashes. Which UI mods an interface runs is its game code's
+/// choice (`SessionInit.lua`; FAF's leaves out `Hotstats`). Each file
+/// runs in its own throwaway VM, in parallel.
 pub fn discover(vfs: &Vfs) -> Mods {
     let files: Vec<&str> = match vfs.find_files("/mods", "*mod_info.lua") {
         Ok(f) => f.collect(),
@@ -111,9 +117,6 @@ fn read_mod_info(vfs: &Vfs, path: &str) -> LuaResult<Option<ModInfo>> {
         Ok(env.raw_get::<Option<LuaTable>>(k)?.map(|t| t.sequence_values::<String>().filter_map(Result::ok).collect()))
     };
     let name = text("name")?;
-    if name == "Hotstats" {
-        return Ok(None);
-    }
     let hookdir = text("hookdir")?;
     let after = match list("after")? {
         Some(a) => a,
@@ -123,13 +126,18 @@ fn read_mod_info(vfs: &Vfs, path: &str) -> LuaResult<Option<ModInfo>> {
         uid: text("uid")?,
         name,
         version: text("version")?,
-        hook_dir: normalise(&format!("{location}/{}", hookdir.trim_start_matches('/'))).trim_end_matches('/').to_string(),
+        hook_dir: hook_dir(&location, &hookdir),
         location,
         ui_only: env.raw_get::<Option<bool>>("ui_only").ok().flatten().unwrap_or(false),
         before: list("before")?.unwrap_or_default(),
         after,
         info: LuaData::from_lua(&LuaValue::Table(env)),
     }))
+}
+
+/// A mod's hook folder: `location .. hookdir`, normalised, no trailing slash.
+fn hook_dir(location: &str, hookdir: &str) -> String {
+    normalise(&format!("{location}/{}", hookdir.trim_start_matches('/'))).trim_end_matches('/').to_string()
 }
 
 /// The mods `uids` names that are in `all`, in the order they apply: by
@@ -298,7 +306,10 @@ pub struct ModHooks {
 
 impl ModHooks {
     pub fn new(vfs: &Vfs, mods: &[Arc<ModInfo>]) -> Self {
-        let dirs: Vec<String> = mods.iter().map(|m| m.hook_dir.clone()).collect();
+        Self::from_dirs(vfs, mods.iter().map(|m| m.hook_dir.clone()).collect())
+    }
+
+    fn from_dirs(vfs: &Vfs, dirs: Vec<String>) -> Self {
         let mut hooked = HashSet::new();
         for dir in &dirs {
             for f in vfs.find_files(dir, "*").into_iter().flatten() {
@@ -363,8 +374,56 @@ pub fn activate(lua: &Lua, vfs: &Vfs, mods: &[Arc<ModInfo>]) -> LuaResult<()> {
     Ok(())
 }
 
+/// The hook folders of the mods the VM's `__active_mods` lists now, in
+/// order (a repeat left out): each entry's `location .. hookdir`, `hookdir`
+/// defaulting to `/hook`, as moho's loader reads them.
+fn active_hook_dirs(lua: &Lua) -> Vec<String> {
+    let Ok(LuaValue::Table(list)) = lua.globals().raw_get::<LuaValue>("__active_mods") else { return Vec::new() };
+    let mut dirs: Vec<String> = Vec::new();
+    for entry in list.sequence_values::<LuaValue>().flatten() {
+        let LuaValue::Table(m) = entry else { continue };
+        let Ok(LuaValue::String(location)) = m.raw_get::<LuaValue>("location") else { continue };
+        let hookdir = match m.raw_get::<LuaValue>("hookdir") {
+            Ok(LuaValue::String(h)) => h.to_string_lossy().to_string(),
+            _ => "/hook".to_string(),
+        };
+        let dir = hook_dir(&location.to_string_lossy(), &hookdir);
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+/// Brings the VM's [`ModHooks`] in line with its `__active_mods`, before a
+/// script loads: moho's loader reads `__active_mods` at every load, so a
+/// mod the game's Lua adds (FAF's and LOUD's `SessionInit.lua` add the UI
+/// mods after `userInit.lua`) hooks the scripts loaded after that. `vfs`
+/// is only asked for when the list changed.
+pub fn sync_hooks(lua: &Lua, vfs: impl FnOnce() -> Option<Arc<std::sync::RwLock<Vfs>>>) {
+    let dirs = active_hook_dirs(lua);
+    if lua.app_data_ref::<ModHooks>().map(|h| h.dirs == dirs).unwrap_or(dirs.is_empty()) {
+        return;
+    }
+    if dirs.is_empty() {
+        lua.remove_app_data::<ModHooks>();
+        return;
+    }
+    let Some(vfs) = vfs() else { return };
+    let Ok(vfs) = vfs.read() else { return };
+    lua.set_app_data(ModHooks::from_dirs(&vfs, dirs));
+}
+
 /// The VFS source of a script run from source, with the VM's mod hooks.
 pub fn script_source(lua: &Lua, vfs: &Vfs, path: &str) -> io::Result<Arc<[u8]>> {
+    let dirs = active_hook_dirs(lua);
+    if !lua.app_data_ref::<ModHooks>().map(|h| h.dirs == dirs).unwrap_or(dirs.is_empty()) {
+        if dirs.is_empty() {
+            lua.remove_app_data::<ModHooks>();
+        } else {
+            lua.set_app_data(ModHooks::from_dirs(vfs, dirs));
+        }
+    }
     match lua.app_data_ref::<ModHooks>() {
         Some(h) => h.source(vfs, path).map(Arc::from),
         None => vfs.read_processed(path),
@@ -477,6 +536,42 @@ mod tests {
         let names: Vec<String> = lua.load("local t = {} for _, m in __active_mods do table.insert(t, m.name .. '@' .. m.location) end return t").eval().unwrap();
         assert_eq!(names, ["One@/mods/one", "Two@/mods/two"]);
         assert_ne!(hash(&vfs, &mods[..1]), hash(&vfs, &mods));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every mod is found, a `Hotstats` too: which UI mods run is the game
+    /// code's choice (FAF's `mods.lua` leaves that one out). The hooks
+    /// follow `__active_mods` as the game's Lua changes it, as moho's loader
+    /// reads it at each load: a mod added there hooks the scripts loaded
+    /// after, one taken out stops hooking.
+    #[test]
+    fn hooks_follow_active_mods() {
+        let dir = std::env::temp_dir().join(format!("mods_sync_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (path, body) in [
+            ("lua/a.lua", "base"),
+            ("mods/hotstats/mod_info.lua", "name = 'Hotstats'\nuid = 'hs'\nui_only = true\n"),
+            ("mods/hotstats/hook/lua/a.lua", "hs"),
+            ("mods/sim/mod_info.lua", "name = 'Sim'\nuid = 'sim'\n"),
+            ("mods/sim/hook/lua/a.lua", "sim"),
+        ] {
+            let p = dir.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+        let vfs = Vfs::new(vec![crate::engine::vfs::MountPoint { source: dir.clone(), mountpoint: "/".into() }], vec![]).unwrap();
+        let all = discover(&vfs);
+        assert_eq!(all.keys().collect::<Vec<_>>(), ["hs", "sim"]);
+        let lua = Lua::new();
+        let src = |lua: &Lua| String::from_utf8(script_source(lua, &vfs, "/lua/a.lua").unwrap().to_vec()).unwrap();
+        activate(&lua, &vfs, &resolve(&all, &["sim".into()])).unwrap();
+        assert_eq!(src(&lua), "base\nsim");
+        // As SessionInit.lua adds a UI mod (an info table of its own).
+        lua.load("table.insert(__active_mods, {name = 'Hotstats', uid = 'hs', location = '/mods/hotstats'})").exec().unwrap();
+        assert_eq!(src(&lua), "base\nsim\nhs");
+        lua.load("__active_mods = {}").exec().unwrap();
+        assert_eq!(src(&lua), "base");
+        assert!(lua.app_data_ref::<ModHooks>().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1345,6 +1345,11 @@ fn update_ui(s: &mut RenderState, dt: f32) {
                     s.player.script_ui(&s.world, o.units.as_deref(), o.script, !o.clear);
                     continue;
                 }
+                // `IssueDockCommand`: the interface picks the platform.
+                if o.command == "UNITCOMMAND_Dock" {
+                    s.player.issue_dock(&s.world, !o.clear);
+                    continue;
+                }
                 match rts_core_engine::ui::command_kind(&o.command) {
                     Some(kind) => {
                         // Blueprint orders (`IssueBlueprintCommand`: factory

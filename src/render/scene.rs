@@ -242,7 +242,7 @@ pub struct Scene {
     water_pipeline: wgpu::RenderPipeline,
     terrain: Option<TerrainMesh>,
     /// The terrain's heights, every sample ((width + 1) x (height + 1)
-    /// f32, group 0 binding 10): decals and tread marks build their
+    /// f32, group 0 binding 10): decals and splats build their
     /// ground-hugging grids from it in the vertex shader.
     heights: wgpu::Buffer,
     pub stage: Lent<Stage>,
@@ -289,7 +289,7 @@ pub struct Scene {
     model_draws: Vec<(u32, std::ops::Range<u32>)>,
     /// Timed splats (tread marks, footprints) since the last frame, for
     /// the terrain renderer.
-    pending_marks: Vec<super::terrain::TreadMark>,
+    pending_splats: Vec<super::terrain::Splat>,
     frame_game_seconds: f32,
     /// Its mesh and instance slot (after the models') once prepared.
     ghost_draw: Option<(u32, u32)>,
@@ -1358,7 +1358,7 @@ impl Scene {
             model_instances,
             model_capacity,
             model_draws: Vec::new(),
-            pending_marks: Vec::new(),
+            pending_splats: Vec::new(),
             frame_game_seconds: 0.0,
             ghost_draw: None,
             queued_ghost_draws: Vec::new(),
@@ -1436,7 +1436,7 @@ impl Scene {
     }
 
     /// What one snapshot brings (`World::receive`), in order: new meshes,
-    /// clips and effect assets, a terrain change, fog, tread marks, the sim's
+    /// clips and effect assets, a terrain change, fog, splats, the sim's
     /// decals, and the snapshot itself, which becomes the latest.
     pub fn apply(&mut self, device: &wgpu::Device, delta: super::world::SceneDelta) {
         {
@@ -1467,7 +1467,7 @@ impl Scene {
         if let Some(f) = delta.fog {
             self.pending_fog.push(f);
         }
-        self.pending_marks.extend(delta.marks);
+        self.pending_splats.extend(delta.splats);
         if let Some(d) = delta.decals {
             self.map.set_script_decals(d);
         }
@@ -1543,7 +1543,7 @@ impl Scene {
     }
 
     /// Starts a frame's prepare: the fog and overlay updates, the
-    /// interpolation phase, tread marks, then the stage for the worker
+    /// interpolation phase, splats, then the stage for the worker
     /// (`Stage::run`), loaded with everything it reads: the two snapshots,
     /// the camera's view, the map. `None` before the first snapshot.
     pub fn prepare_begin(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Stage> {
@@ -1559,11 +1559,11 @@ impl Scene {
             _ => TICK_SECONDS,
         };
         let alpha = self.fixed_alpha.unwrap_or_else(|| (self.arrived.elapsed().as_secs_f32() / interval.max(1e-3)).clamp(0.0, 1.0));
-        // Game seconds the frame shows: tread marks are born and fade by it.
+        // Game seconds the frame shows: splats are born and fade by it.
         self.frame_game_seconds = (latest.sim_tick as f32 - 1.0 + alpha) * TICK_SECONDS;
-        if !self.pending_marks.is_empty() {
-            let marks = std::mem::take(&mut self.pending_marks);
-            self.map.lay_treads(device, queue, &marks);
+        if !self.pending_splats.is_empty() || self.map.splats_waiting() {
+            let splats = std::mem::take(&mut self.pending_splats);
+            self.map.lay_splats(device, queue, &splats, self.frame_game_seconds);
         }
         {
             let stage = &mut *self.stage;
@@ -1839,8 +1839,11 @@ impl Scene {
                 orders.iter().map(|(u, marks)| (*u, marks.iter().map(|m| if m.command == command { super::player::moved_marker(m, node) } else { m.clone() }).collect())).collect()
             });
             let orders = dragged.as_deref().unwrap_or(orders);
-            // Selection brackets: each selected unit's selection box.
+            // Selection brackets: each selected unit's selection box, round
+            // its mesh's box (moho, 0x103c7726: the mesh box's centre across,
+            // the unit's height; the collision box until the mesh loads).
             let boxes = self.input.blueprint_selection.as_deref();
+            let models = &self.stage.models;
             let brackets: Vec<super::command_graph::Bracket> = self
                 .input
                 .selection
@@ -1848,10 +1851,11 @@ impl Scene {
                 .filter_map(|id| {
                     let e = &self.frame_entities[self.frame_entities.binary_search_by_key(id, |e| e.id).ok()?];
                     let [sx, sz, thickness, ox, oy, oz] = boxes.and_then(|b| b.get(e.blueprint as usize).copied()).unwrap_or([0.0; 6]);
+                    let mesh = super::selection_box::unit_box(e.position, e.rotation, e.scale, e.center, e.half, models.bounds(e.mesh));
                     Some(super::command_graph::Bracket {
-                        position: Vec3::from_array(e.position),
+                        position: Vec3::new(mesh.centre.x, e.position[1], mesh.centre.z),
                         rotation: Quat::from_array(e.rotation).normalize(),
-                        half: super::command_graph::bracket_half([sx, sz], [e.half[0], e.half[2]]),
+                        half: super::command_graph::bracket_half([sx, sz], [mesh.half.x, mesh.half.z]),
                         thickness,
                         offset: [ox, oy, oz],
                     })

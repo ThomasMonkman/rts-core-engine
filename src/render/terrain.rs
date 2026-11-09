@@ -349,12 +349,12 @@ impl DecalInstance {
     }
 }
 
-/// A tread mark as the vertex shader reads it (an instance): it builds the
-/// mark's grid of terrain cells from the height buffer (`vs_tread`), born
+/// A splat as the vertex shader reads it (an instance): it builds the
+/// mark's grid of terrain cells from the height buffer (`vs_splat`), born
 /// and faded by game time (`g.params.z`).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct TreadInstance {
+struct SplatInstance {
     /// Centre (x, z); half extents across and along.
     centre_half: [f32; 4],
     /// Heading; game seconds it appears at, and lives; the camera depth
@@ -364,7 +364,7 @@ struct TreadInstance {
 
 /// A timed splat to lay (FAF's tread marks and footprints).
 #[derive(Clone, Debug, PartialEq)]
-pub struct TreadMark {
+pub struct Splat {
     pub texture: String,
     /// Centre on the ground (x, z).
     pub centre: [f32; 2],
@@ -380,12 +380,12 @@ pub struct TreadMark {
     pub lod: f32,
 }
 
-/// Marks each tread texture keeps; the oldest is overwritten first.
-const TREAD_RING: u32 = 16384;
+/// Splats each texture keeps; the oldest is overwritten first.
+const SPLAT_RING: u32 = 16384;
 
-/// One texture's tread marks: a ring of instances, all drawn every frame
+/// One texture's splats: a ring of instances, all drawn every frame
 /// (the shader hides those not born yet or faded).
-struct TreadRing {
+struct SplatRing {
     group: usize,
     instances: wgpu::Buffer,
     head: u32,
@@ -396,8 +396,14 @@ struct TreadRing {
 }
 
 #[derive(Default)]
-struct Treads {
-    rings: BTreeMap<String, TreadRing>,
+struct Splats {
+    rings: BTreeMap<String, SplatRing>,
+    /// Marks whose texture was still loading when laid: retried each
+    /// `lay_splats` until it's in (dropped if it fails, or once their
+    /// lifetime has run out). Without this a one-off splat (`CreateSplat`)
+    /// with a texture not seen before never showed: its own request is what
+    /// starts the load.
+    waiting: Vec<Splat>,
 }
 
 /// A run of decals drawn in one call: same texture and pass, adjacent
@@ -511,7 +517,7 @@ impl DecalLayer {
 
 /// A world view's decal draws this frame ([`TerrainRenderer::cull_decals`]):
 /// per layer (the map's, the sim's, the interface's), and the terrain's
-/// sample step their grids (and the tread marks') are built at.
+/// sample step their grids (and the splats') are built at.
 #[derive(Default)]
 pub struct DecalDraws {
     step: u32,
@@ -632,8 +638,8 @@ pub struct TerrainRenderer {
     view: Option<Arc<TerrainView>>,
     vfs: Option<Arc<RwLock<Vfs>>>,
     script: ScriptDecals,
-    treads: Treads,
-    tread_pipeline: wgpu::RenderPipeline,
+    splats: Splats,
+    splat_pipeline: wgpu::RenderPipeline,
     failures: Vec<String>,
 }
 
@@ -711,10 +717,10 @@ impl TerrainRenderer {
         let normal_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("terrain: normals + light targets layout"), entries: &[target_entry(0), target_entry(1)] });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("terrain: shader"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
         let terrain_vertex = wgpu::VertexBufferLayout { array_stride: 24, step_mode: wgpu::VertexStepMode::Vertex, attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3] };
-        // Decals and tread marks are instances; their vertices come from the
+        // Decals and splats are instances; their vertices come from the
         // vertex index and the height buffer.
         let decal_vertex = wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<DecalInstance>() as u64, step_mode: wgpu::VertexStepMode::Instance, attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Uint32x4, 4 => Float32x4] };
-        let tread_vertex = wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<TreadInstance>() as u64, step_mode: wgpu::VertexStepMode::Instance, attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4] };
+        let splat_vertex = wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<SplatInstance>() as u64, step_mode: wgpu::VertexStepMode::Instance, attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4] };
         let water_vertex = wgpu::VertexBufferLayout { array_stride: 12, step_mode: wgpu::VertexStepMode::Vertex, attributes: &wgpu::vertex_attr_array![0 => Float32x3] };
         let layout = |groups: &[Option<&wgpu::BindGroupLayout>]| device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("terrain: pipeline layout"), bind_group_layouts: groups, immediate_size: 0 });
         let normals_layout = layout(&[Some(globals), Some(&texture_layout)]);
@@ -764,7 +770,7 @@ impl TerrainRenderer {
             // Decals lie on the terrain's own vertices: equal depth passes.
             decal_normals_pipeline: pipeline("decals: normals", &decal_normals_layout, "vs_decal", "fs_decal_normals", std::slice::from_ref(&decal_vertex), NORMAL_FORMAT, blend, depth_state(false, C::LessEqual, 0)),
             decal_albedo_pipeline: pipeline("decals: albedo", &decal_albedo_layout, "vs_decal", "fs_decal_albedo", &[decal_vertex], format, blend, depth_state(false, C::LessEqual, 0)),
-            tread_pipeline: pipeline("tread marks + footprints", &decal_albedo_layout, "vs_tread", "fs_tread", &[tread_vertex], format, blend, depth_state(false, C::LessEqual, 0)),
+            splat_pipeline: pipeline("splats", &decal_albedo_layout, "vs_splat", "fs_splat", &[splat_vertex], format, blend, depth_state(false, C::LessEqual, 0)),
             water_pipeline: pipeline("water: map", &normals_layout, "vs_water", "fs_water", &[water_vertex], format, Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING), depth_state(false, C::Less, 0)),
             wrap: wrap_sampler(device, 0),
             sky: super::sky::SkyRenderer::new(device, globals, format, depth),
@@ -802,7 +808,7 @@ impl TerrainRenderer {
             vfs: None,
             script: ScriptDecals::default(),
             gpu: (device.clone(), queue.clone()),
-            treads: Treads::default(),
+            splats: Splats::default(),
             failures: Vec::new(),
         }
     }
@@ -835,11 +841,18 @@ impl TerrainRenderer {
         self.ready.is_some()
     }
 
-    /// Textures tread marks or footprints have been laid with (render-state
+    /// Textures splats (tread marks, footprints, ...) have been laid with (render-state
     /// tests).
     #[allow(dead_code)]
-    pub fn tread_textures(&self) -> Vec<String> {
-        self.treads.rings.keys().cloned().collect()
+    pub fn splat_textures(&self) -> Vec<String> {
+        self.splats.rings.keys().cloned().collect()
+    }
+
+    /// Marks laid into the splat ring of each texture whose path contains
+    /// `name` (render-state tests).
+    #[allow(dead_code)]
+    pub fn splat_count(&self, name: &str) -> u32 {
+        self.splats.rings.iter().filter(|(t, _)| t.contains(name)).map(|(_, r)| r.count).sum()
     }
 
     /// Decals built into the map's layer and into the sim's (render-state
@@ -948,47 +961,67 @@ impl TerrainRenderer {
         script.layer = Some(DecalLayer::build(device, &view, &source, |d| request_group(script, gpu, device, layout, no_spec, &vfs, bc, d.textures.first()?, spec_path(d).map_or("", String::as_str))));
     }
 
-    /// Lays tread marks and footprints (marks whose texture is still
-    /// loading are skipped). Each texture's ring is written where its head
-    /// is, in at most two runs.
-    pub fn lay_treads(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, marks: &[TreadMark]) {
-        if marks.is_empty() {
+    /// Marks wait for their texture (`lay_splats` should run even with no
+    /// new ones).
+    pub fn splats_waiting(&self) -> bool {
+        !self.splats.waiting.is_empty()
+    }
+
+    /// Lays splats (tread marks, footprints, CreateSplat) at game seconds `now`, with those
+    /// still waiting for their texture. A mark whose texture is loading
+    /// waits; one whose texture failed, or whose lifetime is over, is
+    /// dropped. Each texture's ring is written where its head is, in at
+    /// most two runs.
+    pub fn lay_splats(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, marks: &[Splat], now: f32) {
+        if marks.is_empty() && self.splats.waiting.is_empty() {
             return;
         }
-        let Some(view) = self.view.clone() else { return };
-        let _s = rts_core_engine::prof_span!("lay tread marks");
+        let Some(view) = self.view.clone() else {
+            self.splats.waiting.extend_from_slice(marks);
+            return;
+        };
+        let _s = rts_core_engine::prof_span!("lay splats");
         let (vfs, bc) = (self.vfs.clone(), self.bc);
-        let mut by_texture: BTreeMap<&str, Vec<TreadInstance>> = BTreeMap::new();
-        for m in marks {
-            let Some(group) = request_group(&mut self.script, &self.gpu, device, &self.decal_layout, &self.no_spec, &vfs, bc, &m.texture, "") else { continue };
+        let waiting = std::mem::take(&mut self.splats.waiting);
+        let mut by_texture: BTreeMap<String, Vec<SplatInstance>> = BTreeMap::new();
+        for m in waiting.iter().chain(marks) {
+            if m.born + m.lifetime <= now {
+                continue;
+            }
+            let Some(group) = request_group(&mut self.script, &self.gpu, device, &self.decal_layout, &self.no_spec, &vfs, bc, &m.texture, "") else {
+                if matches!(self.script.textures.get(&m.texture), Some(DecalTexture::Loading)) {
+                    self.splats.waiting.push(m.clone());
+                }
+                continue;
+            };
             // No marks under water.
             if view.water.is_some_and(|w| height(&view, m.centre[0], m.centre[1]) < w) {
                 continue;
             }
             let (hx, hz) = (m.size[0] / 2.0, m.size[1] / 2.0);
-            let ring = self.treads.rings.entry(m.texture.clone()).or_insert_with(|| TreadRing {
+            let ring = self.splats.rings.entry(m.texture.clone()).or_insert_with(|| SplatRing {
                 group,
-                instances: device.create_buffer(&wgpu::BufferDescriptor { label: Some(&format!("tread marks: {}", m.texture)), size: (TREAD_RING as usize * std::mem::size_of::<TreadInstance>()) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
+                instances: device.create_buffer(&wgpu::BufferDescriptor { label: Some(&format!("splats: {}", m.texture)), size: (SPLAT_RING as usize * std::mem::size_of::<SplatInstance>()) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
                 head: 0,
                 count: 0,
                 radius: 0.0,
             });
             ring.radius = ring.radius.max(hx.hypot(hz));
-            by_texture.entry(m.texture.as_str()).or_default().push(TreadInstance { centre_half: [m.centre[0], m.centre[1], hx, hz], heading_time: [m.heading, m.born, m.lifetime, m.lod] });
+            by_texture.entry(m.texture.clone()).or_default().push(SplatInstance { centre_half: [m.centre[0], m.centre[1], hx, hz], heading_time: [m.heading, m.born, m.lifetime, m.lod] });
         }
-        let stride = std::mem::size_of::<TreadInstance>() as u64;
+        let stride = std::mem::size_of::<SplatInstance>() as u64;
         for (texture, marks) in by_texture {
-            let Some(ring) = self.treads.rings.get_mut(texture) else { continue };
+            let Some(ring) = self.splats.rings.get_mut(&texture) else { continue };
             // More than a ring's worth at once: keep the newest.
-            let marks = &marks[marks.len().saturating_sub(TREAD_RING as usize)..];
+            let marks = &marks[marks.len().saturating_sub(SPLAT_RING as usize)..];
             let n = marks.len() as u32;
-            let first = n.min(TREAD_RING - ring.head);
+            let first = n.min(SPLAT_RING - ring.head);
             queue.write_buffer(&ring.instances, ring.head as u64 * stride, bytemuck::cast_slice(&marks[..first as usize]));
             if first < n {
                 queue.write_buffer(&ring.instances, 0, bytemuck::cast_slice(&marks[first as usize..]));
             }
-            ring.head = (ring.head + n) % TREAD_RING;
-            ring.count = (ring.count + n).min(TREAD_RING);
+            ring.head = (ring.head + n) % SPLAT_RING;
+            ring.count = (ring.count + n).min(SPLAT_RING);
         }
     }
 
@@ -1269,13 +1302,13 @@ impl TerrainRenderer {
         }
         pass.set_bind_group(3, &self.normal_target.group, &[]);
         self.draw_decals(pass, r, false, decals);
-        // Tread marks and footprints over the decals.
-        if !self.treads.rings.is_empty() {
-            pass.timed_push("tread marks + footprints");
-            pass.set_pipeline(&self.tread_pipeline);
-            for ring in self.treads.rings.values() {
+        // Splats (tread marks, footprints, ...) over the decals.
+        if !self.splats.rings.is_empty() {
+            pass.timed_push("splats");
+            pass.set_pipeline(&self.splat_pipeline);
+            for ring in self.splats.rings.values() {
                 // Every instance draws the grid the ring's largest mark
-                // needs at this step (`vs_tread` collapses the rest).
+                // needs at this step (`vs_splat` collapses the rest).
                 let n = (2.0 * ring.radius / decals.step.max(1) as f32).ceil() as u32 + 2;
                 pass.set_bind_group(2, &self.script.groups[ring.group], &[]);
                 pass.set_vertex_buffer(0, ring.instances.slice(..));
@@ -1404,7 +1437,7 @@ fn height(t: &TerrainView, x: f32, z: f32) -> f32 {
 
 /// The terrain mesh's sample spacing: every sample on maps up to 20 km
 /// (1024 cells), every n-th on bigger ones to keep the mesh at most ~1024^2
-/// (`Scene::upload_terrain`; decals and tread marks share its grid).
+/// (`Scene::upload_terrain`; decals and splats share its grid).
 pub fn mesh_step(t: &TerrainView) -> u32 {
     (t.width.max(t.height) / 1024).max(1)
 }
@@ -1456,7 +1489,7 @@ pub fn lod_indices(cols: u32, rows: u32, step: u32) -> Vec<TerrainLodIndices> {
     out
 }
 
-/// The terrain mesh's vertex at grid point (x, z): decals and tread marks
+/// The terrain mesh's vertex at grid point (x, z): decals and splats
 /// rebuild these exact positions from the height buffer (`terrain_vertex`
 /// in the shaders), so they rasterise to the terrain's own depth.
 pub fn mesh_vertex(t: &TerrainView, x: u32, z: u32) -> [f32; 3] {

@@ -575,8 +575,10 @@ pub mod caps {
     /// Can board a transport (right-clicking one walks it aboard:
     /// `TransportLoadUnits`).
     pub const CALL_TRANSPORT: u16 = 512;
+    /// Can dock at an air staging platform (`IssueDockCommand`).
+    pub const DOCK: u16 = 1024;
     /// `RULEUCC_*` name of each bit, in bit order.
-    pub const NAMES: [&str; 10] = ["Move", "Attack", "Guard", "Patrol", "Reclaim", "Repair", "Capture", "Stop", "Transport", "CallTransport"];
+    pub const NAMES: [&str; 11] = ["Move", "Attack", "Guard", "Patrol", "Reclaim", "Repair", "Capture", "Stop", "Transport", "CallTransport", "Dock"];
 }
 
 /// A selected unit's state for the interface (FAF's unit panels).
@@ -688,9 +690,10 @@ pub struct Snapshot {
     pub blueprint_caps: Option<Arc<Vec<u16>>>,
     /// Each blueprint's [`order_categories`] bits (same index).
     pub blueprint_order_categories: Option<Arc<Vec<u16>>>,
-    /// Each blueprint's cargo-slot classes (bits 1 / 2 / 4) and cargo class
-    /// (1..3), same index: the cursor's load orders where boarding can work.
-    pub blueprint_transport: Option<Arc<Vec<(u8, u8)>>>,
+    /// Each blueprint's cargo-slot classes (bit `class - 1`), cargo class
+    /// and `ClassGenericUpTo`, same index: the cursor's load orders where
+    /// boarding can work.
+    pub blueprint_transport: Option<Arc<Vec<(u8, u8, u8)>>>,
     /// Each blueprint's drag-selection priority (`General.SelectionPriority`,
     /// 1 = highest), bit 7 set for `LOWSELECTPRIO` units (priority 6 while
     /// being built: FAF's exe patch), same index.
@@ -1523,35 +1526,29 @@ fn blueprint_selection_priority(lua: &mlua::Lua, ids: &[String]) -> Vec<u8> {
         .collect()
 }
 
-/// Per blueprint, its cargo-slot classes and its cargo class, same index as
-/// [`blueprint_caps`]. The slot classes are bits (`1` = class 1, `2` = class
-/// 2, `4` = class 3) from the model's `attachpoint` bones — the same ones
+/// Per blueprint, its cargo-slot classes, its cargo class and its
+/// `Transport.ClassGenericUpTo`, same index as [`blueprint_caps`]. The slot
+/// classes are bits (bit `class - 1`, classes 1..4) from the model's
+/// `attachpoint` bones — the same ones
 /// [`crate::engine::api::transport::free_slots`] boards into, so the cursor
 /// offers loads only where boarding can actually work (a docking pad's
 /// `attachpoint` bones are class 1 only: an air-staging dock takes the
 /// gunships that land on it, not the engineers classed 2 and 3). Class is
-/// `Transport.TransportClass`, 1 when unset.
-fn blueprint_transport(lua: &mlua::Lua, ids: &[String]) -> Vec<(u8, u8)> {
+/// `Transport.TransportClass` as the blueprint has it, 1 when unset.
+fn blueprint_transport(lua: &mlua::Lua, ids: &[String]) -> Vec<(u8, u8, u8)> {
     use mlua::prelude::*;
     let bps: Option<LuaTable> = lua.globals().raw_get("__blueprints").ok().flatten();
     ids.iter()
         .map(|id| {
-            let Some(bp) = bps.as_ref().and_then(|b| b.raw_get::<Option<LuaTable>>(id.as_str()).ok().flatten()) else { return (0, 1) };
+            let Some(bp) = bps.as_ref().and_then(|b| b.raw_get::<Option<LuaTable>>(id.as_str()).ok().flatten()) else { return (0, 1, 0) };
             let slots = crate::engine::api::mesh::skeleton_for(lua, &bp).ok().flatten().map_or(0u8, |s| {
-                s.bones.iter().fold(0u8, |m, b| match crate::engine::api::transport::slot_class(&b.name) {
-                    Some(1) => m | 1,
-                    Some(2) => m | 2,
-                    Some(3) => m | 4,
-                    _ => m,
-                })
+                s.bones.iter().fold(0u8, |m, b| crate::engine::api::transport::slot_class(&b.name).map_or(m, |c| m | 1 << (c - 1)))
             });
-            let class = bp
-                .raw_get::<Option<LuaTable>>("Transport")
-                .ok()
-                .flatten()
-                .and_then(|t| t.raw_get::<Option<u8>>("TransportClass").ok().flatten())
-                .map_or(1, |c| c.clamp(1, 3));
-            (slots, class)
+            let transport = bp.raw_get::<Option<LuaTable>>("Transport").ok().flatten();
+            let field = |name: &str| transport.as_ref().and_then(|t| t.raw_get::<Option<f64>>(name).ok().flatten());
+            let class = field("TransportClass").map_or(1, |c| c.clamp(0.0, 255.0) as u8);
+            let generic_up_to = field("ClassGenericUpTo").map_or(0, |c| c.clamp(0.0, 255.0) as u8);
+            (slots, class, generic_up_to)
         })
         .collect()
 }

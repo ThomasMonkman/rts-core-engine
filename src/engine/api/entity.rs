@@ -4,7 +4,7 @@ use crate::lua_api::shapes;
 use mlua::prelude::*;
 
 use crate::engine::api::blueprints::{BlueprintKind, BlueprintRegistry};
-use crate::engine::api::callbacks::{EntityCallbacks, UnitCallbacks};
+use crate::engine::api::callbacks::EntityCallbacks;
 use crate::engine::api::{moho, script_object};
 use crate::lua_api::{MohoClass, Obj, Status, lua_fn, lua_method};
 use crate::engine::sim::entity::{EntityId, EntityKind, EntityWorld};
@@ -94,6 +94,7 @@ pub fn posed_bone(lua: &Lua, e: &crate::engine::sim::entity::Entity, bone: Optio
 /// aircraft to "fly off the factory by themselves").
 fn take_off(lua: &Lua, unit: EntityId, parent: Option<EntityId>) -> LuaResult<()> {
     use crate::engine::sim::layer::Layer;
+    set_attached(lua, unit, false);
     let grounded_aircraft = world(lua).get(unit).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.motion_params.kind == crate::engine::sim::movement::MotionKind::Air && u.layer != Layer::Air);
     if grounded_aircraft {
         crate::engine::api::movement::set_layer(lua, unit, Layer::Air)?;
@@ -104,13 +105,26 @@ fn take_off(lua: &Lua, unit: EntityId, parent: Option<EntityId>) -> LuaResult<()
     Ok(())
 }
 
+/// A unit's `Attached` state, which moho's `Unit::AttachTo` sets
+/// (MohoEngine.dll 0x1028aab6: state bits +0x490 |= 0x4000, `Attached`) and
+/// `Unit::DetachFrom` clears (0x1028ab2d). No-op for other entities.
+fn set_attached(lua: &Lua, id: EntityId, on: bool) {
+    let i = crate::engine::sim::unit_state::UnitStates::index("Attached").expect("unit state");
+    if let Some(u) = world(lua).get_mut(id).and_then(|e| e.unit.as_deref_mut()) {
+        u.states.set(i, on);
+    }
+}
+
 /// Attaches with the parent bone as posed by its manipulators (the rest pose
-/// for a parent without any).
+/// for a parent without any). A unit enters its `Attached` state.
 pub fn attach_posed(lua: &Lua, child: EntityId, attachment: crate::engine::sim::entity::Attachment) {
-    let manips = lua.app_data_ref::<crate::engine::sim::manipulator::Manipulators>();
-    let weapons = lua.app_data_ref::<crate::engine::sim::weapon::Weapons>();
-    let clips = lua.app_data_ref::<crate::engine::sim::pose::Clips>();
-    world(lua).attach_posed(child, attachment, |p, b| manips.as_deref().is_some_and(|m| m.of(p.id).next().is_some()).then(|| crate::engine::sim::pose::bone_world(p, Some(b), manips.as_deref(), weapons.as_deref(), clips.as_deref()).0));
+    {
+        let manips = lua.app_data_ref::<crate::engine::sim::manipulator::Manipulators>();
+        let weapons = lua.app_data_ref::<crate::engine::sim::weapon::Weapons>();
+        let clips = lua.app_data_ref::<crate::engine::sim::pose::Clips>();
+        world(lua).attach_posed(child, attachment, |p, b| manips.as_deref().is_some_and(|m| m.of(p.id).next().is_some()).then(|| crate::engine::sim::pose::bone_world(p, Some(b), manips.as_deref(), weapons.as_deref(), clips.as_deref()).0));
+    }
+    set_attached(lua, child, true);
 }
 
 /// `src`'s posed bones in mesh space (before its scale), for `TryCopyPose`:
@@ -238,11 +252,16 @@ pub fn compact(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
-/// The engine's `Destroy`: destroys immediately (`BeenDestroyed` is true from
-/// here on), then runs `OnDestroy`; a second call is a no-op. Engine code that
+/// The engine's `Destroy` (moho's `Entity::Destroy`, MohoEngine.dll
+/// 0x1025e420): `BeenDestroyed` is true from here on and systems skip the
+/// entity, but its `OnDestroy` waits for the end of the beat
+/// ([`run_destroy_queue`]); a second call is a no-op. Engine code that
 /// destroys an entity itself (not through its script's `Destroy`) calls this.
 pub fn destroy(lua: &Lua, this: &Obj<moho::Entity>) -> LuaResult<()> {
     let id = entity_id(this)?;
+    if !world(lua).destroy(id) {
+        return Ok(());
+    }
     // A destroyed prop leaves the bounded list (moho's Prop
     // `RemoveBoundedProp` with its handle).
     let prop = world(lua).get(id).is_some_and(|e| e.kind == crate::engine::sim::entity::EntityKind::Prop);
@@ -250,13 +269,7 @@ pub fn destroy(lua: &Lua, this: &Obj<moho::Entity>) -> LuaResult<()> {
         && !b.is_empty() {
         b.remove(id);
     }
-    if world(lua).get(id).is_some_and(|e| !e.destroyed) {
-        crate::engine::api::adjacency::on_destroying(lua, id)?;
-        crate::engine::api::unit_stats::unit_destroyed(lua, id);
-    }
-    if !world(lua).destroy(id) {
-        return Ok(());
-    }
+    crate::engine::api::unit_stats::unit_destroyed(lua, id);
     if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
         p.ambient.remove(&id);
     }
@@ -266,6 +279,37 @@ pub fn destroy(lua: &Lua, this: &Obj<moho::Entity>) -> LuaResult<()> {
     if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::platoon::Platoons>() {
         p.unit_destroyed(id);
     }
+    Ok(())
+}
+
+/// End of the beat (after the Lua threads, before `Sync`): the `OnDestroy`
+/// of every entity destroyed since the last drain, first destroyed first, as
+/// `Sim::AdvanceBeat` drains its destroy queue (0x103194a1). An entity
+/// destroyed meanwhile (by an `OnDestroy`) joins the back of this drain, so
+/// the calls never nest. Each one (`Unit::OnDestroy` 0x10287f80, then
+/// `Entity::OnDestroy` 0x1025e4b0): the native part first (adjacency, its
+/// weapons, the ground it blocked), then the script's `OnDestroy` while it is
+/// still attached, then `parent:OnAttachedDestroyed(self)` and the detach,
+/// then `child:OnParentDestroyed(self)` for each child. Once the drain is
+/// done the objects are freed (`IsDestroyed`), as moho's `Sim::Sync` deletes
+/// them after the beat (`EntityDB::Purge` 0x10268270).
+pub fn run_destroy_queue(lua: &Lua) -> LuaResult<()> {
+    let mut done = Vec::new();
+    loop {
+        let Some(id) = world(lua).next_destroyed() else { break };
+        on_destroy(lua, id)?;
+        done.push(id);
+    }
+    let mut w = world(lua);
+    for id in done {
+        w.free(id);
+    }
+    Ok(())
+}
+
+/// One entity's turn in [`run_destroy_queue`].
+fn on_destroy(lua: &Lua, id: EntityId) -> LuaResult<()> {
+    crate::engine::api::adjacency::on_destroying(lua, id)?;
     crate::engine::api::weapon::destroy_weapons(lua, id)?;
     // A destroyed structure stops blocking the ground.
     let block = world(lua).get_mut(id).and_then(|e| e.unit.as_deref_mut()).and_then(|u| Some((u.nav_block.take()?, std::mem::take(&mut u.nav_occupy))));
@@ -277,7 +321,27 @@ pub fn destroy(lua: &Lua, this: &Obj<moho::Entity>) -> LuaResult<()> {
             grid.block_rect(r.0, r.1, r.2, r.3, false);
         }
     }
-    EntityCallbacks::on_destroy(lua, this, "entity")
+    let Some(this) = object(lua, id)? else {
+        world(lua).detach_destroyed(id);
+        return Ok(());
+    };
+    EntityCallbacks::on_destroy(lua, &this, "entity")?;
+    let parent = world(lua).get(id).and_then(|e| e.attachment).map(|a| a.parent);
+    if let Some(parent) = parent.map(|p| object(lua, p)).transpose()?.flatten() {
+        EntityCallbacks::on_attached_destroyed(lua, &parent, "entity", Obj::new(this.clone()))?;
+    }
+    let children = world(lua).attached_to(id);
+    world(lua).detach_destroyed(id);
+    set_attached(lua, id, false);
+    for &child in &children {
+        set_attached(lua, child, false);
+    }
+    for child in children {
+        if let Some(child) = object(lua, child)? {
+            EntityCallbacks::on_parent_destroyed(lua, &child, "entity", Obj::new(this.clone()))?;
+        }
+    }
+    Ok(())
 }
 
 /// A Lua array of the script objects of `ids`, in order (unbound ids skipped).
@@ -1007,8 +1071,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             with_entity_mut(lua, &this, |e| e.cold.draw_scale = scale)
         })?;
     lua_method!(lua, moho::Entity,
-        /// Destroys immediately (`BeenDestroyed` is true from here on), then runs
-        /// `OnDestroy`; a second call is a no-op.
+        /// Destroys the entity: `BeenDestroyed` is true from here on, and its
+        /// `OnDestroy` runs at the end of the beat (moho's destroy queue); a
+        /// second call is a no-op.
         Destroy = |lua, this: Obj<moho::Entity>| destroy(lua, &this))?;
     lua_method!(lua, moho::Entity,
         /// The position (of `bone`, if given) as three numbers.
@@ -1034,17 +1099,34 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(world(lua).get(id).and_then(|e| e.cold.skeleton.as_ref()).map_or(0, |s| s.bones.len()))
         })?;
     lua_method!(lua, moho::Entity,
-        /// Falling trees: a `moho.MotorFallDown` to `Whack`. The fall itself is
-        /// presentation only (not simulated); the tree stays where it is until
-        /// FAF's script destroys it.
+        /// Falling trees: gives the entity a new fall motor (upright, still;
+        /// `sim::fall_down`) and returns it as a `moho.MotorFallDown` to
+        /// `Whack`. Moho reads none of the arguments (0x10277260).
         FallDown = |lua, this: Obj<moho::Entity>| {
             let id = entity_id(&this)?;
+            if lua.app_data_ref::<crate::engine::sim::fall_down::FallMotors>().is_none() {
+                lua.set_app_data(crate::engine::sim::fall_down::FallMotors::default());
+            }
+            if let Some(mut m) = lua.app_data_mut::<crate::engine::sim::fall_down::FallMotors>() {
+                m.0.insert(id, Default::default());
+            }
             Ok(Obj::<moho::MotorFallDown>::new(script_object::create(lua, EntityHandle(id), moho::class_table(lua, "MotorFallDown")?)?))
         })?;
     lua_method!(lua, moho::MotorFallDown,
-        /// Does nothing: the fall is presentation only.
-        #[lua(partial = "no visual push yet")]
-        Whack = |_, _args: LuaMultiValue| Ok(()))?;
+        /// `Whack(nx, ny, nz, f, dobreak)`: unless already falling, lean
+        /// towards `(nx, nz)` (`ny` is dropped) and fall over if `dobreak`
+        /// (else sway back up); `f` is added to the lean speed, radians per
+        /// tick (MohoEngine.dll 0x10277460; `sim::fall_down`).
+        Whack = |lua, (this, nx, _ny, nz, force, fall): (Obj<moho::MotorFallDown>, f64, f64, f64, f64, Option<bool>)| {
+            let id = entity_id(&this)?;
+            let fx = crate::engine::sim::math::from_lua;
+            if let Some(mut m) = lua.app_data_mut::<crate::engine::sim::fall_down::FallMotors>()
+                && let Some(motor) = m.0.get_mut(&id)
+            {
+                motor.whack(fx(nx), fx(nz), fx(force), fall.unwrap_or(false));
+            }
+            Ok(())
+        })?;
     lua_method!(lua, moho::Entity,
         /// Sinking into the ground is presentation only too (FAF destroys the
         /// prop shortly after).
@@ -1228,10 +1310,12 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::Entity,
         /// Kills the entity once: health drops to 0 and `OnKilled(instigator,
         /// type, excessDamageRatio)` runs; FAF's script then plays the death and
-        /// calls `Destroy`. Later calls are no-ops.
+        /// calls `Destroy`. Later calls are no-ops. A `Destroy` earlier in the
+        /// beat doesn't stop it (moho's `Unit::Kill`, 0x102878b0, only tests
+        /// the dead flag).
         Kill = |lua, (this, instigator, kind, excess): (Obj<moho::Entity>, shapes::Instigator, Option<shapes::DamageType>, Option<f64>)| {
             let first = with_entity_mut(lua, &this, |e| {
-                let first = !e.cold.killed && !e.destroyed;
+                let first = !e.cold.killed && !e.gone;
                 if first {
                     e.cold.killed = true;
                     e.health = Fx::ZERO;
@@ -1249,17 +1333,21 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             crate::engine::api::unit_stats::unit_killed(lua, entity_id(&this)?, killer)?;
             crate::engine::api::movement::start_falling(lua, entity_id(&this)?);
             let kind = kind.map(shapes::DamageType::into_inner).unwrap_or_else(|| LuaValue::String(lua.create_string("Normal").expect("string")));
-            // A unit killed while attached (cargo) is reported to what it's
-            // attached to first: `parent:OnAttachedKilled(unit)`.
-            let parent = {
+            // Then the attachments hear of it (moho's `Entity::Kill`,
+            // 0x1025e3b0, for every kind of entity): `parent:OnAttachedKilled(self)`,
+            // then `child:OnParentKilled(self)` for each child.
+            let id = entity_id(&this)?;
+            let (parent, children) = {
                 let w = world(lua);
-                w.get(entity_id(&this)?)
-                    .filter(|e| e.unit.is_some())
-                    .and_then(|e| e.attachment.map(|a| a.parent))
-                    .filter(|p| w.get(*p).is_some_and(|pe| pe.unit.is_some() && !pe.destroyed))
+                (w.get(id).and_then(|e| e.attachment.map(|a| a.parent)), w.attached_to(id))
             };
             if let Some(parent) = parent.map(|p| object(lua, p)).transpose()?.flatten() {
-                UnitCallbacks::on_attached_killed(lua, &parent, "unit", Obj::new(this.table().clone()))?;
+                EntityCallbacks::on_attached_killed(lua, &parent, "entity", Obj::new(this.table().clone()))?;
+            }
+            for child in children {
+                if let Some(child) = object(lua, child)? {
+                    EntityCallbacks::on_parent_killed(lua, &child, "entity", Obj::new(this.table().clone()))?;
+                }
             }
             EntityCallbacks::on_killed(lua, &this, "entity", instigator, shapes::DamageType(kind), excess.unwrap_or(0.0))
         })?;

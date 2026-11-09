@@ -5,9 +5,15 @@
 //!
 //! The table is FAF's `/lua/armordefinition.lua` (`armordefinition`: a list
 //! of `{ armorType, 'DamageType mult', ... }`), read once on first use. A
-//! unit's armor type is its blueprint `Defense.ArmorType`. Damage types an
-//! armor doesn't list, and units without a known armor type, take full
-//! damage (inferred).
+//! unit's armor type is its blueprint `Defense.ArmorType`, matched without
+//! regard to case, the first definition of a name winning (moho's
+//! `ARMOR_GetArmorDefinations`, MohoEngine.dll 0x10152f40: `_stricmp` at
+//! 0x101530d6, stopping at the first match; `XAC2101`'s `'STRUCTURE'` gets
+//! `Structure`). Damage types are matched with case (a `std::map`,
+//! 0x102893e8). Damage types an armor doesn't list, and units without a
+//! known armor type, take full damage, with no `Default` fallback
+//! (`Unit::ProcessArmorOnDamage` 0x102893a0 leaves the amount unchanged;
+//! `GetArmorMult` gives 1, 0x102894c8).
 
 use std::collections::BTreeMap;
 
@@ -18,7 +24,7 @@ use crate::engine::api::moho;
 use crate::engine::sim::entity::EntityId;
 use crate::lua_api::{Obj, lua_method};
 
-/// armor type -> damage type -> multiplier.
+/// armor type (lowercase) -> damage type -> multiplier.
 #[derive(Default)]
 pub struct ArmorTable {
     loaded: bool,
@@ -51,7 +57,7 @@ fn ensure_loaded(lua: &Lua) -> LuaResult<()> {
                     mults.insert(kind.to_string(), m);
                 }
             }
-            types.insert(name, mults);
+            types.entry(name.to_ascii_lowercase()).or_insert(mults);
         }
     }
     lua.set_app_data(ArmorTable { loaded: true, types });
@@ -64,6 +70,7 @@ pub fn mult(lua: &Lua, unit: EntityId, damage_type: &str) -> LuaResult<f64> {
     let armor = world(lua).get(unit).and_then(|e| e.unit.as_deref()).and_then(|u| u.armor_type.clone());
     let Some(armor) = armor else { return Ok(1.0) };
     let table = lua.app_data_ref::<ArmorTable>().expect("ArmorTable");
+    // `armor_type` is kept lowercase (`api::unit`), as the table's names.
     Ok(table.types.get(&*armor).and_then(|t| t.get(damage_type)).copied().unwrap_or(1.0))
 }
 

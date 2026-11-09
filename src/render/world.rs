@@ -35,7 +35,7 @@ pub struct SceneDelta {
     pub effect_assets: Vec<(u32, String)>,
     pub terrain: Option<Arc<TerrainView>>,
     pub fog: Option<crate::engine::snapshot::FogUpdate>,
-    pub marks: Vec<super::terrain::TreadMark>,
+    pub splats: Vec<super::terrain::Splat>,
     pub decals: Option<Arc<Vec<crate::engine::assets::scmap::Decal>>>,
     /// The first of a new session's engine (`Snapshot::new_session`): the
     /// head's scene starts afresh before taking it.
@@ -234,7 +234,7 @@ pub struct World {
     pub blueprint_order_categories: Option<Arc<Vec<u16>>>,
     /// Cargo-slot classes (bits 1 / 2 / 4) and cargo class (1..3) per
     /// blueprint (same index): the load cursors only where boarding works.
-    pub blueprint_transport: Option<Arc<Vec<(u8, u8)>>>,
+    pub blueprint_transport: Option<Arc<Vec<(u8, u8, u8)>>>,
     pub blueprint_selection_priority: Option<Arc<Vec<u8>>>,
     pub blueprint_icons: Option<Arc<Vec<String>>>,
     pub blueprint_icon_zoom: Option<Arc<Vec<f32>>>,
@@ -615,10 +615,10 @@ impl World {
             }
             // Timed splats: FAF's tread marks (`TreadComponent`) and
             // footprints, laid and faded by the terrain renderer.
-            let marks = snap
+            let splats = snap
                 .splats
                 .drain(..)
-                .map(|sp| super::terrain::TreadMark {
+                .map(|sp| super::terrain::Splat {
                     texture: sp.texture,
                     centre: [sp.centre[0], sp.centre[2]],
                     heading: sp.heading,
@@ -759,7 +759,7 @@ impl World {
                 effect_assets: std::mem::take(&mut snap.new_effect_assets),
                 terrain: snap.terrain.take(),
                 fog: snap.fog.take(),
-                marks,
+                splats,
                 decals: snap.decals.take(),
                 new_session: snap.new_session,
                 snapshot: Arc::new(snap),

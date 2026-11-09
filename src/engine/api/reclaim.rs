@@ -28,9 +28,14 @@
 //! them while a job runs (`reclaiming`). Everything runs in reclaimer id
 //! order.
 //!
-//! Inferred, not verified against the binary: resources per fraction for
-//! units as well as props, range = build range + 2,
-//! auto-reclaim only takes props already in range (no detours).
+//! Resources per fraction, for units as well as props, are moho's: the
+//! reclaim task (MohoEngine.dll 0x10209d30..0x1020a1a5) gains `(energy,
+//! mass) / ticks x (fraction actually taken / step)` a tick, with ticks
+//! `max(1, time x 10)`.
+//!
+//! Inferred, not verified against the binary: range = build range + 2
+//! (moho tests the reclaimer's `MaxBuildDistance`, from a distance not
+//! traced), auto-reclaim only takes props already in range (no detours).
 
 use std::collections::BTreeMap;
 

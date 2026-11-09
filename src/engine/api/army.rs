@@ -134,7 +134,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         })?;
     lua_fn!(lua, global,
         /// Deprecated in FAF and of unknown meaning; its only use scales
-        /// shield damage by `1 - handicap`, so no handicap = 0 (inferred).
+        /// shield damage by `1 - handicap`. 0: moho's is 0 unless the
+        /// `DebugSetArmyHandicap` console command sets it (MohoEngine.dll
+        /// 0x102e22c0, 0x102e3bc5), which ours lacks.
         ArmyGetHandicap = |_, _army: shapes::Army| Ok(0.0))?;
     lua_fn!(lua, global,
         /// Removes `cat` from the categories the army can't build.

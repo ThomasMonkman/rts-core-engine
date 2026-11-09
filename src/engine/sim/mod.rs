@@ -33,6 +33,7 @@ pub mod pose;
 pub mod movement;
 pub mod avoidance;
 pub mod scroller;
+pub mod fall_down;
 pub mod formation;
 pub mod gc;
 pub mod nav;

@@ -1,7 +1,9 @@
 -- Scenario test (tests/scenarios.rs): factory roll-off (`IssueMoveOffFactory`).
--- A land factory's tank, released from the raised build pad, drives straight
--- out (no rally point: forward past the factory's skirt) and down to the
--- ground without dropping; the factory then builds the next one. An air
+-- A land factory's tank, released from the raised build pad, drives out (its
+-- rally point is its own spot, so FAF picks the +3 x `RollOffPoints` entry,
+-- and the goal is the first open cell there, just off the footprint, as in
+-- the real game: dev/probes probe_rolloff) and down to the ground without
+-- dropping; the factory then builds the next one. An air
 -- factory's scout takes off by itself and climbs; another's transport (a
 -- hover aircraft) drifts off the pad so the next one isn't built inside it.
 -- A factory with a rally point to its east rolls its tank down the east side
@@ -69,7 +71,7 @@ ForkThread(function()
     if tank then
         local p = tank:GetPosition()
         note(string.format('tank at %.1f, %.1f (factory 400, 600), largest one-tick drop %.2f', p[1], p[3], worst_drop))
-        check(math.abs(p[1] - 400) > 4 or math.abs(p[3] - 600) > 4, 'the tank rolled off the factory')
+        check(math.abs(p[1] - 400) > 2.5 or math.abs(p[3] - 600) > 2.5, 'the tank rolled off the factory')
         check(worst_drop < 0.3, 'the tank came down off the pad gradually')
         check(math.abs(p[2] - GetTerrainHeight(p[1], p[3])) < 0.05, 'and ended on the ground')
     end

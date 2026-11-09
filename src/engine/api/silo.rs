@@ -290,7 +290,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                 };
                 let (energy, mass) = (energy * energy_mod.max(Fx::ZERO), mass * mass_mod.max(Fx::ZERO));
                 let seconds = if build_rate > Fx::ZERO { build_time / build_rate } else { build_time };
-                let event = lua.app_data_mut::<EconomyEvents>().expect("EconomyEvents").create(unit, energy, mass, seconds);
+                let event = lua.app_data_mut::<EconomyEvents>().expect("EconomyEvents").create_fractional(unit, energy, mass, seconds);
                 lua.app_data_mut::<SiloJobs>().expect("SiloJobs").0.insert(key, Job { weapon: index, event, banked: (Fx::ZERO, Fx::ZERO) });
                 // A head start given while no missile was in progress.
                 let head_start = entity::world(lua).get_mut(unit).and_then(|e| e.unit.as_deref_mut()).map_or(0, |u| std::mem::take(&mut u.silo_blocks));

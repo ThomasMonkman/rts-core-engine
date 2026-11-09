@@ -249,6 +249,9 @@ pub struct Models {
     /// meshes loaded since last taken ([`Models::take_new_bounds`]): the
     /// main thread's picking and drag selection test them.
     new_bounds: Vec<(u32, [f32; 6])>,
+    /// Every sim mesh's bounds loaded so far (same form), by mesh index:
+    /// selection brackets are centred on them.
+    bounds: Vec<Option<[f32; 6]>>,
     /// For the loaders, which upload their textures themselves.
     gpu: (wgpu::Device, wgpu::Queue),
     /// The textures many models share (lookup, build), loaded once.
@@ -462,6 +465,12 @@ impl Models {
         std::mem::take(&mut self.new_bounds)
     }
 
+    /// A sim mesh's bounds (mesh space, rest pose: min xyz, max xyz), once
+    /// it has loaded.
+    pub fn bounds(&self, index: u32) -> Option<[f32; 6]> {
+        self.bounds.get(index as usize).copied().flatten()
+    }
+
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, globals: &wgpu::BindGroupLayout, format: wgpu::TextureFormat, depth: wgpu::TextureFormat) -> Self {
         let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -605,6 +614,7 @@ impl Models {
             interface_index: Default::default(),
             vfs: None,
             new_bounds: Vec::new(),
+            bounds: Vec::new(),
             gpu: (device.clone(), queue.clone()),
             shared: Default::default(),
             share_all: false,
@@ -907,6 +917,10 @@ impl Models {
                             }
                         }
                         self.new_bounds.push((index, b));
+                        if self.bounds.len() <= index as usize {
+                            self.bounds.resize(index as usize + 1, None);
+                        }
+                        self.bounds[index as usize] = Some(b);
                     }
                     let verts: Vec<MeshVertex> = (0..mesh.positions.len())
                         .map(|v| MeshVertex {

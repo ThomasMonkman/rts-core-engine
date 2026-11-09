@@ -224,19 +224,25 @@ impl VfsIndex {
         for m in self.mounts.iter().filter(|m| !m.source.exists()) {
             tracing::warn!(source = %m.source.display(), "vfs: mount point not found (skipped)");
         }
+        // A mount that can't be read (a stray .7z or a broken zip in the
+        // mods/maps folder) is warned about and skipped, so one bad file
+        // doesn't stop the game starting.
         let mounted_list: Vec<Mounted> = self
             .mounts
             .par_iter()
             .filter(|mount_point| mount_point.source.exists())
-            .map(|mount_point| -> io::Result<Mounted> {
+            .filter_map(|mount_point| {
                 let _s = crate::prof_span!("vfs index mount (worker)");
-                if mount_point.source.is_dir() {
-                    Ok(Mounted::Folder(get_folder_index(mount_point)?))
+                let mounted = if mount_point.source.is_dir() {
+                    get_folder_index(mount_point).map(Mounted::Folder)
                 } else {
                     get_archive_index(mount_point).map(Mounted::Archieve)
-                }
+                };
+                mounted
+                    .inspect_err(|e| tracing::warn!(source = %mount_point.source.display(), error = %e, "vfs: can't read mount (skipped)"))
+                    .ok()
             })
-            .collect::<io::Result<_>>()?;
+            .collect();
         let _ = index_span;
 
         // First mount wins: merge in mount order.
@@ -437,7 +443,7 @@ impl Vfs {
         }
         // Compare canonical paths when the file exists, so `../x/..` and
         // absolute spellings of a mounted folder both match.
-        let lower = std::fs::canonicalize(path).map_or_else(|_| unixy.clone(), |c| c.to_string_lossy().replace('\\', "/")).to_lowercase();
+        let lower = std::fs::canonicalize(crate::engine::api::io::disk_path(path)).map_or_else(|_| unixy.clone(), |c| c.to_string_lossy().replace('\\', "/")).to_lowercase();
         for (src, mountpoint) in &self.index.folder_roots {
             if let Some(rest) = lower.strip_prefix(src.as_str())
                 && (rest.is_empty() || rest.starts_with('/')) {
@@ -785,6 +791,27 @@ mod tests {
         assert_eq!(vfs.disk_to_local(&dir.join("units/a_unit.bp").to_string_lossy()), "/units/a_unit.bp");
         assert_eq!(vfs.disk_to_local(&dir.join("units/../units/a_unit.bp").to_string_lossy()), "/units/a_unit.bp");
         assert_eq!(vfs.disk_to_local("/elsewhere/x.lua"), "/elsewhere/x.lua");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A mount that isn't a readable archive (a stray .7z in the mods
+    /// folder) is skipped and the other mounts still load.
+    #[test]
+    fn unreadable_archive_mount_is_skipped() {
+        let dir = std::env::temp_dir().join(format!("vfs_badzip_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("ok/lua")).unwrap();
+        std::fs::write(dir.join("ok/lua/a.lua"), b"a").unwrap();
+        std::fs::write(dir.join("junk.7z"), b"7z\xbc\xaf\x27\x1c not a zip").unwrap();
+        let vfs = Vfs::new(
+            vec![
+                MountPoint { source: dir.join("junk.7z"), mountpoint: "/mods/junk.7z".into() },
+                MountPoint { source: dir.join("ok"), mountpoint: "/".into() },
+            ],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(vfs.read("/lua/a.lua").unwrap(), b"a");
+        assert!(!vfs.contains("/mods/junk.7z/anything"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

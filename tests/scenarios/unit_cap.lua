@@ -20,5 +20,19 @@ ForkThread(function()
     SetArmyUnitCap(1, GetArmyUnitCap(1) + 10)
     WaitTicks(10)
     check(factory:GetFocusUnit() ~= nil, 'build starts once the cap allows')
+    -- Scripted spawns go through the same cap (moho's `Sim::CreateUnit`): at
+    -- the cap, CreateUnitHPR raises and the brain hears it; a cap of 0
+    -- refuses too; ignoring the cap lets it through.
+    SetArmyUnitCap(1, math.ceil(GetArmyUnitCostTotal(1)))
+    local before = reached
+    local ok, err = pcall(CreateUnitHPR, 'uel0201', 'ARMY_1', 380, GetTerrainHeight(380, 560), 560, 0, 0, 0)
+    check(not ok and string.find(tostring(err), 'CreateUnit%(uel0201%) failed'), 'CreateUnitHPR past the cap fails: ' .. tostring(err))
+    check(reached == before + 1, 'the brain hears the scripted spawn hit the cap')
+    SetArmyUnitCap(1, 0)
+    check(not pcall(CreateUnitHPR, 'uel0201', 'ARMY_1', 380, GetTerrainHeight(380, 560), 560, 0, 0, 0), 'cap 0 refuses')
+    SetIgnoreArmyUnitCap(1, true)
+    local made = CreateUnitHPR('uel0201', 'ARMY_1', 380, GetTerrainHeight(380, 560), 560, 0, 0, 0)
+    check(made ~= nil, 'ignoring the cap spawns')
+    SetIgnoreArmyUnitCap(1, false)
     ScenarioResult.done = true
 end)

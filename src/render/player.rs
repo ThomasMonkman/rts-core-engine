@@ -318,16 +318,21 @@ impl PlayerControl {
         }
     }
 
-    /// Cargo-slot classes of `e`'s model (bits 1 / 2 / 4): where the sim's
+    /// Cargo-slot classes of `e`'s model (bit `class - 1`): where the sim's
     /// `free_slots` finds a bone to board into.
     fn slot_mask(scene: &World, e: &EntityView) -> u8 {
-        scene.blueprint_transport.as_ref().and_then(|t| t.get(e.blueprint as usize)).map_or(0, |&(s, _)| s)
+        scene.blueprint_transport.as_ref().and_then(|t| t.get(e.blueprint as usize)).map_or(0, |&(s, _, _)| s)
+    }
+
+    /// `e`'s `Transport.ClassGenericUpTo`.
+    fn generic_up_to(scene: &World, e: &EntityView) -> u8 {
+        scene.blueprint_transport.as_ref().and_then(|t| t.get(e.blueprint as usize)).map_or(0, |&(_, _, g)| g)
     }
 
     /// The entity's cargo class (its blueprint's `Transport.TransportClass`,
     /// 1 when unset).
     fn transport_class(scene: &World, e: &EntityView) -> u8 {
-        scene.blueprint_transport.as_ref().and_then(|t| t.get(e.blueprint as usize)).map_or(1, |&(_, c)| if c == 0 { 1 } else { c })
+        scene.blueprint_transport.as_ref().and_then(|t| t.get(e.blueprint as usize)).map_or(1, |&(_, c, _)| c)
     }
 
     /// Drag-selection priority (1 = highest): the blueprint's
@@ -603,7 +608,7 @@ impl PlayerControl {
         let passenger = Passenger { mobile: unit.kind == ViewKind::Unit, air: uc & oc::AIR != 0, commander: uc & oc::COMMAND != 0, class: Self::transport_class(scene, unit) };
         let carrier = Carrier {
             transport: Self::caps_of(scene, transport) & caps::TRANSPORT != 0,
-            staging: tc & oc::AIRSTAGINGPLATFORM != 0, carries_commander: tc & oc::CANTRANSPORTCOMMANDER != 0, slot_classes: Self::slot_mask(scene, transport), storage: false };
+            staging: tc & oc::AIRSTAGINGPLATFORM != 0, carries_commander: tc & oc::CANTRANSPORTCOMMANDER != 0, slot_classes: Self::slot_mask(scene, transport), generic_up_to: Self::generic_up_to(scene, transport), storage: false };
         crate::engine::sim::carry::can_carry(&passenger, &carrier)
     }
 
@@ -815,6 +820,41 @@ impl PlayerControl {
         self.send_split(scene, &ids, kind, CommandTarget::None, queue, None, None, blueprint, count);
     }
 
+    /// `IssueDockCommand(clear)` (moho's user-side function, MohoEngine.dll
+    /// 0x10407150): the selection's finished units with `RULEUCC_Dock`
+    /// dock at the player's nearest finished, live `AIRSTAGINGPLATFORM`,
+    /// by distance in XZ from the docking units' mean position. Moho sends
+    /// a Dock order (type 39) to that platform; its sim handler is the load
+    /// order's (dispatch 0x101f4a4e, shared with TransportLoadUnits), so
+    /// ours sends that load order.
+    /// Not done: when the units outnumber the nearest platform's room, moho
+    /// spreads them over the platforms within (its distance + 100) by their
+    /// room (0x104075eb..0x104077d7, not fully traced).
+    pub fn issue_dock(&mut self, scene: &World, queue: bool) {
+        use crate::engine::snapshot::order_categories as oc;
+        let Some(player) = self.player else { return };
+        let units: Vec<&EntityView> = self
+            .selection
+            .iter()
+            .filter_map(|&id| Self::view(scene, id))
+            .filter(|e| self.commandable(e) && e.build >= 1.0 && Self::caps_of(scene, e) & caps::DOCK != 0)
+            .collect();
+        if units.is_empty() {
+            return;
+        }
+        let n = units.len() as f32;
+        let (cx, cz) = units.iter().fold((0.0, 0.0), |(x, z), e| (x + e.position[0] / n, z + e.position[2] / n));
+        let platform = scene
+            .entities()
+            .iter()
+            .filter(|p| p.army == player && matches!(p.kind, ViewKind::Unit | ViewKind::Structure) && p.build >= 1.0 && p.health > 0.0 && Self::order_categories(scene, p) & oc::AIRSTAGINGPLATFORM != 0)
+            .map(|p| ((p.position[0] - cx).powi(2) + (p.position[2] - cz).powi(2), p.id))
+            .fold(None, |best: Option<(f32, u32)>, c| if best.is_none_or(|b| c.0 < b.0) { Some(c) } else { best });
+        let Some((_, platform)) = platform else { return };
+        let ids: Vec<u32> = units.iter().map(|e| e.id).filter(|&id| id != platform).collect();
+        self.send_split(scene, &ids, CommandKind::TransportLoadUnits, CommandTarget::Entity(platform), queue, None, None, None, 0);
+    }
+
     /// A script order from the interface (an enhancement) for the selection.
     pub fn script_ui(&mut self, scene: &World, units: Option<&[u32]>, script: Vec<(String, String)>, queue: bool) {
         let Some(tx) = &self.orders else { return };
@@ -979,6 +1019,34 @@ mod tests {
         p.end_session(SessionEnd::Restart);
         p.adopt_army(Some(1), false);
         assert_eq!(p.player, Some(3));
+    }
+
+    /// `IssueDockCommand`: the selection's dockers (finished, with
+    /// `RULEUCC_Dock`) load onto the player's nearest finished platform
+    /// from their mean position; the rest of the selection stays out of it.
+    #[test]
+    fn dock_goes_to_the_nearest_platform() {
+        use crate::engine::snapshot::{order_categories as oc, Sighting};
+        let view = |id, army, x: f32, bp, build| EntityView { id, kind: ViewKind::Unit, army, position: [x, 0.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0; 3], half: [0.5; 3], health: 1.0, max_health: 100.0, build_rate: 0.0, build, work: 0.0, shield: -1.0, blueprint: bp, mesh: 0, scale: [1.0; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 };
+        // Blueprints: 0 a plane, 1 a tank, 2 a platform.
+        let mut w = World::new(64, 64);
+        w.blueprint_caps = Some(std::sync::Arc::new(vec![caps::MOVE | caps::DOCK, caps::MOVE, caps::STOP]));
+        w.blueprint_order_categories = Some(std::sync::Arc::new(vec![oc::AIR, 0, oc::AIRSTAGINGPLATFORM]));
+        w.frame.entities = std::sync::Arc::new(vec![
+            view(1, 1, 0.0, 0, 1.0),
+            view(2, 1, 20.0, 0, 1.0),
+            view(3, 1, 10.0, 1, 1.0),
+            view(4, 1, 60.0, 2, 1.0),
+            view(5, 1, 15.0, 2, 0.5), // unfinished
+            view(6, 2, 10.0, 2, 1.0), // another army's
+            view(7, 1, -30.0, 2, 1.0),
+        ]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut p = PlayerControl::new(Some(1), vec![1, 2, 3], Some(tx));
+        p.issue_dock(&w, false);
+        let sent: Vec<PlayerCommand> = rx.try_iter().collect();
+        assert_eq!(sent.len(), 1);
+        assert_eq!((sent[0].kind, sent[0].target, sent[0].units.clone(), sent[0].queue), (CommandKind::TransportLoadUnits, CommandTarget::Entity(7), vec![1, 2], false), "from x 10: 7 is 40 away, 4 is 50");
     }
 
     #[test]
