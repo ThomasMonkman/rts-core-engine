@@ -252,6 +252,8 @@ pub struct Scene {
     /// Particle effects, beams and trails.
     /// The selected units' order lines and waypoints.
     pub command_graph: super::command_graph::CommandGraph,
+    /// Scripts' debug lines: the sim canvas and the views' world shapes.
+    pub debug_lines: super::debug_lines::DebugLines,
     /// Resource deposits' icons on the zoomed-out view.
     pub resource_icons: super::resource_icons::ResourceIcons,
     /// Surface size (pixels) and the cursor on it (set by the frame).
@@ -373,6 +375,7 @@ struct ViewGpu {
     terrain_draws: Vec<std::ops::Range<u32>>,
     decals: super::terrain::DecalDraws,
     graph: super::command_graph::GraphFrame,
+    lines: super::debug_lines::LinesFrame,
     icons: super::resource_icons::IconsFrame,
     ranges: super::ranges::RangesFrame,
     cascades: Option<super::shadows::Cascades>,
@@ -1334,6 +1337,7 @@ impl Scene {
         let map = super::terrain::TerrainRenderer::new(device, queue, &layout, format, DEPTH_FORMAT, w, h);
         let mut particles = super::particles::Particles::new(device, queue, &layout, format, DEPTH_FORMAT);
         let command_graph = super::command_graph::CommandGraph::new(device, queue, &layout, format, DEPTH_FORMAT);
+        let debug_lines = super::debug_lines::DebugLines::new(device, &layout, format, DEPTH_FORMAT);
         let resource_icons = super::resource_icons::ResourceIcons::new(device, &layout, format, DEPTH_FORMAT);
         let bloom = super::bloom::Bloom::new(device, surface_format, w, h);
         let smaa = super::smaa::Smaa::new(device, queue, surface_format, w, h);
@@ -1355,6 +1359,7 @@ impl Scene {
             height_range: (0.0, 0.0),
             map,
             command_graph,
+            debug_lines,
             resource_icons,
             screen: [w as f32, h as f32],
             started: Instant::now(),
@@ -1969,6 +1974,10 @@ impl Scene {
             };
             queue.write_buffer(&v.globals, 0, bytemuck::bytes_of(&globals));
         }
+        // Scripts' debug lines: the sim canvas (listed once per snapshot)
+        // and this view's world shapes.
+        self.debug_lines.set_canvas(self.latest.as_ref().map(|s| &s.debug.draw), self.latest.as_ref().map_or(0, |s| s.tick));
+        self.debug_lines.prepare(device, queue, &mut v.lines, None, size, 2.0 * c.half_tangents().1 / size[1].max(1.0));
         self.views_gpu[index] = Some(v);
     }
 
@@ -1984,6 +1993,7 @@ impl Scene {
             terrain_draws: Vec::new(),
             decals: Default::default(),
             graph: Default::default(),
+            lines: Default::default(),
             icons: Default::default(),
             ranges: Default::default(),
             cascades: None,
@@ -2595,6 +2605,10 @@ impl Scene {
             // (as the base game draws them).
             pass.timed_push("command graph (order lines)");
             self.command_graph.draw(&mut pass, &v.graph);
+            pass.timed_pop();
+            // Scripts' debug lines, over everything in the world.
+            pass.timed_push("debug lines");
+            self.debug_lines.draw(&mut pass, &v.lines);
             pass.timed_pop();
             // FAF's `UnitPlace` renders after water and effects.
             if self.ghost_draw.is_some() || !self.template_ghost_draws.is_empty() {

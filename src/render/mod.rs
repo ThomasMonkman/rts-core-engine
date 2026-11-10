@@ -101,6 +101,7 @@ pub mod bloom;
 pub mod camera;
 pub mod command_graph;
 pub mod console;
+pub mod debug_lines;
 pub mod frame;
 pub mod globals;
 pub mod gpu_prof;
