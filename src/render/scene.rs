@@ -2677,8 +2677,15 @@ impl Scene {
         if self.input.range_filters.is_empty() && ghost.is_none() && !own {
             return Vec::new();
         }
-        let zoom = ((c.zoom - c.min_zoom) / (c.max_zoom - c.min_zoom).max(1e-3)).clamp(0.0, 1.0);
-        let lerp = |t: [f32; 2]| t[0] + (t[1] - t[0]) * zoom;
+        // A ring's line width (FA exe 0x7ef67e): from the filter's zoomed-in
+        // width to its zoomed-out one scaled by the map's larger side x
+        // `range_Inner/OuterThicknessCoeff` (1/1024), by zoom / max zoom
+        // (camera vtable +0x4c / +0x50). So a ring is as wide on screen
+        // zoomed out on any map size: 4 units on a 20 km map, 1 on a 5 km one.
+        const THICKNESS_COEFF: f32 = 1.0 / 1024.0;
+        let size = self.map_size.map_or(1024.0, |(w, h)| w.max(h));
+        let zoom = (c.zoom / c.max_zoom.max(1e-3)).clamp(0.0, 1.0);
+        let lerp = |t: [f32; 2]| t[0] + (t[1] * THICKNESS_COEFF * size - t[0]) * zoom;
         let water = self.water.as_ref().map(|w| w.1);
         let low = water.map_or(self.height_range.0, |w| w.min(self.height_range.0)) - 5.0;
         let high = self.height_range.1.max(water.unwrap_or(f32::MIN)) + 1.0;
