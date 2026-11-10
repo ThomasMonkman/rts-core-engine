@@ -98,6 +98,21 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_fn!(lua, global,
+        /// Draws a line and a small circle 2 units from `start` toward
+        /// `finish` on the debug canvas this beat.
+        DrawLinePop = |lua, (start, finish, color): (Vector, Vector, Color)| {
+            let (a, b, color) = (point(&start)?, point(&finish)?, argb(&color));
+            let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            let k = if len > 0.0 { 2.0 / len } else { 0.0 };
+            let center = [a[0] + d[0] * k, a[1] + d[1] * k, a[2] + d[2] * k];
+            add(lua, |c| {
+                c.lines.push(DebugLine { a, b, color });
+                c.circles.push(DebugCircle { center, radius: 1.0, color });
+            });
+            Ok(())
+        })?;
+    lua_fn!(lua, global,
         /// Draws a flat circle of that radius on the debug canvas this beat.
         DrawCircle = |lua, (center, radius, color): (Vector, f64, Color)| {
             let circle = DebugCircle { center: point(&center)?, radius: radius as f32, color: argb(&color) };
@@ -115,10 +130,15 @@ mod tests {
     fn draws_collect_until_cleared() {
         let lua = Lua::new();
         register(&lua).unwrap();
-        lua.load("DrawLine({0, 1, 2}, {3, 4, 5}, 'ff0000') DrawCircle({1, 2, 3}, 10, 'aaffffff')").exec().unwrap();
+        lua.load("DrawLine({0, 1, 2}, {3, 4, 5}, 'ff0000') DrawCircle({1, 2, 3}, 10, 'aaffffff') DrawLinePop({0, 0, 0}, {10, 0, 0}, 'Red')")
+            .exec()
+            .unwrap();
         let d = current(&lua);
-        assert_eq!(d.lines, vec![DebugLine { a: [0.0, 1.0, 2.0], b: [3.0, 4.0, 5.0], color: 0xFFFF_0000 }]);
-        assert_eq!(d.circles, vec![DebugCircle { center: [1.0, 2.0, 3.0], radius: 10.0, color: 0xAAFF_FFFF }]);
+        assert_eq!(d.lines.len(), 2);
+        assert_eq!(d.lines[0], DebugLine { a: [0.0, 1.0, 2.0], b: [3.0, 4.0, 5.0], color: 0xFFFF_0000 });
+        assert_eq!(d.circles[0], DebugCircle { center: [1.0, 2.0, 3.0], radius: 10.0, color: 0xAAFF_FFFF });
+        // The pop: radius 1, 2 units along the line from its start.
+        assert_eq!(d.circles[1], DebugCircle { center: [2.0, 0.0, 0.0], radius: 1.0, color: 0xFFFF_0000 });
         // Republishing the beat shows it again; the next beat starts empty.
         assert_eq!(current(&lua), d);
         clear(&lua);

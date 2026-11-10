@@ -23,7 +23,6 @@ pub const CORE: &[&str] = &[
 pub const SIM: &[&str] = &[
     "CoordinateAttacks",
     "CreateUnit2",
-    "DrawLinePop",
     "EntityCategoryCountAroundPosition",
     "GenerateRandomOrientation",
     "GetEntitiesInRect",

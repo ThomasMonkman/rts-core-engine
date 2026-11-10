@@ -28,7 +28,6 @@ signatures! {
         BeginLoggingStats(filename: String);
         CoordinateAttacks();
         CreateUnit2(blueprint_id: String, army: Army, layer: Layer, x: f64, z: f64, heading: f64) -> Obj<moho::Unit>;
-        DrawLinePop(start: Vector, finish: Vector, color: Color);
         EndGame();
         EndLoggingStats(exit: Option<bool>);
         EntityCategoryCountAroundPosition(category: EntityCategory, position: Vector) -> f64;
