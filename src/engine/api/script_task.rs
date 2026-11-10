@@ -27,7 +27,11 @@ use crate::engine::sim::entity::EntityId;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ScriptTaskHandle(pub EntityId);
-impl LuaUserData for ScriptTaskHandle {}
+impl LuaUserData for ScriptTaskHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 struct Task {

@@ -15,7 +15,11 @@ use crate::engine::sim::math::Fx;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ManipulatorHandle(pub ManipulatorId);
-impl LuaUserData for ManipulatorHandle {}
+impl LuaUserData for ManipulatorHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 fn manips(lua: &Lua) -> mlua::AppDataRefMut<'_, Manipulators> {
     lua.app_data_mut::<Manipulators>().expect("Manipulators not in app_data")

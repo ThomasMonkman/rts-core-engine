@@ -18,7 +18,11 @@ use crate::engine::sim::math::FxVec3;
 /// Opaque `SimCommand` handle returned by `Issue*`.
 #[derive(Clone, Copy, Debug)]
 pub struct CommandHandle(pub CommandId);
-impl LuaUserData for CommandHandle {}
+impl LuaUserData for CommandHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 /// moho's command handles are opaque userdata.
 impl crate::lua_api::LuaType for CommandHandle {

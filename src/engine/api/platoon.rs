@@ -14,7 +14,11 @@ use crate::engine::sim::platoon::{PlatoonId, Platoons};
 
 #[derive(Clone, Copy, Debug)]
 pub struct PlatoonHandle(pub PlatoonId);
-impl LuaUserData for PlatoonHandle {}
+impl LuaUserData for PlatoonHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 const PLATOONS_KEY: &str = "engine.platoons";
 

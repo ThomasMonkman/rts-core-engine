@@ -37,6 +37,7 @@ impl crate::lua_api::LuaType for CueHandle {
 
 impl LuaUserData for CueHandle {
     fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
         methods.add_meta_method(LuaMetaMethod::ToString, |_, h, ()| Ok(format!("CueHandle({})", h.id)));
     }
 }

@@ -19,7 +19,11 @@ use crate::lua_api::{Obj, Status, lua_fn, lua_method};
 /// `_c_object` of a personality: its army.
 #[derive(Clone, Copy, Debug)]
 pub struct PersonalityHandle(pub u32);
-impl LuaUserData for PersonalityHandle {}
+impl LuaUserData for PersonalityHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 /// Personality names set by `SetArmyAIPersonality`, by army.
 #[derive(Default, serde::Serialize, serde::Deserialize)]

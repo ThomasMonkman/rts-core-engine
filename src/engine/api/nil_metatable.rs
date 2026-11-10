@@ -98,8 +98,10 @@ mod tests {
             assert!(lua.load(format!("getmetatable({v}).x = 1")).exec().is_err(), "{v}");
         }
         assert!(lua.load("getmetatable(nil).__index.x = 1").exec().is_err());
-        // The sim's number metatable doesn't make numbers indexable.
-        assert!(lua.load("local n = 0 return n.x").exec().is_err());
+        // The sim's numbers index to nil, as moho's, but writes still raise.
+        let v: LuaValue = lua.load("local n = 0 return n.x").eval().unwrap();
+        assert!(v.is_nil());
+        assert!(lua.load("local n = 0 n.x = 1").exec().is_err());
     }
 
     #[test]
@@ -118,10 +120,72 @@ pub fn register_numbers(lua: &Lua) -> LuaResult<()> {
     set_number_metatable(lua, index_to_nil(lua)?)
 }
 
-/// The sim's numbers get an empty metatable: `config.lua` needs
-/// `getmetatable(0)` to be a table, but indexing a number still raises there.
+/// The sim's numbers index to nil with a warning ([`index_warn`]).
+/// `config.lua` needs `getmetatable(0)` to be a writable table.
 pub fn register_number_metatable(lua: &Lua) -> LuaResult<()> {
-    set_number_metatable(lua, lua.create_table()?)
+    set_number_metatable(lua, index_warn_metatable(lua)?)
+}
+
+/// Functions index to nil with a warning ([`index_warn`]), both layers.
+pub fn register_functions(lua: &Lua) -> LuaResult<()> {
+    let mt = index_warn_metatable(lua)?;
+    let f = lua.create_function(|_, ()| Ok(()))?;
+    // SAFETY: stack holds [f, mt]; setting f's metatable sets the function
+    // type's (Luau keeps one per non-table, non-userdata type) and pops mt.
+    unsafe {
+        lua.exec_raw::<()>((f, mt), |state| {
+            mlua::ffi::lua_setmetatable(state, -2);
+        })
+    }
+}
+
+/// Call sites already warned about, so a hot loop logs once.
+#[derive(Default)]
+struct IndexWarnings(std::collections::BTreeSet<String>);
+
+/// Moho's LuaPlus yields nil when a number, function or userdata is indexed
+/// (real-game probe: `(5).Foo`, `(5)[1]`, `print.Foo` and a platoon's
+/// `_c_object.Dead` are all nil; writes still raise). Ours does too, but
+/// logs it once per call site, as it is nearly always a script bug (RNGAI's
+/// `Economy.BuildCostEnergy.BuildCostMass`). Only runs on the path that
+/// would otherwise raise.
+pub fn index_warn(lua: &Lua, value: &LuaValue, key: &LuaValue) -> LuaResult<LuaValue> {
+    let site = lua
+        .inspect_stack(1)
+        .map(|d| format!("{}:{}", d.source().short_src.as_deref().unwrap_or("?"), d.curr_line()))
+        .unwrap_or_else(|| "?".to_owned());
+    if lua.app_data_ref::<IndexWarnings>().is_none() {
+        lua.set_app_data(IndexWarnings::default());
+    }
+    let new = lua.app_data_mut::<IndexWarnings>().is_some_and(|mut w| w.0.insert(site.clone()));
+    if new {
+        let key = match key {
+            LuaValue::String(s) => format!("'{}'", s.to_string_lossy()),
+            other => other.to_string().unwrap_or_else(|_| other.type_name().to_owned()),
+        };
+        let what = match value {
+            LuaValue::Integer(_) | LuaValue::Number(_) => "number",
+            v => v.type_name(),
+        };
+        tracing::warn!(target: "lua", "{site}: indexed a {what} with {key}; yields nil, as in moho");
+    }
+    Ok(LuaValue::Nil)
+}
+
+/// `{ __index = index_warn }`.
+fn index_warn_metatable(lua: &Lua) -> LuaResult<LuaTable> {
+    let mt = lua.create_table()?;
+    mt.raw_set(
+        "__index",
+        lua.create_function(|lua, (v, k): (LuaValue, LuaValue)| index_warn(lua, &v, &k))?,
+    )?;
+    Ok(mt)
+}
+
+/// Gives a userdata type moho's indexing ([`index_warn`]); every handle type
+/// calls it from `add_methods`.
+pub fn add_nil_index<T, M: LuaUserDataMethods<T>>(methods: &mut M) {
+    methods.add_meta_function(LuaMetaMethod::Index, |lua, (v, k): (LuaValue, LuaValue)| index_warn(lua, &v, &k));
 }
 
 fn set_number_metatable(lua: &Lua, mt: LuaTable) -> LuaResult<()> {
@@ -148,6 +212,33 @@ pub fn register_booleans(lua: &Lua) -> LuaResult<()> {
             mlua::ffi::lua_pushvalue(state, -2);
             mlua::ffi::lua_setmetatable(state, -2);
         })
+    }
+}
+
+#[cfg(test)]
+mod index_warn_tests {
+    use mlua::prelude::*;
+
+    #[test]
+    fn numbers_functions_and_userdata_index_to_nil() {
+        struct Handle;
+        impl LuaUserData for Handle {
+            fn add_methods<M: LuaUserDataMethods<Self>>(m: &mut M) {
+                super::add_nil_index(m)
+            }
+        }
+        let lua = Lua::new();
+        super::register_number_metatable(&lua).unwrap();
+        super::register_functions(&lua).unwrap();
+        lua.globals().set("h", Handle).unwrap();
+        // RNGAI's shapes: a blueprint number's field, a platoon walk.
+        let r: (LuaValue, LuaValue, LuaValue, LuaValue) = lua
+            .load("local e = { E = 5 } return e.E.BuildCostMass, e.E[1], print.Foo, h.Dead")
+            .eval()
+            .unwrap();
+        assert!(r.0.is_nil() && r.1.is_nil() && r.2.is_nil() && r.3.is_nil());
+        assert!(lua.load("local n = 5 n.Foo = 1").exec().is_err());
+        assert!(lua.load("local n = 5 n.Foo()").exec().is_err());
     }
 }
 

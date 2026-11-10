@@ -17,7 +17,11 @@ use crate::lua_api::{Obj, lua_fn, lua_method};
 /// `_c_object` of an effect script object.
 #[derive(Clone, Copy, Debug)]
 pub struct EffectHandle(pub u32);
-impl LuaUserData for EffectHandle {}
+impl LuaUserData for EffectHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 /// Army argument as moho takes it: an index, negative = none.
 fn army_of(v: &LuaValue) -> Option<u32> {

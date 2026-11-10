@@ -106,6 +106,7 @@ pub fn register_safe(lua: &mlua::Lua) -> mlua::Result<()> {
     // active mod's uid (sim mods' blueprint load).
     nil_metatable::register_booleans(lua)?;
     nil_metatable::register_number_metatable(lua)?;
+    nil_metatable::register_functions(lua)?;
     disk_get_file_info::register(lua)?;
     blueprints::register(lua)?;
     // Up front: registering a mesh later then needs no container borrow

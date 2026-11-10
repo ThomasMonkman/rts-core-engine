@@ -401,6 +401,7 @@ impl UserVm {
         api::nil_metatable::register(&lua)?;
         api::nil_metatable::register_numbers(&lua)?;
         api::nil_metatable::register_booleans(&lua)?;
+        api::nil_metatable::register_functions(&lua)?;
         api::disk_get_file_info::register(&lua)?;
         api::threads::register(&lua)?;
         api::random::register(&lua)?;

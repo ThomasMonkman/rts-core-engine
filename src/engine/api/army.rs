@@ -13,7 +13,11 @@ use crate::engine::sim::math::{Fx, FxVec2};
 /// `_c_object` of an AI brain.
 #[derive(Clone, Copy, Debug)]
 pub struct ArmyHandle(pub u32);
-impl LuaUserData for ArmyHandle {}
+impl LuaUserData for ArmyHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 /// The army this client views the game as; -1 = observer. Client-local, so
 /// the sim must only use it for presentation (FAF uses it for Sync/UI data).

@@ -28,12 +28,20 @@ pub type ControlId = u32;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ControlHandle(pub ControlId);
-impl LuaUserData for ControlHandle {}
+impl LuaUserData for ControlHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 /// A camera's native side (`GetCamera`): cameras live as long as the
 /// interface, so it is never destroyed.
 pub struct CameraHandle;
-impl LuaUserData for CameraHandle {}
+impl LuaUserData for CameraHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 /// A border: textures for the vertical sides, the horizontal sides and the
 /// four corners (`SetNewTextures`), or one colour (`SetSolidColor`).

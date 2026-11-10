@@ -13,7 +13,11 @@ use crate::engine::sim::math::{Fx, FxQuat, FxVec3};
 /// `_c_object` of an entity script object.
 #[derive(Clone, Copy, Debug)]
 pub struct EntityHandle(pub EntityId);
-impl LuaUserData for EntityHandle {}
+impl LuaUserData for EntityHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 const ENTITIES_KEY: &str = "engine.entities";
 
