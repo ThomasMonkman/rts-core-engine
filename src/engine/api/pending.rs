@@ -24,7 +24,6 @@ pub const SIM: &[&str] = &[
     "CoordinateAttacks",
     "CreateUnit2",
     "DrawCircle",
-    "DrawLine",
     "DrawLinePop",
     "EntityCategoryCountAroundPosition",
     "GenerateRandomOrientation",

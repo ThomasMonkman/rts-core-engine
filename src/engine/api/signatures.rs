@@ -29,7 +29,6 @@ signatures! {
         CoordinateAttacks();
         CreateUnit2(blueprint_id: String, army: Army, layer: Layer, x: f64, z: f64, heading: f64) -> Obj<moho::Unit>;
         DrawCircle(center: Vector, diameter: f64, color: Color);
-        DrawLine(point_a: Vector, point_b: Vector, color: Color);
         DrawLinePop(start: Vector, finish: Vector, color: Color);
         EndGame();
         EndLoggingStats(exit: Option<bool>);

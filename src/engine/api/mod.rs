@@ -23,6 +23,7 @@ pub mod command_source;
 pub mod player_input;
 pub mod damage;
 pub mod debug;
+pub mod debug_draw;
 pub mod deposits;
 pub mod destroyed;
 pub mod disk_find_files;
@@ -137,6 +138,7 @@ pub fn register_safe(lua: &mlua::Lua) -> mlua::Result<()> {
     sim_time::register(lua)?;
     unit::register(lua)?;
     beam::register(lua)?;
+    debug_draw::register(lua)?;
     script_task::register(lua)?;
     economy_event::register(lua)?;
     silo::register(lua)?;

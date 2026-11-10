@@ -31,6 +31,8 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
         s.begin_tick();
         s.tick()
     });
+    // The debug canvas shows one beat's draws (moho empties it each beat).
+    crate::engine::api::debug_draw::clear(lua);
     // Stage timing when the engine attached it (every run; absent in tests
     // and benches); fetched per call, never held across Lua.
     let profile = lua.app_data_ref::<crate::engine::watchdog::StageTimes>().is_some();

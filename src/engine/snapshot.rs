@@ -679,6 +679,8 @@ pub struct DebugData {
     /// (unit, max range) per weapon.
     pub ranges: Vec<(u32, f32)>,
     pub grid: Option<Arc<GridOverlay>>,
+    /// The scripts' debug canvas this beat (`DrawLine` / `DrawCircle`).
+    pub draw: crate::engine::api::debug_draw::DebugDraw,
 }
 
 #[derive(Debug, Default)]
@@ -2670,6 +2672,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
         let _s = crate::prof_span!("snapshot debug + unit details");
         debug_data(lua, &request, &mut sink)
     };
+    snap.debug.draw = crate::engine::api::debug_draw::current(lua);
     fog::apply(lua, &mut sink.fog, view, &mut snap);
     let (terrain_version, blueprints) = (lua.app_data_ref::<Terrain>().map(|t| t.version), snap.blueprints.is_some());
     let full_props = snap.props.is_some();

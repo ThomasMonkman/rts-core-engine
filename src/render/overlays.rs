@@ -241,6 +241,22 @@ fn draw_view_overlays(
         let line: Vec<Pos2> = pts.iter().filter_map(|p| to_screen(ground(p[0], p[2]))).collect();
         painter.add(egui::Shape::line(line, Stroke::new(1.5_f32, Color32::from_rgb(255, 255, 255))));
     }
+    // The scripts' debug canvas (`DrawLine`, `DrawCircle`), where they put it.
+    let argb = |c: u32| Color32::from_rgba_unmultiplied((c >> 16) as u8, (c >> 8) as u8, c as u8, (c >> 24) as u8);
+    for l in &debug.draw.lines {
+        if let (Some(a), Some(b)) = (to_screen(glam::Vec3::from(l.a)), to_screen(glam::Vec3::from(l.b))) {
+            painter.line_segment([a, b], Stroke::new(1.5_f32, argb(l.color)));
+        }
+    }
+    for c in &debug.draw.circles {
+        let ring: Vec<Pos2> = (0..=32)
+            .filter_map(|i| {
+                let a = i as f32 / 32.0 * std::f32::consts::TAU;
+                to_screen(glam::Vec3::new(c.center[0] + c.radius * a.cos(), c.center[1], c.center[2] + c.radius * a.sin()))
+            })
+            .collect();
+        painter.add(egui::Shape::line(ring, Stroke::new(1.5_f32, argb(c.color))));
+    }
     for (unit, range) in &debug.ranges {
         let Some(e) = by_id(*unit) else { continue };
         let c = e.position;
