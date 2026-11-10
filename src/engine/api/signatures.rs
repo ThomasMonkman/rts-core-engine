@@ -97,7 +97,6 @@ signatures! {
         FindUnit(category: EntityCategory, need_to_be_idle: bool) -> Option<Obj<moho::Unit>>;
         /// A unit and its upgrade blueprint.
         FindUnitToUpgrade(upgrade_list: LuaTable) -> (LuaValue, LuaValue);
-        GetNumPlatoonsTemplateNamed(name: String) -> f64;
         GetNumPlatoonsWithAI(name: String) -> f64;
         /// The plan's conversion isn't identified (passed on as is).
         SetCurrentPlan(plan: LuaValue);

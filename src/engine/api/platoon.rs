@@ -559,6 +559,17 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         },
     )?;
     lua_method!(lua, moho::AIBrain,
+        /// How many of the army's platoons have this name (`MakePlatoon`'s first
+        /// argument, a formed platoon's template name), ignoring case; 0 when
+        /// the name isn't a string. Moho counts its army's platoon list with
+        /// `_stricmp` (FA exe 0x58ce30 -> `CArmyImpl` vtable +0x84, 0x700770).
+        GetNumPlatoonsTemplateNamed = |lua, (brain, name): (Obj<moho::AIBrain>, LuaValue)| {
+            let ArmyHandle(army) = script_object::handle(&brain)?;
+            let LuaValue::String(name) = name else { return Ok(0.0) };
+            let name = name.to_string_lossy();
+            Ok(platoons(lua).of_army(army).filter(|p| p.label.eq_ignore_ascii_case(&name)).count() as f64)
+        })?;
+    lua_method!(lua, moho::AIBrain,
         /// The army's platoons in creation order, without its ArmyPool (inferred).
         GetPlatoonsList = |lua, brain: Obj<moho::AIBrain>| {
             let ArmyHandle(army) = script_object::handle(&brain)?;

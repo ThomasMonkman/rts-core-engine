@@ -184,6 +184,11 @@ fn brain_engineer_building() {
 }
 
 #[test]
+fn brain_platoons_template_named() {
+    scenario("brain_platoons_template_named", 100);
+}
+
+#[test]
 fn num_build_orders() {
     scenario("num_build_orders", 40);
 }
