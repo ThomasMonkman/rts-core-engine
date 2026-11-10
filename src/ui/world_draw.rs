@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use mlua::prelude::*;
 
-use crate::engine::api::debug_draw::{DebugDraw, DebugLine, point};
+use crate::engine::api::debug_draw::{DebugCircle, DebugDraw, DebugLine, point};
 use crate::lua_api::lua_fn;
 use crate::lua_api::shapes::{Color, Vector};
 
@@ -79,6 +79,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             add(lua, |d| d.lines.push(line));
             Ok(())
         })?;
+    lua_fn!(lua, global,
+        /// Draws a flat circle of that radius in the world view whose
+        /// `OnRenderWorld` is running.
+        UI_DrawCircle = |lua, (pos, radius, c, t): (Vector, f64, Color, Option<f64>)| {
+            let circle = DebugCircle { center: point(&pos)?, radius: radius as f32, color: color(&c)?, width: thickness(t), min_px: MIN_PX };
+            add(lua, |d| d.circles.push(circle));
+            Ok(())
+        })?;
     Ok(())
 }
 
@@ -101,12 +109,14 @@ mod tests {
             .load(
                 "return { OnRenderWorld = function(self, delta)
                     UI_DrawLine({0, 1, 0}, {10, 1, 0}, 'ff0000')
+                    UI_DrawCircle({5, 0, 5}, 3, 'aa00ff00', 0.5)
                 end }",
             )
             .eval()
             .unwrap();
         let d = render_world(&lua, &view).unwrap().unwrap();
         assert_eq!(d.lines[0], DebugLine { a: [0.0, 1.0, 0.0], b: [10.0, 1.0, 0.0], color: 0xFFFF_0000, width: 0.15, min_px: MIN_PX });
+        assert_eq!(d.circles, vec![DebugCircle { center: [5.0, 0.0, 5.0], radius: 3.0, color: 0xAA00_FF00, width: 0.5, min_px: MIN_PX }]);
         // Each frame starts empty; a view without the callback draws nothing.
         assert!(render_world(&lua, &lua.create_table().unwrap()).unwrap().is_none());
     }
