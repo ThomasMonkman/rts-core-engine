@@ -138,14 +138,7 @@ pub fn setup(lua: &Lua, cfg: &SessionConfig) -> LuaResult<()> {
     lua.set_app_data(SimRng::new(seed));
     lua.set_named_registry_value("sim.create_initial_units", cfg.create_initial_units)?;
     let launch = cfg.launch.as_ref().map(|l| l.to_lua(lua)).transpose()?;
-    let scenario = match &launch {
-        Some(LuaValue::Table(l)) => {
-            let options: LuaTable = l.get::<LuaTable>("Config")?.get("GameOptions")?;
-            options.get::<String>("ScenarioFile")?
-        }
-        _ => cfg.scenario.clone(),
-    };
-    let scenario = scenario_vfs_path(lua, &scenario)?;
+    let scenario = scenario_file(lua, launch.as_ref(), cfg)?;
     let human_army = {
         let _s = crate::prof_span!("session launch (scenario, armies)");
         let lobby_army: Option<u32> = lua
@@ -171,13 +164,6 @@ pub fn setup(lua: &Lua, cfg: &SessionConfig) -> LuaResult<()> {
         .transpose()?
         .is_some_and(|v| matches!(&v, LuaValue::Boolean(true)) || v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("true")));
     lua.set_app_data(crate::engine::api::command_source::Cheats { enabled: cheats, cheaters: Vec::new() });
-    {
-        let _s = crate::prof_span!("load map");
-        crate::engine::api::terrain::load_map(lua)?;
-    }
-    if let Some(mut sink) = lua.app_data_mut::<crate::engine::snapshot::SnapshotSink>() {
-        sink.send_terrain(lua);
-    }
     {
         let _s = crate::prof_span!("SetupSession");
         let setup: LuaFunction = lua.globals().get("SetupSession")?;
@@ -242,6 +228,41 @@ fn initialize_prebuilt_units(lua: &Lua) -> LuaResult<()> {
         if !civilian {
             init.call::<()>(name)?;
         }
+    }
+    Ok(())
+}
+
+/// The session's scenario file as a VFS path: the lobby launch's
+/// `ScenarioFile`, else the configured one.
+fn scenario_file(lua: &Lua, launch: Option<&LuaValue>, cfg: &SessionConfig) -> LuaResult<String> {
+    let scenario = match launch {
+        Some(LuaValue::Table(l)) => {
+            let options: LuaTable = l.get::<LuaTable>("Config")?.get("GameOptions")?;
+            options.get::<String>("ScenarioFile")?
+        }
+        _ => cfg.scenario.clone(),
+    };
+    scenario_vfs_path(lua, &scenario)
+}
+
+/// Loads the session's map (the scenario's `.scmap`) into the sim, before
+/// `/lua/simInit.lua` runs: moho has the terrain before any sim Lua, and
+/// mods call `GetMapSize()` and the like when their modules are imported
+/// (RNGAI's `unitcountbuildconditions.lua` hook, from simInit's imports).
+pub fn load_map(lua: &Lua, cfg: &SessionConfig) -> LuaResult<()> {
+    let launch = cfg.launch.as_ref().map(|l| l.to_lua(lua)).transpose()?;
+    let scenario = scenario_file(lua, launch.as_ref(), cfg)?;
+    let data = lua.create_table()?;
+    let doscript: LuaFunction = lua.globals().get("doscript")?;
+    doscript.call::<()>(("/lua/dataInit.lua", data.clone()))?;
+    doscript.call::<()>((scenario.as_str(), data.clone()))?;
+    let map: String = data
+        .get::<Option<LuaTable>>("ScenarioInfo")?
+        .ok_or_else(|| LuaError::runtime(format!("session launch: no ScenarioInfo in {scenario}")))?
+        .get("map")?;
+    crate::engine::api::terrain::load_map(lua, &map)?;
+    if let Some(mut sink) = lua.app_data_mut::<crate::engine::snapshot::SnapshotSink>() {
+        sink.send_terrain(lua);
     }
     Ok(())
 }
