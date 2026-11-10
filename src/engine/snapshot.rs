@@ -779,6 +779,10 @@ pub struct Snapshot {
     /// Launches a camera following their launcher follows, since the last
     /// delivered snapshot (`Display.CameraFollowsProjectile`).
     pub camera_follows: Vec<crate::engine::sim::presentation::CameraFollow>,
+    /// Projectiles launched since the last delivered snapshot and where
+    /// from (id, position), in id order: the renderer lerps a projectile
+    /// with no last-snapshot position from its launch point.
+    pub launches: Vec<(u32, [f32; 3])>,
     /// Live particle effects, in id order.
     pub effects: Vec<EffectView>,
     pub effect_curves: Vec<EffectCurve>,
@@ -2427,6 +2431,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
             p.camera_shakes.clear();
             p.upgrades.clear();
             p.camera_follows.clear();
+            p.launches.clear();
         }
         return;
     };
@@ -2440,6 +2445,9 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
         if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
             let excess = p.sounds.len().saturating_sub(crate::engine::sim::presentation::MAX_PENDING_SOUNDS);
             p.sounds.drain(..excess);
+            // Skipped snapshots: the next one's previous lacks these shots
+            // by more than a tick; drawing them where they are is fine.
+            p.launches.clear();
         }
         return;
     }
@@ -2623,6 +2631,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
         p.camera_shakes.clear();
         snap.upgrades = std::mem::take(&mut p.upgrades);
         snap.camera_follows = std::mem::take(&mut p.camera_follows);
+        snap.launches = std::mem::take(&mut p.launches);
         let sight = fog::SoundSight::new(lua, view);
         snap.sounds = p
             .sounds
@@ -2698,7 +2707,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
             }
         }
         // Not delivered: keep its syncs, splats and prop changes for the next one.
-        Err(TrySendError::Full(snap)) | Err(TrySendError::Disconnected(snap)) => {
+        Err(TrySendError::Full(mut snap)) | Err(TrySendError::Disconnected(mut snap)) => {
             sink.pending_props = prop_ids;
             sink.fog.dropped();
             if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
@@ -2724,6 +2733,12 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
                 let later = std::mem::take(&mut p.camera_follows);
                 p.camera_follows = snap.camera_follows.clone();
                 p.camera_follows.extend(later);
+            }
+            if !snap.launches.is_empty()
+                && let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
+                let later = std::mem::take(&mut p.launches);
+                p.launches = std::mem::take(&mut snap.launches);
+                p.launches.extend(later);
             }
             if !snap.sounds.is_empty()
                 && let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {

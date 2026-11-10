@@ -160,6 +160,15 @@ pub struct Presentation {
     /// Projectiles launched that a camera following their launcher
     /// follows (`Display.CameraFollowsProjectile`), drained like `sounds`.
     pub camera_follows: Vec<CameraFollow>,
+    /// Projectiles launched since the last delivered snapshot, with where
+    /// they were launched (projectile id, position), in id order. A shot
+    /// flies its first tick in the same beat it is fired (moho's motion
+    /// stage runs after the script stage), so the renderer, which has no
+    /// last-tick position for it, lerps it from here instead of showing it
+    /// a tick of flight in front of the muzzle. Drained like `sounds`; not
+    /// in keyframes.
+    #[serde(skip)]
+    pub launches: Vec<(u32, [f32; 3])>,
     /// Upgrades completed since the last delivered snapshot (old structure,
     /// new one; `NotifyUpgrade`): the interface moves its selection and
     /// control groups over. Drained like `sounds`.

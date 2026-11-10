@@ -1277,6 +1277,59 @@ fn attack_move_and_patrol_go_to_the_whole_selection() {
     assert_eq!(summary(&rx.try_iter().collect::<Vec<_>>()), vec![(CommandKind::Patrol, selection.clone(), true)]);
 }
 
+/// A shot's trail starts at the drawn muzzle. The sim flies a projectile
+/// its first tick in the beat it is fired (the motion stage runs after the
+/// Lua threads), so its first snapshot already has it a tick of flight out;
+/// the trail's first segment must still be laid from where it was launched
+/// (`Snapshot::launches`), not from there (it was, after 2026-11-07: the UEF
+/// ACU's shots started some 3.5 units in front of the gun).
+#[test]
+fn shot_trails_start_at_the_muzzle() {
+    let Some(mut h) = Harness::new(None, false, None) else { return };
+    h.engine
+        .sim_lua()
+        .load(
+            r#"
+            local x, z = 384, 896
+            local acu = CreateUnitHPR('uel0001', 'ARMY_1', x, GetTerrainHeight(x, z), z, 0, 0, 0)
+            local t = CreateUnitHPR('uel0201', 'ARMY_2', x, GetTerrainHeight(x, z + 18), z + 18, 0, 0, 0)
+            t:SetCanTakeDamage(false)
+            t:SetFireState(1)
+            rawset(_G, 'TestAcu', acu)
+            IssueAttack({acu}, t)
+            "#,
+        )
+        .exec()
+        .expect("setup");
+    h.ticks(1);
+    h.settle();
+    // Each tick's first frame, as the game lays trails: the shot drawn at
+    // its launch point, not a tick of flight out (`Scene` lerps it from
+    // `Snapshot::launches`).
+    h.scene.fixed_alpha = Some(0.0);
+    let lua = h.engine.sim_lua();
+    let acu: u32 = lua.load("return tonumber(TestAcu:GetEntityId())").eval().expect("acu id");
+    let muzzle: u32 = lua.load("for i = 0, TestAcu:GetBoneCount() - 1 do if TestAcu:GetBoneName(i) == 'Right_Arm_Muzzle' then return i end end").eval().expect("muzzle bone");
+    let mut seen = std::collections::BTreeSet::new();
+    let mut checked = 0;
+    for _ in 0..40 {
+        h.ticks(1);
+        let Some(snap) = h.scene.latest.clone() else { continue };
+        let Some(at) = h.scene.bone_world(acu, muzzle).map(|m| m.transform_point3(Vec3::ZERO)) else { continue };
+        for p in snap.entities.iter().filter(|e| e.kind == crate::engine::snapshot::ViewKind::Projectile && e.army == 1) {
+            if !seen.insert(p.id) {
+                continue;
+            }
+            let trails: Vec<u32> = snap.effects.iter().filter(|f| f.entity == p.id && f.kind == crate::engine::snapshot::EffectViewKind::Trail).map(|f| f.id).collect();
+            for &(id, from, to) in h.scene.stage.particles.trails_laid.iter().filter(|l| trails.contains(&l.0)) {
+                assert!(from.distance(at) < 0.25, "shot {}: trail {id} starts {:.2} from the muzzle ({from} -> {to}, muzzle {at})", p.id, from.distance(at));
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0, "no shot trails laid to check");
+}
+
 /// Largest distance between where the sim poses each bone of `id`
 /// (`sim::pose`, used for muzzles and `GetPosition(bone)`) and where the
 /// renderer draws it; how many bones were compared; the largest distance of a
