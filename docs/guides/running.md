@@ -224,6 +224,7 @@ and a map from a vault needs the same `--vault`. File format and internals:
 | `--script <file.lua>` | a Lua file from disk, run in the sim after `BeginSession` | none |
 | `--player <army>` | the army you play: a human slot with its commander | none (observer) |
 | `--no-ai` | no AI and no starting commanders (a `--script` drives the units) | off |
+| `--ai <[N=]KEY>` | the AI the armies get, by lobby key (repeatable): `KEY` for every AI army, `N=KEY` for army N. E.g. `--ai RNGStandard --ai 1=easy --ai 2=adaptive`: slot 1 runs easy, slot 2 adaptive, and every other AI slot RNGStandard. An AI mod's keys need its `--mod`. `--ai list` stops with the keys there are (the game's lobby list plus the session's mods' `CustomAIs_v2`); an unknown key does too. Ignored with a lobby launch; recorded in the replay | FAF: `adaptive`; other game code: its lobby's first |
 | `--prebuilt` | FAF's PrebuiltUnits option: each army starts with a small base | off |
 | `--fog <none\|explored\|unexplored>` | the FogOfWar option | explored |
 | `--victory <condition>` | the Victory option: `sandbox` (never ends), `demoralization`, `domination`, `eradication`, `decapitation` | sandbox |
