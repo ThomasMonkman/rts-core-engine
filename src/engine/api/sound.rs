@@ -37,6 +37,7 @@ impl crate::lua_api::LuaType for SoundHandle {
 
 impl LuaUserData for SoundHandle {
     fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
         methods.add_meta_method(LuaMetaMethod::ToString, |_, s, ()| {
             Ok(format!("Sound({}/{})", s.bank, s.cue))
         });

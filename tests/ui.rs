@@ -541,7 +541,7 @@ fn split_view_shows_two_world_cameras() {
     }
     let worlds = |vm: &UserVm| -> Vec<(String, [f32; 4])> {
         vm.draw_list().unwrap().into_iter().filter_map(|i| match i {
-            DrawItem::World { rect, camera } => Some((camera, rect)),
+            DrawItem::World { rect, camera, .. } => Some((camera, rect)),
             _ => None,
         }).collect()
     };
@@ -582,7 +582,7 @@ fn second_head_shows_camera_head2() {
     }
     let worlds = |items: Vec<DrawItem>| -> Vec<(String, [f32; 4])> {
         items.into_iter().filter_map(|i| match i {
-            DrawItem::World { rect, camera } => Some((camera, rect)),
+            DrawItem::World { rect, camera, .. } => Some((camera, rect)),
             _ => None,
         }).collect()
     };

@@ -43,12 +43,15 @@ scenario.Options = {
     TeamShareOverflow = 'enabled',
 }
 
--- Game code that isn't FAF's (LOUD, the base game) reads options its own
--- lobby sets: the rest take its lobby's defaults (an option's `default` is
--- an index into its `values`), the base lists in lobbyoptions.lua after any
--- `/lua/CustomOptions` files, as LOUD's lobby merges them. The options
--- above win.
-if not isFaf then
+-- The rest of the options take the lobby's defaults (an option's `default`
+-- is an index into its `values`), as a game started from a lobby has them:
+-- the base lists in lobbyoptions.lua after any `/lua/CustomOptions` files
+-- (LOUD's lobby merges those), then each AI mod's
+-- `/lua/AI/LobbyOptions/lobbyoptions.lua` `AIOpts` (FAF's lobby,
+-- `ImportModAIOptions`). Scripts read them: RNGAI takes FAF's `TeamSpawn`
+-- ('fixed') to mean its enemies' start spots are known, and has its own AI
+-- options (real-game run with these defaults). The options above win.
+do
     local function addDefaults(list)
         if type(list) ~= 'table' then return end
         for _, option in ipairs(list) do
@@ -59,13 +62,20 @@ if not isFaf then
             end
         end
     end
-    local listNames = { 'LobbyGlobalOptions', 'globalOpts', 'teamOptions', 'advAIOptions', 'advGameOptions' }
+    local listNames = { 'LobbyGlobalOptions', 'globalOpts', 'teamOptions', 'AIOpts', 'advAIOptions', 'advGameOptions' }
     local files = DiskFindFiles('/lua/CustomOptions', '*.lua')
     table.insert(files, '/lua/ui/lobby/lobbyoptions.lua')
     for _, file in ipairs(files) do
         local ok, module = pcall(import, file)
         if ok then
             for _, name in ipairs(listNames) do addDefaults(rawget(module, name)) end
+        end
+    end
+    for _, mod in ipairs(__active_mods or {}) do
+        local file = mod.location and (mod.location .. '/lua/AI/LobbyOptions/lobbyoptions.lua')
+        if file and DiskGetFileInfo(file) then
+            local ok, module = pcall(import, file)
+            if ok then addDefaults(rawget(module, 'AIOpts')) end
         end
     end
 end

@@ -1780,7 +1780,7 @@ fn split_view_draws_each_camera_in_its_half() {
     h.scene.record_all_bones = false;
     h.scene.frozen_time = Some(0.0);
     let (w, ht) = (480, 270);
-    let views = vec![View { camera: "WorldCamera".into(), rect: [0.0, 0.0, 237.0, 270.0] }, View { camera: "WorldCamera2".into(), rect: [243.0, 0.0, 480.0, 270.0] }];
+    let views = vec![View { camera: "WorldCamera".into(), rect: [0.0, 0.0, 237.0, 270.0], shapes: None }, View { camera: "WorldCamera2".into(), rect: [243.0, 0.0, 480.0, 270.0], shapes: None }];
     h.resize(w, ht);
     h.world.set_views(views.clone());
     for (name, at, dist) in [("WorldCamera", Vec3::new(668.0, 18.0, 366.0), 31.0f32), ("WorldCamera2", Vec3::new(512.0, 18.0, 512.0), f32::MAX)] {

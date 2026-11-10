@@ -27,7 +27,13 @@ function VDist2Sq(x1, y1, x2, y2)
     return dx * dx + dy * dy
 end
 
+-- Moho's VDist3 reads a nil vector as {0, 0, 0} (real-game probe:
+-- `VDist3(nil, {1, 2, 3})` is 3.74); VDist3Sq and VDist2 raise on nil.
+local zero = table.freeze({ 0, 0, 0 })
+
 function VDist3(a, b)
+    if a == nil then a = zero end
+    if b == nil then b = zero end
     local dx, dy, dz = a[1] - b[1], a[2] - b[2], a[3] - b[3]
     return sqrt(dx * dx + dy * dy + dz * dz)
 end

@@ -28,7 +28,7 @@ use crate::engine::api::entity::{self, entity_id, object, world};
 use crate::engine::api::callbacks::CollisionBeamEntityCallbacks;
 use crate::engine::api::{moho, script_object};
 use crate::lua_api::shapes::{Bone, Shaped};
-use crate::lua_api::{Obj, lua_method};
+use crate::lua_api::{Obj, lua_fn, lua_method};
 use crate::engine::sim::entity::{Attachment, EntityId, EntityKind};
 use crate::engine::sim::math::{Fx, FxQuat, FxVec3};
 
@@ -92,6 +92,16 @@ struct BeamSpec {
 }
 
 pub fn register(lua: &Lua) -> LuaResult<()> {
+    lua_fn!(lua, global,
+        /// The object itself when it is a live collision beam, else nil: moho
+        /// returns the object, not a boolean, as its `IsProjectile` does (FA exe
+        /// 0x75eba0, the entity's beam cast at vtable +0x20).
+        IsCollisionBeam = |lua, v: LuaValue| {
+            let LuaValue::Table(t) = v else { return Ok(None) };
+            let Ok(id) = entity_id(&t) else { return Ok(None) };
+            let live = beams(lua).0.contains_key(&id) && world(lua).get(id).is_some_and(|e| !e.destroyed);
+            Ok(live.then(|| Obj::<moho::CollisionBeamEntity>::new(t)))
+        })?;
     lua.set_app_data(Beams::default());
     lua_method!(lua, moho::CollisionBeamEntity, __init = |lua, (this, spec): (Obj<moho::CollisionBeamEntity>, Shaped<BeamSpec>)| {
         let weapon: LuaTable = spec.get("Weapon")?;

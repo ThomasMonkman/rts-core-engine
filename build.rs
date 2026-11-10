@@ -9,7 +9,7 @@ use std::path::Path;
 
 /// Root modules: one WGSL artifact each (`$OUT_DIR/<name>.wgsl`). The other
 /// files are libraries they import (`package::globals`).
-const ROOTS: &[&str] = &["bloom", "command_graph", "models", "ranges", "ranges_bin", "resource_icons", "particles", "scene", "shadows", "sky", "smaa", "terrain", "ui"];
+const ROOTS: &[&str] = &["bloom", "command_graph", "debug_lines", "models", "ranges", "ranges_bin", "resource_icons", "particles", "scene", "shadows", "sky", "smaa", "terrain", "ui"];
 
 fn main() {
     build_id();

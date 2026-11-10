@@ -179,6 +179,26 @@ fn brain_factories() {
 }
 
 #[test]
+fn brain_engineer_building() {
+    scenario("brain_engineer_building", 500);
+}
+
+#[test]
+fn brain_platoons_template_named() {
+    scenario("brain_platoons_template_named", 100);
+}
+
+#[test]
+fn brain_platoons_with_ai() {
+    scenario("brain_platoons_with_ai", 100);
+}
+
+#[test]
+fn is_collision_beam() {
+    scenario("is_collision_beam", 100);
+}
+
+#[test]
 fn num_build_orders() {
     scenario("num_build_orders", 40);
 }

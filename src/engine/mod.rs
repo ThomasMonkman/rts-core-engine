@@ -945,11 +945,18 @@ pub fn repository_root(init_path: &Path) -> Option<PathBuf> {
 
 /// Mount points for every map folder in `<vault>/maps`, then every mod
 /// folder in `<vault>/mods` (FAF's `MountModContent`: `/mods/<name>`), in
-/// name order. A vault without mods has none.
+/// name order. A vault without one of them has none of that kind (a
+/// mods-only vault works); a vault that isn't a folder is an error.
 fn vault_maps(vault: &Path) -> std::io::Result<Vec<vfs::MountPoint>> {
-    let mut mounts = vault_folders(&vault.join("maps"), "maps")?;
-    if vault.join("mods").is_dir() {
-        mounts.extend(vault_folders(&vault.join("mods"), "mods")?);
+    if !vault.is_dir() {
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("vault folder not found: {}", vault.display())));
+    }
+    let mut mounts = Vec::new();
+    for kind in ["maps", "mods"] {
+        let dir = vault.join(kind);
+        if dir.is_dir() {
+            mounts.extend(vault_folders(&dir, kind)?);
+        }
     }
     Ok(mounts)
 }
@@ -975,6 +982,25 @@ mod tests {
 
     /// FAF 3839 moved the development init file to `setup/bin/`: the
     /// repository is still the checkout's root.
+    #[test]
+    fn a_vault_without_maps_or_mods_mounts_what_it_has() {
+        let vault = std::env::temp_dir().join(format!("vault_parts_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&vault);
+        std::fs::create_dir_all(vault.join("mods/RNGAI")).unwrap();
+        let mounts = vault_maps(&vault).unwrap();
+        assert_eq!(mounts.iter().map(|m| m.mountpoint.as_str()).collect::<Vec<_>>(), ["/mods/rngai"]);
+        std::fs::create_dir_all(vault.join("maps/canis")).unwrap();
+        let mounts = vault_maps(&vault).unwrap();
+        assert_eq!(mounts.iter().map(|m| m.mountpoint.as_str()).collect::<Vec<_>>(), ["/maps/canis", "/mods/rngai"]);
+        // Only maps.
+        std::fs::remove_dir_all(vault.join("mods")).unwrap();
+        let mounts = vault_maps(&vault).unwrap();
+        assert_eq!(mounts.iter().map(|m| m.mountpoint.as_str()).collect::<Vec<_>>(), ["/maps/canis"]);
+        // A vault folder that isn't there is still an error (a typo).
+        assert!(vault_maps(&vault.join("nope")).is_err());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
     #[test]
     fn repository_root_is_the_checkout() {
         let dir = std::env::temp_dir().join(format!("repo_root_{}", std::process::id()));

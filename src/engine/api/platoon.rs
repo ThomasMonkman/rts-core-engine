@@ -14,7 +14,11 @@ use crate::engine::sim::platoon::{PlatoonId, Platoons};
 
 #[derive(Clone, Copy, Debug)]
 pub struct PlatoonHandle(pub PlatoonId);
-impl LuaUserData for PlatoonHandle {}
+impl LuaUserData for PlatoonHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 const PLATOONS_KEY: &str = "engine.platoons";
 
@@ -554,6 +558,30 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(Some(platoon))
         },
     )?;
+    lua_method!(lua, moho::AIBrain,
+        /// How many of the army's platoons have this name (`MakePlatoon`'s first
+        /// argument, a formed platoon's template name), ignoring case; 0 when
+        /// the name isn't a string. Moho counts its army's platoon list with
+        /// `_stricmp` (FA exe 0x58ce30 -> `CArmyImpl` vtable +0x84, 0x700770).
+        GetNumPlatoonsTemplateNamed = |lua, (brain, name): (Obj<moho::AIBrain>, LuaValue)| {
+            let ArmyHandle(army) = script_object::handle(&brain)?;
+            let LuaValue::String(name) = name else { return Ok(0.0) };
+            let name = name.to_string_lossy();
+            Ok(platoons(lua).of_army(army).filter(|p| p.label.eq_ignore_ascii_case(&name)).count() as f64)
+        })?;
+    lua_method!(lua, moho::AIBrain,
+        /// How many of the army's platoons run this AI plan (`MakePlatoon`'s
+        /// second argument, a formed platoon's template plan), ignoring case; 0
+        /// when the plan isn't a string. Moho counts its army's platoon list
+        /// with `_stricmp` on the string after the name (FA exe 0x58cca0 ->
+        /// `CArmyImpl` vtable +0x88, 0x7007c0; that it is the plan is inferred
+        /// from the layout).
+        GetNumPlatoonsWithAI = |lua, (brain, plan): (Obj<moho::AIBrain>, LuaValue)| {
+            let ArmyHandle(army) = script_object::handle(&brain)?;
+            let LuaValue::String(plan) = plan else { return Ok(0.0) };
+            let plan = plan.to_string_lossy();
+            Ok(platoons(lua).of_army(army).filter(|p| p.plan.eq_ignore_ascii_case(&plan)).count() as f64)
+        })?;
     lua_method!(lua, moho::AIBrain,
         /// The army's platoons in creation order, without its ArmyPool (inferred).
         GetPlatoonsList = |lua, brain: Obj<moho::AIBrain>| {

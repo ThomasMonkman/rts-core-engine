@@ -96,7 +96,7 @@ FAF's `OnSync` (`/lua/UserSync.lua`) runs, so unit data, printed text, scores an
 expects.
 
 **Beats and frames.** Each new tick, `UserVm::beat` moves `GameTick`, updates the economy and runs
-FAF's `gamemain.OnBeat`. Each frame, `UserVm::frame` runs user threads and `OnFrame`.
+FAF's `gamemain.OnBeat`. Each frame, `UserVm::frame` runs user threads and `OnFrame`; building the draw list then calls `OnRenderWorld(delta)` of each world view with `SetCustomRender(true)`, whose `UI_Draw*` shapes go with that view to the renderer (`ui/world_draw.rs`).
 
 **Fog of war.** The interface only sees what the renderer's frame holds, which is the view army's
 fog-of-war snapshot ([rendering.md](rendering.md#fog-of-war)). Undetected enemies aren't in it at

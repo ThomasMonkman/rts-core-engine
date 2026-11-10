@@ -19,7 +19,11 @@ pub struct WeaponHandle {
     pub unit: EntityId,
     pub index: u32,
 }
-impl LuaUserData for WeaponHandle {}
+impl LuaUserData for WeaponHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 const WEAPONS_KEY: &str = "engine.weapons";
 

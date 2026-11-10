@@ -21,6 +21,7 @@ impl crate::lua_api::LuaType for EntityCategory {
 
 impl LuaUserData for EntityCategory {
     fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
         methods.add_meta_function(
             LuaMetaMethod::Add,
             |_, (a, b): (LuaUserDataRef<Self>, LuaUserDataRef<Self>)| {

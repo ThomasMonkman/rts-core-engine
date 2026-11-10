@@ -23,6 +23,7 @@ pub mod signatures;
 pub mod sound;
 pub mod team_color;
 pub mod user_api;
+pub mod world_draw;
 pub mod world_mesh;
 pub mod world_pick;
 
@@ -401,6 +402,7 @@ impl UserVm {
         api::nil_metatable::register(&lua)?;
         api::nil_metatable::register_numbers(&lua)?;
         api::nil_metatable::register_booleans(&lua)?;
+        api::nil_metatable::register_functions(&lua)?;
         api::disk_get_file_info::register(&lua)?;
         api::threads::register(&lua)?;
         api::random::register(&lua)?;
@@ -416,6 +418,7 @@ impl UserVm {
         user_api::register(&lua)?;
         api::core::register(&lua)?;
         world_pick::register(&lua)?;
+        world_draw::register(&lua)?;
         world_pick::register_view_methods(&lua)?;
         sound::register(&lua)?;
         team_color::register(&lua)?;
@@ -1777,6 +1780,7 @@ impl UserVm {
         let t: f64 = self.lua.named_registry_value::<Option<f64>>("user.time")?.unwrap_or(0.0);
         self.lua.set_named_registry_value("user.time", t + dt as f64)?;
         api::threads::run_tick(&self.lua)?;
+        self.lua.set_app_data(world_draw::FrameDelta(dt));
         controls::on_frame(&self.lua, dt)?;
         movie::tick(&self.lua, dt)?;
         cursor::update(&self.lua)

@@ -16,7 +16,11 @@ use crate::lua_api::lua_fn;
 
 #[derive(Clone, Copy, Debug)]
 pub struct EconomyEventHandle(pub u32);
-impl LuaUserData for EconomyEventHandle {}
+impl LuaUserData for EconomyEventHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 /// Progress last reported to each event's callback.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
