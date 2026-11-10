@@ -93,10 +93,10 @@ fn add(lua: &Lua, f: impl FnOnce(&mut DebugDraw)) {
     if lua.app_data_ref::<DebugDraw>().is_none() {
         lua.set_app_data(DebugDraw::default());
     }
-    if let Some(mut d) = lua.app_data_mut::<DebugDraw>() {
-        if !d.full() {
-            f(&mut d);
-        }
+    if let Some(mut d) = lua.app_data_mut::<DebugDraw>()
+        && !d.full()
+    {
+        f(&mut d);
     }
 }
 
