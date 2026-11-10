@@ -42,7 +42,6 @@ signatures! {
         GetReclaimablesInRect(x0: f64, z0: f64, x1: f64, z1: f64) -> Option<LuaTable>;
         GetUnitsInRect(rectangle: Rect) -> Option<Vec<Obj<moho::Unit>>>;
         GetUnitsInRect(x0: f64, z0: f64, x1: f64, z1: f64) -> Option<Vec<Obj<moho::Unit>>>;
-        IsCollisionBeam(object: LuaValue) -> bool;
         LUnitMove(unit: Obj<moho::Unit>, target: Vector);
         LUnitMoveNear(unit: Obj<moho::Unit>, target: Vector, range: f64);
         MetaImpact(instigator: Obj<moho::Unit>, location: Vector, max_radius: f64, amount: f64, affects_category: Option<EntityCategory>, damage_friendly: Option<bool>);

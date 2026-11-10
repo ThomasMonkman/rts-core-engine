@@ -29,7 +29,6 @@ pub const SIM: &[&str] = &[
     "EntityCategoryCountAroundPosition",
     "GenerateRandomOrientation",
     "GetEntitiesInRect",
-    "IsCollisionBeam",
     "LUnitMove",
     "LUnitMoveNear",
     "PlayLoop",
