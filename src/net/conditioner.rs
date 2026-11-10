@@ -46,13 +46,17 @@ impl Conditions {
 }
 
 /// Ready-made lines (each way): name and conditions.
-pub const PRESETS: [(&str, Conditions); 5] = [
+pub const PRESETS: [(&str, Conditions); 6] = [
     ("off", Conditions::OFF),
     ("LAN", Conditions { latency_ms: 1, jitter_ms: 1, loss_permille: 0, spike_every: 0, spike_ms: 0 }),
     ("Wi-Fi", Conditions { latency_ms: 5, jitter_ms: 15, loss_permille: 5, spike_every: 200, spike_ms: 80 }),
     ("intercontinental", Conditions { latency_ms: 75, jitter_ms: 10, loss_permille: 2, spike_every: 0, spike_ms: 0 }),
     // ~350 ms round trip on average: (150 + 50/2) ms each way.
     ("awful", Conditions { latency_ms: 150, jitter_ms: 50, loss_permille: 50, spike_every: 50, spike_ms: 400 }),
+    // The Moon: 384,400 km is 1.28 s each way at light speed, ~2.6 s round
+    // trip (its distance swings 1.21-1.35 s over a month, too slowly to be
+    // jitter); a deep-space link loses a little.
+    ("moon", Conditions { latency_ms: 1280, jitter_ms: 10, loss_permille: 10, spike_every: 0, spike_ms: 0 }),
 ];
 
 /// What becomes of a packet.

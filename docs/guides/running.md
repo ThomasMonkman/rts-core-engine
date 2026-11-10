@@ -117,7 +117,7 @@ outside one), and flags `shaped` (conditions on, below), `DESYNC` and `waiting o
 always there, in every build, so conditions can be set before hosting or joining. Click `net` for the network
 panel: each peer's path, ping, p99, input delay and max speed, and **conditions**: latency, jitter,
 loss and spikes on this client's packets, each way, with presets (LAN, Wi-Fi, intercontinental,
-awful). They apply at once to UDP and iroh alike and aren't saved (`src/net/conditioner.rs`).
+awful, moon: ~2.6 s round trip). They apply at once to UDP and iroh alike and aren't saved (`src/net/conditioner.rs`).
 
 ### Test scenes
 
