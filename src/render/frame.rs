@@ -458,7 +458,7 @@ fn to_physical(item: rts_core_engine::ui::controls::DrawItem, scale: f32) -> rts
     match item {
         D::Quad { rect, texture, uv, color, tiled } => D::Quad { rect: r(rect), texture, uv, color, tiled },
         D::Minimap { rect } => D::Minimap { rect: r(rect) },
-        D::World { rect, camera } => D::World { rect: r(rect), camera },
+        D::World { rect, camera, shapes } => D::World { rect: r(rect), camera, shapes },
         D::Text { rect, text, family, size, color, shadow, vertical } => D::Text { rect: r(rect), text, family, size: size * scale, color, shadow, vertical },
         D::Movie { rect, movie, frame, color } => D::Movie { rect: r(rect), movie, frame, color },
     }
@@ -1440,7 +1440,7 @@ fn update_ui(s: &mut RenderState, dt: f32) {
                 let _m = rts_core_engine::prof_span!("minimap items");
                 items.extend(minimap_items(s, rect));
             }
-            rts_core_engine::ui::controls::DrawItem::World { rect, camera } => views.push(crate::render::camera::View { camera, rect }),
+            rts_core_engine::ui::controls::DrawItem::World { rect, camera, shapes } => views.push(crate::render::camera::View { camera, rect, shapes }),
             other => items.push(other),
         }
     }
@@ -1455,7 +1455,7 @@ fn update_ui(s: &mut RenderState, dt: f32) {
         let (mut views, mut items) = (Vec::new(), Vec::new());
         for item in ui {
             match to_physical(item, scale) {
-                rts_core_engine::ui::controls::DrawItem::World { rect, camera } => views.push(crate::render::camera::View { camera, rect }),
+                rts_core_engine::ui::controls::DrawItem::World { rect, camera, shapes } => views.push(crate::render::camera::View { camera, rect, shapes }),
                 rts_core_engine::ui::controls::DrawItem::Minimap { .. } => {}
                 other => items.push(other),
             }

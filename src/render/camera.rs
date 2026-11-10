@@ -394,12 +394,14 @@ impl Cameras {
 pub struct View {
     pub camera: String,
     pub rect: [f32; 4],
+    /// Its interface world shapes this frame (`OnRenderWorld`).
+    pub shapes: Option<std::sync::Arc<rts_core_engine::engine::api::debug_draw::DebugDraw>>,
 }
 
 impl View {
     /// The main camera over the whole `w` x `h` window.
     pub fn full(w: f32, h: f32) -> Self {
-        Self { camera: MAIN.to_owned(), rect: [0.0, 0.0, w, h] }
+        Self { camera: MAIN.to_owned(), rect: [0.0, 0.0, w, h], shapes: None }
     }
 
     pub fn size(&self) -> [f32; 2] {

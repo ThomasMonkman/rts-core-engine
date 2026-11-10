@@ -237,7 +237,6 @@ signatures! {
         UISelectionByCategory(expression: String, add_to_cur_sel: bool, in_view_frustum: bool, nearest_to_mouse: bool, must_be_idle: bool);
         UIZoomTo(units: Vec<Obj<moho::UserUnit>>, seconds: Option<f64>);
         UI_DrawCircle(pos: Vector, size: f64, color: Color, thickness: Option<f64>);
-        UI_DrawLine(position1: Vector, position2: Vector, color: Color, thickness: Option<f64>);
         UI_DrawRect(pos: Vector, size: f64, color: Color, thickness: Option<f64>);
         ValidateUnitsList(units: Vec<Obj<moho::UserUnit>>) -> Vec<Obj<moho::UserUnit>>;
         WorldIsPlaying() -> bool;

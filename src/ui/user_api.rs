@@ -264,7 +264,6 @@ pub const USER_GLOBALS: &[&str] = &[
     "UISelectionByCategory",
     "UIZoomTo",
     "UI_DrawCircle",
-    "UI_DrawLine",
     "UI_DrawRect",
     "UnProject",
     "ValidateIPAddress",

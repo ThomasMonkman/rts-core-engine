@@ -1977,7 +1977,7 @@ impl Scene {
         // Scripts' debug lines: the sim canvas (listed once per snapshot)
         // and this view's world shapes.
         self.debug_lines.set_canvas(self.latest.as_ref().map(|s| &s.debug.draw), self.latest.as_ref().map_or(0, |s| s.tick));
-        self.debug_lines.prepare(device, queue, &mut v.lines, None, size, 2.0 * c.half_tangents().1 / size[1].max(1.0));
+        self.debug_lines.prepare(device, queue, &mut v.lines, shown.shapes.as_deref(), size, 2.0 * c.half_tangents().1 / size[1].max(1.0));
         self.views_gpu[index] = Some(v);
     }
 
