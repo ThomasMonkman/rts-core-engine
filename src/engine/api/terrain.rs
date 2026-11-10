@@ -9,10 +9,9 @@ use crate::engine::sim::terrain::Terrain;
 use crate::engine::vfs::Vfs;
 use crate::lua_api::{Obj, lua_fn, lua_method};
 
-/// Loads the `.scmap` named by `ScenarioInfo.map` into the sim [`Terrain`].
-pub fn load_map(lua: &Lua) -> LuaResult<()> {
-    let scenario: LuaTable = lua.globals().get("ScenarioInfo")?;
-    let path: String = scenario.get("map")?;
+/// Loads the `.scmap` at VFS path `path` into the sim [`Terrain`].
+pub fn load_map(lua: &Lua, path: &str) -> LuaResult<()> {
+    let path = path.to_owned();
     let bytes = {
         let vfs = lua.app_data_ref::<Arc<RwLock<Vfs>>>().expect("VFS not in app_data").clone();
         let vfs = vfs.read().expect("VFS poisoned");

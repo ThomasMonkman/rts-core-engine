@@ -149,6 +149,12 @@ impl Engine {
                 api::categories::build(&self.sim_lua)?;
             }
             {
+                // Before any sim Lua, as moho: mods ask about the terrain
+                // when their modules are imported.
+                let _s = crate::prof_span!("load map");
+                session::load_map(&self.sim_lua, session)?;
+            }
+            {
                 let _s = crate::prof_span!("simInit.lua");
                 self.init_sim()?;
                 sim::gc::collect(&self.sim_lua)?;
