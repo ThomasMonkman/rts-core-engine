@@ -97,6 +97,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             add(lua, |d| d.lines.push(line));
             Ok(())
         })?;
+    lua_fn!(lua, global,
+        /// Draws a flat circle of that radius on the debug canvas this beat.
+        DrawCircle = |lua, (center, radius, color): (Vector, f64, Color)| {
+            let circle = DebugCircle { center: point(&center)?, radius: radius as f32, color: argb(&color) };
+            add(lua, |d| d.circles.push(circle));
+            Ok(())
+        })?;
     Ok(())
 }
 
@@ -108,9 +115,10 @@ mod tests {
     fn draws_collect_until_cleared() {
         let lua = Lua::new();
         register(&lua).unwrap();
-        lua.load("DrawLine({0, 1, 2}, {3, 4, 5}, 'ff0000')").exec().unwrap();
+        lua.load("DrawLine({0, 1, 2}, {3, 4, 5}, 'ff0000') DrawCircle({1, 2, 3}, 10, 'aaffffff')").exec().unwrap();
         let d = current(&lua);
         assert_eq!(d.lines, vec![DebugLine { a: [0.0, 1.0, 2.0], b: [3.0, 4.0, 5.0], color: 0xFFFF_0000 }]);
+        assert_eq!(d.circles, vec![DebugCircle { center: [1.0, 2.0, 3.0], radius: 10.0, color: 0xAAFF_FFFF }]);
         // Republishing the beat shows it again; the next beat starts empty.
         assert_eq!(current(&lua), d);
         clear(&lua);
