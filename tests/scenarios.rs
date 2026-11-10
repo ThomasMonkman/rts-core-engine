@@ -189,6 +189,11 @@ fn brain_platoons_template_named() {
 }
 
 #[test]
+fn brain_platoons_with_ai() {
+    scenario("brain_platoons_with_ai", 100);
+}
+
+#[test]
 fn is_collision_beam() {
     scenario("is_collision_beam", 100);
 }
