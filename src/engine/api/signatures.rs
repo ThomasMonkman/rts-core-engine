@@ -99,7 +99,6 @@ signatures! {
         FindUnitToUpgrade(upgrade_list: LuaTable) -> (LuaValue, LuaValue);
         GetNumPlatoonsTemplateNamed(name: String) -> f64;
         GetNumPlatoonsWithAI(name: String) -> f64;
-        IsAnyEngineerBuilding(category: EntityCategory) -> bool;
         /// The plan's conversion isn't identified (passed on as is).
         SetCurrentPlan(plan: LuaValue);
         SetGreaterOf(stat_name: String, value: f64);

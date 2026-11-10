@@ -466,6 +466,28 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
                 .count() as u32)
         })?;
     lua_method!(lua, moho::AIBrain,
+        /// Whether any of the army's finished `ENGINEER` units (ACUs and SCUs
+        /// included, factories not) is in unit state Building with a focus
+        /// unit in `category`: what is under construction now, including
+        /// assisting it, not queued orders (MohoEngine.dll 0x1017df10). RNGAI
+        /// asks before starting another power or hydro build.
+        IsAnyEngineerBuilding = |lua, (brain, category): (
+            Obj<moho::AIBrain>,
+            LuaUserDataRef<crate::engine::api::categories::EntityCategory>,
+        )| {
+            use crate::engine::sim::unit_state::UnitStates;
+            let ArmyHandle(index) = script_object::handle(&brain)?;
+            let domain = crate::engine::api::categories::domain(lua)?;
+            let (Some(engineer), Some(building)) = (domain.named.get("ENGINEER"), UnitStates::index("Building")) else { return Ok(false) };
+            let w = crate::engine::api::entity::world(lua);
+            let focus_in_category = |id: u32| w.get(id).is_some_and(|e| e.unit.is_some() && e.category_index.is_some_and(|i| category.0.contains(i)));
+            Ok(w.iter()
+                .filter(|e| !e.destroyed && e.army == Some(index) && e.fraction_complete >= Fx::ONE)
+                .filter(|e| e.category_index.is_some_and(|i| engineer.contains(i)))
+                .filter_map(|e| e.unit.as_deref())
+                .any(|u| u.states.contains(building) && u.focus.is_some_and(focus_in_category)))
+        })?;
+    lua_method!(lua, moho::AIBrain,
         /// How many units around `position` (within `radius` on the XZ plane)
         /// match `category`, optionally only those with the given alliance
         /// (see `GetUnitsAroundPoint`).

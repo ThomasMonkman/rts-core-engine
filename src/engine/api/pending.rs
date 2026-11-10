@@ -84,7 +84,7 @@ pub const UNUSED: &[(&str, &[&str], &str)] = &[
     ),
     (
         "aibrain_methods",
-        &["FindClosestArmyWithBase", "FindUnit", "FindUnitToUpgrade", "GetNumPlatoonsTemplateNamed", "GetNumPlatoonsWithAI", "IsAnyEngineerBuilding", "SetCurrentPlan", "SetGreaterOf"],
+        &["FindClosestArmyWithBase", "FindUnit", "FindUnitToUpgrade", "GetNumPlatoonsTemplateNamed", "GetNumPlatoonsWithAI", "SetCurrentPlan", "SetGreaterOf"],
         "every brain class defines its own `SetCurrentPlan` in Lua, and `FindUnit`'s only caller (`AIGetBuilder`) is dead code, in FAF and the original game",
     ),
     (
