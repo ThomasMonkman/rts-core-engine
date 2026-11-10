@@ -54,6 +54,69 @@ pub struct SessionConfig {
     /// Mods (uids) to run besides a launch's `GameMods` (`--mod`): sim mods
     /// in the sim, UI-only ones in the interface (`engine::mods`).
     pub mods: Vec<String>,
+    /// The AI the armies get (`--ai`), instead of the game code's default.
+    /// Unused with a lobby launch (its slots name their own AI).
+    pub ai_choice: AiChoice,
+}
+
+/// Which AI (a lobby AI key, e.g. `adaptive`, `RNGStandard`) the armies
+/// get: one for all, and any by army number. Checked against the game's
+/// lobby AI list (with the session's mods) when the session starts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AiChoice {
+    /// For every AI army without its own; `None` = the game code's default.
+    pub default: Option<String>,
+    /// `(army, key)`: army numbers are 1-based, in start-spot order.
+    pub armies: Vec<(u32, String)>,
+}
+
+impl AiChoice {
+    /// The `--ai` values: `KEY` for every army, `N=KEY` for army N.
+    pub fn parse(values: &[String]) -> Result<Self, String> {
+        let mut choice = AiChoice::default();
+        for v in values {
+            match v.split_once('=') {
+                Some((army, key)) => {
+                    let army: u32 = army.trim().parse().ok().filter(|&a| a > 0).ok_or_else(|| format!("--ai {v}: expected ARMY=KEY with an army number from 1"))?;
+                    let key = key.trim();
+                    if key.is_empty() {
+                        return Err(format!("--ai {v}: no AI key"));
+                    }
+                    if choice.armies.iter().any(|(a, _)| *a == army) {
+                        return Err(format!("--ai: army {army} given twice"));
+                    }
+                    choice.armies.push((army, key.to_string()));
+                }
+                None if v.trim().is_empty() => return Err("--ai: no AI key".into()),
+                None if choice.default.is_some() => return Err(format!("--ai {v}: a default AI is already given (use ARMY=KEY for one army)")),
+                None => choice.default = Some(v.trim().to_string()),
+            }
+        }
+        Ok(choice)
+    }
+
+    /// Back to the `--ai` values (the replay header keeps them so).
+    pub fn values(&self) -> Vec<String> {
+        self.default.iter().cloned().chain(self.armies.iter().map(|(a, k)| format!("{a}={k}"))).collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.default.is_none() && self.armies.is_empty()
+    }
+
+    /// As `session_launch.lua` takes it: `{default = key, [army] = key}`,
+    /// or nil when nothing was chosen.
+    fn to_lua(&self, lua: &Lua) -> LuaResult<LuaValue> {
+        if self.is_empty() {
+            return Ok(LuaNil);
+        }
+        let t = lua.create_table()?;
+        t.set("default", self.default.as_deref())?;
+        for (army, key) in &self.armies {
+            t.set(*army, key.as_str())?;
+        }
+        Ok(LuaValue::Table(t))
+    }
 }
 
 /// FAF's lobby `AutoTeams` layouts: two teams split by the map's middle
@@ -104,6 +167,7 @@ impl Default for SessionConfig {
             fog_of_war: None,
             victory: None,
             mods: Vec::new(),
+            ai_choice: AiChoice::default(),
         }
     }
 }
@@ -144,7 +208,7 @@ pub fn setup(lua: &Lua, cfg: &SessionConfig) -> LuaResult<()> {
         let lobby_army: Option<u32> = lua
             .load(include_str!("lua/session_launch.lua"))
             .set_name("=[engine session_launch]")
-            .call((scenario.as_str(), cfg.ai_armies, cfg.ai, cfg.human_army.unwrap_or(0), cfg.teams, cfg.prebuilt, launch, game_code(lua).name()))?;
+            .call((scenario.as_str(), cfg.ai_armies, cfg.ai, cfg.human_army.unwrap_or(0), cfg.teams, cfg.prebuilt, launch, game_code(lua).name(), cfg.ai_choice.to_lua(lua)?))?;
         cfg.human_army.or(lobby_army)
     };
     if let Some(fog) = &cfg.fog_of_war {

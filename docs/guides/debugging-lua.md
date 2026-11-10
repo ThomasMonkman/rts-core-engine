@@ -41,6 +41,19 @@ The repo's `.vscode/launch.json` has the configurations. To set breakpoints in F
 Each VM appears as a thread: **Sim** and **UI**. Each stops on its own: stopping the sim
 freezes the game while the interface keeps drawing. Stopping the UI freezes the window.
 
+### Debugging a mod
+
+Add the mod's folder to the workspace, and start the engine yourself with the mod mounted and on,
+then attach. For an AI mod, `--ai` gives the armies its AI:
+
+```sh
+cargo run -- --lua-debug-wait --vault <dir> --mod <uid> --ai <key>   # <dir>/mods/<name> is the mod
+```
+
+Breakpoints work in the mod's own files and in its hook files (`<mod>/hook/...`): a hook runs
+appended to the script it hooks, and its lines map back to the hook file. A mod mounted through a
+symlink works too (paths are compared after resolving links).
+
 ### Conditional breakpoints
 
 Right-click a breakpoint → **Edit Condition** (or right-click the gutter → **Add Conditional

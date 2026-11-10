@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 
-use rts_core_engine::engine::session::{AutoTeams, SessionConfig};
+use rts_core_engine::engine::session::{AiChoice, AutoTeams, SessionConfig};
 use rts_core_engine::engine::snapshot::{DebugRequest, SimControl};
 
 /// The repository's licence (GPL-3.0, `LICENSE`; also the packages'
@@ -82,6 +82,15 @@ pub struct Cli {
     /// --script moves their units; stress tests).
     #[arg(long)]
     pub no_ai: bool,
+
+    /// The AI the armies get, by its lobby key (repeatable): `KEY` for
+    /// every AI army, `N=KEY` for army N. E.g. `--ai RNGStandard --ai
+    /// 1=easy --ai 2=adaptive`: slot 1 runs easy, slot 2 adaptive, and
+    /// every other AI slot RNGStandard. An AI mod's keys need its `--mod`.
+    /// `--ai list` stops with the keys the game (and the session's mods)
+    /// offers. Default: FAF's adaptive (other game code: its lobby's first).
+    #[arg(long = "ai", value_name = "[N=]KEY", conflicts_with = "no_ai")]
+    pub ai: Vec<String>,
 
     /// Runs a mod (its uid, from its `mod_info.lua`; repeatable), as if
     /// the lobby had it on: a sim mod in the sim, a UI-only one in the
@@ -446,7 +455,7 @@ fn parse_overlay(s: &str) -> Result<Overlay, String> {
 /// Options that only mean something in a game session: giving any of them
 /// skips the main menu, as `--session` does.
 const SESSION_OPTIONS: &[&str] = &[
-    "ticks", "map", "armies", "teams", "auto_teams", "fog", "victory", "prebuilt", "no_ai", "seed", "script", "camera", "overlay", "select", "player", "record", "replay",
+    "ticks", "map", "armies", "teams", "auto_teams", "fog", "victory", "prebuilt", "no_ai", "ai", "seed", "script", "camera", "overlay", "select", "player", "record", "replay",
     "profile_stages", "net_host", "net_join", "net_bot", "mods",
 ];
 
@@ -477,6 +486,9 @@ impl Cli {
 
     fn from_matches(matches: &ArgMatches) -> Result<Self, clap::Error> {
         let mut cli = Self::from_arg_matches(matches)?;
+        if let Err(e) = AiChoice::parse(&cli.ai) {
+            return Err(Self::command().error(clap::error::ErrorKind::ValueValidation, e));
+        }
         cli.session |= cli.headless || SESSION_OPTIONS.iter().any(|id| matches.value_source(id) == Some(ValueSource::CommandLine));
         Ok(cli)
     }
@@ -499,6 +511,7 @@ impl Cli {
             fog_of_war: self.fog.clone(),
             victory: self.victory.clone(),
             mods: self.mods.clone(),
+            ai_choice: AiChoice::parse(&self.ai).expect("checked when parsed"),
             ..SessionConfig::default()
         }
     }
@@ -562,6 +575,20 @@ mod tests {
         let r = c.debug_request();
         assert!(r.paths && !r.weapon_ranges);
         assert_eq!((r.nav_layer, r.threat_army, r.selected), (Some(2), Some(2), Some(5)));
+    }
+
+    #[test]
+    fn ai_takes_a_default_and_per_army_keys() {
+        let c = Cli::try_parse_args(["rts", "--ai", "RNGStandard", "--ai", "2=adaptive", "--ai", "5=rush"]).unwrap();
+        assert!(c.session, "--ai is a session option");
+        let ai = c.session().ai_choice;
+        assert_eq!(ai.default.as_deref(), Some("RNGStandard"));
+        assert_eq!(ai.armies, vec![(2, "adaptive".to_string()), (5, "rush".to_string())]);
+        assert_eq!(ai.values(), ["RNGStandard", "2=adaptive", "5=rush"], "the replay header's form");
+        assert!(Cli::try_parse_args(["rts"]).unwrap().session().ai_choice.is_empty(), "the game code's default");
+        for bad in [&["--ai", "a", "--ai", "b"][..], &["--ai", "0=adaptive"], &["--ai", "x=adaptive"], &["--ai", "2="], &["--ai", "2=a", "--ai", "2=b"], &["--ai", "a", "--no-ai"]] {
+            assert!(Cli::try_parse_args([&["rts"][..], bad].concat()).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

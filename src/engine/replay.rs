@@ -31,7 +31,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::engine::session::{AutoTeams, SessionConfig};
+use crate::engine::session::{AiChoice, AutoTeams, SessionConfig};
 use crate::engine::sim::lua_data::LuaData;
 
 /// Default recordings kept in the replays folder (oldest removed first).
@@ -339,8 +339,23 @@ fn encode_session(c: &SessionConfig) -> LuaData {
         (s("auto_teams"), opt_s(&auto)),
         (s("fog_of_war"), opt_s(&c.fog_of_war)),
         (s("victory"), opt_s(&c.victory)),
-        (s("mods"), LuaData::Table(c.mods.iter().enumerate().map(|(i, m)| (LuaData::number(i as f64 + 1.0), s(m))).collect())),
+        (s("mods"), string_list(&c.mods)),
+        (s("ai_choice"), string_list(&c.ai_choice.values())),
     ])
+}
+
+fn string_list(v: &[String]) -> LuaData {
+    LuaData::Table(v.iter().enumerate().map(|(i, m)| (LuaData::number(i as f64 + 1.0), s(m))).collect())
+}
+
+fn decode_list(v: Option<&LuaData>) -> Vec<String> {
+    match v {
+        Some(LuaData::Table(m)) => m.iter().filter_map(|(_, v)| match v {
+            LuaData::String(b) => Some(String::from_utf8_lossy(b).into_owned()),
+            _ => None,
+        }).collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn decode_session(t: &LuaData) -> Result<SessionConfig, String> {
@@ -373,13 +388,8 @@ fn decode_session(t: &LuaData) -> Result<SessionConfig, String> {
         net_bot: false,
         fog_of_war: text("fog_of_war"),
         victory: text("victory"),
-        mods: match get("mods") {
-            Some(LuaData::Table(m)) => m.iter().filter_map(|(_, v)| match v {
-                LuaData::String(b) => Some(String::from_utf8_lossy(b).into_owned()),
-                _ => None,
-            }).collect(),
-            _ => Vec::new(),
-        },
+        mods: decode_list(get("mods")),
+        ai_choice: AiChoice::parse(&decode_list(get("ai_choice"))).map_err(|e| format!("session ai_choice: {e}"))?,
     })
 }
 
@@ -422,6 +432,7 @@ mod tests {
             fog_of_war: Some("explored".into()),
             victory: None,
             mods: vec!["74A9EAB2-E851-11DB-A1F1-F2C755D89593".into()],
+            ai_choice: AiChoice { default: Some("RNGStandard".into()), armies: vec![(2, "adaptive".into())] },
         };
         let text = header("0.1.0+abcd1234, FAF 3839, Lua 0123abcd", &session) + "12 0 0 1 2 0 - - - 5 - 0 - - -\n";
         let h = read_header(&text).unwrap();
