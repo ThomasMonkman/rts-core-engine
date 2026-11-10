@@ -83,6 +83,8 @@ Luau types are static analysis only — VM does not enforce at runtime. Use `lua
 | Behaviour | Where |
 |-----------|-------|
 | Indexing `nil` yields `nil` (writes/calls still raise) | `api/nil_metatable.rs` — per-type metatable on nil |
+| Indexing a boolean, number, function or userdata yields `nil` too (writes still raise); ours logs a warning once per call site for numbers, functions and userdata, as that is nearly always a script bug | `api/nil_metatable.rs` (`register_number_metatable`, `register_functions`, `add_nil_index` on every handle type) |
+| `VDist3` reads a `nil` vector as `{0, 0, 0}` (`VDist3Sq` and `VDist2` raise) | `lua/shims/vector_math.lua` |
 | Ordering comparisons with `nil` or mismatched types are `false` | patched Luau, `vendor/luau0-src/MOHO_PATCHES.md` |
 | Implicit vararg `arg` table | `lua_translation/vararg.rs` |
 | `math.mod`, `math.pow`, `string.gfind`, `table.setn` | `lua/shims/lua50_aliases.lua` |
