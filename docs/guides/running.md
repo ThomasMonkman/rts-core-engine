@@ -229,7 +229,7 @@ and a map from a vault needs the same `--vault`. File format and internals:
 | `--fog <none\|explored\|unexplored>` | the FogOfWar option | explored |
 | `--victory <condition>` | the Victory option: `sandbox` (never ends), `demoralization`, `domination`, `eradication`, `decapitation` | sandbox |
 | `--mod <uid>` | run a mod as if the lobby had it on (repeatable; recorded in the replay) | none |
-| `--vault <dir>` | mount a FAF vault folder's `maps/` and `mods/`, e.g. `--vault ../faf-vault` | none |
+| `--vault <dir>` | mount a FAF vault folder's `maps/` and `mods/` (either may be missing: a folder with only `mods/` works), e.g. `--vault ../faf-vault` | none |
 | `--log <file>` | log file; give runs in parallel separate files | `game.log` |
 | `--record <file>` / `--no-record` | record to this file / don't record | windowed: `replays/` |
 | `--replay <file>` | play a recording (headless too; `--ticks` still applies) | off |
