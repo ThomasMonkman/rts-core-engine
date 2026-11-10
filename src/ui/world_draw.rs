@@ -87,6 +87,20 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             add(lua, |d| d.circles.push(circle));
             Ok(())
         })?;
+    lua_fn!(lua, global,
+        /// Draws a flat square, a corner at `pos` and `size` along +x and +z,
+        /// in the world view whose `OnRenderWorld` is running.
+        UI_DrawRect = |lua, (pos, size, c, t): (Vector, f64, Color, Option<f64>)| {
+            let [x, y, z] = point(&pos)?;
+            let (s, color, width) = (size as f32, color(&c)?, thickness(t));
+            let corners = [[x, y, z], [x + s, y, z], [x + s, y, z + s], [x, y, z + s]];
+            add(lua, |d| {
+                for i in 0..4 {
+                    d.lines.push(DebugLine { a: corners[i], b: corners[(i + 1) % 4], color, width, min_px: MIN_PX });
+                }
+            });
+            Ok(())
+        })?;
     Ok(())
 }
 
@@ -110,6 +124,7 @@ mod tests {
                 "return { OnRenderWorld = function(self, delta)
                     UI_DrawLine({0, 1, 0}, {10, 1, 0}, 'ff0000')
                     UI_DrawCircle({5, 0, 5}, 3, 'aa00ff00', 0.5)
+                    UI_DrawRect({1, 0, 2}, 4, 'Blue')
                 end }",
             )
             .eval()
@@ -117,6 +132,9 @@ mod tests {
         let d = render_world(&lua, &view).unwrap().unwrap();
         assert_eq!(d.lines[0], DebugLine { a: [0.0, 1.0, 0.0], b: [10.0, 1.0, 0.0], color: 0xFFFF_0000, width: 0.15, min_px: MIN_PX });
         assert_eq!(d.circles, vec![DebugCircle { center: [5.0, 0.0, 5.0], radius: 3.0, color: 0xAA00_FF00, width: 0.5, min_px: MIN_PX }]);
+        // The square: corner at pos, along +x then +z.
+        let square: Vec<[f32; 3]> = d.lines[1..].iter().map(|l| l.a).collect();
+        assert_eq!(square, vec![[1.0, 0.0, 2.0], [5.0, 0.0, 2.0], [5.0, 0.0, 6.0], [1.0, 0.0, 6.0]]);
         // Each frame starts empty; a view without the callback draws nothing.
         assert!(render_world(&lua, &lua.create_table().unwrap()).unwrap().is_none());
     }
