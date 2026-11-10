@@ -1035,6 +1035,12 @@ impl Stage {
                             v.position = [lerp(p.position[0], v.position[0]), lerp(p.position[1], v.position[1]), lerp(p.position[2], v.position[2])];
                             v.rotation = Quat::from_array(p.rotation).slerp(Quat::from_array(v.rotation), alpha).to_array();
                             *pp = (p.pose_start, p.pose_len);
+                        } else if let Ok(j) = latest.launches.binary_search_by_key(&v.id, |l| l.0) {
+                            // Launched this tick: it already flew a tick, so
+                            // lerp it from its muzzle.
+                            let from = latest.launches[j].1;
+                            let lerp = |a: f32, b: f32| a + (b - a) * alpha;
+                            v.position = [lerp(from[0], v.position[0]), lerp(from[1], v.position[1]), lerp(from[2], v.position[2])];
                         }
                     };
                     if latest.entities.len() >= PARALLEL_MIN {
@@ -1177,7 +1183,7 @@ impl Stage {
             // Emitters in any view emit; the first view's camera faces the
             // billboards until each view sets its own (`Scene::prepare_view`).
             let sight: Vec<([glam::Vec4; 6], LodPlane)> = self.views.iter().map(|v| (frustum_planes(v.view_proj()), v.lod_plane())).collect();
-            self.particles.finish(device, queue, now, &latest.effects, prev, &latest.effect_curves, alpha, &sight, &resolve, water, &ground, c.zoom);
+            self.particles.finish(device, queue, now, &latest.effects, prev, &latest.effect_curves, alpha, &sight, &resolve, &latest.launches, water, &ground, c.zoom);
         }
     }
 }

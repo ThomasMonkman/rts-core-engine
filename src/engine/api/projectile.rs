@@ -346,6 +346,9 @@ pub fn spawn_projectile(lua: &Lua, launcher: EntityId, bp_path: &str, position: 
         && let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
         p.camera_follows.push(crate::engine::sim::presentation::CameraFollow { launcher, projectile: id, timeout });
     }
+    if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
+        p.launches.push((id, [position.x.to_num(), position.y.to_num(), position.z.to_num()]));
+    }
     let mut state = ProjectileState::new(id, Some(launcher), &template, velocity);
     state.turn_rate = turn_rate;
     state.angular_velocity = angular_velocity;
