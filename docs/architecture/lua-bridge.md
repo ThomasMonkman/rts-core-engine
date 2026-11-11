@@ -30,6 +30,9 @@ A file that's missing does nothing. One that doesn't compile is skipped with a w
 ### `import`
 `import(path)` is FAF's own Lua (`/lua/system/import.lua`), built on our `doscript(path, env)`. It makes a module table whose metatable falls back to `_G`, runs the file in it, and caches it. Each module gets its own environment, so its globals don't leak into `_G`. Every caller gets the **same** table, which class inheritance depends on.
 
+### Reloading changed files
+`--enable-disk-watch` (the game's `/EnableDiskWatch`) watches the VFS's folder mounts (`src/engine/disk_watch.rs`). When a file in the VFS changes, its cached source and bytecode are dropped, and each VM calls every function in its `__diskwatch` table with the lowercase VFS path. The interface does this every frame, and the sim before each tick (but not in a networked game, where it would desync). FAF's `import.lua` registers `dirty_module` there: it runs the module's `__moduleinfo.OnDirty`, then removes it and every module that imported it from `__modules`, so the next `import` runs the new file (and `OnReload` gets the new module). A changed hook file reloads the script it hooks. Only Lua modules reload: blueprints and textures don't, and files added after startup aren't picked up.
+
 ## Translation: SupCom Lua to Luau
 
 `src/engine/lua_translation/`, one module per difference, run in this order by `translate()`:

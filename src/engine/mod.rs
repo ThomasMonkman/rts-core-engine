@@ -12,6 +12,7 @@ pub mod game_code;
 pub mod mods;
 pub mod vfs;
 pub mod watchdog;
+pub mod disk_watch;
 pub mod tracy;
 
 use crate::debug_ui::DebugUiState;
@@ -234,8 +235,18 @@ impl Engine {
 
     /// Advances the sim by one tick (and writes a keyframe if one is due).
     pub fn tick(&mut self) -> LuaResult<()> {
-        sim::tick::step(&self.sim_lua)?;
+        self.step()?;
         self.after_step()
+    }
+
+    /// One sim tick. With `--enable-disk-watch` the files changed on disk
+    /// are told to the sim's Lua first, between ticks; not in a networked
+    /// game, where only this machine's sim would change (a desync).
+    fn step(&self) -> LuaResult<()> {
+        if disk_watch::enabled() && self.sim_lua.app_data_ref::<crate::net::lockstep::Lockstep>().is_none() {
+            disk_watch::deliver(&self.sim_lua)?;
+        }
+        sim::tick::step(&self.sim_lua)
     }
 
     /// The sim VM (tests and tools inspect sim state through its app data).
@@ -309,7 +320,7 @@ impl Engine {
                 control.set_speed(snapshot::SimControl::percent_of(step));
             }
             let step_started = std::time::Instant::now();
-            sim::tick::step(&self.sim_lua)?;
+            self.step()?;
             self.after_step()?;
             self.note_net_tick(step_started);
             if let Some(control) = &pace {
@@ -441,7 +452,7 @@ impl Engine {
                 continue;
             }
             let step_started = std::time::Instant::now();
-            sim::tick::step(&self.sim_lua)?;
+            self.step()?;
             self.after_step()?;
             self.note_net_tick(step_started);
             self.sync_net_speed(&control);
@@ -709,6 +720,8 @@ struct GameFiles {
     vfs: Arc<RwLock<Vfs>>,
     scripts: Arc<ScriptCache>,
     tree: Arc<FsDir>,
+    /// `--enable-disk-watch`: the watcher on the folder mounts.
+    _disk_watch: Option<disk_watch::Watcher>,
 }
 
 /// Identifies a set of mounts (the sources and where they are mounted).
@@ -803,7 +816,8 @@ fn build_game_files(mount_points: Vec<MountPoint>, hook_paths: Vec<String>) -> L
             .map_err(LuaError::external)?;
     }
 
-    Ok(Arc::new(GameFiles { vfs, scripts: script_cache, tree }))
+    let _disk_watch = disk_watch::watch(&vfs, &script_cache);
+    Ok(Arc::new(GameFiles { vfs, scripts: script_cache, tree, _disk_watch }))
 }
 
 fn run_init_script(init_path: &str, fa_path: &str) -> LuaResult<InitScriptOutput> {

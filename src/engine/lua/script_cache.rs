@@ -22,6 +22,10 @@ pub struct ScriptCache {
     vfs: Arc<RwLock<Vfs>>,
     compiler: Compiler,
     cache: RwLock<HashMap<String, Compiled>>,
+    /// Every script that changed on disk (`--enable-disk-watch`), in the
+    /// order seen: each VM tells its Lua the ones after its own cursor
+    /// (`engine::disk_watch::deliver`).
+    changed: RwLock<Vec<String>>,
 }
 
 impl std::fmt::Debug for ScriptCache {
@@ -69,7 +73,33 @@ impl ScriptCache {
             vfs,
             compiler: compiler(),
             cache: RwLock::new(HashMap::new()),
+            changed: RwLock::new(Vec::new()),
         }
+    }
+
+    /// `path` changed on disk: its translated source and bytecode are
+    /// dropped (the next load reads the file again), and it joins the
+    /// changes the VMs are told of.
+    pub fn changed(&self, path: &str) {
+        let key = Self::key(path);
+        self.vfs.read().unwrap().invalidate(&key);
+        self.cache.write().unwrap().remove(&key);
+        self.changed.write().unwrap().push(key);
+    }
+
+    /// The changes after `cursor` (an index into every change so far),
+    /// moving it past them.
+    pub fn changes_since(&self, cursor: &mut usize) -> Vec<String> {
+        let changed = self.changed.read().unwrap();
+        let new = changed.get(*cursor..).unwrap_or_default().to_vec();
+        *cursor = changed.len();
+        new
+    }
+
+    /// How many changes there have been (a new VM's cursor: it loads
+    /// everything fresh).
+    pub fn change_count(&self) -> usize {
+        self.changed.read().unwrap().len()
     }
 
     /// The VFS the scripts come from.

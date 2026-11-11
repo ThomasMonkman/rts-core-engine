@@ -339,6 +339,14 @@ pub struct Cli {
     #[arg(long, value_name = "N[@B]", value_parser = parse_audit_key)]
     pub audit_test: Option<String>,
 
+    /// Reload game files edited on disk while the game runs (the game's
+    /// `/EnableDiskWatch`): the folder mounts are watched, and each changed
+    /// file is passed to the Lua's `__diskwatch` handlers (FAF's
+    /// `dirty_module`: the next `import` runs it again). The interface
+    /// reloads every frame, the sim between ticks (not in a networked game).
+    #[arg(long)]
+    pub enable_disk_watch: bool,
+
     /// The game's own `/switch` arguments that had no meaning here and
     /// were dropped (see [`moho_args`]), logged at startup.
     #[arg(skip)]
@@ -348,7 +356,8 @@ pub struct Cli {
 /// Translates the real game's command line (`SupremeCommander.exe /log
 /// <file> /init <file>`, as LOUD's launcher and shortcuts run it) into
 /// ours, so this program can stand in for `bin/SupremeCommander.exe`:
-/// `/init` becomes `--fa`, `/log` becomes `--log`. Relative paths are read
+/// `/init` becomes `--fa`, `/log` becomes `--log`, `/EnableDiskWatch`
+/// becomes `--enable-disk-watch`. Relative paths are read
 /// from the program's folder: LOUD's launcher starts the game from the
 /// Forged Alliance folder with `/init "..\LOUD\bin\LoudDataPath.lua"`,
 /// which only names the file from `bin/`. Any other `/switch` (one word
@@ -379,6 +388,11 @@ pub fn moho_args(args: Vec<OsString>, exe_dir: Option<&Path>) -> (Vec<OsString>,
             continue;
         }
         let name = arg.to_string_lossy().to_ascii_lowercase();
+        // Switches without a value.
+        if name == "/enablediskwatch" {
+            out.push("--enable-disk-watch".into());
+            continue;
+        }
         let ours = match name.as_str() {
             "/init" => Some("--fa"),
             "/log" => Some("--log"),
@@ -661,6 +675,10 @@ mod tests {
         assert_eq!(moho_args(args(&["exe", "/INIT", abs]), Some(bin)).0, args(&["exe", "--fa", abs]));
         let c = Cli::try_parse_from(moho_args(args(&["exe", "/init", "a.lua", "/log", "b.log"]), Some(bin)).0).unwrap();
         assert_eq!((c.fa, c.log), (Some(bin.join("a.lua")), Some(bin.join("b.log"))));
+        // A switch without a value keeps the next argument.
+        let c = Cli::try_parse_from(moho_args(args(&["exe", "/EnableDiskWatch", "/log", "b.log"]), Some(bin)).0).unwrap();
+        assert!(c.enable_disk_watch);
+        assert_eq!(c.log, Some(bin.join("b.log")));
     }
 
     #[test]

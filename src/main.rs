@@ -104,6 +104,9 @@ fn main() -> std::process::ExitCode {
         print!("{}", cli::LICENSE);
         return std::process::ExitCode::SUCCESS;
     }
+    if cli.enable_disk_watch {
+        rts_core_engine::engine::disk_watch::enable();
+    }
     if let Some(path) = &cli.vfs_dump {
         rts_core_engine::engine::set_vfs_dump(path.clone());
     }

@@ -369,6 +369,36 @@ impl Vfs {
         self.index.file_system.keys().map(|s| s.as_str())
     }
 
+    /// The folders mounted from disk (canonical where they exist), what
+    /// `--enable-disk-watch` watches (`engine::disk_watch`).
+    pub fn folder_sources(&self) -> Vec<PathBuf> {
+        self.index.mounts.iter().filter(|m| m.source.is_dir()).map(|m| std::fs::canonicalize(&m.source).unwrap_or_else(|_| m.source.clone())).collect()
+    }
+
+    /// Forgets the translated source of `path` (it changed on disk), so the
+    /// next read reads the file again.
+    pub fn invalidate(&self, path: &str) {
+        self.layer.processed_cache.write().unwrap().remove(&normalise(path));
+    }
+
+    /// The scripts a change to `path` (normalised) changes: `path` itself
+    /// and, for a hook file, the script it hooks. A hook folder is one of
+    /// the VFS's (the init file's, the engine's) or a mod's: any `/hook`
+    /// folder (`<mod>/hook/lua/x.lua` hooks `/lua/x.lua`).
+    pub fn changed_scripts(&self, path: &str) -> Vec<String> {
+        let mut out = vec![path.to_string()];
+        let base = self
+            .index
+            .hook_dirs
+            .iter()
+            .find_map(|d| path.strip_prefix(d.as_str()).filter(|r| r.starts_with('/')))
+            .or_else(|| path.find("/hook/").map(|i| &path[i + "/hook".len()..]));
+        if let Some(base) = base {
+            out.push(base.to_string());
+        }
+        out
+    }
+
     pub fn paths_by_patterns(
         &self,
         patterns: &[&str],

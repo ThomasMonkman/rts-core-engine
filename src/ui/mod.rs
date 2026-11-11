@@ -1779,6 +1779,7 @@ impl UserVm {
     pub fn frame(&self, dt: f32) -> LuaResult<()> {
         let t: f64 = self.lua.named_registry_value::<Option<f64>>("user.time")?.unwrap_or(0.0);
         self.lua.set_named_registry_value("user.time", t + dt as f64)?;
+        crate::engine::disk_watch::deliver(&self.lua)?;
         api::threads::run_tick(&self.lua)?;
         self.lua.set_app_data(world_draw::FrameDelta(dt));
         controls::on_frame(&self.lua, dt)?;
