@@ -116,6 +116,23 @@ pub fn read_timeline(text: &str) -> Timeline {
     t
 }
 
+/// The line a recording gets when files changed on disk were reloaded into
+/// its sim (`--enable-disk-watch`): `# reloaded <tick> <file>`. Such a
+/// recording can't play back as it was played (the reloaded code and
+/// blueprints aren't in it), so it isn't loaded ([`reloaded_at`]).
+pub const RELOADED: &str = "# reloaded ";
+
+/// The tick of a recording's first [`RELOADED`] line, if it has one.
+pub fn reloaded_at(text: &str) -> Option<u64> {
+    text.lines().find_map(|l| l.strip_prefix(RELOADED)).map(|r| r.split_whitespace().next().and_then(|t| t.parse().ok()).unwrap_or(0))
+}
+
+/// Why a recording can't be played, if it can't: files were reloaded into
+/// it mid-game.
+pub fn unplayable(text: &str) -> Option<String> {
+    reloaded_at(text).map(|tick| format!("files changed on disk were reloaded into this game at tick {tick} (--enable-disk-watch), so it can't be played back as it was played"))
+}
+
 /// Our recordings' extension (moho's are `.SCFAReplay`, FAF's `.fafreplay`).
 pub const EXTENSION: &str = "rtsreplay";
 
@@ -396,6 +413,14 @@ fn decode_session(t: &LuaData) -> Result<SessionConfig, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reloaded_recording_is_unplayable() {
+        let text = "# rts-core-engine replay 1\n12 0 0 1 2 0 - - - 5 - 0 - - -\n# reloaded 340 /units/uel0105/uel0105_unit.bp\n";
+        assert_eq!(reloaded_at(text), Some(340));
+        assert!(unplayable(text).unwrap().contains("tick 340"));
+        assert_eq!(unplayable("12 0 0 1 2 0 - - - 5 - 0 - - -\n# end 50\n"), None);
+    }
 
     #[test]
     fn timeline_reads_events_and_length() {

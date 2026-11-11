@@ -214,20 +214,21 @@ struct Cursor(usize);
 /// `FILE_ACTION_*` code: [`Action`]),
 /// then each changed blueprint goes to its `ReloadBlueprint`, and if any
 /// did, `after_blueprints` refreshes what the VM derived from them. A Lua
-/// function that errors is warned about and the rest still run. Does
-/// nothing (one atomic load) with disk watching off.
-pub fn deliver(lua: &Lua, after_blueprints: impl FnOnce(&Lua) -> LuaResult<()>) -> LuaResult<()> {
-    if enabled() { deliver_changes(lua, after_blueprints) } else { Ok(()) }
+/// function that errors is warned about and the rest still run. Returns
+/// the paths told (empty: nothing changed). Does nothing (one atomic load)
+/// with disk watching off.
+pub fn deliver(lua: &Lua, after_blueprints: impl FnOnce(&Lua) -> LuaResult<()>) -> LuaResult<Vec<String>> {
+    if enabled() { deliver_changes(lua, after_blueprints) } else { Ok(Vec::new()) }
 }
 
-fn deliver_changes(lua: &Lua, after_blueprints: impl FnOnce(&Lua) -> LuaResult<()>) -> LuaResult<()> {
+fn deliver_changes(lua: &Lua, after_blueprints: impl FnOnce(&Lua) -> LuaResult<()>) -> LuaResult<Vec<String>> {
     // A VM's first call starts from now: it loaded everything fresh.
     let mut cursor = lua.app_data_ref::<Cursor>().map_or_else(change_count, |c| c.0);
     let events = actions_after(&mut cursor);
     lua.set_app_data(Cursor(cursor));
     let changes: Vec<String> = events.iter().map(|(p, _)| p.clone()).collect();
     if changes.is_empty() {
-        return Ok(());
+        return Ok(changes);
     }
     if let Some(hooks) = lua.app_data_ref::<crate::engine::mods::ModHooks>() {
         for path in &changes {
@@ -248,7 +249,7 @@ fn deliver_changes(lua: &Lua, after_blueprints: impl FnOnce(&Lua) -> LuaResult<(
     }
     // A removed blueprint has nothing to run.
     let blueprints: Vec<&String> = events.iter().filter(|(p, a)| p.ends_with(".bp") && *a != Action::Removed && *a != Action::RenamedFrom).map(|(p, _)| p).collect();
-    let Some(reload) = globals.raw_get::<Option<LuaFunction>>("ReloadBlueprint")?.filter(|_| !blueprints.is_empty()) else { return Ok(()) };
+    let Some(reload) = globals.raw_get::<Option<LuaFunction>>("ReloadBlueprint")?.filter(|_| !blueprints.is_empty()) else { return Ok(changes) };
     for path in blueprints {
         info!(path, "disk watch: reloading the blueprint");
         let result = crate::engine::api::blueprints::reloading(lua, || reload.call::<()>(path.as_str()));
@@ -256,7 +257,8 @@ fn deliver_changes(lua: &Lua, after_blueprints: impl FnOnce(&Lua) -> LuaResult<(
             warn!(target: "lua", path, "ReloadBlueprint: {e}");
         }
     }
-    after_blueprints(lua)
+    after_blueprints(lua)?;
+    Ok(changes)
 }
 
 #[cfg(test)]
