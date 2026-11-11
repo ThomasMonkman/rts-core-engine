@@ -52,6 +52,8 @@ pub struct RegisteredBlueprint {
 pub struct BlueprintRegistry {
     next_ordinal: u32,
     by_kind: BTreeMap<BlueprintKind, BTreeMap<String, RegisteredBlueprint>>,
+    /// A blueprint changed on disk is being registered again ([`reloading`]).
+    reloading: bool,
 }
 
 impl BlueprintRegistry {
@@ -584,6 +586,20 @@ fn register_blueprint(lua: &Lua, kind: BlueprintKind, bp: LuaTable) -> LuaResult
         }
     };
 
+    // Reloaded from disk: merged into the table registered before, which
+    // keeps its place and identity (units already out hold it).
+    let merge_into = {
+        let reg = lua.app_data_ref::<BlueprintRegistry>().expect("BlueprintRegistry not in app_data");
+        if reg.reloading { reg.get(kind, &id).map(|r| r.table.clone()) } else { None }
+    };
+    if let Some(old) = merge_into {
+        for pair in bp.pairs::<LuaValue, LuaValue>() {
+            let (k, v) = pair?;
+            old.raw_set(k, v)?;
+        }
+        return Ok(());
+    }
+
     let ordinal = {
         let mut reg = lua
             .app_data_mut::<BlueprintRegistry>()
@@ -619,6 +635,38 @@ fn register_blueprint(lua: &Lua, kind: BlueprintKind, bp: LuaTable) -> LuaResult
     all.raw_set(id, bp.clone())?;
     all.raw_set(ordinal, bp)?;
     Ok(())
+}
+
+/// Runs `f` (FAF's `ReloadBlueprint` on a blueprint changed on disk:
+/// `engine::disk_watch`) with re-registration merging: a blueprint
+/// registered again has the new table's fields written into the one
+/// registered before, which keeps its ordinal and stays the table every
+/// holder has. A field the new table leaves out keeps its old value, as
+/// FAF's notes on moho's reload say.
+pub fn reloading<R>(lua: &Lua, f: impl FnOnce() -> LuaResult<R>) -> LuaResult<R> {
+    let set = |on: bool| {
+        if let Some(mut reg) = lua.app_data_mut::<BlueprintRegistry>() {
+            reg.reloading = on;
+        }
+    };
+    set(true);
+    let r = f();
+    set(false);
+    r
+}
+
+/// After blueprints reloaded from disk (`engine::disk_watch`), the sim's
+/// caches of what it read from them are dropped, so they're read again from
+/// the new tables. Units already out keep what they were made with.
+pub fn forget_derived(lua: &Lua) {
+    lua.set_app_data(super::construction::Footprints::default());
+    lua.set_app_data(super::construction::DecayRates::default());
+    lua.set_app_data(super::build::SkirtCache::default());
+    lua.set_app_data(super::build::BuildableCache::default());
+    lua.set_app_data(super::effect::Lifetimes::default());
+    if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::projectile::Projectiles>() {
+        p.forget_templates();
+    }
 }
 
 const COPY_KEY: &str = "blueprints.copy";
@@ -682,6 +730,23 @@ fn case_insensitive_index(lua: &Lua) -> LuaResult<LuaTable> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A blueprint reloaded from disk merges into the table registered
+    /// before: same table and ordinal, new values in, left-out fields kept.
+    #[test]
+    fn reloading_merges_into_the_registered_table() {
+        let lua = Lua::new();
+        register(&lua).unwrap();
+        lua.load("__blueprints = {} RegisterProjectileBlueprint({ BlueprintId = '/p.bp', A = 1, B = 1 }) old = __blueprints['/p.bp']").exec().unwrap();
+        reloading(&lua, || lua.load("RegisterProjectileBlueprint({ BlueprintId = '/p.bp', A = 2 })").exec()).unwrap();
+        let (same, a, b, ordinal): (bool, i64, i64, bool) = lua.load("local bp = __blueprints['/p.bp'] return bp == old, bp.A, bp.B, __blueprints[1] == old and __blueprints[2] == nil").eval().unwrap();
+        assert!(same, "the same table");
+        assert_eq!((a, b), (2, 1), "new values in, the left-out field kept");
+        assert!(ordinal, "the same ordinal");
+        // Outside a reload, a second registration replaces the table.
+        lua.load("RegisterProjectileBlueprint({ BlueprintId = '/p.bp', A = 3 })").exec().unwrap();
+        assert!(!lua.load("return __blueprints['/p.bp'] == old").eval::<bool>().unwrap());
+    }
 
     /// Registration copies the table, so `pairs` walks a blueprint's tables in
     /// the real game's order: a commander's enhancement slots come out right

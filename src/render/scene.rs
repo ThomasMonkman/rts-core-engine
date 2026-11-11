@@ -246,6 +246,9 @@ pub struct Scene {
     /// ground-hugging grids from it in the vertex shader.
     heights: wgpu::Buffer,
     pub stage: Lent<Stage>,
+    /// How far into the files changed on disk this scene has reloaded
+    /// (`--enable-disk-watch`: `engine::disk_watch`).
+    disk_watch_cursor: usize,
     vfs: Option<Arc<std::sync::RwLock<crate::engine::vfs::Vfs>>>,
     /// The map's own terrain, decals and water, once its textures load.
     pub map: super::terrain::TerrainRenderer,
@@ -1365,6 +1368,7 @@ impl Scene {
             started: Instant::now(),
             frozen_time: None,
             stage: Lent::new(Stage::new(models, particles)),
+            disk_watch_cursor: rts_core_engine::engine::disk_watch::change_count(),
             vfs: None,
             model_instances,
             model_capacity,
@@ -1459,6 +1463,11 @@ impl Scene {
             let _s = rts_core_engine::prof_span!("snapshot: new effect assets");
             let mut assets = delta.effect_assets;
             self.stage.particles.receive(&mut assets, self.vfs.as_ref());
+        }
+        let changed = rts_core_engine::engine::disk_watch::changes_since(&mut self.disk_watch_cursor);
+        if !changed.is_empty() {
+            self.stage.models.reload(&changed);
+            self.stage.particles.reload(&changed);
         }
         self.command_graph.set_vfs(self.stage.models.vfs());
         self.resource_icons.set_vfs(self.stage.models.vfs());

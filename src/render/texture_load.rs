@@ -216,6 +216,14 @@ pub(super) fn fill_mips(t: &mut dds::Texture, srgb: bool, bc: bool, what: &str, 
 pub struct Cache(Arc<Mutex<HashMap<(String, bool), Arc<OnceLock<Option<wgpu::TextureView>>>>>>);
 
 impl Cache {
+    /// Drops `path` (changed on disk: `--enable-disk-watch`), so the next
+    /// load reads it again. Holders of the old view keep it.
+    pub fn forget(&self, path: &str) {
+        if let Ok(mut map) = self.0.lock() {
+            map.retain(|(p, _), _| rts_core_engine::engine::vfs::normalise(p) != path);
+        }
+    }
+
     /// [`load`] through the cache. Submitted before it's shared, so a view
     /// handed out is never one whose copy hasn't been submitted yet.
     pub fn load(&self, device: &wgpu::Device, queue: &wgpu::Queue, vfs: &Vfs, path: &str, srgb: bool, bc: bool, label: &str) -> Option<wgpu::TextureView> {

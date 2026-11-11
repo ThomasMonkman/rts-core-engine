@@ -244,7 +244,12 @@ impl Engine {
     /// game, where only this machine's sim would change (a desync).
     fn step(&self) -> LuaResult<()> {
         if disk_watch::enabled() && self.sim_lua.app_data_ref::<crate::net::lockstep::Lockstep>().is_none() {
-            disk_watch::deliver(&self.sim_lua)?;
+            disk_watch::deliver(&self.sim_lua, |lua| {
+                api::blueprints::apply_defaults(lua, false)?;
+                api::categories::build(lua)?;
+                api::blueprints::forget_derived(lua);
+                Ok(())
+            })?;
         }
         sim::tick::step(&self.sim_lua)
     }

@@ -340,10 +340,10 @@ pub struct Cli {
     pub audit_test: Option<String>,
 
     /// Reload game files edited on disk while the game runs (the game's
-    /// `/EnableDiskWatch`): the folder mounts are watched, and each changed
-    /// file is passed to the Lua's `__diskwatch` handlers (FAF's
-    /// `dirty_module`: the next `import` runs it again). The interface
-    /// reloads every frame, the sim between ticks (not in a networked game).
+    /// `/EnableDiskWatch`): scripts (the next `import` runs them again),
+    /// blueprints (FAF's `ReloadBlueprint`), models and textures. The
+    /// interface reloads every frame, the sim between ticks (not in a
+    /// networked game).
     #[arg(long)]
     pub enable_disk_watch: bool,
 
