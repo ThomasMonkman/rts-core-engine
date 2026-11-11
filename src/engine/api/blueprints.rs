@@ -655,17 +655,39 @@ pub fn reloading<R>(lua: &Lua, f: impl FnOnce() -> LuaResult<R>) -> LuaResult<R>
     r
 }
 
-/// After blueprints reloaded from disk (`engine::disk_watch`), the sim's
-/// caches of what it read from them are dropped, so they're read again from
-/// the new tables. Units already out keep what they were made with.
+/// A sim cache of values read from blueprints (or blueprint files), cleared
+/// when blueprints reload from disk ([`forget_derived`]). Every such cache
+/// submits one beside its type: [`derived_cache!`] for app data that's
+/// `Default`, else an `inventory::submit!` with its own `forget`. A cache
+/// without one keeps stale values after a reload; the test
+/// `every_derived_cache_is_rebuilt_on_reload` checks each by its reader.
+pub struct DerivedCache {
+    pub name: &'static str,
+    pub forget: fn(&Lua),
+}
+inventory::collect!(DerivedCache);
+
+/// Registers app data `$ty` as a [`DerivedCache`], forgotten by resetting
+/// it to its default.
+macro_rules! derived_cache {
+    ($ty:ty) => {
+        inventory::submit! {
+            $crate::engine::api::blueprints::DerivedCache {
+                name: stringify!($ty),
+                forget: |lua| { lua.set_app_data(<$ty>::default()); },
+            }
+        }
+    };
+}
+pub(crate) use derived_cache;
+
+/// After blueprints reloaded from disk (`engine::disk_watch`), every
+/// [`DerivedCache`] is dropped, so its values are read again from the new
+/// tables. Units already out keep what they were made with.
 pub fn forget_derived(lua: &Lua) {
-    lua.set_app_data(super::construction::Footprints::default());
-    lua.set_app_data(super::construction::DecayRates::default());
-    lua.set_app_data(super::build::SkirtCache::default());
-    lua.set_app_data(super::build::BuildableCache::default());
-    lua.set_app_data(super::effect::Lifetimes::default());
-    if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::projectile::Projectiles>() {
-        p.forget_templates();
+    for cache in inventory::iter::<DerivedCache> {
+        tracing::debug!(cache = cache.name, "blueprints reloaded: forgetting");
+        (cache.forget)(lua);
     }
 }
 
@@ -730,6 +752,73 @@ fn case_insensitive_index(lua: &Lua) -> LuaResult<LuaTable> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every [`DerivedCache`] is rebuilt after a reload: each cache's own
+    /// reader, asked before and after blueprints (and an effect file)
+    /// change, gives the new value. A cache added later goes here too: its
+    /// reader, an edit, an assert (the count below fails until it does).
+    #[test]
+    fn every_derived_cache_is_rebuilt_on_reload() {
+        use crate::engine::api::{build, categories, construction, effect, projectile};
+        use crate::engine::sim::presentation::EffectKind;
+        use crate::engine::vfs::{MountPoint, Vfs};
+        use std::sync::{Arc, RwLock};
+
+        let dir = std::env::temp_dir().join(format!("derived_caches_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("effects")).unwrap();
+        std::fs::write(dir.join("effects/e.bp"), "EmitterBlueprint { Lifetime = 10 }").unwrap();
+        let lua = Lua::new();
+        register(&lua).unwrap();
+        lua.set_app_data(Arc::new(RwLock::new(Vfs::new(vec![MountPoint { source: dir.clone(), mountpoint: "/".into() }], vec![]).unwrap())));
+        lua.set_app_data(construction::Footprints::default());
+        lua.set_app_data(construction::DecayRates::default());
+        lua.set_app_data(build::SkirtCache::default());
+        lua.set_app_data(build::BuildableCache::default());
+        lua.set_app_data(crate::engine::sim::projectile::Projectiles::default());
+        lua.load(
+            "__blueprints = {}
+            RegisterUnitBlueprint({ BlueprintId = 'b', Categories = { 'LAND' }, Footprint = { SizeX = 2, SizeZ = 2 }, Economy = { BuildCostMass = 10, BuildableCategory = { 'LAND' } } })
+            RegisterUnitBlueprint({ BlueprintId = 'n', Categories = { 'NAVAL' } })
+            RegisterProjectileBlueprint({ BlueprintId = '/p.bp', Physics = { PositionX = 1 } })",
+        )
+        .exec()
+        .unwrap();
+        categories::build(&lua).unwrap();
+
+        // (footprint half x, decay cost (0.1 / rate), skirt width, builds `n`, effect lifetime, projectile offset x)
+        let read = |lua: &Lua| {
+            let n = categories::domain(lua).unwrap().index_of("n").unwrap();
+            let bp = lua.load("return __blueprints['/p.bp']").eval::<LuaTable>().unwrap();
+            let skirt = build::skirt_of(lua, "b").unwrap().unwrap();
+            (
+                construction::footprint_half(lua, "b").unwrap().0.to_num::<f64>(),
+                (0.1 / construction::decay_rate(lua, "b").unwrap().to_num::<f64>()).round(),
+                skirt[2] - skirt[0],
+                build::buildable(lua, "b").unwrap().contains(n),
+                effect::blueprint_lifetime(lua, EffectKind::Emitter, "/effects/e.bp"),
+                projectile::template_of(lua, "/p.bp", &bp).unwrap().position.x.to_num::<f64>(),
+            )
+        };
+        let before = read(&lua);
+        assert_eq!(before, (1.0, 10.0, 2.0, false, Some(10.0), 1.0));
+
+        reloading(&lua, || {
+            lua.load(
+                "RegisterUnitBlueprint({ BlueprintId = 'b', Categories = { 'LAND' }, Footprint = { SizeX = 4, SizeZ = 4 }, Economy = { BuildCostMass = 20, BuildableCategory = { 'NAVAL' } } })
+                RegisterProjectileBlueprint({ BlueprintId = '/p.bp', Physics = { PositionX = 2 } })",
+            )
+            .exec()
+        })
+        .unwrap();
+        std::fs::write(dir.join("effects/e.bp"), "EmitterBlueprint { Lifetime = 20 }").unwrap();
+        categories::build(&lua).unwrap();
+        forget_derived(&lua);
+
+        assert_eq!(read(&lua), (2.0, 20.0, 4.0, true, Some(20.0), 2.0), "every cache reads the new values");
+        assert_eq!(inventory::iter::<DerivedCache>.into_iter().count(), 6, "a new DerivedCache: check it here too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A blueprint reloaded from disk merges into the table registered
     /// before: same table and ordinal, new values in, left-out fields kept.

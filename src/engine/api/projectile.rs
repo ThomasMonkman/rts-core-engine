@@ -235,8 +235,20 @@ fn realistic_launch(lua: &Lua, launcher: EntityId, launch: Launch, dir: FxVec3) 
     }
 }
 
+// The parsed templates sit beside the live projectiles: only they go.
+inventory::submit! {
+    crate::engine::api::blueprints::DerivedCache {
+        name: "projectile templates",
+        forget: |lua| {
+            if let Some(mut p) = lua.app_data_mut::<Projectiles>() {
+                p.forget_templates();
+            }
+        },
+    }
+}
+
 /// The `Physics` template of blueprint `bp_id` (parsed once, then cached).
-fn template_of(lua: &Lua, bp_id: &str, bp: &LuaTable) -> LuaResult<std::sync::Arc<ProjectileTemplate>> {
+pub(crate) fn template_of(lua: &Lua, bp_id: &str, bp: &LuaTable) -> LuaResult<std::sync::Arc<ProjectileTemplate>> {
     let cached = projectiles(lua).template(bp_id);
     match cached {
         Some(t) => Ok(t),

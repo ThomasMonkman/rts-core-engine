@@ -92,12 +92,13 @@ fn effect_object(lua: &Lua, handle: u32) -> LuaResult<Obj<moho::IEffect>> {
 /// Effect blueprint lifetimes by path, read once each.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Lifetimes(std::collections::BTreeMap<String, Option<f64>>);
+crate::engine::api::blueprints::derived_cache!(Lifetimes);
 
 /// The `Lifetime` of an emitter / trail blueprint (lights get theirs from
 /// their arguments). Beams last until destroyed or their ends go: FAF keeps
 /// build beams (`Lifetime = 2`) in a bag for the whole build, and projectile
 /// and ambient building beams are never destroyed by script.
-fn blueprint_lifetime(lua: &Lua, kind: EffectKind, blueprint: &str) -> Option<f64> {
+pub(crate) fn blueprint_lifetime(lua: &Lua, kind: EffectKind, blueprint: &str) -> Option<f64> {
     if matches!(kind, EffectKind::Light { .. } | EffectKind::Beam) || !blueprint.len().checked_sub(3).is_some_and(|i| blueprint.get(i..).is_some_and(|e| e.eq_ignore_ascii_case(".bp"))) {
         return None;
     }
