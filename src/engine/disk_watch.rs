@@ -5,7 +5,8 @@
 //! - **Watched**: the VFS's folder mounts (a file in an archive can't
 //!   change), one watcher per set of game files ([`watch`]). Editors write a
 //!   save as several events, so a change is taken once the folder has been
-//!   quiet for [`QUIET`]. Only files already in the VFS count.
+//!   quiet for [`QUIET`] (100 ms; moho holds each change 250 ms). Only
+//!   files already in the VFS count.
 //! - **Forgotten**: a changed file's translated source and bytecode are
 //!   dropped ([`ScriptCache::forget`]); a changed hook file counts as a
 //!   change to the script it hooks too ([`Vfs::changed_scripts`]). Each
@@ -13,7 +14,8 @@
 //!   from its own cursor: each VM ([`deliver`]) and the renderer (models,
 //!   textures, emitters: `render::scene`, `render::ui`).
 //! - **Scripts**: each VM calls every function in its `__diskwatch` table
-//!   with the path (lowercase, as `import` keys its modules) and a reason.
+//!   with the path (lowercase, as `import` keys its modules) and the
+//!   change's Win32 `FILE_ACTION_*` code ([`Action`]), as moho does.
 //!   FAF's `import.lua` puts `dirty_module` there, which runs the module's
 //!   `__moduleinfo.OnDirty`, takes it and every module that imported it out
 //!   of `__modules`, and the next `import` runs the file again (`OnReload`
@@ -35,11 +37,15 @@
 //!   tick, except in a networked game, where reloading on one machine
 //!   would desync it.
 //!
-//! Moho's exact arguments to the `__diskwatch` functions aren't confirmed
-//! from the binary: FAF's `dirty_module(name, why)` only needs `why` to be
-//! truthy (it then logs "changed on disk").
+//! From the retail exe (`docs/research/verifying-against-the-binary.md`):
+//! `ScrDiskWatcherTask` (0x4c77d0) calls each `__diskwatch` value with
+//! the path and the event's action as a number (2 arguments, 1 result;
+//! `lua_pushlstring`, then the int as a float), catching errors as "Error
+//! handling disk changes". `CDiskWatch::Check` (0x462520) holds each event
+//! until it is 250 ms old, and a modified file (action 3) until it can be
+//! opened for reading (not still being written). FAF's
+//! `dirty_module(name, why)` logs "changed on disk" for any `why`.
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, mpsc};
@@ -55,10 +61,37 @@ use crate::engine::vfs::{Vfs, normalise};
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Every file that changed on disk (lowercase VFS paths), in the order seen.
-static CHANGES: RwLock<Vec<String>> = RwLock::new(Vec::new());
+static CHANGES: RwLock<Vec<(String, Action)>> = RwLock::new(Vec::new());
 
-/// How long a folder must be quiet before its changes are taken.
+/// How long a folder must be quiet before its changes are taken: long
+/// enough for an editor's save to finish. Shorter than moho's 250 ms on
+/// purpose (responsiveness over fidelity).
 const QUIET: Duration = Duration::from_millis(100);
+
+/// What happened to a file: the Win32 `FILE_ACTION_*` code moho passes to
+/// the `__diskwatch` functions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Action {
+    Added = 1,
+    Removed = 2,
+    Modified = 3,
+    RenamedFrom = 4,
+    RenamedTo = 5,
+}
+
+impl Action {
+    fn of(kind: &EventKind) -> Option<Self> {
+        use notify::event::{ModifyKind, RenameMode};
+        Some(match kind {
+            EventKind::Create(_) => Action::Added,
+            EventKind::Remove(_) => Action::Removed,
+            EventKind::Modify(ModifyKind::Name(RenameMode::From)) => Action::RenamedFrom,
+            EventKind::Modify(ModifyKind::Name(RenameMode::To)) => Action::RenamedTo,
+            EventKind::Modify(_) => Action::Modified,
+            _ => return None,
+        })
+    }
+}
 
 /// Turns disk watching on (at startup, before the game files are built).
 pub fn enable() {
@@ -80,11 +113,21 @@ pub fn changes_since(cursor: &mut usize) -> Vec<String> {
 }
 
 fn changes_after(cursor: &mut usize) -> Vec<String> {
+    actions_after(cursor).into_iter().map(|(p, _)| p).collect()
+}
+
+/// [`changes_after`] with each path's latest action.
+fn actions_after(cursor: &mut usize) -> Vec<(String, Action)> {
     let changes = CHANGES.read().unwrap();
-    let mut seen = BTreeSet::new();
-    let new = changes.get(*cursor..).unwrap_or_default().iter().filter(|p| seen.insert(p.as_str())).cloned().collect();
+    let mut out: Vec<(String, Action)> = Vec::new();
+    for (path, action) in changes.get(*cursor..).unwrap_or_default() {
+        match out.iter_mut().find(|(p, _)| p == path) {
+            Some(seen) => seen.1 = *action,
+            None => out.push((path.clone(), *action)),
+        }
+    }
     *cursor = changes.len();
-    new
+    out
 }
 
 /// How many changes there have been: a new consumer's cursor (it loads
@@ -95,10 +138,10 @@ pub fn change_count() -> usize {
 
 /// Records that `path` changed on disk, dropping its compiled script from
 /// `cache`.
-fn changed(cache: &ScriptCache, path: &str) {
+fn changed(cache: &ScriptCache, path: &str, action: Action) {
     let path = normalise(path);
     cache.forget(&path);
-    CHANGES.write().unwrap().push(path);
+    CHANGES.write().unwrap().push((path, action));
 }
 
 /// A running watcher; dropping it stops it.
@@ -113,12 +156,12 @@ pub fn watch(vfs: &Arc<RwLock<Vfs>>, cache: &Arc<ScriptCache>) -> Option<Watcher
 }
 
 fn watch_folders(vfs: &Arc<RwLock<Vfs>>, cache: &Arc<ScriptCache>) -> Option<Watcher> {
-    let (tx, rx) = mpsc::channel::<PathBuf>();
+    let (tx, rx) = mpsc::channel::<(PathBuf, Action)>();
     let mut inner = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         let Ok(event) = event else { return };
-        if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
+        if let Some(action) = Action::of(&event.kind) {
             for path in event.paths {
-                let _ = tx.send(path);
+                let _ = tx.send((path, action));
             }
         }
     })
@@ -136,22 +179,25 @@ fn watch_folders(vfs: &Arc<RwLock<Vfs>>, cache: &Arc<ScriptCache>) -> Option<Wat
         .name("disk-watch".into())
         .spawn(move || {
             while let Ok(first) = rx.recv() {
-                let mut paths = BTreeSet::from([first]);
-                while let Ok(p) = rx.recv_timeout(QUIET) {
-                    paths.insert(p);
+                // Each path's latest action, in path order.
+                let mut events = std::collections::BTreeMap::from([first]);
+                while let Ok((p, a)) = rx.recv_timeout(QUIET) {
+                    events.insert(p, a);
                 }
-                let changes: BTreeSet<String> = {
+                let changes: Vec<(String, Action)> = {
                     let vfs = vfs.read().unwrap();
-                    paths
+                    events
                         .iter()
-                        .map(|p| normalise(&vfs.disk_to_local(&p.to_string_lossy())))
-                        .filter(|p| vfs.contains(p))
-                        .flat_map(|p| vfs.changed_scripts(&p))
+                        .map(|(p, a)| (normalise(&vfs.disk_to_local(&p.to_string_lossy())), *a))
+                        .filter(|(p, _)| vfs.contains(p))
+                        // A hook's script changed (its text did), whatever
+                        // happened to the hook file.
+                        .flat_map(|(p, a)| vfs.changed_scripts(&p).into_iter().enumerate().map(move |(i, s)| (s, if i == 0 { a } else { Action::Modified })))
                         .collect()
                 };
-                for path in changes {
-                    info!(path, "disk watch: changed on disk");
-                    changed(&cache, &path);
+                for (path, action) in changes {
+                    info!(path, ?action, "disk watch: changed on disk");
+                    changed(&cache, &path, action);
                 }
             }
         })
@@ -164,7 +210,8 @@ fn watch_folders(vfs: &Arc<RwLock<Vfs>>, cache: &Arc<ScriptCache>) -> Option<Wat
 struct Cursor(usize);
 
 /// Tells `lua` of the files changed since it was last told: each function
-/// in its `__diskwatch` table is called with `(path, "changed on disk")`,
+/// in its `__diskwatch` table is called with `(path, action)` (moho's
+/// `FILE_ACTION_*` code: [`Action`]),
 /// then each changed blueprint goes to its `ReloadBlueprint`, and if any
 /// did, `after_blueprints` refreshes what the VM derived from them. A Lua
 /// function that errors is warned about and the rest still run. Does
@@ -176,8 +223,9 @@ pub fn deliver(lua: &Lua, after_blueprints: impl FnOnce(&Lua) -> LuaResult<()>) 
 fn deliver_changes(lua: &Lua, after_blueprints: impl FnOnce(&Lua) -> LuaResult<()>) -> LuaResult<()> {
     // A VM's first call starts from now: it loaded everything fresh.
     let mut cursor = lua.app_data_ref::<Cursor>().map_or_else(change_count, |c| c.0);
-    let changes = changes_after(&mut cursor);
+    let events = actions_after(&mut cursor);
     lua.set_app_data(Cursor(cursor));
+    let changes: Vec<String> = events.iter().map(|(p, _)| p.clone()).collect();
     if changes.is_empty() {
         return Ok(());
     }
@@ -189,15 +237,17 @@ fn deliver_changes(lua: &Lua, after_blueprints: impl FnOnce(&Lua) -> LuaResult<(
     let globals = lua.globals();
     if let Some(watchers) = globals.raw_get::<Option<LuaTable>>("__diskwatch")? {
         let watchers: Vec<LuaFunction> = watchers.sequence_values().collect::<LuaResult<_>>()?;
-        for path in &changes {
+        for (path, action) in &events {
             for f in &watchers {
-                if let Err(e) = f.call::<()>((path.as_str(), "changed on disk")) {
-                    warn!(target: "lua", path, "__diskwatch: {e}");
+                if let Err(e) = f.call::<()>((path.as_str(), *action as u8)) {
+                    // Moho's message (`ScrDiskWatcherTask`).
+                    warn!(target: "lua", path, "Error handling disk changes: {e}");
                 }
             }
         }
     }
-    let blueprints: Vec<&String> = changes.iter().filter(|p| p.ends_with(".bp")).collect();
+    // A removed blueprint has nothing to run.
+    let blueprints: Vec<&String> = events.iter().filter(|(p, a)| p.ends_with(".bp") && *a != Action::Removed && *a != Action::RenamedFrom).map(|(p, _)| p).collect();
     let Some(reload) = globals.raw_get::<Option<LuaFunction>>("ReloadBlueprint")?.filter(|_| !blueprints.is_empty()) else { return Ok(()) };
     for path in blueprints {
         info!(path, "disk watch: reloading the blueprint");
@@ -239,16 +289,17 @@ mod tests {
         let lua = Lua::new();
         lua.set_app_data(cache.clone());
         crate::engine::api::dofile_or_script::register(&lua).unwrap();
-        lua.load("__diskwatch = {} told = {} table.insert(__diskwatch, function(p, why) if p == '/lua/reload.lua' then table.insert(told, p) end end)").exec().unwrap();
+        lua.load("__diskwatch = {} told = {} table.insert(__diskwatch, function(p, action) if p == '/lua/reload.lua' then table.insert(told, action) end end)").exec().unwrap();
         lua.load("doscript('/lua/reload.lua')").exec().unwrap();
         deliver_changes(&lua, |_| Ok(())).unwrap();
         assert_eq!(lua.globals().get::<i64>("x").unwrap(), 1);
 
         std::fs::write(dir.join("lua/reload.lua"), "x = 2").unwrap();
-        changed(&cache, "/LUA/reload.lua");
-        changed(&cache, "/lua/reload.lua");
+        changed(&cache, "/LUA/reload.lua", Action::Modified);
+        changed(&cache, "/lua/reload.lua", Action::Modified);
         deliver_changes(&lua, |_| Ok(())).unwrap();
         assert_eq!(lua.load("return #told").eval::<i64>().unwrap(), 1, "told once");
+        assert_eq!(lua.load("return told[1]").eval::<i64>().unwrap(), 3, "FILE_ACTION_MODIFIED, as moho passes it");
         lua.load("doscript('/lua/reload.lua')").exec().unwrap();
         assert_eq!(lua.globals().get::<i64>("x").unwrap(), 2, "the new file runs");
         deliver_changes(&lua, |_| Ok(())).unwrap();
@@ -264,7 +315,7 @@ mod tests {
         lua.set_app_data(cache.clone());
         lua.load("reloaded = {} function ReloadBlueprint(f) if f == '/units/bp_reload/bp_reload_unit.bp' then table.insert(reloaded, f) end end").exec().unwrap();
         deliver_changes(&lua, |_| Ok(())).unwrap();
-        changed(&cache, "/units/bp_reload/bp_reload_unit.bp");
+        changed(&cache, "/units/bp_reload/bp_reload_unit.bp", Action::Modified);
         let mut after = false;
         deliver_changes(&lua, |_| {
             after = true;
