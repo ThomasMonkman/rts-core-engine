@@ -355,14 +355,23 @@ pub struct Cli {
 
 /// Translates the real game's command line (`SupremeCommander.exe /log
 /// <file> /init <file>`, as LOUD's launcher and shortcuts run it) into
-/// ours, so this program can stand in for `bin/SupremeCommander.exe`:
-/// `/init` becomes `--fa`, `/log` becomes `--log`, `/EnableDiskWatch`
-/// becomes `--enable-disk-watch`. Relative paths are read
-/// from the program's folder: LOUD's launcher starts the game from the
-/// Forged Alliance folder with `/init "..\LOUD\bin\LoudDataPath.lua"`,
-/// which only names the file from `bin/`. Any other `/switch` (one word
-/// after the slash, so `/maps/x/x_scenario.lua` stays a value) is dropped
-/// with the values after it, as moho ignores switches it doesn't read.
+/// ours, so this program can stand in for `bin/SupremeCommander.exe`.
+///
+/// - `/init <file>` becomes `--fa <file>`. A relative path is read from the
+///   program's folder, as the real game reads it.
+/// - `/log <file>` becomes `--log <file>`. A relative path is read from the
+///   working directory, as the real game reads it.
+/// - Either is read from the other folder instead when only that one has
+///   the init file (or, for the log, its folder).
+/// - LOUD's launcher runs from the Forged Alliance folder with `/init
+///   "..\LOUD\bin\LoudDataPath.lua"` (a path from `bin/`) and `/log
+///   "LOUD\bin\LOUD.log"` (from the working directory; older versions pass
+///   `..\LOUD\bin\LOUD.log`, from `bin/`).
+/// - `/EnableDiskWatch` becomes `--enable-disk-watch`.
+/// - Any other `/switch` (one word after the slash, so
+///   `/maps/x/x_scenario.lua` stays a value) is dropped with the values
+///   after it, as moho ignores switches it doesn't read.
+///
 /// Returns the new arguments and the dropped ones.
 pub fn moho_args(args: Vec<OsString>, exe_dir: Option<&Path>) -> (Vec<OsString>, Vec<String>) {
     let is_switch = |a: &OsString| {
@@ -370,13 +379,21 @@ pub fn moho_args(args: Vec<OsString>, exe_dir: Option<&Path>) -> (Vec<OsString>,
         a.strip_prefix('/').is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
     };
     let is_value = |a: &OsString| !is_switch(a) && !a.to_string_lossy().starts_with('-');
-    let resolve = |p: &OsString| -> OsString {
+    // `exists` says whether a candidate is the one meant; with neither, the
+    // folder moho reads it from (so an error names the path it would have).
+    let resolve = |p: &OsString, exists: fn(&Path) -> bool, from_exe: bool| -> OsString {
         let p = Path::new(p);
         match exe_dir {
-            Some(dir) if p.is_relative() => dir.join(p).into_os_string(),
+            Some(dir) if p.is_relative() => {
+                let beside = dir.join(p);
+                let (first, second) = if from_exe { (beside, p.to_path_buf()) } else { (p.to_path_buf(), beside) };
+                if !exists(&first) && exists(&second) { second.into_os_string() } else { first.into_os_string() }
+            }
             _ => p.as_os_str().to_owned(),
         }
     };
+    let is_file: fn(&Path) -> bool = |p| p.is_file();
+    let in_a_folder: fn(&Path) -> bool = |p| p.parent().is_some_and(|d| d.as_os_str().is_empty() || d.is_dir());
     let mut out = Vec::with_capacity(args.len());
     let mut ignored = Vec::new();
     let mut it = args.into_iter().peekable();
@@ -394,14 +411,14 @@ pub fn moho_args(args: Vec<OsString>, exe_dir: Option<&Path>) -> (Vec<OsString>,
             continue;
         }
         let ours = match name.as_str() {
-            "/init" => Some("--fa"),
-            "/log" => Some("--log"),
+            "/init" => Some(("--fa", is_file, true)),
+            "/log" => Some(("--log", in_a_folder, false)),
             _ => None,
         };
         match (ours, it.next_if(is_value)) {
-            (Some(flag), Some(value)) => {
+            (Some((flag, exists, from_exe)), Some(value)) => {
                 out.push(flag.into());
-                out.push(resolve(&value));
+                out.push(resolve(&value, exists, from_exe));
             }
             (_, value) => {
                 ignored.push(arg.to_string_lossy().into_owned());
@@ -658,8 +675,9 @@ mod tests {
         assert!(!menu(&["--auto-teams", "north-south"]));
     }
 
-    /// LOUD's launcher command line: `/init` and `/log` map to ours, read
-    /// from the program's folder; other switches drop with their values;
+    /// LOUD's launcher command line: `/init` and `/log` map to ours, `/init`
+    /// read from the program's folder and `/log` from the working directory
+    /// (each from the other when only that one exists); other switches drop with their values;
     /// our own flags and VFS paths pass through.
     #[test]
     fn translates_the_real_games_command_line() {
@@ -668,17 +686,21 @@ mod tests {
         let (out, ignored) = moho_args(args(&["exe", "/log", "..\\LOUD\\bin\\LOUD.log", "/init", "..\\LOUD\\bin\\LoudDataPath.lua", "/nobugreport", "/gpgnet", "127.0.0.1:1", "--map", "/maps/x/x_scenario.lua"]), Some(bin));
         assert_eq!(
             out,
-            args(&["exe", "--log"]).into_iter().chain([bin.join("..\\LOUD\\bin\\LOUD.log").into_os_string(), "--fa".into(), bin.join("..\\LOUD\\bin\\LoudDataPath.lua").into_os_string(), "--map".into(), "/maps/x/x_scenario.lua".into()]).collect::<Vec<_>>()
+            args(&["exe", "--log", "..\\LOUD\\bin\\LOUD.log"]).into_iter().chain(["--fa".into(), bin.join("..\\LOUD\\bin\\LoudDataPath.lua").into_os_string(), "--map".into(), "/maps/x/x_scenario.lua".into()]).collect::<Vec<_>>()
         );
         assert_eq!(ignored, ["/nobugreport", "/gpgnet", "127.0.0.1:1"]);
         let abs = if cfg!(windows) { "C:\\x\\init.lua" } else { "/x/init.lua" };
         assert_eq!(moho_args(args(&["exe", "/INIT", abs]), Some(bin)).0, args(&["exe", "--fa", abs]));
         let c = Cli::try_parse_from(moho_args(args(&["exe", "/init", "a.lua", "/log", "b.log"]), Some(bin)).0).unwrap();
-        assert_eq!((c.fa, c.log), (Some(bin.join("a.lua")), Some(bin.join("b.log"))));
+        assert_eq!((c.fa, c.log), (Some(bin.join("a.lua")), Some(PathBuf::from("b.log"))));
+        // Each from the other folder when only that one has it: the
+        // repository root (the tests' working directory) has these.
+        let c = Cli::try_parse_from(moho_args(args(&["exe", "/log", "src/x.log", "/init", "Cargo.toml"]), Some(bin)).0).unwrap();
+        assert_eq!((c.fa, c.log), (Some(PathBuf::from("Cargo.toml")), Some(PathBuf::from("src/x.log"))));
         // A switch without a value keeps the next argument.
         let c = Cli::try_parse_from(moho_args(args(&["exe", "/EnableDiskWatch", "/log", "b.log"]), Some(bin)).0).unwrap();
         assert!(c.enable_disk_watch);
-        assert_eq!(c.log, Some(bin.join("b.log")));
+        assert_eq!(c.log, Some(PathBuf::from("b.log")));
     }
 
     #[test]

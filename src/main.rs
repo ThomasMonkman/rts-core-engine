@@ -139,8 +139,22 @@ fn main() -> std::process::ExitCode {
     // goes to stderr (the file log keeps everything).
     let audit_quiet_stdout = cli.audit_table || (cli.audit_test.is_some() && cli.headless);
 
-    let log_path = cli.log.clone().unwrap_or_else(install::default_log);
-    let log_file = std::fs::File::create(&log_path).unwrap_or_else(|e| panic!("failed to create {}: {e}", log_path.display()));
+    // A given log that can't be created (a launcher's path to a folder that
+    // isn't there) falls back to the default one rather than ending the run.
+    let mut log_path = cli.log.clone().unwrap_or_else(install::default_log);
+    let mut log_fallback = None;
+    let log_file = match std::fs::File::create(&log_path) {
+        Ok(f) => f,
+        Err(e) if cli.log.is_some() => {
+            let default = install::default_log();
+            let msg = format!("couldn't create the log {}: {e}; logging to {} instead", log_path.display(), default.display());
+            eprintln!("{msg}");
+            log_fallback = Some(msg);
+            log_path = default;
+            std::fs::File::create(&log_path).unwrap_or_else(|e| panic!("failed to create {}: {e}", log_path.display()))
+        }
+        Err(e) => panic!("failed to create {}: {e}", log_path.display()),
+    };
     let (non_blocking_writer, _guard) = tracing_appender::non_blocking(log_file);
 
     tracing_subscriber::registry()
@@ -175,6 +189,9 @@ fn main() -> std::process::ExitCode {
     }
     rts_core_engine::diagnostics::log_panics();
     rts_core_engine::diagnostics::log_system();
+    if let Some(msg) = &log_fallback {
+        tracing::warn!("{msg}");
+    }
     if !cli.ignored_moho_args.is_empty() {
         tracing::info!("ignored the game's command-line switches: {}", cli.ignored_moho_args.join(" "));
     }

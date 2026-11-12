@@ -1,7 +1,8 @@
 # Puts rts-core-engine in place of a Forged Alliance install's bin\SupremeCommander.exe,
 # so whatever launches the game (LOUD's LOVE-LOUD.exe, a shortcut with /init) runs this
 # engine instead. The original is kept as bin\SupremeCommander.original.exe; -Restore puts
-# it back. Steam's "Verify integrity of game files" also restores it. See docs/guides/packaging.md.
+# it back. Without -Exe it installs the newer of target\release and target\package\release.
+# Steam's "Verify integrity of game files" also restores it. See docs/guides/packaging.md.
 #
 #   powershell -ExecutionPolicy Bypass -File dev\package\install-as-supcom.ps1 -GameDir <FA> [-Exe <rts-core-engine.exe>]
 #   powershell -ExecutionPolicy Bypass -File dev\package\install-as-supcom.ps1 -GameDir <FA> -Restore
@@ -12,7 +13,13 @@ param(
 )
 $ErrorActionPreference = "Stop"
 # Not a param default: Windows PowerShell 5.1 leaves $PSScriptRoot empty there.
-if (-not $Exe) { $Exe = "$PSScriptRoot\..\..\target\package\release\rts-core-engine.exe" }
+# The newer of a plain `cargo build --release` and the package build, so a fresh build is
+# never passed over for an old one.
+if (-not $Exe) {
+    $built = "target\release", "target\package\release" | ForEach-Object { Get-Item "$PSScriptRoot\..\..\$_\rts-core-engine.exe" -ErrorAction SilentlyContinue }
+    $Exe = ($built | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+    if (-not $Exe) { $Exe = "$PSScriptRoot\..\..\target\package\release\rts-core-engine.exe" }
+}
 $target = Join-Path $GameDir "bin\SupremeCommander.exe"
 $backup = Join-Path $GameDir "bin\SupremeCommander.original.exe"
 if (-not (Test-Path (Join-Path $GameDir "gamedata\units.scd"))) { throw "$GameDir isn't a Forged Alliance folder (no gamedata\units.scd)" }
@@ -32,4 +39,4 @@ if (-not (Test-Path $backup)) {
     Write-Output "kept the original as $backup"
 }
 Copy-Item $Exe $target -Force
-Write-Output "installed $Exe as $target"
+Write-Output "installed $Exe (built $((Get-Item $Exe).LastWriteTime)) as $target"
