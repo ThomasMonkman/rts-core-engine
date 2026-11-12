@@ -47,13 +47,15 @@ Nothing finds LOUD by itself yet: a player gives `--fa` (or `RTS_FA`).
 
 The engine takes the real game's command line, so it can replace the game's exe and be started
 by whatever starts that. LOUD's `LOVE-LOUD.exe` runs, from the Forged Alliance folder,
-`bin\SupremeCommander.exe /log "..\LOUD\bin\LOUD.log" /init "..\LOUD\bin\LoudDataPath.lua"`.
+`bin\SupremeCommander.exe /log "LOUD\bin\LOUD.log" /init "..\LOUD\bin\LoudDataPath.lua"`
+(older versions: `/log "..\LOUD\bin\LOUD.log"`).
 
-- `/init <file>` is `--fa <file>`, `/log <file>` is `--log <file>` (`cli::moho_args`). A relative
-  path is read from the program's folder, not the working directory: LOUD's paths only name
-  their files from `bin/`. Other switches (`/nobugreport`, `/gpgnet ...`) are dropped with their
+- `/init <file>` is `--fa <file>`, `/log <file>` is `--log <file>` (`cli::moho_args`). Relative
+  paths are read as the real game reads them: `/init` from the program's folder, `/log`
+  from the working directory, each from the other folder when only that one has the file (or
+  the log's folder). A log that still can't be created falls back to the default log. Other switches (`/nobugreport`, `/gpgnet ...`) are dropped with their
   values and logged.
-- The game folder is the one above the program's (`<FA>/bin/..`), ahead of a saved pick (row 2½
+- The game folder is the one above the program's (`<FA>/bin/..`), ahead of a saved pick (row 1½
   of the table above).
 - `dev/package/install-as-supcom.ps1 -GameDir <FA>` copies a static-CRT build over
   `bin\SupremeCommander.exe`, keeping the original as `SupremeCommander.original.exe`;
