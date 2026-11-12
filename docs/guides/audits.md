@@ -147,7 +147,6 @@ Check for string literals (`"OnPaused"`), not any mention: a name mentioned only
 
 Callbacks the engine deliberately doesn't call:
 
-- `OnGetDamageAbsorption`: FAF's shield calls it itself.
 - `OnEnableWeapon` / `OnDisableWeapon` from `SetWeaponEnabled`: FAF's
   overcharge calls `SetWeaponEnabled` inside them, so firing them from the
   setter would re-enter. Moho calls them only from overcharge orders
