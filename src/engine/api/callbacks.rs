@@ -37,8 +37,8 @@ callbacks! {
         /// Killed: `instigator` (or nil), the damage type, the overkill ratio.
         OnKilled(instigator: Instigator, kind: DamageType, overkill: f64);
         /// Damaged by `amount` after armour, only when that is more than 0
-        /// (MohoEngine.dll `DealDamage` 0x10308181; `direction` is a unit
-        /// vector).
+        /// (MohoEngine.dll `DealDamage` 0x10308181; `direction` is the
+        /// target's position minus the damage's location, not normalised).
         OnDamage(instigator: Instigator, amount: f64, direction: Vector, kind: DamageType);
         /// Fully reclaimed by `reclaimer`.
         OnReclaimed(reclaimer: Obj<moho::Unit>);

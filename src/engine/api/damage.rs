@@ -46,7 +46,7 @@ fn fx(v: f64) -> Fx {
 /// direction, type)` only when the amount is more than 0 (0x10308181), so
 /// negative damage doesn't heal and armour that takes it to 0 (the
 /// `Experimental` armour's `ExperimentalFootfall`) runs no `OnDamage`.
-/// `direction` is what `OnDamage` gets (`direction_to`). Moho then divides by 1 + the target army's handicap, set only
+/// `direction` makes what `OnDamage` gets from the target's position. Moho then divides by 1 + the target army's handicap, set only
 /// by the `DebugSetArmyHandicap` console command (0x103076b6): ours has
 /// none, so the divisor is 1, as in every normal game.
 fn deal(lua: &Lua, instigator: &LuaValue, direction: impl FnOnce(FxVec3) -> FxVec3, target: EntityId, amount: f64, kind: &LuaValue) -> LuaResult<()> {
@@ -267,10 +267,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             if entity_of(&instigator) == Some(target_id) {
                 return Ok(());
             }
-            // Unit vector from `location` to the target (zero if they
-            // coincide); moho's single-target path is not traced.
+            // The target's position minus `location`, not normalised
+            // (MohoEngine.dll 0x103099e0..0x10309a39): FAF's shields offset
+            // their impact flash by its length, onto the bubble's surface.
             let location = read_location(&location)?;
-            deal(lua, &instigator, |pos| (pos - location).normalized().unwrap_or_default(), target_id, amount, &kind)
+            deal(lua, &instigator, |pos| pos - location, target_id, amount, &kind)
         })?;
     lua_fn!(lua, global,
         /// Damages every unit and prop within `radius` of `location`, units
@@ -337,7 +338,7 @@ mod tests {
             "self and friendly included; units (id order) then props"
         );
         assert_eq!(run("DamageArea(nil, {0, 0, 0}, 4.5, 1, 'Force')"), "I:1:0 A:1:4 N:1:0.05 P:1:3", "no instigator: no filter");
-        assert_eq!(run("Damage(I, {0, 0, 0}, I, 5, 'Normal') Damage(I, {0, 0, 0}, F, 5, 'Normal')"), "F:5:1");
+        assert_eq!(run("Damage(I, {0, 0, 0}, I, 5, 'Normal') Damage(I, {0, 0, 0}, F, 5, 'Normal')"), "F:5:20", "not normalised");
     }
 
     #[test]
