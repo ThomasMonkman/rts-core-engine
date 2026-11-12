@@ -18,8 +18,8 @@ First match wins:
 | # | Where | Notes |
 |---|---|---|
 | 1 | `--fa <DIR>` / `--game-dir <DIR>`, then `RTS_FA` / `RTS_GAME_DIR` | a path given here that's wrong is an error, not skipped |
+| 1½ | the folder above the executable's (game folder only) | when it stands in for the game's `bin/SupremeCommander.exe` (below); an absolute path, so it wins over the dev layout's `../`, which a launcher's working directory can point anywhere |
 | 2 | `../fa`, `../Supreme Commander Forged Alliance` | the development layout, relative to the working directory (ahead of the settings, so a saved pick never redirects `cargo run`) |
-| 2½ | the folder above the executable's | when it stands in for the game's `bin/SupremeCommander.exe` (below) |
 | 3 | `settings.ini` in the settings folder | written when the player picks folders in the "not found" dialog; a saved folder that's gone is skipped |
 | 4 | beside the executable (beside the `.app` on macOS): `fa/`, `FAForever/`, `Supreme Commander Forged Alliance/` | a portable folder |
 | 5 | `%ProgramData%\FAForever` (Windows), `~/.faforever` (Linux, macOS) | the FAF client: `bin/init_faf.lua`, and the game folder from its `fa_path.lua` |
