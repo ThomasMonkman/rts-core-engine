@@ -6,6 +6,9 @@
 //! `/lua/sim/DamageArea.lua`: units and props whose collision shape the sphere
 //! (or ring) touches are hit, in id order, units first; the instigator only if
 //! `damageSelf`; allies of the instigator's army only if `damageFriendly`.
+//! Shield bubbles the blast touches from outside absorb part of it, as in
+//! moho (`shields_absorbing`): units under them take the rest, then each
+//! shield takes what it absorbed.
 
 use crate::engine::api::moho;
 use crate::lua_api::{Obj, shapes};
@@ -43,7 +46,7 @@ fn fx(v: f64) -> Fx {
 /// direction, type)` only when the amount is more than 0 (0x10308181), so
 /// negative damage doesn't heal and armour that takes it to 0 (the
 /// `Experimental` armour's `ExperimentalFootfall`) runs no `OnDamage`.
-/// `direction` is what `OnDamage` gets (`direction_to`). Moho then divides by 1 + the target army's handicap, set only
+/// `direction` makes what `OnDamage` gets from the target's position. Moho then divides by 1 + the target army's handicap, set only
 /// by the `DebugSetArmyHandicap` console command (0x103076b6): ours has
 /// none, so the divisor is 1, as in every normal game.
 fn deal(lua: &Lua, instigator: &LuaValue, direction: impl FnOnce(FxVec3) -> FxVec3, target: EntityId, amount: f64, kind: &LuaValue) -> LuaResult<()> {
@@ -127,14 +130,118 @@ fn damage_shell(
             .chain(props)
             .collect()
     };
+    let shields = shields_absorbing(lua, &instigator, center, fx(max_r), amount, &kind, friendly, source_army)?;
     for id in targets {
+        // A target under a shield that absorbs part of the blast takes the
+        // rest (0x103071b0: every absorbing shield whose shape holds the
+        // target's position takes its share off), nothing when that is
+        // 0 or less (0x10308447).
+        let mut left = amount;
+        if !shields.is_empty() {
+            let w = world(lua);
+            if let Some(pos) = w.get(id).map(|e| e.position()) {
+                for s in &shields {
+                    if w.get(s.id).is_some_and(|e| crate::engine::sim::collision::sphere_touches(pos, Fx::ZERO, e.position(), e.orientation, &e.collision_shape())) {
+                        left -= s.absorbed;
+                    }
+                }
+            }
+        }
+        if left <= 0.0 {
+            continue;
+        }
         // Moho's area damage passes the target's position minus the centre,
         // not normalised (MohoEngine.dll 0x103088da..0x10308919 stores it in
         // the damage's direction, +0x80, which `DealDamage` hands to
         // `OnDamage` at 0x103081c7; the same at 0x10308470 and 0x10308590).
-        deal(lua, &instigator, |pos| pos - center, id, amount, &kind)?;
+        deal(lua, &instigator, |pos| pos - center, id, left, &kind)?;
+    }
+    // Then each absorbing shield takes what it absorbed, after everything
+    // else (0x10308547..0x1030869f).
+    for s in shields {
+        deal(lua, &instigator, |pos| pos - center, s.id, s.absorbed, &kind)?;
     }
     Ok(())
+}
+
+/// A shield bubble taking part of an area blast.
+struct Absorbing {
+    id: EntityId,
+    absorbed: f64,
+}
+
+/// Moho's shield pass before area damage (MohoEngine.dll 0x10307220, from
+/// the area and ring paths 0x10308240 / 0x10308720): each shield entity with
+/// a collision shape (a bubble that is down, or a personal shield, has none
+/// in FAF) that isn't the instigator's ally (unless `friendly`), whose
+/// sphere doesn't hold the blast's centre (0.1 inside its surface,
+/// 0x1030730b: a blast from under the bubble isn't stopped by it), and
+/// that the blast's sphere touches, is asked
+/// `OnGetDamageAbsorption(instigator, amount, type)` (0x1030aa50; 0 without
+/// one); those answering more than 0 absorb that much. Only for positive
+/// damage (0x103073e8; what moho does with negative area damage and
+/// shields isn't traced, ours ignores them). Shields in id order.
+#[allow(clippy::too_many_arguments)]
+fn shields_absorbing(
+    lua: &Lua,
+    instigator: &LuaValue,
+    center: FxVec3,
+    radius: Fx,
+    amount: f64,
+    kind: &LuaValue,
+    friendly: bool,
+    source_army: Option<u32>,
+) -> LuaResult<Vec<Absorbing>> {
+    use crate::engine::sim::collision::sphere_touches;
+    use crate::engine::sim::entity::{CollisionShape, EntityKind};
+    if amount <= 0.0 {
+        return Ok(Vec::new());
+    }
+    let candidates: Vec<EntityId> = {
+        let w = world(lua);
+        let armies = lua.app_data_ref::<Armies>();
+        let mut ids: Vec<EntityId> = w
+            .iter()
+            .filter(|e| !e.destroyed && e.kind == EntityKind::Shield)
+            .filter(|e| match (friendly, source_army, e.army, &armies) {
+                (false, Some(from), Some(to), Some(a)) => a.alliance(from, to) != Alliance::Ally,
+                _ => true,
+            })
+            .filter(|e| {
+                let shape = e.collision_shape();
+                let outside = match shape {
+                    CollisionShape::None => return false,
+                    CollisionShape::Sphere { center: c, radius: r } => {
+                        let inner = CollisionShape::Sphere { center: c, radius: r - Fx::from_num(0.1) };
+                        !sphere_touches(center, Fx::ZERO, e.position(), e.orientation, &inner)
+                    }
+                    CollisionShape::Box { .. } => true,
+                };
+                outside && sphere_touches(center, radius, e.position(), e.orientation, &shape)
+            })
+            .map(|e| e.id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    };
+    let mut out = Vec::new();
+    for id in candidates {
+        let Some(obj) = object(lua, id)? else { continue };
+        let Some(f) = obj.get::<Option<LuaFunction>>("OnGetDamageAbsorption")? else { continue };
+        let absorbed = match f.call::<LuaValue>((obj.clone(), instigator.clone(), amount, kind.clone())) {
+            Ok(LuaValue::Number(n)) => n,
+            Ok(LuaValue::Integer(n)) => n as f64,
+            Ok(_) => 0.0,
+            Err(e) => {
+                tracing::warn!(target: "lua", "Error running OnGetDamageAbsorption script in shield: {}", crate::lua_api::errors::Explained(lua, &e));
+                0.0
+            }
+        };
+        if absorbed > 0.0 {
+            out.push(Absorbing { id, absorbed });
+        }
+    }
+    Ok(out)
 }
 
 /// `Damage`, `DamageArea` and `DamageRing` raise on an amount of 0
@@ -160,10 +267,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             if entity_of(&instigator) == Some(target_id) {
                 return Ok(());
             }
-            // Unit vector from `location` to the target (zero if they
-            // coincide); moho's single-target path is not traced.
+            // The target's position minus `location`, not normalised
+            // (MohoEngine.dll 0x103099e0..0x10309a39): FAF's shields offset
+            // their impact flash by its length, onto the bubble's surface.
             let location = read_location(&location)?;
-            deal(lua, &instigator, |pos| (pos - location).normalized().unwrap_or_default(), target_id, amount, &kind)
+            deal(lua, &instigator, |pos| pos - location, target_id, amount, &kind)
         })?;
     lua_fn!(lua, global,
         /// Damages every unit and prop within `radius` of `location`, units
@@ -230,6 +338,42 @@ mod tests {
             "self and friendly included; units (id order) then props"
         );
         assert_eq!(run("DamageArea(nil, {0, 0, 0}, 4.5, 1, 'Force')"), "I:1:0 A:1:4 N:1:0.05 P:1:3", "no instigator: no filter");
-        assert_eq!(run("Damage(I, {0, 0, 0}, I, 5, 'Normal') Damage(I, {0, 0, 0}, F, 5, 'Normal')"), "F:5:1");
+        assert_eq!(run("Damage(I, {0, 0, 0}, I, 5, 'Normal') Damage(I, {0, 0, 0}, F, 5, 'Normal')"), "F:5:20", "not normalised");
+    }
+
+    #[test]
+    fn shield_bubbles_absorb_area_damage() {
+        let lua = Lua::new();
+        moho::register(&lua).unwrap();
+        entity::register(&lua).unwrap();
+        register(&lua).unwrap();
+        lua.set_named_registry_value("vector_metatable", lua.create_table().unwrap()).unwrap();
+        lua.set_app_data(Armies::default());
+        lua.globals().set("hits", lua.create_table().unwrap()).unwrap();
+        spawn(&lua, "I", EntityKind::Unit, Some(1), -20.0);
+        // A bubble of radius 5 at the origin absorbing 3/4 of what it's
+        // offered; one unit under it, one outside it.
+        spawn(&lua, "S", EntityKind::Shield, Some(3), 0.0);
+        spawn(&lua, "U", EntityKind::Unit, Some(3), 4.0);
+        spawn(&lua, "O", EntityKind::Unit, Some(3), 8.0);
+        lua.load("moho.entity_methods.SetCollisionShape(S, 'Sphere', 0, 0, 0, 5)
+            S.OnGetDamageAbsorption = function(self, inst, amount, kind) return amount * 0.75 end")
+            .exec()
+            .unwrap();
+        let run = |code: &str| -> String {
+            lua.load(format!("hits = {{}} {code} return table.concat(hits, ' ')")).eval().unwrap()
+        };
+        assert_eq!(
+            run("DamageArea(I, {6, 0, 0}, 3, 8, 'Normal')"),
+            "U:2:-2 O:8:2 S:6:-6",
+            "from outside: the unit under the bubble takes the rest, the one outside all of it, then the shield its share"
+        );
+        assert_eq!(run("DamageRing(I, {6, 0, 0}, 1, 3, 8, 'Normal')"), "U:2:-2 O:8:2 S:6:-6", "rings too");
+        assert_eq!(run("DamageArea(I, {3, 0, 0}, 3, 8, 'Normal')"), "U:8:1", "from under the bubble: not absorbed");
+        assert_eq!(run("DamageArea(I, {10.5, 0, 0}, 3, 8, 'Normal')"), "O:8:-2.5", "a blast that doesn't reach the bubble");
+        lua.load("S.OnGetDamageAbsorption = function(self, inst, amount, kind) return amount end").exec().unwrap();
+        assert_eq!(run("DamageArea(I, {6, 0, 0}, 3, 8, 'Normal')"), "O:8:2 S:8:-6", "fully absorbed: nothing under the bubble");
+        lua.load("moho.entity_methods.SetCollisionShape(S, 'None')").exec().unwrap();
+        assert_eq!(run("DamageArea(I, {6, 0, 0}, 3, 8, 'Normal')"), "U:8:-2 O:8:2", "a bubble that's down absorbs nothing");
     }
 }
