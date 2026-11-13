@@ -158,6 +158,33 @@ tuple_args!(A, B, C, D, E, F, G);
 tuple_args!(A, B, C, D, E, F, G, H);
 tuple_args!(A, B, C, D, E, F, G, H, I);
 tuple_args!(A, B, C, D, E, F, G, H, I, J);
+
+/// Parameters `T` that must come as `MIN` to `MAX` values, counting explicit
+/// `nil`s, as moho's bindings check (`lua_gettop`, MohoEngine.dll's
+/// "expected between %d and %d args, but got %d"). Typed parameters alone
+/// can't tell a missing value from a `nil`. Destructure it in the closure:
+/// `|lua, Arity((a, b)): Arity<1, 2, (A, Option<B>)>|`.
+pub struct Arity<const MIN: usize, const MAX: usize, T>(pub T);
+
+impl<const MIN: usize, const MAX: usize, T: FromLuaMulti> FromLuaMulti for Arity<MIN, MAX, T> {
+    fn from_lua_multi(values: LuaMultiValue, lua: &Lua) -> LuaResult<Self> {
+        let n = values.len();
+        if !(MIN..=MAX).contains(&n) {
+            let expected = if MIN == MAX { format!("{MIN}") } else { format!("between {MIN} and {MAX}") };
+            return Err(LuaError::runtime(format!("expected {expected} args, but got {n}")));
+        }
+        T::from_lua_args(values, 1, None, lua).map(Arity)
+    }
+}
+
+impl<const MIN: usize, const MAX: usize, T: LuaArgs> LuaArgs for Arity<MIN, MAX, T> {
+    fn types() -> Vec<LuaTy> {
+        T::types()
+    }
+    fn param_types() -> Vec<LuaTy> {
+        T::param_types()
+    }
+}
 tuple_args!(A, B, C, D, E, F, G, H, I, J, K);
 tuple_args!(A, B, C, D, E, F, G, H, I, J, K, L);
 tuple_args!(A, B, C, D, E, F, G, H, I, J, K, L, M);

@@ -432,6 +432,11 @@ fn param_names(f: &Expr) -> Option<Vec<Option<String>>> {
         Pat::Ident(i) => Some(i.ident.to_string().trim_start_matches('_').to_string()).filter(|s| !s.is_empty()),
         _ => None,
     };
+    // `Arity((a, b)): Arity<..>`: the names are the inner tuple's.
+    let pat = match pat {
+        Pat::TupleStruct(ts) if ts.elems.len() == 1 => &ts.elems[0],
+        p => p,
+    };
     match pat {
         Pat::Tuple(t) => Some(t.elems.iter().map(name).collect()),
         // `args: (A, B)`: one name for several values; leave them unnamed.

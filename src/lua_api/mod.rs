@@ -29,7 +29,7 @@ pub use lua_api_macros::{LuaEnum, LuaTable, callbacks, lua_fn, lua_method, signa
 pub use registry::{ApiRegistry, CallbackBlock, CallbackInfo, FnEntry, Scope, Signature, SignatureBlock, Status, TypeDecl, with_registry};
 #[doc(hidden)]
 pub use inventory;
-pub use ty::{AliasInfo, EnumInfo, FieldInfo, FieldIntoLua, LuaArgs, LuaTy, LuaType, StructInfo};
+pub use ty::{AliasInfo, Arity, EnumInfo, FieldInfo, FieldIntoLua, LuaArgs, LuaTy, LuaType, StructInfo};
 
 use std::borrow::Cow;
 
