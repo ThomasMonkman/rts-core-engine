@@ -526,9 +526,20 @@ pub fn segment_enters_sphere(from: FxVec3, to: FxVec3, center: FxVec3, radius: F
 }
 
 /// The earliest shield bubble the segment `from -> to` enters from outside
-/// (shots fired from inside get out): fraction along it and shield id; ties
-/// go to the lowest id.
+/// (shots fired from inside get out): fraction along it (0 at the latest)
+/// and shield id; ties go to the lowest id.
+///
+/// The test line starts 1% of the step behind the projectile: moho's
+/// collision line for entities starts behind it by a share of its velocity
+/// (10% in the retail exe, 1% in FAF's: FA-Binary-Patches
+/// `hooks/FixCollisions.cpp`). So a projectile made on a bubble's surface,
+/// heading in, enters it at once: the fragments a Lobo shell bursts into on
+/// the bubble hit it, not what's under it (FAF probe probe_splashwater:
+/// three Lobos took a mobile shield's bubble from 3000 to 1500 in one
+/// volley, the tank and the carrier under it untouched).
 fn first_shield_hit(p: &ProjectileState, from: FxVec3, to: FxVec3, shields: &[ShieldSphere]) -> Option<(Fx, EntityId)> {
+    let back = (to - from) * (Fx::ONE / Fx::from_num(100));
+    let from = from - back;
     let d = to - from;
     let seg = d.x.abs() + d.y.abs() + d.z.abs();
     let mut best: Option<(Fx, EntityId)> = None;
@@ -548,6 +559,8 @@ fn first_shield_hit(p: &ProjectileState, from: FxVec3, to: FxVec3, shields: &[Sh
             continue;
         }
         let Some(t) = segment_enters_sphere(from, to, s.center, s.radius) else { continue };
+        // Back to a fraction of the real step (the line is 1.01 steps).
+        let t = (t * Fx::from_num(101) / Fx::from_num(100) - Fx::ONE / Fx::from_num(100)).max(Fx::ZERO);
         if best.is_none_or(|(bt, bid)| (t, s.id) < (bt, bid)) {
             best = Some((t, s.id));
         }

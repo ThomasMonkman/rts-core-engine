@@ -533,6 +533,11 @@ fn shield_absolver() {
 }
 
 #[test]
+fn shield_fragments() {
+    scenario("shield_fragments", 400);
+}
+
+#[test]
 fn health_changed() {
     scenario("health_changed", 60);
 }
