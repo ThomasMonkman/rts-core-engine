@@ -157,3 +157,35 @@ fn forin_token_scan_matches_full_parse() {
         .join()
         .unwrap();
 }
+
+/// The translation keeps every line where it was: the Lua debugger maps a
+/// chunk's lines straight back to the file's (`engine::lua::debugger`), as
+/// do error messages and tracebacks.
+#[test]
+#[ignore = "requires ../fa checkout, run explicitly"]
+fn actual_fa_files_translate_preserves_line_numbers() {
+    std::thread::Builder::new()
+        .stack_size(512 * 1024 * 1024)
+        .spawn(|| {
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fa");
+            assert!(root.exists(), "../fa checkout not found at {}", root.display());
+            let mut files = Vec::new();
+            lua_files(&root, &mut files);
+            files.sort();
+            let mut moved = Vec::new();
+            for f in &files {
+                let Ok(raw) = std::fs::read_to_string(f) else { continue };
+                if raw.matches('\n').count() != translate(&raw).matches('\n').count() {
+                    moved.push(f.clone());
+                }
+            }
+            println!("\n=== lines: {} files, {} with lines moved ===", files.len(), moved.len());
+            for f in moved.iter().take(20) {
+                println!("MOVED {}", f.display());
+            }
+            assert!(moved.is_empty());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

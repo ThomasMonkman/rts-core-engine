@@ -16,10 +16,23 @@ use crate::engine::sim::presentation::Presentation;
 use crate::lua_api::{Obj, lua_fn, lua_method};
 use crate::engine::api::moho;
 
+/// Whether entity `id`'s object still exists. Moho's `IsDestroyed` tests
+/// the script object's C pointer (MohoEngine.dll 0x100b9d50 -> 0x100ba4d0),
+/// which stays set after `Destroy` until the object is freed after the beat
+/// that ran its `OnDestroy` (`EntityWorld::free`); so a destroyed entity is
+/// not `IsDestroyed` for the rest of that beat, while `BeenDestroyed` is.
 fn entity_alive(lua: &Lua, id: u32) -> bool {
     lua.app_data_ref::<EntityWorld>()
-        .and_then(|w| w.get(id).map(|e| !e.destroyed))
+        .and_then(|w| w.get(id).map(|e| !e.gone))
         .unwrap_or(false)
+}
+
+/// `BeenDestroyed`: `Destroy` has been called (moho reads the destroy-queued
+/// flag, 0x102746d0 tests +0x1b9).
+fn entity_destroy_queued(lua: &Lua, this: &LuaTable) -> LuaResult<bool> {
+    let LuaValue::UserData(ud) = this.raw_get::<LuaValue>(C_OBJECT)? else { return Ok(true) };
+    let Ok(h) = ud.borrow::<EntityHandle>() else { return is_destroyed(lua, &LuaValue::Table(this.clone())) };
+    Ok(lua.app_data_ref::<EntityWorld>().and_then(|w| w.get(h.0).map(|e| e.destroyed)).unwrap_or(true))
 }
 
 /// True unless `v` is a live engine object (non-engine values count as destroyed).
@@ -48,11 +61,13 @@ pub fn is_destroyed(lua: &Lua, v: &LuaValue) -> LuaResult<bool> {
 
 pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
-        /// False for a live engine object; anything else (nil, a plain table, a destroyed object) counts as destroyed.
+        /// False for a live engine object; anything else (nil, a plain table, a freed object) counts as destroyed.
+        /// A destroyed entity stays live until the end of the beat that runs its `OnDestroy`.
         IsDestroyed = |lua, v: LuaValue| is_destroyed(lua, &v))?;
     lua_method!(lua, moho::Entity,
-        /// True once the entity is destroyed.
-        BeenDestroyed = |lua, this: Obj<moho::Entity>| is_destroyed(lua, &LuaValue::Table(this.into_table())))?;
+        /// True once `Destroy` has been called (its `OnDestroy` may still be
+        /// to come, at the end of the beat).
+        BeenDestroyed = |lua, this: Obj<moho::Entity>| entity_destroy_queued(lua, this.table()))?;
     lua_method!(lua, moho::Manipulator,
         /// True once the manipulator is destroyed. Moho has it on the slide
         /// manipulator only (SupremeCommander.exe); ours is on every one.

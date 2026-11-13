@@ -88,12 +88,24 @@ fn log_filter() -> Targets {
     OWN_TARGETS.iter().fold(Targets::new().with_default(LevelFilter::WARN), |t, own| t.with_target(*own, LevelFilter::TRACE))
 }
 
+/// Whether the console log gets ANSI colours: only when its stream is a
+/// terminal (a pipe, such as the VS Code extension's output panel, or a
+/// redirect gets plain text), and not if `NO_COLOR` is set or `TERM=dumb`.
+fn console_colour(stderr: bool) -> bool {
+    use std::io::IsTerminal;
+    let tty = if stderr { std::io::stderr().is_terminal() } else { std::io::stdout().is_terminal() };
+    tty && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()) && std::env::var("TERM").as_deref() != Ok("dumb")
+}
+
 fn main() -> std::process::ExitCode {
     // Parse first: `--help` and argument errors exit before any setup.
     let cli = cli::Cli::parse_args();
     if cli.license {
         print!("{}", cli::LICENSE);
         return std::process::ExitCode::SUCCESS;
+    }
+    if cli.enable_disk_watch {
+        rts_core_engine::engine::disk_watch::enable();
     }
     if let Some(path) = &cli.vfs_dump {
         rts_core_engine::engine::set_vfs_dump(path.clone());
@@ -127,8 +139,22 @@ fn main() -> std::process::ExitCode {
     // goes to stderr (the file log keeps everything).
     let audit_quiet_stdout = cli.audit_table || (cli.audit_test.is_some() && cli.headless);
 
-    let log_path = cli.log.clone().unwrap_or_else(install::default_log);
-    let log_file = std::fs::File::create(&log_path).unwrap_or_else(|e| panic!("failed to create {}: {e}", log_path.display()));
+    // A given log that can't be created (a launcher's path to a folder that
+    // isn't there) falls back to the default one rather than ending the run.
+    let mut log_path = cli.log.clone().unwrap_or_else(install::default_log);
+    let mut log_fallback = None;
+    let log_file = match std::fs::File::create(&log_path) {
+        Ok(f) => f,
+        Err(e) if cli.log.is_some() => {
+            let default = install::default_log();
+            let msg = format!("couldn't create the log {}: {e}; logging to {} instead", log_path.display(), default.display());
+            eprintln!("{msg}");
+            log_fallback = Some(msg);
+            log_path = default;
+            std::fs::File::create(&log_path).unwrap_or_else(|e| panic!("failed to create {}: {e}", log_path.display()))
+        }
+        Err(e) => panic!("failed to create {}: {e}", log_path.display()),
+    };
     let (non_blocking_writer, _guard) = tracing_appender::non_blocking(log_file);
 
     tracing_subscriber::registry()
@@ -143,6 +169,7 @@ fn main() -> std::process::ExitCode {
         )
         .with(
             fmt::layer()
+                .with_ansi(console_colour(audit_quiet_stdout))
                 .with_writer(if audit_quiet_stdout {
                     tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stderr)
                 } else {
@@ -153,8 +180,21 @@ fn main() -> std::process::ExitCode {
         .with(tracy_layer())
         .init();
     rts_core_engine::threads::init_global_pool();
+    // Before any VM or script cache: it changes how scripts compile.
+    if cli.lua_debug.is_some() || cli.lua_debug_wait {
+        let port = cli.lua_debug.unwrap_or(4711);
+        if let Err(e) = rts_core_engine::engine::lua::debugger::start(port, cli.lua_debug_wait) {
+            tracing::error!("--lua-debug: can't listen on 127.0.0.1:{port}: {e}");
+        }
+    }
     rts_core_engine::diagnostics::log_panics();
     rts_core_engine::diagnostics::log_system();
+    if let Some(msg) = &log_fallback {
+        tracing::warn!("{msg}");
+    }
+    if !cli.ignored_moho_args.is_empty() {
+        tracing::info!("ignored the game's command-line switches: {}", cli.ignored_moho_args.join(" "));
+    }
 
     // FAF's Lua and the game's data: found, or (windowed) asked for.
     let overrides = install::Overrides { fa: cli.fa.clone(), game: cli.game_dir.clone() };

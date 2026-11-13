@@ -22,11 +22,23 @@ callbacks! {
     moho::Entity {
         /// After the script object of a blueprint-less entity is created.
         OnCreate();
-        /// The entity is being destroyed.
+        /// The entity is being destroyed (end of the beat it was destroyed in,
+        /// still attached).
         OnDestroy();
+        /// An entity attached to this one (cargo, a shield, ...) was killed
+        /// (`Entity::Kill`, any kind of entity).
+        OnAttachedKilled(attached: Obj<moho::Entity>);
+        /// The entity this one is attached to was killed.
+        OnParentKilled(parent: Obj<moho::Entity>);
+        /// An entity attached to this one ran its `OnDestroy`; it is detached next.
+        OnAttachedDestroyed(attached: Obj<moho::Entity>);
+        /// The entity this one is attached to ran its `OnDestroy`.
+        OnParentDestroyed(parent: Obj<moho::Entity>);
         /// Killed: `instigator` (or nil), the damage type, the overkill ratio.
         OnKilled(instigator: Instigator, kind: DamageType, overkill: f64);
-        /// Damaged, before armour (`direction` is a unit vector).
+        /// Damaged by `amount` after armour, only when that is more than 0
+        /// (MohoEngine.dll `DealDamage` 0x10308181; `direction` is the
+        /// target's position minus the damage's location, not normalised).
         OnDamage(instigator: Instigator, amount: f64, direction: Vector, kind: DamageType);
         /// Fully reclaimed by `reclaimer`.
         OnReclaimed(reclaimer: Obj<moho::Unit>);
@@ -109,10 +121,15 @@ callbacks! {
         OnAssignedFocusEntity();
         /// Health changed by a quarter step (fractions of max health).
         OnHealthChanged(new: f64, old: f64);
-        /// A unit attached to this one (cargo) was killed.
-        OnAttachedKilled(attached: Obj<moho::Unit>);
         /// First seen by `army`.
         OnDetectedBy(army: u32);
+        /// Damaged (more than 0, after armour) by an instigator of army
+        /// `army` (1-based; MohoEngine.dll `DealDamage` 0x10307708). FAF's is
+        /// empty.
+        OnDamageBy(army: u32);
+        /// Armour multiplied a hit of `kind` by 2 or more (`DealDamage`
+        /// 0x10307761; FAF defines none).
+        OnExtraDamageDealt(kind: DamageType);
         OnStartCapture(target: Obj<moho::Unit>);
         OnStopCapture(target: Obj<moho::Unit>);
         OnFailedCapture(target: Obj<moho::Unit>);

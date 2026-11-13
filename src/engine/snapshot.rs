@@ -53,6 +53,12 @@ pub struct EntityView {
     pub half: [f32; 3],
     /// 0..1.
     pub health: f32,
+    /// Its maximum health now (`GetMaxHealth`: a buff or script may have
+    /// changed it from the blueprint's).
+    pub max_health: f32,
+    /// Its build rate now (`GetBuildRate`: an enhancement, buff or
+    /// veterancy may have changed it from the blueprint's); 0 if not a unit.
+    pub build_rate: f32,
     /// 0..1 (1 = finished).
     pub build: f32,
     /// 0..1 of its current job (`GetWorkProgress`: building, an upgrade, an
@@ -338,6 +344,9 @@ pub struct SimControl {
     /// The player left the session (the interface's `SessionEndGame`: the
     /// score screen, quitting): this client's sim runs no more ticks.
     left: std::sync::atomic::AtomicBool,
+    /// A networked game whose lobby fixed the game speed (`normal`, `fast`):
+    /// the speed selector is off.
+    speed_fixed: std::sync::atomic::AtomicBool,
     /// The renderer is done with the session (back to the main menu, or
     /// launching another): the real-time loop returns and the engine
     /// thread starts the next session.
@@ -350,7 +359,7 @@ impl SimControl {
     pub const STEPS: [u32; 8] = [25, 50, 100, 200, 400, 800, 1600, Self::MAX];
 
     pub fn new(speed: u32) -> Arc<Self> {
-        Arc::new(Self { speed: speed.into(), paused: false.into(), hold_at: u64::MAX.into(), agreed: 0.into(), changed_by: 1.into(), effective: 0.into(), left: false.into(), closed: false.into() })
+        Arc::new(Self { speed: speed.into(), paused: false.into(), hold_at: u64::MAX.into(), agreed: 0.into(), changed_by: 1.into(), effective: 0.into(), left: false.into(), speed_fixed: false.into(), closed: false.into() })
     }
 
     pub fn speed(&self) -> u32 {
@@ -401,6 +410,15 @@ impl SimControl {
 
     pub fn set_paused(&self, on: bool) {
         self.paused.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The lobby fixed the game speed (a networked game).
+    pub fn speed_fixed(&self) -> bool {
+        self.speed_fixed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_speed_fixed(&self, on: bool) {
+        self.speed_fixed.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The player left the session (`SessionEndGame`).
@@ -569,8 +587,10 @@ pub mod caps {
     /// Can board a transport (right-clicking one walks it aboard:
     /// `TransportLoadUnits`).
     pub const CALL_TRANSPORT: u16 = 512;
+    /// Can dock at an air staging platform (`IssueDockCommand`).
+    pub const DOCK: u16 = 1024;
     /// `RULEUCC_*` name of each bit, in bit order.
-    pub const NAMES: [&str; 10] = ["Move", "Attack", "Guard", "Patrol", "Reclaim", "Repair", "Capture", "Stop", "Transport", "CallTransport"];
+    pub const NAMES: [&str; 11] = ["Move", "Attack", "Guard", "Patrol", "Reclaim", "Repair", "Capture", "Stop", "Transport", "CallTransport", "Dock"];
 }
 
 /// A selected unit's state for the interface (FAF's unit panels).
@@ -659,6 +679,8 @@ pub struct DebugData {
     /// (unit, max range) per weapon.
     pub ranges: Vec<(u32, f32)>,
     pub grid: Option<Arc<GridOverlay>>,
+    /// The scripts' debug canvas this beat (`DrawLine` / `DrawCircle`).
+    pub draw: crate::engine::api::debug_draw::DebugDraw,
 }
 
 #[derive(Debug, Default)]
@@ -682,9 +704,10 @@ pub struct Snapshot {
     pub blueprint_caps: Option<Arc<Vec<u16>>>,
     /// Each blueprint's [`order_categories`] bits (same index).
     pub blueprint_order_categories: Option<Arc<Vec<u16>>>,
-    /// Each blueprint's cargo-slot classes (bits 1 / 2 / 4) and cargo class
-    /// (1..3), same index: the cursor's load orders where boarding can work.
-    pub blueprint_transport: Option<Arc<Vec<(u8, u8)>>>,
+    /// Each blueprint's cargo-slot classes (bit `class - 1`), cargo class
+    /// and `ClassGenericUpTo`, same index: the cursor's load orders where
+    /// boarding can work.
+    pub blueprint_transport: Option<Arc<Vec<(u8, u8, u8)>>>,
     /// Each blueprint's drag-selection priority (`General.SelectionPriority`,
     /// 1 = highest), bit 7 set for `LOWSELECTPRIO` units (priority 6 while
     /// being built: FAF's exe patch), same index.
@@ -758,6 +781,10 @@ pub struct Snapshot {
     /// Launches a camera following their launcher follows, since the last
     /// delivered snapshot (`Display.CameraFollowsProjectile`).
     pub camera_follows: Vec<crate::engine::sim::presentation::CameraFollow>,
+    /// Projectiles launched since the last delivered snapshot and where
+    /// from (id, position), in id order: the renderer lerps a projectile
+    /// with no last-snapshot position from its launch point.
+    pub launches: Vec<(u32, [f32; 3])>,
     /// Live particle effects, in id order.
     pub effects: Vec<EffectView>,
     pub effect_curves: Vec<EffectCurve>,
@@ -797,6 +824,9 @@ pub struct Snapshot {
     /// How every army is shown; with the first snapshot and when it
     /// changed (`SetArmyColor`, `SetArmyShowScore`).
     pub army_display: Option<Arc<Vec<ArmyDisplay>>>,
+    /// Every unit's custom name (`SetCustomName`: AI and campaign
+    /// commanders), by id; with the first snapshot and when one changed.
+    pub custom_names: Option<Arc<Vec<(u32, String)>>>,
     /// The explicit one-way alliances `(from, to, alliance)` (unset pairs
     /// are enemies); when they changed.
     pub alliances: Option<Arc<Vec<(u32, u32, crate::engine::sim::army::Alliance)>>>,
@@ -880,6 +910,8 @@ pub struct SnapshotSink {
     sent_focus_army: Option<i32>,
     /// `Presentation::decal_version` last sent.
     sent_decals: Option<u64>,
+    /// `Presentation::custom_name_version` last sent.
+    sent_custom_names: Option<u64>,
     /// The full prop list went out (later snapshots send changes).
     sent_props: bool,
     /// Prop changes taken from the world but not delivered yet.
@@ -930,7 +962,7 @@ pub fn channel() -> (SnapshotSink, Receiver<Snapshot>, SharedDebugRequest) {
 
 impl SnapshotSink {
     fn new(tx: SyncSender<Snapshot>, in_flight: Arc<std::sync::atomic::AtomicUsize>, request: SharedDebugRequest) -> Self {
-        SnapshotSink { in_flight, tx, tick: 0, terrain_version: None, sent_blueprints: false, sent_alliances: None, sent_focus_army: None, sent_army_display: None, sent_decals: None, sent_props: false, pending_props: Vec::new(), sent_meshes: 0, sent_projectile_icons: 0, sent_vfs: false, clip_ids: Default::default(), clips: Vec::new(), sent_clips: 0, sent_effect_assets: 0, pose_ops: Vec::new(), hidden: Vec::new(), request, grid_key: None, grid: None, fog: Default::default(), sent_game_over: false }
+        SnapshotSink { in_flight, tx, tick: 0, terrain_version: None, sent_blueprints: false, sent_alliances: None, sent_focus_army: None, sent_army_display: None, sent_decals: None, sent_custom_names: None, sent_props: false, pending_props: Vec::new(), sent_meshes: 0, sent_projectile_icons: 0, sent_vfs: false, clip_ids: Default::default(), clips: Vec::new(), sent_clips: 0, sent_effect_assets: 0, pose_ops: Vec::new(), hidden: Vec::new(), request, grid_key: None, grid: None, fog: Default::default(), sent_game_over: false }
     }
 
     /// The same channel to the renderer for another session, with nothing
@@ -970,6 +1002,8 @@ fn view_of(e: &crate::engine::sim::entity::Entity, structure: Option<&crate::eng
         center,
         half,
         health,
+        max_health: f(e.max_health),
+        build_rate: e.unit.as_deref().map_or(0.0, |u| f(u.build_rate)),
         build: f(e.fraction_complete),
         work: e.unit.as_deref().map_or(0.0, |u| f(u.work_progress)),
         shield: e.unit.as_deref().filter(|u| u.has_shield).map_or(-1.0, |u| f(u.shield_ratio)),
@@ -1510,35 +1544,29 @@ fn blueprint_selection_priority(lua: &mlua::Lua, ids: &[String]) -> Vec<u8> {
         .collect()
 }
 
-/// Per blueprint, its cargo-slot classes and its cargo class, same index as
-/// [`blueprint_caps`]. The slot classes are bits (`1` = class 1, `2` = class
-/// 2, `4` = class 3) from the model's `attachpoint` bones — the same ones
+/// Per blueprint, its cargo-slot classes, its cargo class and its
+/// `Transport.ClassGenericUpTo`, same index as [`blueprint_caps`]. The slot
+/// classes are bits (bit `class - 1`, classes 1..4) from the model's
+/// `attachpoint` bones — the same ones
 /// [`crate::engine::api::transport::free_slots`] boards into, so the cursor
 /// offers loads only where boarding can actually work (a docking pad's
 /// `attachpoint` bones are class 1 only: an air-staging dock takes the
 /// gunships that land on it, not the engineers classed 2 and 3). Class is
-/// `Transport.TransportClass`, 1 when unset.
-fn blueprint_transport(lua: &mlua::Lua, ids: &[String]) -> Vec<(u8, u8)> {
+/// `Transport.TransportClass` as the blueprint has it, 1 when unset.
+fn blueprint_transport(lua: &mlua::Lua, ids: &[String]) -> Vec<(u8, u8, u8)> {
     use mlua::prelude::*;
     let bps: Option<LuaTable> = lua.globals().raw_get("__blueprints").ok().flatten();
     ids.iter()
         .map(|id| {
-            let Some(bp) = bps.as_ref().and_then(|b| b.raw_get::<Option<LuaTable>>(id.as_str()).ok().flatten()) else { return (0, 1) };
+            let Some(bp) = bps.as_ref().and_then(|b| b.raw_get::<Option<LuaTable>>(id.as_str()).ok().flatten()) else { return (0, 1, 0) };
             let slots = crate::engine::api::mesh::skeleton_for(lua, &bp).ok().flatten().map_or(0u8, |s| {
-                s.bones.iter().fold(0u8, |m, b| match crate::engine::api::transport::slot_class(&b.name) {
-                    Some(1) => m | 1,
-                    Some(2) => m | 2,
-                    Some(3) => m | 4,
-                    _ => m,
-                })
+                s.bones.iter().fold(0u8, |m, b| crate::engine::api::transport::slot_class(&b.name).map_or(m, |c| m | 1 << (c - 1)))
             });
-            let class = bp
-                .raw_get::<Option<LuaTable>>("Transport")
-                .ok()
-                .flatten()
-                .and_then(|t| t.raw_get::<Option<u8>>("TransportClass").ok().flatten())
-                .map_or(1, |c| c.clamp(1, 3));
-            (slots, class)
+            let transport = bp.raw_get::<Option<LuaTable>>("Transport").ok().flatten();
+            let field = |name: &str| transport.as_ref().and_then(|t| t.raw_get::<Option<f64>>(name).ok().flatten());
+            let class = field("TransportClass").map_or(1, |c| c.clamp(0.0, 255.0) as u8);
+            let generic_up_to = field("ClassGenericUpTo").map_or(0, |c| c.clamp(0.0, 255.0) as u8);
+            (slots, class, generic_up_to)
         })
         .collect()
 }
@@ -2405,6 +2433,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
             p.camera_shakes.clear();
             p.upgrades.clear();
             p.camera_follows.clear();
+            p.launches.clear();
         }
         return;
     };
@@ -2418,6 +2447,9 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
         if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
             let excess = p.sounds.len().saturating_sub(crate::engine::sim::presentation::MAX_PENDING_SOUNDS);
             p.sounds.drain(..excess);
+            // Skipped snapshots: the next one's previous lacks these shots
+            // by more than a tick; drawing them where they are is fine.
+            p.launches.clear();
         }
         return;
     }
@@ -2590,11 +2622,18 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
             snap.decals = Some(Arc::new(ground_decals(&p)));
             sink.sent_decals = Some(p.decal_version);
         }
+        if sink.sent_custom_names != Some(p.custom_name_version)
+            && let Some(world) = lua.app_data_ref::<EntityWorld>()
+        {
+            snap.custom_names = Some(Arc::new(world.iter().filter(|e| !e.destroyed).filter_map(|e| Some((e.id, e.unit.as_deref()?.custom_name.clone()?))).collect()));
+            sink.sent_custom_names = Some(p.custom_name_version);
+        }
         let _s = crate::prof_span!("snapshot sounds");
         // Nothing reads the shakes yet; don't let them pile up.
         p.camera_shakes.clear();
         snap.upgrades = std::mem::take(&mut p.upgrades);
         snap.camera_follows = std::mem::take(&mut p.camera_follows);
+        snap.launches = std::mem::take(&mut p.launches);
         let sight = fog::SoundSight::new(lua, view);
         snap.sounds = p
             .sounds
@@ -2633,6 +2672,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
         let _s = crate::prof_span!("snapshot debug + unit details");
         debug_data(lua, &request, &mut sink)
     };
+    snap.debug.draw = crate::engine::api::debug_draw::current(lua);
     fog::apply(lua, &mut sink.fog, view, &mut snap);
     let (terrain_version, blueprints) = (lua.app_data_ref::<Terrain>().map(|t| t.version), snap.blueprints.is_some());
     let full_props = snap.props.is_some();
@@ -2670,7 +2710,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
             }
         }
         // Not delivered: keep its syncs, splats and prop changes for the next one.
-        Err(TrySendError::Full(snap)) | Err(TrySendError::Disconnected(snap)) => {
+        Err(TrySendError::Full(mut snap)) | Err(TrySendError::Disconnected(mut snap)) => {
             sink.pending_props = prop_ids;
             sink.fog.dropped();
             if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
@@ -2696,6 +2736,12 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
                 let later = std::mem::take(&mut p.camera_follows);
                 p.camera_follows = snap.camera_follows.clone();
                 p.camera_follows.extend(later);
+            }
+            if !snap.launches.is_empty()
+                && let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
+                let later = std::mem::take(&mut p.launches);
+                p.launches = std::mem::take(&mut snap.launches);
+                p.launches.extend(later);
             }
             if !snap.sounds.is_empty()
                 && let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {

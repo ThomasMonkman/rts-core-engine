@@ -18,6 +18,7 @@ First match wins:
 | # | Where | Notes |
 |---|---|---|
 | 1 | `--fa <DIR>` / `--game-dir <DIR>`, then `RTS_FA` / `RTS_GAME_DIR` | a path given here that's wrong is an error, not skipped |
+| 1½ | the folder above the executable's (game folder only) | when it stands in for the game's `bin/SupremeCommander.exe` (below); an absolute path, so it wins over the dev layout's `../`, which a launcher's working directory can point anywhere |
 | 2 | `../fa`, `../Supreme Commander Forged Alliance` | the development layout, relative to the working directory (ahead of the settings, so a saved pick never redirects `cargo run`) |
 | 3 | `settings.ini` in the settings folder | written when the player picks folders in the "not found" dialog; a saved folder that's gone is skipped |
 | 4 | beside the executable (beside the `.app` on macOS): `fa/`, `FAForever/`, `Supreme Commander Forged Alliance/` | a portable folder |
@@ -41,6 +42,24 @@ Two adjustments make any FAF install work from anywhere:
 checkout's `bin/SupComDataPath.lua`) runs LOUD instead of FAF ([running.md](running.md#loud)). Init files
 are read as moho reads them: Windows paths and wildcards in `mount_dir` work on every platform.
 Nothing finds LOUD by itself yet: a player gives `--fa` (or `RTS_FA`).
+
+### Standing in for `bin/SupremeCommander.exe` (LOUD's launcher)
+
+The engine takes the real game's command line, so it can replace the game's exe and be started
+by whatever starts that. LOUD's `LOVE-LOUD.exe` runs, from the Forged Alliance folder,
+`bin\SupremeCommander.exe /log "LOUD\bin\LOUD.log" /init "..\LOUD\bin\LoudDataPath.lua"`
+(older versions: `/log "..\LOUD\bin\LOUD.log"`).
+
+- `/init <file>` is `--fa <file>`, `/log <file>` is `--log <file>` (`cli::moho_args`). Relative
+  paths are read as the real game reads them: `/init` from the program's folder, `/log`
+  from the working directory, each from the other folder when only that one has the file (or
+  the log's folder). A log that still can't be created falls back to the default log. Other switches (`/nobugreport`, `/gpgnet ...`) are dropped with their
+  values and logged.
+- The game folder is the one above the program's (`<FA>/bin/..`), ahead of a saved pick (row 1½
+  of the table above).
+- `dev/package/install-as-supcom.ps1 -GameDir <FA>` copies a static-CRT build over
+  `bin\SupremeCommander.exe`, keeping the original as `SupremeCommander.original.exe`;
+  `-Restore` puts it back (so does Steam's "Verify integrity of game files").
 
 The settings folder is `%APPDATA%\rts-core-engine`, `~/Library/Application Support/rts-core-engine` or
 `~/.config/rts-core-engine`. Outside a source checkout (no `Cargo.toml` + `src/main.rs` in the working

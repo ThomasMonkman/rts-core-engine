@@ -76,6 +76,11 @@ Playing one from the menu (`LaunchReplaySession`) hands it to the engine thread 
 launch (`engine::session::Launch`). The viewer is an observer: their commands are dropped, except
 game speed. Delete removes the file outright (moho moves it to the recycle bin).
 
+A game whose sim reloaded files changed on disk (`--enable-disk-watch`) can't play back as it was
+played: the edited code and blueprints aren't in the recording. The first reload warns and writes
+`# reloaded <tick> <file>` (`replay::RELOADED`); loading such a recording (`--replay`, the Replay
+dialog) warns and refuses it (`replay::unplayable`).
+
 One process plays any number of sessions. The engine thread makes a fresh engine for each launch
 (`main.rs`), and a session ends when the renderer closes it (`SimControl::close`): **Exit to menu**
 (`ExitGame`) or **Restart** (`RestartSession`; a replay or a skirmish, not a networked game,

@@ -54,6 +54,69 @@ pub struct SessionConfig {
     /// Mods (uids) to run besides a launch's `GameMods` (`--mod`): sim mods
     /// in the sim, UI-only ones in the interface (`engine::mods`).
     pub mods: Vec<String>,
+    /// The AI the armies get (`--ai`), instead of the game code's default.
+    /// Unused with a lobby launch (its slots name their own AI).
+    pub ai_choice: AiChoice,
+}
+
+/// Which AI (a lobby AI key, e.g. `adaptive`, `RNGStandard`) the armies
+/// get: one for all, and any by army number. Checked against the game's
+/// lobby AI list (with the session's mods) when the session starts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AiChoice {
+    /// For every AI army without its own; `None` = the game code's default.
+    pub default: Option<String>,
+    /// `(army, key)`: army numbers are 1-based, in start-spot order.
+    pub armies: Vec<(u32, String)>,
+}
+
+impl AiChoice {
+    /// The `--ai` values: `KEY` for every army, `N=KEY` for army N.
+    pub fn parse(values: &[String]) -> Result<Self, String> {
+        let mut choice = AiChoice::default();
+        for v in values {
+            match v.split_once('=') {
+                Some((army, key)) => {
+                    let army: u32 = army.trim().parse().ok().filter(|&a| a > 0).ok_or_else(|| format!("--ai {v}: expected ARMY=KEY with an army number from 1"))?;
+                    let key = key.trim();
+                    if key.is_empty() {
+                        return Err(format!("--ai {v}: no AI key"));
+                    }
+                    if choice.armies.iter().any(|(a, _)| *a == army) {
+                        return Err(format!("--ai: army {army} given twice"));
+                    }
+                    choice.armies.push((army, key.to_string()));
+                }
+                None if v.trim().is_empty() => return Err("--ai: no AI key".into()),
+                None if choice.default.is_some() => return Err(format!("--ai {v}: a default AI is already given (use ARMY=KEY for one army)")),
+                None => choice.default = Some(v.trim().to_string()),
+            }
+        }
+        Ok(choice)
+    }
+
+    /// Back to the `--ai` values (the replay header keeps them so).
+    pub fn values(&self) -> Vec<String> {
+        self.default.iter().cloned().chain(self.armies.iter().map(|(a, k)| format!("{a}={k}"))).collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.default.is_none() && self.armies.is_empty()
+    }
+
+    /// As `session_launch.lua` takes it: `{default = key, [army] = key}`,
+    /// or nil when nothing was chosen.
+    fn to_lua(&self, lua: &Lua) -> LuaResult<LuaValue> {
+        if self.is_empty() {
+            return Ok(LuaNil);
+        }
+        let t = lua.create_table()?;
+        t.set("default", self.default.as_deref())?;
+        for (army, key) in &self.armies {
+            t.set(*army, key.as_str())?;
+        }
+        Ok(LuaValue::Table(t))
+    }
 }
 
 /// FAF's lobby `AutoTeams` layouts: two teams split by the map's middle
@@ -104,6 +167,7 @@ impl Default for SessionConfig {
             fog_of_war: None,
             victory: None,
             mods: Vec::new(),
+            ai_choice: AiChoice::default(),
         }
     }
 }
@@ -138,20 +202,13 @@ pub fn setup(lua: &Lua, cfg: &SessionConfig) -> LuaResult<()> {
     lua.set_app_data(SimRng::new(seed));
     lua.set_named_registry_value("sim.create_initial_units", cfg.create_initial_units)?;
     let launch = cfg.launch.as_ref().map(|l| l.to_lua(lua)).transpose()?;
-    let scenario = match &launch {
-        Some(LuaValue::Table(l)) => {
-            let options: LuaTable = l.get::<LuaTable>("Config")?.get("GameOptions")?;
-            options.get::<String>("ScenarioFile")?
-        }
-        _ => cfg.scenario.clone(),
-    };
-    let scenario = scenario_vfs_path(lua, &scenario)?;
+    let scenario = scenario_file(lua, launch.as_ref(), cfg)?;
     let human_army = {
         let _s = crate::prof_span!("session launch (scenario, armies)");
         let lobby_army: Option<u32> = lua
             .load(include_str!("lua/session_launch.lua"))
             .set_name("=[engine session_launch]")
-            .call((scenario.as_str(), cfg.ai_armies, cfg.ai, cfg.human_army.unwrap_or(0), cfg.teams, cfg.prebuilt, launch, game_code(lua).name()))?;
+            .call((scenario.as_str(), cfg.ai_armies, cfg.ai, cfg.human_army.unwrap_or(0), cfg.teams, cfg.prebuilt, launch, game_code(lua).name(), cfg.ai_choice.to_lua(lua)?))?;
         cfg.human_army.or(lobby_army)
     };
     if let Some(fog) = &cfg.fog_of_war {
@@ -171,13 +228,6 @@ pub fn setup(lua: &Lua, cfg: &SessionConfig) -> LuaResult<()> {
         .transpose()?
         .is_some_and(|v| matches!(&v, LuaValue::Boolean(true)) || v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("true")));
     lua.set_app_data(crate::engine::api::command_source::Cheats { enabled: cheats, cheaters: Vec::new() });
-    {
-        let _s = crate::prof_span!("load map");
-        crate::engine::api::terrain::load_map(lua)?;
-    }
-    if let Some(mut sink) = lua.app_data_mut::<crate::engine::snapshot::SnapshotSink>() {
-        sink.send_terrain(lua);
-    }
     {
         let _s = crate::prof_span!("SetupSession");
         let setup: LuaFunction = lua.globals().get("SetupSession")?;
@@ -242,6 +292,41 @@ fn initialize_prebuilt_units(lua: &Lua) -> LuaResult<()> {
         if !civilian {
             init.call::<()>(name)?;
         }
+    }
+    Ok(())
+}
+
+/// The session's scenario file as a VFS path: the lobby launch's
+/// `ScenarioFile`, else the configured one.
+fn scenario_file(lua: &Lua, launch: Option<&LuaValue>, cfg: &SessionConfig) -> LuaResult<String> {
+    let scenario = match launch {
+        Some(LuaValue::Table(l)) => {
+            let options: LuaTable = l.get::<LuaTable>("Config")?.get("GameOptions")?;
+            options.get::<String>("ScenarioFile")?
+        }
+        _ => cfg.scenario.clone(),
+    };
+    scenario_vfs_path(lua, &scenario)
+}
+
+/// Loads the session's map (the scenario's `.scmap`) into the sim, before
+/// `/lua/simInit.lua` runs: moho has the terrain before any sim Lua, and
+/// mods call `GetMapSize()` and the like when their modules are imported
+/// (RNGAI's `unitcountbuildconditions.lua` hook, from simInit's imports).
+pub fn load_map(lua: &Lua, cfg: &SessionConfig) -> LuaResult<()> {
+    let launch = cfg.launch.as_ref().map(|l| l.to_lua(lua)).transpose()?;
+    let scenario = scenario_file(lua, launch.as_ref(), cfg)?;
+    let data = lua.create_table()?;
+    let doscript: LuaFunction = lua.globals().get("doscript")?;
+    doscript.call::<()>(("/lua/dataInit.lua", data.clone()))?;
+    doscript.call::<()>((scenario.as_str(), data.clone()))?;
+    let map: String = data
+        .get::<Option<LuaTable>>("ScenarioInfo")?
+        .ok_or_else(|| LuaError::runtime(format!("session launch: no ScenarioInfo in {scenario}")))?
+        .get("map")?;
+    crate::engine::api::terrain::load_map(lua, &map)?;
+    if let Some(mut sink) = lua.app_data_mut::<crate::engine::snapshot::SnapshotSink>() {
+        sink.send_terrain(lua);
     }
     Ok(())
 }

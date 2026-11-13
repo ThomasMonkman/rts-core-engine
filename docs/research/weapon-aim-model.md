@@ -59,8 +59,13 @@ the real game with probes (`dev/probes/maps/probe_turretreach`, `probe_aimtiming
   never put on the ignore list.
 - The search 0x101c4ca0 makes the current target **sticky**: within the best priority class, a candidate
   replaces the best-so-far only if it scores better, except the current target (weapon +0xd0), which is
-  taken whatever its score, and once it is the best nothing else at that priority replaces it. (read,
-  decompile at 0x101c5150..0x101c5223; worth an asm re-check)
+  taken whatever its score, and once it is the best nothing else at that priority replaces it. Before
+  any of that, a range gate: a candidate whose range code (0 in range, 1 too close, 2 outside the arc,
+  3 beyond MaxRadius) is worse than the best so far's never replaces it, whatever its priority
+  (0x101c5199..0x101c51a8; best starts at code 3, priority 9999). So the pick depends on candidate
+  order. A candidate the army has never seen (`ReconBlip::IsSeenEver`, 0x10169500) keeps priority 9999
+  and competes on score alone (0x101c51c6). Ours ranks (class, range code, current target, score, id).
+  (asm, 0x101c5144..0x101c5236, re-checked 2026-11-07)
 - What keeps limited turrets sane in moho is **data + scoring**: (a) the blueprint HeadingArcCenter/Range
   (half-angle, off the body heading, bearing from the weapon bone +0xa8; 0x102b1b38) is a hard filter for
   search and fire; (b) for `Turreted` (or SlavedToBody) weapons the search score is
@@ -148,8 +153,12 @@ turreted search score.
   iterative 0x1021b010; ballistic weapons then `AI_CalculateFiringPitch`, high arc when BallisticArc == 2.
   No side-offset or "muzzle ahead of pivot" geometry: an offset muzzle converges only approximately and
   moho accepts that error.
-- **Target-point/arc origin**: the heading-arc and range test origin is the weapon bone +0xa8 (the last
-  aim's muzzle).
+- **Range and arc origins**: distances (the search radius 0x101c4d06, the range test's `MaxRadius` /
+  `MinRadius` 0x102b19bd) are measured in XZ from the **unit's position**, and the height test from its
+  y. Only the heading arc's bearing is taken from the weapon bone +0xa8 (the last aim's muzzle;
+  0x102b1ac3, the unit's position when it has none). The fire task tests range at the target's own
+  position (0x102b1be0 -> 0x101cf6c0 with bl = 1); the target task's `PrefersPrimaryWeaponTarget`
+  check, and the aim, at its target point (bl = 0, `Unit::GetTargetPoint`).
 - **Stickiness / scoring** (see 1): the current target is kept at equal priority, and turreted weapons
   rank by angle off the barrel, not distance. The real and our Fatboy pick the same targets.
 - **`SetFiringArc`'s yaw needs no flip** (found with the real Fatboy).

@@ -4,14 +4,25 @@
 //! Per tick (moho stores per-tick amounts, i.e. per-second rates / 10):
 //! 1. every live, complete unit adds its production to its army's income, its
 //!    active consumption to the army's request and its blueprint storage to
-//!    the army's capacity;
+//!    the army's capacity. Production is scaled by the share of its own
+//!    consumption the unit was served last tick (`GetResourceConsumed`), so
+//!    a mex in an energy stall makes less mass; `Economy.NaturalProducer`
+//!    units (commanders, SACUs, pods) produce in full
+//!    (`Unit::HandleResourceManagement`, MohoEngine.dll 0x1028a150). Storage
+//!    and production count only while production is active
+//!    (`SetProductionActive(false)` takes the storage away too);
 //! 2. armies settle one at a time in ascending army index, as moho's
 //!    `Sim::AdvanceBeat` ticks them (`CEconomy::ProcessArmyEconomy`):
 //!    - what allies shared to it (`banked`) joins its income;
-//!    - per resource, it can serve `ratio = min(1, (stored + income) /
-//!      requested)`; a consumer gets the smallest ratio over the resources it
-//!      asks for (`GetResourceConsumed`) and consumes that fraction of each
-//!      request;
+//!    - the stall split (MohoEngine.dll 0x1033d040..0x1033d3ff): with `A =
+//!      stored + income` and `T = requested` per resource, `served = min(1,
+//!      A / T)` over both resources, and the resource that set it limits
+//!      (energy, moho's first, on a tie). Every consumer asking for the
+//!      limiting resource, alone or with the other, gets `served` of each
+//!      request. Those asking for the other resource only share what the
+//!      throttled dual consumers left of it: `min(1, max(0, A - dual *
+//!      served) / single)`. A consumer's fraction is its
+//!      `GetResourceConsumed`;
 //!    - what's left above capacity (`max(0, stored + income - expense -
 //!      capacity)` per resource) overflows to allies when the army shares
 //!      (`SetResourceSharing`, on by default): the allies (ascending index,
@@ -23,11 +34,10 @@
 //!    - `stored = clamp(stored + income - expense, 0, capacity)`; what no ally
 //!      took is the excess (`Economy_AccumExcess_*`).
 //!
-//! The stall rule is inferred from FAF's docs ("when stalling, usage is the
-//! same as the current income"); moho pools requests wanting both resources
-//! apart from those wanting one. Moho uses `f32`
-//! here, so values agree with FAF only approximately; the sim is fixed-point
-//! for cross-platform determinism.
+//! Moho pools each consumer's need as its request less what it was granted
+//! and hasn't used; a unit uses its grant every tick, so its need is its
+//! whole request. Moho uses `f32` here, so values agree with FAF only
+//! approximately; the sim is fixed-point for cross-platform determinism.
 
 use std::collections::BTreeMap;
 
@@ -37,20 +47,35 @@ use crate::engine::sim::math::Fx;
 
 /// `CreateEconomyEvent(unit, energy, mass, seconds)`: a one-off cost drawn
 /// from the unit's army over `seconds` (moho's economy events: weapon
-/// charge-ups, overcharge, teleport). It competes with unit consumption at
-/// the same served ratio; at progress 1 it's done (`EconomyEventIsDone`).
+/// charge-ups, overcharge, teleport; also capture). It competes with unit
+/// consumption in the stall split; at progress 1 it's done
+/// (`EconomyEventIsDone`).
+///
+/// Moho's event (MohoEngine.dll 0x10340160, tick 0x103404d0) is a consumer
+/// node asking `cost / ticks` per tick. What it's granted stays on the node
+/// until the whole per-tick request is there in both resources; only then
+/// is it used and the event moves one whole tick on. While stalled it asks
+/// only for what's still missing, so progress comes in whole steps, later.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EconomyEvent {
     pub unit: EntityId,
     /// Request per tick at full service.
     pub mass: Fx,
     pub energy: Fx,
-    /// Ticks the cost is spread over, and how many have been paid so far
-    /// (fractions when the army stalls); done when `paid == ticks`. Kept as
-    /// a count so a fully served event finishes exactly (a summed `1/ticks`
-    /// would round short of 1).
+    /// Ticks the cost is spread over, and how many have been paid so far;
+    /// done when `paid == ticks`. Kept as a count so a fully served event
+    /// finishes exactly (a summed `1/ticks` would round short of 1).
     pub ticks: Fx,
     pub paid: Fx,
+    /// Moho's whole-step event: what's granted toward the current tick's
+    /// request is kept in `granted_*` until it's complete. Off (silo
+    /// missiles, FAF's patched `CAiSiloBuildImpl`): `paid` moves by the
+    /// fraction served.
+    pub whole_steps: bool,
+    pub granted_mass: Fx,
+    pub granted_energy: Fx,
+    /// Asks for nothing this tick (a paused captor).
+    pub held: bool,
 }
 
 impl EconomyEvent {
@@ -62,6 +87,48 @@ impl EconomyEvent {
     pub fn done(&self) -> bool {
         self.paid >= self.ticks
     }
+
+    /// What it asks the economy for this tick (mass, energy).
+    fn need(&self) -> (Fx, Fx) {
+        if self.held || self.done() {
+            (Fx::ZERO, Fx::ZERO)
+        } else if self.whole_steps {
+            ((self.mass - self.granted_mass).max(Fx::ZERO), (self.energy - self.granted_energy).max(Fx::ZERO))
+        } else {
+            (self.mass, self.energy)
+        }
+    }
+
+    /// Takes this tick's grant: `fraction` of what it needed.
+    fn grant(&mut self, need: (Fx, Fx), fraction: Fx) {
+        if !self.whole_steps {
+            self.paid = (self.paid + fraction).min(self.ticks);
+            return;
+        }
+        self.granted_mass += need.0 * fraction;
+        self.granted_energy += need.1 * fraction;
+    }
+
+    /// A whole-step event whose last grant is complete uses it and moves
+    /// one tick on. Moho's event tick runs from `Unit::MotionTick`
+    /// (0x1028873d), ahead of the army's economy pass in the beat, so it
+    /// sees the grant a tick after it was made: an event of `n` ticks is
+    /// done on tick `n + 1` (FAF probe `probe_econ`: 2.0 s -> 21 ticks,
+    /// 0.5 s -> 6, 0.05 s -> 2).
+    fn take_grant(&mut self) {
+        if !self.whole_steps || self.held || self.done() {
+            return;
+        }
+        // Moho compares f32 sums, which reach the request a few steps into a
+        // steady stall; fixed point would stay a fraction of an ulp short for
+        // ever. A gap below f32's precision (2^-24 of the request) is full.
+        let full = |granted: Fx, request: Fx| request - granted <= (request / Fx::from_num(1 << 24)).max(Fx::DELTA);
+        if full(self.granted_mass, self.mass) && full(self.granted_energy, self.energy) {
+            self.paid = (self.paid + Fx::ONE).min(self.ticks);
+            self.granted_mass = Fx::ZERO;
+            self.granted_energy = Fx::ZERO;
+        }
+    }
 }
 
 /// Live economy events by id (ids never reused), visited in id order.
@@ -72,13 +139,41 @@ pub struct EconomyEvents {
 }
 
 impl EconomyEvents {
-    /// `seconds <= 0` takes the whole cost in one tick.
+    /// `CreateEconomyEvent`: `max(1, trunc(seconds * 10))` ticks (moho
+    /// truncates, 0x103401e2), so up to 0.1 s takes the whole cost in one
+    /// tick.
     pub fn create(&mut self, unit: EntityId, energy: Fx, mass: Fx, seconds: Fx) -> u32 {
-        let ticks = (seconds * Fx::from_num(10)).max(Fx::ONE);
+        let ticks = (seconds * Fx::from_num(10)).round_to_zero().max(Fx::ONE);
+        self.insert(unit, energy, mass, ticks, true)
+    }
+
+    /// A whole-step event of exactly `ticks` (at least 1).
+    pub fn create_ticks(&mut self, unit: EntityId, energy: Fx, mass: Fx, ticks: u32) -> u32 {
+        self.insert(unit, energy, mass, Fx::from_num(ticks.max(1)), true)
+    }
+
+    /// An event paid by the fraction served each tick, over
+    /// `max(1, ceil(seconds * 10))` ticks (silo missiles).
+    pub fn create_fractional(&mut self, unit: EntityId, energy: Fx, mass: Fx, seconds: Fx) -> u32 {
+        let ticks = (seconds * Fx::from_num(10)).max(Fx::ONE).ceil();
+        self.insert(unit, energy, mass, ticks, false)
+    }
+
+    fn insert(&mut self, unit: EntityId, energy: Fx, mass: Fx, ticks: Fx, whole_steps: bool) -> u32 {
         let id = self.next;
         self.next += 1;
-        let ticks = ticks.ceil();
-        self.map.insert(id, EconomyEvent { unit, mass: mass / ticks, energy: energy / ticks, ticks, paid: Fx::ZERO });
+        let event = EconomyEvent {
+            unit,
+            mass: mass / ticks,
+            energy: energy / ticks,
+            ticks,
+            paid: Fx::ZERO,
+            whole_steps,
+            granted_mass: Fx::ZERO,
+            granted_energy: Fx::ZERO,
+            held: false,
+        };
+        self.map.insert(id, event);
         id
     }
 
@@ -111,8 +206,6 @@ pub struct ResourceState {
     /// The part of `requested` from consumers asking for this resource only
     /// (the rest also asks for the other one).
     pub requested_single: Fx,
-    /// Fraction of requests for this resource served this tick.
-    pub served: Fx,
     /// What was actually consumed (`GetEconomyUsage`).
     pub expense: Fx,
     /// Overflow allies shared in, reclaim and `GiveResource` gifts, not yet
@@ -136,12 +229,9 @@ pub struct ResourceState {
 }
 
 impl ResourceState {
-    /// Fraction of requests that can be served this tick.
-    fn serve_ratio(&self) -> Fx {
-        if self.requested <= Fx::ZERO {
-            return Fx::ONE;
-        }
-        (self.stored + self.income).saturating_div(self.requested).clamp(Fx::ZERO, Fx::ONE)
+    /// What it can spend this tick.
+    fn available(&self) -> Fx {
+        (self.stored + self.income).max(Fx::ZERO)
     }
 
     /// Reclaimed resources: banked as income, as moho's reclaim task does
@@ -163,6 +253,12 @@ impl ResourceState {
 pub struct Economy {
     pub mass: ResourceState,
     pub energy: ResourceState,
+    /// This tick's stall split (`settle`): consumers asking for the limiting
+    /// resource (mass when `mass_limits`, else energy) get `served`; those
+    /// asking for the other one only get `served_other`.
+    pub served: Fx,
+    pub served_other: Fx,
+    pub mass_limits: bool,
 }
 
 impl Economy {
@@ -219,16 +315,17 @@ impl Economy {
     }
 
     /// The fraction served this tick to a consumer asking for these amounts:
-    /// the smallest ratio over the resources it asks for.
+    /// `served` if it asks for the limiting resource, else `served_other`
+    /// (moho's per-node grant, 0x1033d2c0..0x1033d3ff).
     fn served_fraction(&self, mass: Fx, energy: Fx) -> Fx {
-        let mut fraction = Fx::ONE;
-        if mass > Fx::ZERO {
-            fraction = fraction.min(self.mass.served);
+        let (limiting, other) = if self.mass_limits { (mass, energy) } else { (energy, mass) };
+        if limiting > Fx::ZERO {
+            self.served
+        } else if other > Fx::ZERO {
+            self.served_other
+        } else {
+            Fx::ONE
         }
-        if energy > Fx::ZERO {
-            fraction = fraction.min(self.energy.served);
-        }
-        fraction
     }
 }
 
@@ -254,11 +351,18 @@ pub fn step(world: &mut EntityWorld, armies: &mut Armies, events: &mut EconomyEv
         }
         let Some(a) = armies.get_mut(army) else { continue };
         let econ = &mut a.economy;
-        econ.mass.capacity += u.storage_mass;
-        econ.energy.capacity += u.storage_energy;
         if u.production_active {
-            econ.mass.income += per_tick(u.production_mass);
-            econ.energy.income += per_tick(u.production_energy);
+            // Storage counts only while production runs: `SetProductionActive
+            // (false)` takes it away (0x1028a274 -> 0x1028a467).
+            econ.mass.capacity += u.storage_mass;
+            econ.energy.capacity += u.storage_energy;
+            // Production goes at the share of its own consumption it was
+            // served (moho's node ratio, MohoEngine.dll 0x1028a194..0x1028a1ac:
+            // a mex in an energy stall, a mass fabricator); natural producers
+            // in full.
+            let ratio = if u.natural_producer { Fx::ONE } else { u.resource_consumed };
+            econ.mass.income += per_tick(u.production_mass) * ratio;
+            econ.energy.income += per_tick(u.production_energy) * ratio;
         }
         if u.consumption_active {
             econ.request(per_tick(u.consumption_mass), per_tick(u.consumption_energy));
@@ -268,12 +372,17 @@ pub fn step(world: &mut EntityWorld, armies: &mut Armies, events: &mut EconomyEv
     // Economy events of live units request too (events of gone units are
     // dropped: nothing can wait on them any more).
     events.map.retain(|_, ev| world.get(ev.unit).is_some_and(|e| !e.destroyed));
+    // Last tick's complete grants first, as moho's unit tick does.
+    for ev in events.map.values_mut() {
+        ev.take_grant();
+    }
     for ev in events.map.values() {
-        if ev.done() {
+        if ev.done() || ev.held {
             continue;
         }
         let Some(a) = world.get(ev.unit).and_then(|e| e.army).and_then(|army| armies.get_mut(army)) else { continue };
-        a.economy.request(ev.mass, ev.energy);
+        let (mass, energy) = ev.need();
+        a.economy.request(mass, energy);
     }
 
     // 2. each army settles in index order: served ratios, expense, overflow
@@ -296,12 +405,13 @@ pub fn step(world: &mut EntityWorld, armies: &mut Armies, events: &mut EconomyEv
         };
     });
     for ev in events.map.values_mut() {
-        if ev.done() {
+        if ev.done() || ev.held {
             continue;
         }
         let Some(a) = world.get(ev.unit).and_then(|e| e.army).and_then(|army| armies.get(army)) else { continue };
-        let fraction = a.economy.served_fraction(ev.mass, ev.energy);
-        ev.paid = (ev.paid + fraction).min(ev.ticks);
+        let need = ev.need();
+        let fraction = a.economy.served_fraction(need.0, need.1);
+        ev.grant(need, fraction);
     }
 }
 
@@ -315,6 +425,37 @@ fn takes_overflow(armies: &Armies, donor: u32, j: usize) -> bool {
         && (a.economy.mass.room() > Fx::ZERO || a.economy.energy.room() > Fx::ZERO)
 }
 
+/// The stall split (MohoEngine.dll 0x1033d1da..0x1033d29a): one ratio for
+/// every consumer of the limiting resource, then what the dual consumers
+/// left of the other resource shared by those wanting only it. Sets the
+/// ratios and each resource's expense.
+fn split(econ: &mut Economy) {
+    // `min(1, A / T)` over both resources, energy first (moho's pair order;
+    // a later resource only takes over when strictly scarcer).
+    let mut served = Fx::ONE;
+    let mut mass_limits = false;
+    for (is_mass, r) in [(false, &econ.energy), (true, &econ.mass)] {
+        let available = r.available();
+        if r.requested.saturating_mul(served) > available {
+            served = available.saturating_div(r.requested).clamp(Fx::ZERO, Fx::ONE);
+            mass_limits = is_mass;
+        }
+    }
+    let (limiting, other) = if mass_limits { (&mut econ.mass, &mut econ.energy) } else { (&mut econ.energy, &mut econ.mass) };
+    limiting.expense = limiting.requested * served;
+    let dual = other.requested - other.requested_single;
+    let left = (other.available() - dual * served).max(Fx::ZERO);
+    let served_other = if other.requested_single > left {
+        left.saturating_div(other.requested_single).clamp(Fx::ZERO, Fx::ONE)
+    } else {
+        Fx::ONE
+    };
+    other.expense = dual * served + other.requested_single * served_other;
+    econ.served = served;
+    econ.served_other = served_other;
+    econ.mass_limits = mass_limits;
+}
+
 /// One army's turn (list position `i`): `CEconomy::ProcessArmyEconomy`.
 fn settle(armies: &mut Armies, i: usize) {
     let a = &mut armies.list[i];
@@ -323,12 +464,10 @@ fn settle(armies: &mut Armies, i: usize) {
     for r in [&mut econ.mass, &mut econ.energy] {
         r.income += r.banked;
         r.banked = Fx::ZERO;
-        r.served = r.serve_ratio();
     }
-    let dual = econ.mass.served.min(econ.energy.served);
+    split(econ);
     let mut excess = [Fx::ZERO; 2];
     for (r, excess) in [&mut econ.mass, &mut econ.energy].into_iter().zip(&mut excess) {
-        r.expense = r.requested_single * r.served + (r.requested - r.requested_single) * dual;
         *excess = (r.stored + r.income - r.expense - r.capacity.max(Fx::ZERO)).max(Fx::ZERO);
     }
 
@@ -382,7 +521,40 @@ mod tests {
 
     fn unit(w: &mut EntityWorld, army: u32, f: impl FnOnce(&mut crate::engine::sim::entity::UnitData)) {
         let id = w.spawn(EntityKind::Unit, BlueprintKind::Unit, "u".into(), Some(army), FxVec3::default(), FxQuat::IDENTITY);
-        f(w.get_mut(id).unwrap().unit.as_mut().unwrap());
+        let u = w.get_mut(id).unwrap().unit.as_mut().unwrap();
+        // As `spawn_unit` makes it.
+        u.resource_consumed = Fx::ONE;
+        f(u);
+    }
+
+    /// A mex (mass out, energy upkeep) in an energy stall makes only the
+    /// served share of its mass, a tick behind; a natural producer
+    /// (`Economy.NaturalProducer`) makes all of it.
+    #[test]
+    fn production_follows_the_served_share_of_upkeep() {
+        for natural in [false, true] {
+            let mut w = EntityWorld::default();
+            // 1 energy a tick of income against 4 asked: 25% served.
+            unit(&mut w, 1, |u| {
+                u.production_active = true;
+                u.production_energy = fx(10.0);
+                u.natural_producer = true;
+            });
+            unit(&mut w, 1, |u| {
+                u.production_active = true;
+                u.production_mass = fx(20.0);
+                u.consumption_active = true;
+                u.consumption_energy = fx(40.0);
+                u.natural_producer = natural;
+            });
+            let mut a = armies(1);
+            a.list[0].economy.mass.granted_storage = fx(100.0);
+            step(&mut w, &mut a, &mut EconomyEvents::default());
+            assert_eq!(a.list[0].economy.mass.income, fx(2.0), "fully served before the first settle");
+            step(&mut w, &mut a, &mut EconomyEvents::default());
+            let want = if natural { fx(2.0) } else { fx(0.5) };
+            assert_eq!(a.list[0].economy.mass.income, want, "natural producer: {natural}");
+        }
     }
 
     #[test]
@@ -395,15 +567,17 @@ mod tests {
         let mut events = EconomyEvents::default();
         // 300 energy over 3 s = 30 ticks of 10.
         let ev = events.create(id, fx(300.0), Fx::ZERO, fx(3.0));
-        for _ in 0..29 {
+        for _ in 0..30 {
             step(&mut w, &mut a, &mut events);
         }
         assert!(!events.is_done(ev));
+        assert_eq!(a.list[0].economy.energy.stored, fx(700.0), "paid exactly 300 over 30 ticks");
         step(&mut w, &mut a, &mut events);
-        assert!(events.is_done(ev), "done on tick 30");
-        assert_eq!(a.list[0].economy.energy.stored, fx(700.0), "paid exactly 300");
-        // Instant events (time 0) take one tick.
+        assert!(events.is_done(ev), "done on tick 31: each grant is used the tick after");
+        // Instant events (time 0): granted on the first tick, done on the second.
         let ov = events.create(id, fx(100.0), Fx::ZERO, Fx::ZERO);
+        step(&mut w, &mut a, &mut events);
+        assert!(!events.is_done(ov));
         step(&mut w, &mut a, &mut events);
         assert!(events.is_done(ov));
     }
@@ -417,7 +591,10 @@ mod tests {
     fn give_storage_replaces_the_script_storage() {
         let mut w = EntityWorld::default();
         let mut a = armies(1);
-        unit(&mut w, 1, |u| u.storage_energy = fx(3900.0));
+        unit(&mut w, 1, |u| {
+            u.production_active = true;
+            u.storage_energy = fx(3900.0);
+        });
         step(&mut w, &mut a, &mut EconomyEvents::default());
         let e = &mut a.list[0].economy;
         assert_eq!(e.energy.capacity, fx(3900.0));
@@ -436,13 +613,41 @@ mod tests {
         let mut w = EntityWorld::default();
         let mut a = armies(1);
         a.list[0].economy.energy.granted_storage = fx(1000.0);
-        a.list[0].economy.energy.stored = fx(5.0);
-        let id = w.spawn(EntityKind::Unit, BlueprintKind::Unit, "u".into(), Some(1), FxVec3::default(), FxQuat::IDENTITY);
+        // 5 energy a tick against the event's 10.
+        unit(&mut w, 1, |u| {
+            u.production_active = true;
+            u.production_energy = fx(50.0);
+        });
+        let id = w.iter().next().unwrap().id;
         let mut events = EconomyEvents::default();
         let ev = events.create(id, fx(100.0), Fx::ZERO, fx(1.0));
         step(&mut w, &mut a, &mut events);
-        let p = events.map[&ev].progress().to_num::<f64>();
-        assert!((p - 0.05).abs() < 1e-6, "half of one tick's 10 served, of 10 ticks: {p}");
+        assert_eq!(events.map[&ev].progress(), Fx::ZERO, "half a step granted: no progress yet");
+        assert_eq!(a.list[0].economy.energy.expense, fx(5.0), "but drawn");
+        step(&mut w, &mut a, &mut events);
+        assert_eq!(a.list[0].economy.energy.requested, fx(5.0), "only the missing half asked for");
+        assert_eq!(events.map[&ev].paid, Fx::ZERO, "complete, used next tick");
+        step(&mut w, &mut a, &mut events);
+        assert_eq!(events.map[&ev].paid, Fx::ONE, "one whole step of 10");
+        // A steady stall still gets there (f32-like rounding of the last bit).
+        let mut events = EconomyEvents::default();
+        let ev = events.create(id, fx(300.0), Fx::ZERO, fx(1.0));
+        for _ in 0..80 {
+            step(&mut w, &mut a, &mut events);
+        }
+        assert!(events.is_done(ev));
+    }
+
+    /// Moho truncates an event's ticks: 2.55 s is 25 paid ticks (done on
+    /// the 26th, as each grant is used a tick late).
+    #[test]
+    fn economy_event_ticks_truncate() {
+        let mut events = EconomyEvents::default();
+        let unit: EntityId = 0;
+        let ev = events.create(unit, fx(255.0), Fx::ZERO, fx(2.55));
+        assert_eq!(events.map[&ev].ticks, fx(25.0));
+        let ev = events.create(unit, fx(1.0), Fx::ZERO, fx(0.05));
+        assert_eq!(events.map[&ev].ticks, Fx::ONE, "at least one");
     }
 
     fn armies(n: u32) -> Armies {
@@ -525,6 +730,58 @@ mod tests {
         assert_eq!(econ.mass.stored, fx(99.75));
         let consumed = w.iter().nth(1).unwrap().unit.as_ref().unwrap().resource_consumed;
         assert_eq!(consumed, fx(0.25));
+    }
+
+    /// Short of both: everything asking for the scarcer resource gets its
+    /// ratio, and those wanting only the other share what the throttled dual
+    /// consumers left of it (moho's split), not their own `A / T`.
+    #[test]
+    fn double_stall_gives_the_rest_to_the_other_resources_consumers() {
+        let mut w = EntityWorld::default();
+        // Dual: 10 mass and 10 energy a tick; energy only: 10 a tick.
+        unit(&mut w, 1, |u| {
+            u.consumption_active = true;
+            u.consumption_mass = fx(100.0);
+            u.consumption_energy = fx(100.0);
+        });
+        unit(&mut w, 1, |u| {
+            u.consumption_active = true;
+            u.consumption_energy = fx(100.0);
+        });
+        let mut a = armies(1);
+        let e = &mut a.list[0].economy;
+        // Mass 3 of 10 (0.3), energy 8 of 20 (0.4): mass limits.
+        (e.mass.granted_storage, e.mass.stored) = (fx(100.0), fx(3.0));
+        (e.energy.granted_storage, e.energy.stored) = (fx(100.0), fx(8.0));
+        step(&mut w, &mut a, &mut EconomyEvents::default());
+        let consumed: Vec<f64> = w.iter().map(|e| e.unit.as_ref().unwrap().resource_consumed.to_num()).collect();
+        assert!((consumed[0] - 0.3).abs() < 1e-6, "the dual consumer at the mass ratio: {consumed:?}");
+        // 8 - 3 energy left for the 10 asked: 0.5, not energy's own 0.4.
+        assert!((consumed[1] - 0.5).abs() < 1e-6, "the energy consumer gets what's left: {consumed:?}");
+        let e = &a.list[0].economy;
+        assert!(e.energy.stored < fx(1e-6) && e.mass.stored < fx(1e-6), "both drawn dry: {:?}", (e.mass.stored, e.energy.stored));
+    }
+
+    /// `SetProductionActive(false)` takes the unit's storage away with its
+    /// production; turning it back on restores it.
+    #[test]
+    fn storage_counts_only_with_production_active() {
+        let mut w = EntityWorld::default();
+        unit(&mut w, 1, |u| {
+            u.production_active = true;
+            u.storage_energy = fx(500.0);
+        });
+        let mut a = armies(1);
+        step(&mut w, &mut a, &mut EconomyEvents::default());
+        assert_eq!(a.list[0].economy.energy.capacity, fx(500.0));
+        a.list[0].economy.energy.stored = fx(400.0);
+        w.iter_mut().next().unwrap().unit.as_mut().unwrap().production_active = false;
+        step(&mut w, &mut a, &mut EconomyEvents::default());
+        let e = &a.list[0].economy.energy;
+        assert_eq!((e.capacity, e.stored), (Fx::ZERO, Fx::ZERO), "no storage, so nothing kept");
+        w.iter_mut().next().unwrap().unit.as_mut().unwrap().production_active = true;
+        step(&mut w, &mut a, &mut EconomyEvents::default());
+        assert_eq!(a.list[0].economy.energy.capacity, fx(500.0));
     }
 
     /// Allies both ways between every pair in `group`.

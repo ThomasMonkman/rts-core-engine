@@ -1,11 +1,12 @@
 //! Command-line options (`--help` lists them). See docs/guides/running.md.
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 
-use rts_core_engine::engine::session::{AutoTeams, SessionConfig};
+use rts_core_engine::engine::session::{AiChoice, AutoTeams, SessionConfig};
 use rts_core_engine::engine::snapshot::{DebugRequest, SimControl};
 
 /// The repository's licence (GPL-3.0, `LICENSE`; also the packages'
@@ -81,6 +82,15 @@ pub struct Cli {
     /// --script moves their units; stress tests).
     #[arg(long)]
     pub no_ai: bool,
+
+    /// The AI the armies get, by its lobby key (repeatable): `KEY` for
+    /// every AI army, `N=KEY` for army N. E.g. `--ai RNGStandard --ai
+    /// 1=easy --ai 2=adaptive`: slot 1 runs easy, slot 2 adaptive, and
+    /// every other AI slot RNGStandard. An AI mod's keys need its `--mod`.
+    /// `--ai list` stops with the keys the game (and the session's mods)
+    /// offers. Default: FAF's adaptive (other game code: its lobby's first).
+    #[arg(long = "ai", value_name = "[N=]KEY", conflicts_with = "no_ai")]
+    pub ai: Vec<String>,
 
     /// Runs a mod (its uid, from its `mod_info.lua`; repeatable), as if
     /// the lobby had it on: a sim mod in the sim, a UI-only one in the
@@ -180,6 +190,17 @@ pub struct Cli {
     /// 0 disables.
     #[arg(long, value_name = "SECS", default_value_t = 30)]
     pub stall_timeout: u64,
+
+    /// Lua debugger: listen on 127.0.0.1:PORT (default 4711) for VS Code
+    /// (or any Debug Adapter Protocol client). Breakpoints, stepping and
+    /// variables in the sim and interface Lua. See docs/guides/debugging-lua.md.
+    #[arg(long, value_name = "PORT", num_args = 0..=1, default_missing_value = "4711")]
+    pub lua_debug: Option<u16>,
+
+    /// With --lua-debug (implied): wait for the debugger to attach before
+    /// running any Lua, so breakpoints in start-up code are hit.
+    #[arg(long)]
+    pub lua_debug_wait: bool,
 
     /// Log file (also shown in the window's Logs panel). Give separate runs
     /// separate files so they don't overwrite each other. Defaults to
@@ -317,6 +338,98 @@ pub struct Cli {
     /// case's row.
     #[arg(long, value_name = "N[@B]", value_parser = parse_audit_key)]
     pub audit_test: Option<String>,
+
+    /// Reload game files edited on disk while the game runs (the game's
+    /// `/EnableDiskWatch`): scripts (the next `import` runs them again),
+    /// blueprints (FAF's `ReloadBlueprint`), models and textures. The
+    /// interface reloads every frame, the sim between ticks (not in a
+    /// networked game).
+    #[arg(long)]
+    pub enable_disk_watch: bool,
+
+    /// The game's own `/switch` arguments that had no meaning here and
+    /// were dropped (see [`moho_args`]), logged at startup.
+    #[arg(skip)]
+    pub ignored_moho_args: Vec<String>,
+}
+
+/// Translates the real game's command line (`SupremeCommander.exe /log
+/// <file> /init <file>`, as LOUD's launcher and shortcuts run it) into
+/// ours, so this program can stand in for `bin/SupremeCommander.exe`.
+///
+/// - `/init <file>` becomes `--fa <file>`. A relative path is read from the
+///   program's folder, as the real game reads it.
+/// - `/log <file>` becomes `--log <file>`. A relative path is read from the
+///   working directory, as the real game reads it.
+/// - Either is read from the other folder instead when only that one has
+///   the init file (or, for the log, its folder).
+/// - LOUD's launcher runs from the Forged Alliance folder with `/init
+///   "..\LOUD\bin\LoudDataPath.lua"` (a path from `bin/`) and `/log
+///   "LOUD\bin\LOUD.log"` (from the working directory; older versions pass
+///   `..\LOUD\bin\LOUD.log`, from `bin/`).
+/// - `/EnableDiskWatch` becomes `--enable-disk-watch`.
+/// - Any other `/switch` (one word after the slash, so
+///   `/maps/x/x_scenario.lua` stays a value) is dropped with the values
+///   after it, as moho ignores switches it doesn't read.
+///
+/// Returns the new arguments and the dropped ones.
+pub fn moho_args(args: Vec<OsString>, exe_dir: Option<&Path>) -> (Vec<OsString>, Vec<String>) {
+    let is_switch = |a: &OsString| {
+        let a = a.to_string_lossy();
+        a.strip_prefix('/').is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+    };
+    let is_value = |a: &OsString| !is_switch(a) && !a.to_string_lossy().starts_with('-');
+    // `exists` says whether a candidate is the one meant; with neither, the
+    // folder moho reads it from (so an error names the path it would have).
+    let resolve = |p: &OsString, exists: fn(&Path) -> bool, from_exe: bool| -> OsString {
+        let p = Path::new(p);
+        match exe_dir {
+            Some(dir) if p.is_relative() => {
+                let beside = dir.join(p);
+                let (first, second) = if from_exe { (beside, p.to_path_buf()) } else { (p.to_path_buf(), beside) };
+                if !exists(&first) && exists(&second) { second.into_os_string() } else { first.into_os_string() }
+            }
+            _ => p.as_os_str().to_owned(),
+        }
+    };
+    let is_file: fn(&Path) -> bool = |p| p.is_file();
+    let in_a_folder: fn(&Path) -> bool = |p| p.parent().is_some_and(|d| d.as_os_str().is_empty() || d.is_dir());
+    let mut out = Vec::with_capacity(args.len());
+    let mut ignored = Vec::new();
+    let mut it = args.into_iter().peekable();
+    // The program's own path.
+    out.extend(it.next());
+    while let Some(arg) = it.next() {
+        if !is_switch(&arg) {
+            out.push(arg);
+            continue;
+        }
+        let name = arg.to_string_lossy().to_ascii_lowercase();
+        // Switches without a value.
+        if name == "/enablediskwatch" {
+            out.push("--enable-disk-watch".into());
+            continue;
+        }
+        let ours = match name.as_str() {
+            "/init" => Some(("--fa", is_file, true)),
+            "/log" => Some(("--log", in_a_folder, false)),
+            _ => None,
+        };
+        match (ours, it.next_if(is_value)) {
+            (Some((flag, exists, from_exe)), Some(value)) => {
+                out.push(flag.into());
+                out.push(resolve(&value, exists, from_exe));
+            }
+            (_, value) => {
+                ignored.push(arg.to_string_lossy().into_owned());
+                ignored.extend(value.map(|v| v.to_string_lossy().into_owned()));
+                while let Some(v) = it.next_if(is_value) {
+                    ignored.push(v.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    (out, ignored)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -373,7 +486,7 @@ fn parse_overlay(s: &str) -> Result<Overlay, String> {
 /// Options that only mean something in a game session: giving any of them
 /// skips the main menu, as `--session` does.
 const SESSION_OPTIONS: &[&str] = &[
-    "ticks", "map", "armies", "teams", "auto_teams", "fog", "victory", "prebuilt", "no_ai", "seed", "script", "camera", "overlay", "select", "player", "record", "replay",
+    "ticks", "map", "armies", "teams", "auto_teams", "fog", "victory", "prebuilt", "no_ai", "ai", "seed", "script", "camera", "overlay", "select", "player", "record", "replay",
     "profile_stages", "net_host", "net_join", "net_bot", "mods",
 ];
 
@@ -390,7 +503,11 @@ impl Cli {
 
     /// Parses the process arguments (exits on `--help` or an error).
     pub fn parse_args() -> Self {
-        Self::from_matches(&Self::command().get_matches()).unwrap_or_else(|e| e.exit())
+        let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf));
+        let (args, ignored) = moho_args(std::env::args_os().collect(), exe_dir.as_deref());
+        let mut cli = Self::from_matches(&Self::command().get_matches_from(args)).unwrap_or_else(|e| e.exit());
+        cli.ignored_moho_args = ignored;
+        cli
     }
 
     #[cfg(test)]
@@ -400,6 +517,9 @@ impl Cli {
 
     fn from_matches(matches: &ArgMatches) -> Result<Self, clap::Error> {
         let mut cli = Self::from_arg_matches(matches)?;
+        if let Err(e) = AiChoice::parse(&cli.ai) {
+            return Err(Self::command().error(clap::error::ErrorKind::ValueValidation, e));
+        }
         cli.session |= cli.headless || SESSION_OPTIONS.iter().any(|id| matches.value_source(id) == Some(ValueSource::CommandLine));
         Ok(cli)
     }
@@ -422,6 +542,7 @@ impl Cli {
             fog_of_war: self.fog.clone(),
             victory: self.victory.clone(),
             mods: self.mods.clone(),
+            ai_choice: AiChoice::parse(&self.ai).expect("checked when parsed"),
             ..SessionConfig::default()
         }
     }
@@ -488,6 +609,20 @@ mod tests {
     }
 
     #[test]
+    fn ai_takes_a_default_and_per_army_keys() {
+        let c = Cli::try_parse_args(["rts", "--ai", "RNGStandard", "--ai", "2=adaptive", "--ai", "5=rush"]).unwrap();
+        assert!(c.session, "--ai is a session option");
+        let ai = c.session().ai_choice;
+        assert_eq!(ai.default.as_deref(), Some("RNGStandard"));
+        assert_eq!(ai.armies, vec![(2, "adaptive".to_string()), (5, "rush".to_string())]);
+        assert_eq!(ai.values(), ["RNGStandard", "2=adaptive", "5=rush"], "the replay header's form");
+        assert!(Cli::try_parse_args(["rts"]).unwrap().session().ai_choice.is_empty(), "the game code's default");
+        for bad in [&["--ai", "a", "--ai", "b"][..], &["--ai", "0=adaptive"], &["--ai", "x=adaptive"], &["--ai", "2="], &["--ai", "2=a", "--ai", "2=b"], &["--ai", "a", "--no-ai"]] {
+            assert!(Cli::try_parse_args([&["rts"][..], bad].concat()).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn speed_paces_a_window_always_and_a_headless_run_only_when_given() {
         let pace = |args: &[&str], headless| Cli::try_parse_from([&["rts"][..], args].concat()).unwrap().pace(headless);
         assert_eq!(pace(&[], false), Some(100), "a window defaults to normal speed");
@@ -538,6 +673,34 @@ mod tests {
         assert!(!menu(&["--player", "1"]));
         assert!(!menu(&["--seed", "0"]), "a session option counts even at its default value");
         assert!(!menu(&["--auto-teams", "north-south"]));
+    }
+
+    /// LOUD's launcher command line: `/init` and `/log` map to ours, `/init`
+    /// read from the program's folder and `/log` from the working directory
+    /// (each from the other when only that one exists); other switches drop with their values;
+    /// our own flags and VFS paths pass through.
+    #[test]
+    fn translates_the_real_games_command_line() {
+        let args = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
+        let bin = Path::new("C:/FA/bin");
+        let (out, ignored) = moho_args(args(&["exe", "/log", "..\\LOUD\\bin\\LOUD.log", "/init", "..\\LOUD\\bin\\LoudDataPath.lua", "/nobugreport", "/gpgnet", "127.0.0.1:1", "--map", "/maps/x/x_scenario.lua"]), Some(bin));
+        assert_eq!(
+            out,
+            args(&["exe", "--log", "..\\LOUD\\bin\\LOUD.log"]).into_iter().chain(["--fa".into(), bin.join("..\\LOUD\\bin\\LoudDataPath.lua").into_os_string(), "--map".into(), "/maps/x/x_scenario.lua".into()]).collect::<Vec<_>>()
+        );
+        assert_eq!(ignored, ["/nobugreport", "/gpgnet", "127.0.0.1:1"]);
+        let abs = if cfg!(windows) { "C:\\x\\init.lua" } else { "/x/init.lua" };
+        assert_eq!(moho_args(args(&["exe", "/INIT", abs]), Some(bin)).0, args(&["exe", "--fa", abs]));
+        let c = Cli::try_parse_from(moho_args(args(&["exe", "/init", "a.lua", "/log", "b.log"]), Some(bin)).0).unwrap();
+        assert_eq!((c.fa, c.log), (Some(bin.join("a.lua")), Some(PathBuf::from("b.log"))));
+        // Each from the other folder when only that one has it: the
+        // repository root (the tests' working directory) has these.
+        let c = Cli::try_parse_from(moho_args(args(&["exe", "/log", "src/x.log", "/init", "Cargo.toml"]), Some(bin)).0).unwrap();
+        assert_eq!((c.fa, c.log), (Some(PathBuf::from("Cargo.toml")), Some(PathBuf::from("src/x.log"))));
+        // A switch without a value keeps the next argument.
+        let c = Cli::try_parse_from(moho_args(args(&["exe", "/EnableDiskWatch", "/log", "b.log"]), Some(bin)).0).unwrap();
+        assert!(c.enable_disk_watch);
+        assert_eq!(c.log, Some(PathBuf::from("b.log")));
     }
 
     #[test]

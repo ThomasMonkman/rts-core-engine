@@ -93,6 +93,7 @@ impl Skirts {
 /// borrowed.
 #[derive(Default)]
 pub struct SkirtCache(std::cell::OnceCell<Skirts>);
+crate::engine::api::blueprints::derived_cache!(SkirtCache);
 
 fn with_skirts<R>(lua: &Lua, f: impl FnOnce(&Skirts) -> R) -> LuaResult<R> {
     let cache = lua.app_data_ref::<SkirtCache>().expect("SkirtCache");
@@ -355,9 +356,10 @@ pub fn adjacent_structures(lua: &Lua, id: crate::engine::sim::entity::EntityId) 
 /// repeatedly; parse each blueprint's expressions once).
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct BuildableCache(std::collections::BTreeMap<String, crate::engine::sim::category::CategorySet>);
+crate::engine::api::blueprints::derived_cache!(BuildableCache);
 
 /// What blueprint `bp_id` can build at all (its `BuildableCategory` union).
-fn buildable(lua: &Lua, bp_id: &str) -> LuaResult<crate::engine::sim::category::CategorySet> {
+pub(crate) fn buildable(lua: &Lua, bp_id: &str) -> LuaResult<crate::engine::sim::category::CategorySet> {
     if let Some(set) = lua.app_data_ref::<BuildableCache>().and_then(|c| c.0.get(bp_id).cloned()) {
         return Ok(set);
     }

@@ -235,8 +235,20 @@ fn realistic_launch(lua: &Lua, launcher: EntityId, launch: Launch, dir: FxVec3) 
     }
 }
 
+// The parsed templates sit beside the live projectiles: only they go.
+inventory::submit! {
+    crate::engine::api::blueprints::DerivedCache {
+        name: "projectile templates",
+        forget: |lua| {
+            if let Some(mut p) = lua.app_data_mut::<Projectiles>() {
+                p.forget_templates();
+            }
+        },
+    }
+}
+
 /// The `Physics` template of blueprint `bp_id` (parsed once, then cached).
-fn template_of(lua: &Lua, bp_id: &str, bp: &LuaTable) -> LuaResult<std::sync::Arc<ProjectileTemplate>> {
+pub(crate) fn template_of(lua: &Lua, bp_id: &str, bp: &LuaTable) -> LuaResult<std::sync::Arc<ProjectileTemplate>> {
     let cached = projectiles(lua).template(bp_id);
     match cached {
         Some(t) => Ok(t),
@@ -345,6 +357,9 @@ pub fn spawn_projectile(lua: &Lua, launcher: EntityId, bp_path: &str, position: 
     if let Some(timeout) = template.camera_follow
         && let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
         p.camera_follows.push(crate::engine::sim::presentation::CameraFollow { launcher, projectile: id, timeout });
+    }
+    if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
+        p.launches.push((id, [position.x.to_num(), position.y.to_num(), position.z.to_num()]));
     }
     let mut state = ProjectileState::new(id, Some(launcher), &template, velocity);
     state.turn_rate = turn_rate;
@@ -505,11 +520,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             continue;
         }
         match impact.kind {
-            ImpactKind::Air => {
-                if world(lua).destroy(impact.id) {
-                    ProjectileCallbacks::on_destroy(lua, &Obj::<moho::Projectile>::new(obj.clone()), "projectile")?;
-                }
-            }
+            ImpactKind::Air => crate::engine::api::entity::destroy(lua, &Obj::new(obj.clone()))?,
             // Still flying after hitting the ground: no more surface hits.
             ImpactKind::Terrain => {
                 if let Some(p) = projectiles(lua).get_mut(impact.id) {

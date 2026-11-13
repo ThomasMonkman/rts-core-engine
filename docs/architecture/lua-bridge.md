@@ -30,6 +30,14 @@ A file that's missing does nothing. One that doesn't compile is skipped with a w
 ### `import`
 `import(path)` is FAF's own Lua (`/lua/system/import.lua`), built on our `doscript(path, env)`. It makes a module table whose metatable falls back to `_G`, runs the file in it, and caches it. Each module gets its own environment, so its globals don't leak into `_G`. Every caller gets the **same** table, which class inheritance depends on.
 
+### Reloading changed files
+`--enable-disk-watch` (the game's `/EnableDiskWatch`) watches the VFS's folder mounts (`src/engine/disk_watch.rs`). When a file already in the VFS changes, its cached source and bytecode are dropped and it joins a change log. Each consumer reads the log from its own cursor:
+- **Scripts**: each VM calls every function in its `__diskwatch` table with the lowercase VFS path. FAF's `import.lua` registers `dirty_module` there: it runs the module's `__moduleinfo.OnDirty`, then removes it and every module that imported it from `__modules`, so the next `import` runs the new file (and `OnReload` gets the new module). A changed hook file reloads the script it hooks.
+- **Blueprints**: a changed `.bp` goes to the VM's `ReloadBlueprint` (FAF's `Blueprints.lua`), which re-runs the file and the mod pipeline on that blueprint alone and registers it again. The new fields are merged into the table registered before, which keeps its ordinal and identity, so a field the new file leaves out keeps its old value, as FAF documents for moho. Then unit defaults and `categories` are rebuilt, and the sim's per-blueprint caches are cleared (footprints, skirts, buildable sets, projectile templates, effect lifetimes). Each such cache registers itself as a `DerivedCache` beside its type (`derived_cache!`, `src/engine/api/blueprints.rs`); a new one must, and must be added to the test `every_derived_cache_is_rebuilt_on_reload`. Units already out keep what the sim copied into them when they were made; new ones get the new blueprint.
+- **Models and textures**: the renderer reloads any model whose mesh or textures changed, and any animation clip, when next drawn. It also reloads emitter, trail and beam blueprints and their textures for new effects, and interface textures.
+
+The interface is told every frame, the sim before each tick (but not in a networked game, where it would desync), and the renderer with each snapshot. A sim reload marks the game's recording, which then won't load ([replays.md](replays.md#recordings)). `tests/disk_watch.rs` edits a mod's files under a running game. Not reloaded: files inside archives, files added after startup, the map (terrain, decals), strategic icons, sounds, and the sim's copies of skeletons and clips (bone positions).
+
 ## Translation: SupCom Lua to Luau
 
 `src/engine/lua_translation/`, one module per difference, run in this order by `translate()`:
@@ -53,7 +61,7 @@ To add one: write a new pass module, add it to `translate()`, and test it agains
 FAF uses `ForkThread` / `WaitSeconds` extensively. Key design:
 - `ForkThread(fn, ...)` pushes to a `pending_fork` queue; picked up at end of tick
 - `WaitSeconds(n)` yields with a resume tick target
-- Sim waits are moho's (`Scheduler::wait`, measured in the real game): `coroutine.yield(n)` (FAF's sim `WaitTicks`) wakes `floor(n) - 1` ticks later, at least 1; below 1 it runs again the same tick; a bare yield suspends until `ResumeThread`. FAF's `WaitSeconds(n)` is `WaitTicks(n * 10 + 1)`, so `n` seconds. The interface VM's yields still wait `max(n, 1)` frames (unmeasured)
+- Sim waits are moho's (`Scheduler::wait`, measured in the real game): `coroutine.yield(n)` (FAF's sim `WaitTicks`) wakes `floor(n) - 1` ticks later, at least 1; below 1 it runs again at once, before any other thread; a bare yield, or one of a non-number or a negative count, ends the thread (`CLuaTask::Execute`). `ResumeThread` also cuts a `WaitTicks` short: the thread runs this tick if the pass hasn't reached it yet, else next tick (`Scheduler::resume`). FAF's `WaitSeconds(n)` is `WaitTicks(n * 10 + 1)`, so `n` seconds. The interface VM's yields still wait `max(n, 1)` frames (unmeasured)
 - Scheduler: `BinaryHeap` (sleeping by tick) + `VecDeque` (ready to run)
 - Run `drain_ready_queue()` each tick, then `wake_sleeping_tasks(current_tick)`
 - Collect pending forks **after each resume** so children are visible same tick
@@ -83,6 +91,8 @@ Luau types are static analysis only — VM does not enforce at runtime. Use `lua
 | Behaviour | Where |
 |-----------|-------|
 | Indexing `nil` yields `nil` (writes/calls still raise) | `api/nil_metatable.rs` — per-type metatable on nil |
+| Indexing a boolean, number, function or userdata yields `nil` too (writes still raise); ours logs a warning once per call site for numbers, functions and userdata, as that is nearly always a script bug | `api/nil_metatable.rs` (`register_number_metatable`, `register_functions`, `add_nil_index` on every handle type) |
+| `VDist3` reads a `nil` vector as `{0, 0, 0}` (`VDist3Sq` and `VDist2` raise) | `lua/shims/vector_math.lua` |
 | Ordering comparisons with `nil` or mismatched types are `false` | patched Luau, `vendor/luau0-src/MOHO_PATCHES.md` |
 | Implicit vararg `arg` table | `lua_translation/vararg.rs` |
 | `math.mod`, `math.pow`, `string.gfind`, `table.setn` | `lua/shims/lua50_aliases.lua` |

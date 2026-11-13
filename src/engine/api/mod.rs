@@ -23,6 +23,7 @@ pub mod command_source;
 pub mod player_input;
 pub mod damage;
 pub mod debug;
+pub mod debug_draw;
 pub mod deposits;
 pub mod destroyed;
 pub mod disk_find_files;
@@ -106,6 +107,7 @@ pub fn register_safe(lua: &mlua::Lua) -> mlua::Result<()> {
     // active mod's uid (sim mods' blueprint load).
     nil_metatable::register_booleans(lua)?;
     nil_metatable::register_number_metatable(lua)?;
+    nil_metatable::register_functions(lua)?;
     disk_get_file_info::register(lua)?;
     blueprints::register(lua)?;
     // Up front: registering a mesh later then needs no container borrow
@@ -136,6 +138,7 @@ pub fn register_safe(lua: &mlua::Lua) -> mlua::Result<()> {
     sim_time::register(lua)?;
     unit::register(lua)?;
     beam::register(lua)?;
+    debug_draw::register(lua)?;
     script_task::register(lua)?;
     economy_event::register(lua)?;
     silo::register(lua)?;

@@ -124,6 +124,9 @@ pub struct UiRenderer {
     movie_pipeline: wgpu::RenderPipeline,
     movie_layout: wgpu::BindGroupLayout,
     movies: HashMap<ControlId, MovieTexture>,
+    /// How far into the files changed on disk the textures have been
+    /// reloaded (`--enable-disk-watch`: `engine::disk_watch`).
+    disk_watch_cursor: usize,
 }
 
 /// What a draw call samples.
@@ -226,6 +229,25 @@ impl UiRenderer {
             movie_pipeline,
             movie_layout,
             movies: HashMap::new(),
+            disk_watch_cursor: rts_core_engine::engine::disk_watch::change_count(),
+        }
+    }
+
+    /// Textures changed on disk (`--enable-disk-watch`) are read again at
+    /// their next use (an atlas image's old space is reclaimed when the
+    /// atlas is next regenerated).
+    fn reload_changed(&mut self) {
+        let changed = rts_core_engine::engine::disk_watch::changes_since(&mut self.disk_watch_cursor);
+        if changed.is_empty() {
+            return;
+        }
+        let hit = |p: &str| changed.iter().any(|c| *c == rts_core_engine::engine::vfs::normalise(p));
+        self.slots.retain(|k, _| !matches!(k, Key::Texture(p) if !p.starts_with('#') && hit(p)));
+        let own: Vec<String> = self.own_by_path.keys().filter(|p| !p.starts_with('#') && hit(p)).cloned().collect();
+        for p in own {
+            if let Some(i) = self.own_by_path.remove(&p) {
+                self.own[i] = None;
+            }
         }
     }
 
@@ -478,6 +500,7 @@ impl UiRenderer {
 
     /// Builds this frame's vertices from the draw list (`screen` in pixels).
     pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, items: &[DrawItem], screen: [f32; 2]) {
+        self.reload_changed();
         queue.write_buffer(&self.screen, 0, bytemuck::cast_slice(&[screen[0], screen[1], 0.0, 0.0]));
         let mut verts = Vec::with_capacity(items.len() * 6);
         for m in self.movies.values_mut() {

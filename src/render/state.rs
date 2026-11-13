@@ -121,6 +121,8 @@ pub struct RenderState {
     pub ui_alliances: Option<std::sync::Arc<Vec<(u32, u32, crate::engine::sim::army::Alliance)>>>,
     /// The army display the user layer has (`Scene::army_display`).
     pub ui_army_display: Option<std::sync::Arc<Vec<crate::engine::snapshot::ArmyDisplay>>>,
+    /// The custom names the user layer has (`Scene::custom_names`).
+    pub ui_custom_names: Option<std::sync::Arc<Vec<(u32, String)>>>,
     /// The `TeamColorMode` version the scene has.
     pub ui_team_colors: u64,
     /// The interface's draw list this frame (physical pixels), drawn over
@@ -160,6 +162,8 @@ pub struct RenderState {
     pub show_debug: bool,
     /// The egui stats bar along the bottom (its own button toggles it).
     pub show_status: bool,
+    /// The stats bar's network panel and its view of the links.
+    pub bar: crate::render::status_bar::BarUi,
     /// `--no-aa`: anti-aliasing off whatever the interface's settings say.
     pub no_aa: bool,
     /// `--window-size`: the window keeps that size (the profile's display
@@ -514,6 +518,7 @@ impl RenderState {
             ui_selection: Vec::new(),
             ui_alliances: None,
             ui_army_display: None,
+            ui_custom_names: None,
             ui_team_colors: 0,
             ui_shift: false,
             build_drag: None,
@@ -551,6 +556,7 @@ impl RenderState {
             rollover: None,
             show_debug: false,
             show_status: true,
+            bar: Default::default(),
             ui_cursor: rts_core_engine::ui::cursor::Wanted::System,
             os_cursor: rts_core_engine::ui::cursor::Wanted::System,
             os_cursors: Default::default(),
@@ -851,6 +857,31 @@ impl RenderState {
         self.pace_main();
     }
 
+    /// The second head's window was closed: the head goes, the game runs
+    /// on (moho exits; issue #25). Its present thread ends with its
+    /// channel and frees its surface and scene. The interface is down to
+    /// one head: root frame 1's controls stay, drawn nowhere, and what
+    /// asks `GetNumRootFrames` from here on opens on the main window. It
+    /// isn't made again this run (Secondary Adapter is read once).
+    pub fn close_second_head(&mut self) {
+        let Some(h) = self.second.take() else { return };
+        // Off the screen now (the thread drops the window after its frame).
+        if let Some(window) = &h.window {
+            window.set_visible(false);
+        }
+        drop(h);
+        self.cursor_head = 0;
+        self.input.cursor = None;
+        self.world.set_head_views(1, Vec::new());
+        self.world.set_active_head(0);
+        for vm in self.ui.iter().chain(&self.ui_booting) {
+            vm.set_heads(1);
+        }
+        tracing::info!("second head closed");
+        self.pace_main();
+        self.apply_visibility();
+    }
+
     /// The main window paces its frames by its monitor's refresh while a
     /// second head with a window shares the device (`Presenter::pace`: each
     /// head's wait for a drawable otherwise holds up the other's submits);
@@ -1079,6 +1110,11 @@ impl Percentiles {
             self.samples.pop_front();
         }
         self.samples.push_back(v);
+    }
+
+    /// The window, oldest first.
+    pub fn samples(&self) -> impl Iterator<Item = f32> + '_ {
+        self.samples.iter().copied()
     }
 
     /// The `q` (0..1) percentile of the window, 0 when empty.

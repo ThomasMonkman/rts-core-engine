@@ -27,7 +27,11 @@ use crate::engine::sim::entity::EntityId;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ScriptTaskHandle(pub EntityId);
-impl LuaUserData for ScriptTaskHandle {}
+impl LuaUserData for ScriptTaskHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 struct Task {
@@ -183,17 +187,18 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             (Some(t), Some(c)) if t.command == c => run(lua, unit, t, now)?,
             (Some(_), _) => {
                 destroy(lua, unit)?;
-                if let Some(c) = current {
+                if let Some(c) = current.filter(|_| !crate::engine::api::orders::held(&world(lua), unit)) {
                     create(lua, unit, c)?;
                 }
             }
-            (None, Some(c)) => {
+            // Moho's dispatch hold: no new task while held.
+            (None, Some(c)) if !crate::engine::api::orders::held(&world(lua), unit) => {
                 create(lua, unit, c)?;
                 if let Some(t) = lua.app_data_ref::<ScriptTasks>().and_then(|t| t.by_unit.get(&unit).copied()) {
                     run(lua, unit, t, now)?;
                 }
             }
-            (None, None) => {}
+            _ => {}
         }
     }
     // Drop order tables of finished script commands.

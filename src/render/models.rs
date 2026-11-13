@@ -249,6 +249,9 @@ pub struct Models {
     /// meshes loaded since last taken ([`Models::take_new_bounds`]): the
     /// main thread's picking and drag selection test them.
     new_bounds: Vec<(u32, [f32; 6])>,
+    /// Every sim mesh's bounds loaded so far (same form), by mesh index:
+    /// selection brackets are centred on them.
+    bounds: Vec<Option<[f32; 6]>>,
     /// For the loaders, which upload their textures themselves.
     gpu: (wgpu::Device, wgpu::Queue),
     /// The textures many models share (lookup, build), loaded once.
@@ -260,6 +263,8 @@ pub struct Models {
     done_tx: Sender<Done>,
     done_rx: Receiver<Done>,
     clips: Vec<ClipSlot>,
+    /// Each clip's file, by clip index (a clip changed on disk loads again).
+    clip_paths: Vec<String>,
     /// Per (mesh, clip): each mesh bone's clip bone.
     bindings: std::collections::BTreeMap<(u32, u32), Vec<Option<u32>>>,
     /// Draw calls this frame (the status bar; `Scene::draw` resets it).
@@ -462,6 +467,12 @@ impl Models {
         std::mem::take(&mut self.new_bounds)
     }
 
+    /// A sim mesh's bounds (mesh space, rest pose: min xyz, max xyz), once
+    /// it has loaded.
+    pub fn bounds(&self, index: u32) -> Option<[f32; 6]> {
+        self.bounds.get(index as usize).copied().flatten()
+    }
+
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, globals: &wgpu::BindGroupLayout, format: wgpu::TextureFormat, depth: wgpu::TextureFormat) -> Self {
         let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -590,6 +601,7 @@ impl Models {
         let palette_group = palette_bind_group(device, &palette_layout, &palette);
         Self {
             clips: Vec::new(),
+            clip_paths: Vec::new(),
             bindings: Default::default(),
             draws: Default::default(),
             geometry: Geometry { chunks: Vec::new() },
@@ -605,6 +617,7 @@ impl Models {
             interface_index: Default::default(),
             vfs: None,
             new_bounds: Vec::new(),
+            bounds: Vec::new(),
             gpu: (device.clone(), queue.clone()),
             shared: Default::default(),
             share_all: false,
@@ -660,6 +673,10 @@ impl Models {
             if self.clips.len() <= i {
                 self.clips.resize_with(i + 1, || ClipSlot::Failed);
             }
+            if self.clip_paths.len() <= i {
+                self.clip_paths.resize_with(i + 1, String::new);
+            }
+            self.clip_paths[i] = path.clone();
             self.clips[i] = ClipSlot::Idle(path);
         }
         for (i, asset) in meshes {
@@ -669,6 +686,39 @@ impl Models {
                 self.slots.resize_with(i + 1, || Slot::Idle);
             }
             self.assets[i] = Some(asset);
+        }
+    }
+
+    /// Files changed on disk (`--enable-disk-watch`; lowercase VFS paths):
+    /// every model using one as its mesh or a texture, and every clip from
+    /// one, loads again when next drawn (a model is a box until then).
+    pub fn reload(&mut self, changed: &[String]) {
+        let hit = |p: &str| !p.is_empty() && changed.iter().any(|c| *c == crate::engine::vfs::normalise(p));
+        for p in changed {
+            self.shared.forget(p);
+        }
+        let uses = |a: &RenderAsset| {
+            [a.mesh.as_str(), &a.albedo, &a.specteam, &a.normals].into_iter().chain(a.secondary.as_deref()).chain(a.lookup.as_deref()).any(hit)
+        };
+        let stale: Vec<u32> = (0..self.assets.len() as u32)
+            .chain((0..self.interface_assets.len() as u32).map(|k| INTERFACE_BASE + k))
+            .filter(|&i| self.asset(i).is_some_and(uses))
+            .collect();
+        for &i in &stale {
+            if let Some(slot) = self.slot_mut(i)
+                && matches!(slot, Slot::Ready(_) | Slot::Failed) {
+                *slot = Slot::Idle;
+            }
+        }
+        let stale_clips: Vec<u32> = (0..self.clip_paths.len() as u32).filter(|&c| hit(&self.clip_paths[c as usize])).collect();
+        for &c in &stale_clips {
+            if matches!(self.clips[c as usize], ClipSlot::Ready(_) | ClipSlot::Failed) {
+                self.clips[c as usize] = ClipSlot::Idle(self.clip_paths[c as usize].clone());
+            }
+        }
+        if !stale.is_empty() || !stale_clips.is_empty() {
+            self.bindings.retain(|(m, c), _| !stale.contains(m) && !stale_clips.contains(c));
+            tracing::info!(models = stale.len(), clips = stale_clips.len(), "disk watch: reloading models");
         }
     }
 
@@ -907,6 +957,10 @@ impl Models {
                             }
                         }
                         self.new_bounds.push((index, b));
+                        if self.bounds.len() <= index as usize {
+                            self.bounds.resize(index as usize + 1, None);
+                        }
+                        self.bounds[index as usize] = Some(b);
                     }
                     let verts: Vec<MeshVertex> = (0..mesh.positions.len())
                         .map(|v| MeshVertex {

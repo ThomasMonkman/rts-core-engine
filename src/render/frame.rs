@@ -458,7 +458,7 @@ fn to_physical(item: rts_core_engine::ui::controls::DrawItem, scale: f32) -> rts
     match item {
         D::Quad { rect, texture, uv, color, tiled } => D::Quad { rect: r(rect), texture, uv, color, tiled },
         D::Minimap { rect } => D::Minimap { rect: r(rect) },
-        D::World { rect, camera } => D::World { rect: r(rect), camera },
+        D::World { rect, camera, shapes } => D::World { rect: r(rect), camera, shapes },
         D::Text { rect, text, family, size, color, shadow, vertical } => D::Text { rect: r(rect), text, family, size: size * scale, color, shadow, vertical },
         D::Movie { rect, movie, frame, color } => D::Movie { rect: r(rect), movie, frame, color },
     }
@@ -1230,6 +1230,14 @@ fn update_ui(s: &mut RenderState, dt: f32) {
         }
         s.ui_army_display = Some(c.clone());
     }
+    // Units named by the sim (`SetCustomName`: AI and campaign commanders).
+    if let Some(n) = &s.world.custom_names
+        && !s.ui_custom_names.as_ref().is_some_and(|u| std::sync::Arc::ptr_eq(u, n)) {
+        if let Err(e) = vm.set_custom_names(n) {
+            tracing::warn!("UI custom names: {e}");
+        }
+        s.ui_custom_names = Some(n.clone());
+    }
     // The player's team colours (`TeamColorMode`: FAF's team colour button).
     let (version, team) = vm.team_colors();
     if version != s.ui_team_colors {
@@ -1337,6 +1345,11 @@ fn update_ui(s: &mut RenderState, dt: f32) {
                     s.player.script_ui(&s.world, o.units.as_deref(), o.script, !o.clear);
                     continue;
                 }
+                // `IssueDockCommand`: the interface picks the platform.
+                if o.command == "UNITCOMMAND_Dock" {
+                    s.player.issue_dock(&s.world, !o.clear);
+                    continue;
+                }
                 match rts_core_engine::ui::command_kind(&o.command) {
                     Some(kind) => {
                         // Blueprint orders (`IssueBlueprintCommand`: factory
@@ -1427,7 +1440,7 @@ fn update_ui(s: &mut RenderState, dt: f32) {
                 let _m = rts_core_engine::prof_span!("minimap items");
                 items.extend(minimap_items(s, rect));
             }
-            rts_core_engine::ui::controls::DrawItem::World { rect, camera } => views.push(crate::render::camera::View { camera, rect }),
+            rts_core_engine::ui::controls::DrawItem::World { rect, camera, shapes } => views.push(crate::render::camera::View { camera, rect, shapes }),
             other => items.push(other),
         }
     }
@@ -1442,7 +1455,7 @@ fn update_ui(s: &mut RenderState, dt: f32) {
         let (mut views, mut items) = (Vec::new(), Vec::new());
         for item in ui {
             match to_physical(item, scale) {
-                rts_core_engine::ui::controls::DrawItem::World { rect, camera } => views.push(crate::render::camera::View { camera, rect }),
+                rts_core_engine::ui::controls::DrawItem::World { rect, camera, shapes } => views.push(crate::render::camera::View { camera, rect, shapes }),
                 rts_core_engine::ui::controls::DrawItem::Minimap { .. } => {}
                 other => items.push(other),
             }
@@ -1990,106 +2003,47 @@ pub fn render_frame(s: &mut RenderState) {
     let raw_input = s.egui_state.take_egui_input(&s.window);
     let collector = s.collector.clone();
     let debug = s.debug_ui.lock().unwrap();
-    let tick_rate = s.world.tick_rate();
-    let frame_interval = s.frame_interval;
     s.memory.refresh(&s.device);
-    let (cpu_ms, cpu_p99, gpu_ms, render_ms) = (s.cpu_frame_ms, s.cpu_times.get(0.99), s.gpu_frame_ms, s.present_out.cpu_ms);
-    let (ram, vram) = (s.memory.ram, s.memory.vram);
-    let (tick_p50, tick_p99) = (s.tick_times.get(0.5), s.tick_times.get(0.99));
+    s.bar.net.refresh();
+    let bar_stats = super::status_bar::Stats {
+        frame_interval: s.frame_interval,
+        cpu_ms: s.cpu_frame_ms,
+        cpu_p99: s.cpu_times.get(0.99),
+        render_ms: s.present_out.cpu_ms,
+        gpu_ms: s.gpu_frame_ms,
+        ram: s.memory.ram,
+        vram: s.memory.vram,
+        model_draws: s.world.frame.model_draws,
+        particle_draws: s.world.frame.particle_draws,
+        ui_draws: s.present_out.ui_draws,
+        tick_ms: s.world.tick_ms,
+        tick_p50: s.tick_times.get(0.5),
+        tick_p99: s.tick_times.get(0.99),
+        tick_rate: s.world.tick_rate(),
+        tick: s.world.tick,
+        entity_counts: s.world.entity_counts,
+        effects: s.world.effect_count(),
+        particles: s.world.frame.particles,
+        log_lines: s.collector.len(),
+        frame_history: s.frame_times.samples().collect(),
+        tick_history: s.tick_times.samples().collect(),
+    };
+    let mut bar = std::mem::take(&mut s.bar);
+    let cursor_hint = s.player.cursor_hint();
     let control = s.control.clone();
     let scene = &s.world;
     let request = s.request.clone();
-    let player = &s.player;
     let mut smaa = s.settings.smaa;
     let show_debug = s.show_debug;
     let mut show_status = s.show_status;
-    let draws_ui = s.present_out.ui_draws;
     let egui_span = rts_core_engine::prof_span!("egui run");
     let full_output = s.egui_ctx.run_ui(raw_input, |ui| {
         // The stats bar (its button at the right hides it; the same button
         // alone in the corner brings it back).
-        if show_status {
-            egui::Panel::bottom("status").show_inside(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("⏷").on_hover_text("hide the stats bar").clicked() {
-                            show_status = false;
-                        }
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            // (Cut off short of the button on narrow windows.)
-                            let room = ui.max_rect();
-                            ui.set_clip_rect(room.intersect(ui.clip_rect()));
-                        // Game speed (+/- keys; the pause button), first: the readouts
-                        // after it change width as their numbers do, and would
-                        // shift it about.
-                        let mut speed = control.speed();
-                        let mut paused = control.paused();
-                        if ui.selectable_label(paused, "pause").clicked() {
-                            paused = !paused;
-                            control.set_paused(paused);
-                        }
-                        egui::ComboBox::from_id_salt("speed").selected_text(crate::engine::snapshot::SimControl::label(speed)).show_ui(ui, |ui| {
-                            for s in crate::engine::snapshot::SimControl::STEPS {
-                                ui.selectable_value(&mut speed, s, crate::engine::snapshot::SimControl::label(s));
-                            }
-                        });
-                        if speed != control.speed() {
-                            control.set_speed(speed);
-                        }
-                        ui.separator();
-                        let ms = frame_interval.max(1e-4);
-                        let fps = 1.0 / ms;
-                        ui.weak(format!("{fps:.0} FPS")).on_hover_text(format!("{:.1} ms between frames", ms * 1000.0));
-                        // The work each frame takes, and what limits it.
-                        let gpu = if gpu_ms > 0.0 { format!(" gpu {gpu_ms:.1}ms") } else { String::new() };
-                        let bound = frame_bound(ms * 1000.0, cpu_ms.max(render_ms), gpu_ms);
-                        ui.weak(format!("cpu {cpu_ms:.1}ms (p99 {cpu_p99:.1}) + render {render_ms:.1}ms{gpu}, {bound}"))
-                            .on_hover_text("CPU: the main thread's time per frame (input, the interface's Lua), then the render thread's (prepare, encode, submit; not waiting on vsync). GPU: time the GPU spent drawing it. Bound: whichever (or vsync) sets the frame rate.");
-                        let mem: Vec<String> = [ram.map(|b| format!("ram {}", super::memory::format_bytes(b))), vram.map(|b| format!("vram {}", super::memory::format_bytes(b)))].into_iter().flatten().collect();
-                        if !mem.is_empty() {
-                            ui.weak(mem.join(" "));
-                        }
-                        ui.separator();
-                        ui.weak(format!("sim {:.1}ms/tick (p50 {tick_p50:.1} p99 {tick_p99:.1}), {:.1} ticks/s", scene.tick_ms, tick_rate));
-                        ui.separator();
-                        ui.weak(format!("{}  tick {}", game_clock(scene.tick), scene.tick));
-                        ui.separator();
-                        let [units, structures, projectiles, props] = scene.entity_counts;
-                        ui.weak(format!(
-                            "{} units, {} structures, {} projectiles, {} props, {} effects ({} particles)",
-                            units,
-                            structures,
-                            projectiles,
-                            props,
-                            scene.effect_count(),
-                            scene.frame.particles
-                        ));
-                        ui.separator();
-                        let mode = match player.mode {
-                            crate::render::player::Mode::Normal => String::new(),
-                            crate::render::player::Mode::AttackMove => " | ATTACK-MOVE: click a target".into(),
-                            crate::render::player::Mode::Patrol => " | PATROL: click a point".into(),
-                        };
-                        ui.weak(format!(
-                            "{} selected{} | formation {} (F) | {}",
-                            player.selection.len(),
-                            mode,
-                            player.formation_name(),
-                            match player.player { Some(a) => format!("army {a}"), None => "observer".into() }
-                        ));
-                        ui.separator();
-                        ui.weak(format!("draws {} models, {} particles, {} interface", scene.frame.model_draws, scene.frame.particle_draws, draws_ui)).on_hover_text("Draw calls last frame: wgpu's command processing (`CommandEncoder::finish`) is paid per draw.");
-                        ui.separator();
-                        ui.weak(format!("{} log lines", collector.len()));
-                        });
-                    });
-                });
-            });
-        } else {
-            egui::Area::new(egui::Id::new("status toggle")).anchor(egui::Align2::RIGHT_BOTTOM, [-4.0, -4.0]).show(ui.ctx(), |ui| {
-                if ui.small_button("⏶").on_hover_text("show the stats bar").clicked() {
-                    show_status = true;
-                }
+        super::status_bar::show(ui, &bar_stats, &control, &mut bar, &mut show_status);
+        if let (Some(hint), Some(at)) = (&cursor_hint, ui.ctx().pointer_hover_pos()) {
+            egui::Area::new(egui::Id::new("cursor hint")).fixed_pos(at + egui::vec2(18.0, 18.0)).interactable(false).show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(hint));
             });
         }
         // The debug windows (Ctrl+` shows them).
@@ -2128,6 +2082,7 @@ pub fn render_frame(s: &mut RenderState) {
 
     s.settings.smaa = smaa;
     s.show_status = show_status;
+    s.bar = bar;
     let _ = ui_span;
     // `--screenshot`: save this frame once the sim is far enough along (the
     // main menu: at --screenshot-tick in interface time, once its opening
@@ -2183,42 +2138,14 @@ fn take_present_out(s: &mut RenderState, mut out: crate::render::present::Presen
     s.present_out = out;
 }
 
-/// What limits the frame rate: the CPU's or GPU's work per frame when it
-/// fills the frame interval, else vsync (both finish with time to spare).
-fn frame_bound(interval_ms: f32, cpu_ms: f32, gpu_ms: f32) -> &'static str {
-    let work = cpu_ms.max(gpu_ms);
-    if work < interval_ms * 0.85 {
-        "vsync bound"
-    } else if gpu_ms > cpu_ms {
-        "gpu bound"
-    } else {
-        "cpu bound"
-    }
-}
-
-
-/// In-game time for a sim tick (10 ticks per game second), as SupCom shows
-/// it: `HH:MM:SS`.
-fn game_clock(tick: u64) -> String {
-    let secs = tick / 10;
-    format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
-}
-
 #[cfg(test)]
-mod clock_tests {
-    #[test]
-    fn frame_bound_names_the_limit() {
-        assert_eq!(super::frame_bound(16.7, 6.0, 9.0), "vsync bound");
-        assert_eq!(super::frame_bound(33.0, 31.0, 12.0), "cpu bound");
-        assert_eq!(super::frame_bound(33.0, 10.0, 30.0), "gpu bound");
-    }
-
+mod follow_middle_tests {
     /// A followed group's middle counts the entities still there and
     /// forgets the rest; none left, nothing to follow.
     #[test]
     fn middle_follows_the_entities_left() {
         use rts_core_engine::engine::snapshot::{EntityView, Sighting, ViewKind};
-        let at = |id, x, z| EntityView { id, kind: ViewKind::Unit, army: 1, position: [x, 0.0, z], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0; 3], half: [1.0; 3], health: 1.0, build: 1.0, work: 0.0, shield: -1.0, blueprint: 0, mesh: 0, scale: [1.0; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 };
+        let at = |id, x, z| EntityView { id, kind: ViewKind::Unit, army: 1, position: [x, 0.0, z], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0; 3], half: [1.0; 3], health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, work: 0.0, shield: -1.0, blueprint: 0, mesh: 0, scale: [1.0; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 };
         let entities = [at(2, 10.0, 20.0), at(5, 30.0, 40.0)];
         let mut ids = vec![2, 4, 5];
         assert_eq!(super::middle(&entities, &mut ids), Some([20.0, 30.0]));
@@ -2228,13 +2155,6 @@ mod clock_tests {
         assert!(gone.is_empty());
     }
 
-    #[test]
-    fn game_clock_formats_hours_minutes_seconds() {
-        assert_eq!(super::game_clock(0), "00:00:00");
-        assert_eq!(super::game_clock(9), "00:00:00");
-        assert_eq!(super::game_clock(12_000), "00:20:00");
-        assert_eq!(super::game_clock(36_615), "01:01:01");
-    }
 }
 
 #[cfg(test)]

@@ -35,7 +35,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::engine::sim::entity::{EntityId, EntityWorld};
+use crate::engine::sim::entity::{Entity, EntityId, EntityWorld};
 use crate::engine::sim::intel::IntelType;
 use crate::engine::sim::layer::Layer;
 use crate::engine::sim::math::{Fx, FxVec3};
@@ -280,6 +280,89 @@ fn stamp_disc(s: &Stamp, add: bool, cols: i32, rows: i32, counts: &mut [u16], co
     }
 }
 
+/// A stamp with its key and where it was stamped: ((entity, sensor),
+/// stamp, position).
+type Stamped = ((EntityId, usize), Stamp, FxVec3);
+
+/// Entities per chunk of [`IntelGrids::update`]'s gather and merge. Fixed,
+/// so the split (and the order outputs are joined in) never depends on the
+/// thread count.
+const UPDATE_CHUNK: usize = 1024;
+/// Units per task of the parallel blip scan.
+const SCAN_CHUNK: usize = 1024;
+
+/// The sizes from which [`IntelGrids::update`]'s passes go parallel. The
+/// gather costs ~40 ns per entity serially and the blip scan ~30 ns per
+/// unit, so waking rayon (~100 µs) pays from a few thousand.
+#[derive(Clone, Copy)]
+struct ParallelMin {
+    /// Entities (all of them: props and projectiles too) for the gather
+    /// and merge.
+    update: usize,
+    /// Units for the blip scan.
+    scan: usize,
+}
+
+impl ParallelMin {
+    const DEFAULT: Self = Self { update: 4 * UPDATE_CHUNK, scan: 4096 };
+}
+
+/// One chunk's gather and merge output (reused buffers).
+#[derive(Default)]
+struct UpdateChunk {
+    wanted: Vec<Stamped>,
+    ops: Vec<(Stamp, bool)>,
+    own_flags: Vec<(EntityId, u8)>,
+    jammers: Vec<(EntityId, u32, FxVec3, JammerSpec)>,
+}
+
+impl UpdateChunk {
+    fn clear(&mut self) {
+        self.wanted.clear();
+        self.ops.clear();
+        self.own_flags.clear();
+        self.jammers.clear();
+    }
+}
+
+/// Gathers `ents`' wanted stamps (in (entity, sensor) order: id order,
+/// intel types in sensor order), own cloak / stealth flags and active
+/// jammers into `out`. Reads only the world.
+fn gather_chunk(ents: &[Entity], jammer: &impl Fn(&Entity) -> Option<JammerSpec>, out: &mut UpdateChunk) {
+    for e in ents {
+        if e.destroyed || e.fraction_complete < Fx::ONE {
+            continue;
+        }
+        let Some(army) = e.army else { continue };
+        let mut flags = 0u8;
+        for (&t, s) in &e.cold.intel {
+            match t {
+                IntelType::Cloak if s.enabled => flags |= CLOAK,
+                IntelType::RadarStealth if s.enabled => flags |= RADAR_STEALTH,
+                IntelType::SonarStealth if s.enabled => flags |= SONAR_STEALTH,
+                IntelType::Jammer if s.enabled => {
+                    if let Some(spec) = jammer(e).filter(|j| j.blips > 0) {
+                        out.jammers.push((e.id, army, e.position(), spec));
+                    }
+                }
+                _ => {}
+            }
+            let Some(sensor) = sensor_index(t) else { continue };
+            if !s.enabled || s.radius <= Fx::ZERO {
+                continue;
+            }
+            let p = e.position();
+            let shift = shift_of(sensor);
+            let radius = s.radius.to_num::<i64>().clamp(0, u32::MAX as i64) as u32;
+            let stamp = Stamp { army, sensor, cx: IntelGrids::cell_of(p.x, shift), cz: IntelGrids::cell_of(p.z, shift), radius };
+            out.wanted.push(((e.id, sensor), stamp, p));
+        }
+        if flags != 0 {
+            out.own_flags.push((e.id, flags));
+        }
+    }
+}
+
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct IntelGrids {
     /// The map's size in world units.
@@ -289,9 +372,13 @@ pub struct IntelGrids {
     armies: Vec<Option<ArmyGrids>>,
     /// Current stamps, sorted by (entity, sensor), with where each was
     /// stamped.
-    stamps: Vec<((EntityId, usize), Stamp, FxVec3)>,
+    stamps: Vec<Stamped>,
     /// Reused per-tick buffer of wanted stamps (same order).
-    wanted: Vec<((EntityId, usize), Stamp, FxVec3)>,
+    wanted: Vec<Stamped>,
+    /// Per-chunk buffers of the parallel gather and merge (scratch, emptied
+    /// every update: not saved).
+    #[serde(skip)]
+    update_chunks: Vec<UpdateChunk>,
     /// This update's disc adds / removes (reused buffer).
     ops: Vec<(Stamp, bool)>,
     /// Allied-or-self masks by army index (bit `b` = army `b` shares intel
@@ -323,6 +410,9 @@ pub struct IntelGrids {
     /// [`Recon`]: diffed each update into `changes`.
     now: Vec<(EntityId, [u64; 4])>,
     now_next: Vec<(EntityId, [u64; 4])>,
+    /// The parallel blip scan's per-unit results (scratch: not saved).
+    #[serde(skip)]
+    scan: Vec<Option<(EntityId, [u64; 4])>>,
     /// Per vision cell: the armies whose own exploring sensors
     /// ([`EXPLORING`], vision only) have ever covered it (set as stamps go down, never cleared).
     /// Presentation bookkeeping: nothing in the sim reads it.
@@ -404,6 +494,7 @@ impl IntelGrids {
         }
         // Counts of stamps per (army, sensor) and the armies with any, and
         // every grid an op needs allocated, serially first.
+        let prepass = crate::prof_span!("intel apply prepass");
         for &(st, add) in ops {
             let a = st.army as usize;
             if self.stamp_count.len() <= a {
@@ -419,6 +510,7 @@ impl IntelGrids {
             }
             let _ = self.grids_for(st.army, st.sensor);
         }
+        drop(prepass);
         let dims = [VISION_SHIFT, CELL_SHIFT].map(|shift| self.dims(shift));
         let update = self.tick;
         let Self { armies, cover, explored, row_changed, .. } = self;
@@ -431,6 +523,7 @@ impl IntelGrids {
                 stamp_disc(&st, add, cols as i32, rows as i32, &mut grids.counts[st.sensor], cover[st.sensor], explored, row_changed, update);
             }
         };
+        let _discs = crate::prof_span!("intel discs");
         if ops.len() >= APPLY_PARALLEL_MIN {
             // (Each task filters the op list for its army: cheap next to
             // the discs, and keeps every army's ops in merge order.)
@@ -475,49 +568,93 @@ impl IntelGrids {
     /// Per tick: re-stamps sources that moved far enough or changed, refreshes
     /// cloak / stealth flags and jammers, then records which enemy units
     /// each army sees. `jammer` gives a unit's jammer spec, if it has one.
-    pub fn update(&mut self, world: &EntityWorld, jammer: impl Fn(&crate::engine::sim::entity::Entity) -> Option<JammerSpec>) {
+    pub fn update(&mut self, world: &EntityWorld, jammer: impl Fn(&Entity) -> Option<JammerSpec> + Sync) {
+        self.update_with(world, jammer, ParallelMin::DEFAULT);
+    }
+
+    /// [`IntelGrids::update`] with the sizes from which its passes go
+    /// parallel (tests compare the parallel and serial paths).
+    ///
+    /// Gather and merge run over fixed chunks of [`UPDATE_CHUNK`] entities
+    /// (fixed, so the split never depends on the thread count): each chunk
+    /// gathers its entities' wanted stamps, flags and jammers, then merges
+    /// them with the old stamps whose entity id falls in its id range. Both
+    /// lists are in (entity, sensor) order and the merge looks at one key at
+    /// a time, so the chunks' outputs joined in chunk order are the serial
+    /// lists, element for element.
+    fn update_with(&mut self, world: &EntityWorld, jammer: impl Fn(&Entity) -> Option<JammerSpec> + Sync, min: ParallelMin) {
+        use rayon::prelude::*;
         self.tick += 1;
-        let mut wanted = std::mem::take(&mut self.wanted);
-        wanted.clear();
-        self.own_flags.clear();
-        self.jammers.clear();
-        for e in world.iter() {
-            if e.destroyed || e.fraction_complete < Fx::ONE {
-                continue;
-            }
-            let Some(army) = e.army else { continue };
-            let mut flags = 0u8;
-            for (&t, s) in &e.cold.intel {
-                match t {
-                    IntelType::Cloak if s.enabled => flags |= CLOAK,
-                    IntelType::RadarStealth if s.enabled => flags |= RADAR_STEALTH,
-                    IntelType::SonarStealth if s.enabled => flags |= SONAR_STEALTH,
-                    IntelType::Jammer if s.enabled => {
-                        if let Some(spec) = jammer(e).filter(|j| j.blips > 0) {
-                            self.jammers.push((e.id, army, e.position(), spec));
-                        }
-                    }
-                    _ => {}
-                }
-                let Some(sensor) = sensor_index(t) else { continue };
-                if !s.enabled || s.radius <= Fx::ZERO {
-                    continue;
-                }
-                let p = e.position();
-                let shift = shift_of(sensor);
-                let radius = s.radius.to_num::<i64>().clamp(0, u32::MAX as i64) as u32;
-                let stamp = Stamp { army, sensor, cx: Self::cell_of(p.x, shift), cz: Self::cell_of(p.z, shift), radius };
-                wanted.push(((e.id, sensor), stamp, p));
-            }
-            if flags != 0 {
-                self.own_flags.push((e.id, flags));
-            }
-        }
-        // `wanted` is in (entity, sensor) order (world id order, intel types
-        // in sensor order), like `stamps`: merge the two sorted lists.
+        let ents = world.as_slice();
         let old = std::mem::take(&mut self.stamps);
-        let mut ops = std::mem::take(&mut self.ops);
-        ops.clear();
+        let mut out = UpdateChunk {
+            wanted: std::mem::take(&mut self.wanted),
+            ops: std::mem::take(&mut self.ops),
+            own_flags: std::mem::take(&mut self.own_flags),
+            jammers: std::mem::take(&mut self.jammers),
+        };
+        out.clear();
+        // (No entities: the serial path, which removes every old stamp.)
+        if ents.len() >= min.update.max(1) {
+            let mut chunks = std::mem::take(&mut self.update_chunks);
+            chunks.resize_with(ents.len().div_ceil(UPDATE_CHUNK), UpdateChunk::default);
+            let n = chunks.len();
+            // (Each task is a whole chunk of entities: no `with_min_len`.)
+            let gather = crate::prof_span!("intel gather");
+            chunks.par_iter_mut().enumerate().for_each(|(k, c)| {
+                let _s = crate::prof_span!("intel gather (worker)");
+                c.clear();
+                gather_chunk(&ents[k * UPDATE_CHUNK..((k + 1) * UPDATE_CHUNK).min(ents.len())], &jammer, c);
+            });
+            drop(gather);
+            let merge = crate::prof_span!("intel merge");
+            let this = &*self;
+            chunks.par_iter_mut().enumerate().for_each(|(k, c)| {
+                let _s = crate::prof_span!("intel merge (worker)");
+                // The old stamps of entity ids from this chunk's first up to
+                // the next chunk's first (the first chunk from the start,
+                // the last to the end: freed entities' stamps fall in
+                // exactly one chunk).
+                let lo = if k == 0 { 0 } else { old.partition_point(|o| o.0.0 < ents[k * UPDATE_CHUNK].id) };
+                let hi = if k + 1 == n { old.len() } else { old.partition_point(|o| o.0.0 < ents[(k + 1) * UPDATE_CHUNK].id) };
+                this.merge_chunk(&old[lo..hi], c);
+            });
+            // Serial apply: the chunks' outputs in chunk order.
+            let _join = crate::prof_span!("intel merge join");
+            for c in &chunks {
+                out.wanted.extend_from_slice(&c.wanted);
+                out.ops.extend_from_slice(&c.ops);
+                out.own_flags.extend_from_slice(&c.own_flags);
+                out.jammers.extend_from_slice(&c.jammers);
+            }
+            drop(merge);
+            self.update_chunks = chunks;
+        } else {
+            let gather = crate::prof_span!("intel gather");
+            gather_chunk(ents, &jammer, &mut out);
+            drop(gather);
+            let merge = crate::prof_span!("intel merge");
+            self.merge_chunk(&old, &mut out);
+            drop(merge);
+        }
+        let UpdateChunk { wanted, ops, own_flags, jammers } = out;
+        self.own_flags = own_flags;
+        self.jammers = jammers;
+        self.apply_all(&ops);
+        self.ops = ops;
+        // Wanted becomes current; the old list's storage is reused next tick.
+        self.stamps = wanted;
+        self.wanted = old;
+        self.record_intel(world, min.scan);
+    }
+
+    /// Merges `out.wanted` (in (entity, sensor) order, as `stamps`) with
+    /// `old`, the current stamps of the same entity id range, into
+    /// `out.ops`: new sources are added, gone ones removed, moved ones
+    /// re-stamped once they've moved far enough. Reads only last update's
+    /// cover masks.
+    fn merge_chunk(&self, old: &[Stamped], out: &mut UpdateChunk) {
+        let UpdateChunk { wanted, ops, .. } = out;
         let mut i = 0;
         for w in wanted.iter_mut() {
             let key = w.0;
@@ -551,12 +688,6 @@ impl IntelGrids {
         for &(_, s, _) in &old[i..] {
             ops.push((s, false));
         }
-        self.apply_all(&ops);
-        self.ops = ops;
-        // Wanted becomes current; the old list's storage is reused next tick.
-        self.stamps = wanted;
-        self.wanted = old;
-        self.record_intel(world);
     }
 
     /// Covered by `sensor` for `army` (own or allied) at `p`.
@@ -766,29 +897,57 @@ impl IntelGrids {
         [share(seen), share(radar), share(sonar), share(omni)]
     }
 
+    /// The enemy armies detecting unit `e` now (its own side doesn't count),
+    /// if any, for [`IntelGrids::record_intel`].
+    fn scan_unit(&self, e: &Entity) -> Option<(EntityId, [u64; 4])> {
+        let (Some(owner), Some(_)) = (e.army, e.unit.as_deref()) else { return None };
+        if e.destroyed {
+            return None;
+        }
+        let own = self.shared_by.get(owner as usize).copied().unwrap_or(1 << owner.min(MAX_ARMIES));
+        let m = self.masks(e).map(|m| m & !own);
+        (m != [0; 4]).then_some((e.id, m))
+    }
+
     /// Per unit: enemy intel now, diffed against last update into
     /// `changes`; first sightings into `seen_ever` and `first_seen`.
-    fn record_intel(&mut self, world: &EntityWorld) {
+    ///
+    /// The scan reads only the grids and the world, one unit at a time, so
+    /// from `parallel_min` units it runs in parallel into one slot per
+    /// unit, kept in id order; the diff is serial.
+    fn record_intel(&mut self, world: &EntityWorld, parallel_min: usize) {
+        use rayon::prelude::*;
         self.changes.clear();
         self.first_seen.clear();
         let any = self.active[0] | self.active[1] | self.active[2] | self.active[3] | self.active[4];
         let mut next = std::mem::take(&mut self.now_next);
         next.clear();
+        let scan = crate::prof_span!("intel blip scan");
         if any != 0 {
-            for e in world.units() {
-                let (Some(owner), Some(_)) = (e.army, e.unit.as_deref()) else { continue };
-                if e.destroyed {
-                    continue;
-                }
-                // Its own side doesn't count.
-                let own = self.shared_by.get(owner as usize).copied().unwrap_or(1 << owner.min(MAX_ARMIES));
-                let m = self.masks(e).map(|m| m & !own);
-                if m != [0; 4] {
-                    next.push((e.id, m));
-                }
+            let slots = world.unit_indices();
+            let ents = world.as_slice();
+            if slots.len() >= parallel_min {
+                let mut out = std::mem::take(&mut self.scan);
+                let this = &*self;
+                // Fixed chunks, each a task with its own zone; slot i stays
+                // unit i, so the order is the serial one.
+                out.clear();
+                out.resize(slots.len(), None);
+                out.par_chunks_mut(SCAN_CHUNK).zip(slots.par_chunks(SCAN_CHUNK)).for_each(|(o, s)| {
+                    let _s = crate::prof_span!("intel blip scan (worker)");
+                    for (o, &i) in o.iter_mut().zip(s) {
+                        *o = this.scan_unit(&ents[i as usize]);
+                    }
+                });
+                next.extend(out.iter().flatten());
+                self.scan = out;
+            } else {
+                next.extend(slots.iter().filter_map(|&i| self.scan_unit(&ents[i as usize])));
             }
         }
+        drop(scan);
         // Merge with last update's (both in id order).
+        let _diff = crate::prof_span!("intel blip diff");
         let prev = std::mem::take(&mut self.now);
         let (mut i, mut j) = (0, 0);
         while i < prev.len() || j < next.len() {
@@ -1137,5 +1296,71 @@ mod tests {
         assert!(g.fake_blips(2).is_empty(), "owner sees no fakes");
         give(&mut w, radar, IntelType::Omni, 150.0);
         assert!(run(&w).fake_blips(1).is_empty(), "omni exposes them");
+    }
+
+    /// The parallel gather / merge (fixed entity chunks) and blip scan give
+    /// the serial results bit for bit: every tick's whole state (stamps,
+    /// ops, flags, jammers, grids, detections, changes and first
+    /// sightings) is the same. Units with several sensors, cloak and
+    /// jammers, entities without intel between them (uneven chunks),
+    /// moves, deaths and compaction (old stamps of freed ids at chunk
+    /// boundaries).
+    #[test]
+    fn parallel_update_matches_serial() {
+        use crate::engine::sim::rng::SimRng;
+        let spec = JammerSpec { blips: 3, min: Fx::from_num(5), max: Fx::from_num(15) };
+        let run = |min: ParallelMin| {
+            let mut rng = SimRng::new(9);
+            let mut w = EntityWorld::default();
+            w.set_bounds(512, 512);
+            let mut g = IntelGrids::new(512, 512);
+            g.set_alliances(4, |a, b| a + b == 5);
+            let mut ids = Vec::new();
+            for i in 0..5000u32 {
+                let (x, z) = ((rng.next_u64() % 500) as f64, (rng.next_u64() % 500) as f64);
+                if rng.next_u64() % 3 == 0 {
+                    // No intel: a prop-like entity in between.
+                    w.spawn(EntityKind::Projectile, BlueprintKind::Projectile, String::new(), Some(1 + i % 4), FxVec3::from_f64(x, 0.0, z), FxQuat::IDENTITY);
+                    continue;
+                }
+                let id = unit(&mut w, 1 + i % 4, x, z, 8.0 + (i % 7) as f64 * 5.0);
+                match i % 11 {
+                    1 => give(&mut w, id, IntelType::Radar, 60.0),
+                    2 => give(&mut w, id, IntelType::Omni, 25.0),
+                    3 => give(&mut w, id, IntelType::Cloak, 0.0),
+                    4 => give(&mut w, id, IntelType::Jammer, 0.0),
+                    5 => give(&mut w, id, IntelType::RadarStealthField, 30.0),
+                    _ => {}
+                }
+                ids.push(id);
+            }
+            let mut states = Vec::new();
+            let mut changes = 0;
+            for _ in 0..12 {
+                for &id in &ids {
+                    if rng.next_u64() % 3 == 0 && w.get(id).is_some_and(|e| !e.destroyed) {
+                        let p = w.get(id).unwrap().position();
+                        let d = |v: Fx, r: u64| (v + Fx::from_num((r % 41) as i32 - 20)).clamp(Fx::ZERO, Fx::from_num(500));
+                        w.set_position(id, FxVec3 { x: d(p.x, rng.next_u64()), y: p.y, z: d(p.z, rng.next_u64()) });
+                    }
+                }
+                for _ in 0..150 {
+                    w.destroy(ids[(rng.next_u64() % ids.len() as u64) as usize]);
+                }
+                if rng.next_u64() % 2 == 0 {
+                    w.compact_now();
+                }
+                g.update_with(&w, |e| (e.cold.intel.contains_key(&IntelType::Jammer)).then_some(spec), min);
+                changes += g.changes.len();
+                states.push(postcard::to_allocvec(&g).unwrap());
+            }
+            assert!(changes > 1000 && !g.jammers.is_empty() && !g.own_flags.is_empty(), "the scene exercises it: {changes} changes");
+            states
+        };
+        let serial = run(ParallelMin { update: usize::MAX, scan: usize::MAX });
+        let parallel = run(ParallelMin { update: 0, scan: 0 });
+        for (t, (s, p)) in serial.iter().zip(&parallel).enumerate() {
+            assert!(s == p, "update {t}: parallel state differs from serial");
+        }
     }
 }

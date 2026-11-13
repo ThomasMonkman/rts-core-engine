@@ -1,0 +1,32 @@
+{
+  // Lua debugging needs the extension in dev/vscode-lua-debug installed:
+  // see docs/guides/debugging-lua.md.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "faf-lua",
+      "request": "launch",
+      "name": "Engine: skirmish (Lua debug)",
+      "args": ["run", "--", "--session", "--lua-debug-wait", "--no-audio"]
+    },
+    {
+      // One army, yours (with its commander): no AI.
+      "type": "faf-lua",
+      "request": "launch",
+      "name": "Engine: solo, no AI (Lua debug)",
+      "args": ["run", "--", "--armies", "1", "--player", "1", "--lua-debug-wait", "--no-audio"]
+    },
+    {
+      "type": "faf-lua",
+      "request": "launch",
+      "name": "Engine: main menu (Lua debug)",
+      "args": ["run", "--", "--lua-debug-wait", "--no-audio"]
+    },
+    {
+      "type": "faf-lua",
+      "request": "attach",
+      "name": "Attach to the engine's Lua (--lua-debug)",
+      "port": 4711
+    }
+  ]
+}

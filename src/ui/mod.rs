@@ -23,6 +23,7 @@ pub mod signatures;
 pub mod sound;
 pub mod team_color;
 pub mod user_api;
+pub mod world_draw;
 pub mod world_mesh;
 pub mod world_pick;
 
@@ -78,6 +79,10 @@ pub struct UnitInfo {
     pub army: u32,
     /// 0..1.
     pub health: f32,
+    /// Its maximum health now (the blueprint's unless changed).
+    pub max_health: f32,
+    /// Its build rate now (`GetBuildRate`).
+    pub build_rate: f32,
     /// 0..1 (1 = finished).
     pub build: f32,
     pub position: [f32; 3],
@@ -99,6 +104,8 @@ impl UnitInfo {
             blueprint,
             army: e.army,
             health: e.health,
+            max_health: e.max_health,
+            build_rate: e.build_rate,
             build: e.build,
             position: e.position,
             work: e.work,
@@ -220,6 +227,10 @@ struct UnitBasics<'a> {
     army: u32,
     /// 0..1.
     health: f32,
+    /// Its maximum health now.
+    max_health: f32,
+    /// Its build rate now.
+    build_rate: f32,
     /// 0..1 (1 = finished).
     build: f32,
     x: f32,
@@ -238,13 +249,13 @@ fn write_unit_basics(lua: &Lua, data: &LuaTable, u: &UnitInfo) -> LuaResult<(Lua
     let (t, fresh) = match data.raw_get::<Option<LuaTable>>(u.id)? {
         Some(t) => (t, false),
         None => {
-            let t = lua.create_table_with_capacity(0, 9)?;
+            let t = lua.create_table_with_capacity(0, 11)?;
             data.raw_set(u.id, t.clone())?;
             (t, true)
         }
     };
     let [x, y, z] = u.position;
-    UnitBasics { bp: &u.blueprint, army: u.army, health: u.health, build: u.build, x, y, z, work: u.work, shield: u.shield }.write_into(lua, &t)?;
+    UnitBasics { bp: &u.blueprint, army: u.army, health: u.health, max_health: u.max_health, build_rate: u.build_rate, build: u.build, x, y, z, work: u.work, shield: u.shield }.write_into(lua, &t)?;
     Ok((t, fresh))
 }
 
@@ -340,6 +351,12 @@ fn overlay_color(s: &str) -> [f32; 4] {
     if s.len() >= 8 { [c(16), c(8), c(0), c(24)] } else { [c(16), c(8), c(0), 0.0] }
 }
 
+/// App data: this interface is a game's (its session's mods are active).
+struct GameSession;
+
+/// App data: the game's `SessionInit.lua` ran (it runs `UserSync.lua`).
+struct SessionInitRan;
+
 /// The user-layer VM.
 pub struct UserVm {
     lua: Lua,
@@ -366,6 +383,7 @@ impl UserVm {
         lua.set_app_data(audio);
         lua.set_app_data(vfs);
         lua.set_app_data(cache);
+        crate::engine::lua::debugger::attach(&lua, "UI");
         api::pending::register_core(&lua)?;
         user_api::register_stubs(&lua)?;
         api::globals::register(&lua)?;
@@ -384,6 +402,7 @@ impl UserVm {
         api::nil_metatable::register(&lua)?;
         api::nil_metatable::register_numbers(&lua)?;
         api::nil_metatable::register_booleans(&lua)?;
+        api::nil_metatable::register_functions(&lua)?;
         api::disk_get_file_info::register(&lua)?;
         api::threads::register(&lua)?;
         api::random::register(&lua)?;
@@ -399,6 +418,7 @@ impl UserVm {
         user_api::register(&lua)?;
         api::core::register(&lua)?;
         world_pick::register(&lua)?;
+        world_draw::register(&lua)?;
         world_pick::register_view_methods(&lua)?;
         sound::register(&lua)?;
         team_color::register(&lua)?;
@@ -483,48 +503,51 @@ impl UserVm {
         Ok(Self { lua })
     }
 
-    /// A game's interface runs the session's sim mods and the player's
-    /// UI-only ones (preference `active_mods`, and `--mod`'s): its
-    /// `__active_mods` (sim mods first, as FAF's `SessionInit.lua` builds
-    /// it) and their hooks. Before [`Self::init`]; the front end runs none.
+    /// A game's interface starts as moho's user state: `__active_mods` is
+    /// the session's sim mods (and UI-only `--mod`s, the engine's own), and
+    /// [`Self::init`] runs the game's `/lua/SessionInit.lua`, which adds the
+    /// player's UI mods (its `mods.lua` `GetUiMods`: FAF's leaves out
+    /// `Hotstats`, LOUD's sorts by name). They hook the scripts loaded
+    /// after that (`mods::sync_hooks`). Before [`Self::init`]; the front
+    /// end starts with none.
     pub fn activate_session_mods(&self, session: &crate::engine::mods::SessionMods) -> LuaResult<()> {
         use crate::engine::mods;
-        let mut uids = session.ui.clone();
-        let get: LuaFunction = self.lua.globals().get("GetPreference")?;
-        if let Some(selected) = get.call::<Option<LuaTable>>("active_mods")? {
-            for pair in selected.pairs::<String, LuaValue>() {
-                let (uid, on) = pair?;
-                if !matches!(on, LuaNil | LuaValue::Boolean(false)) {
-                    uids.push(uid);
-                }
-            }
-        }
-        // Only UI-only mods: a sim mod is the game's to choose.
-        uids.retain(|u| session.all.get(u).is_some_and(|m| m.ui_only));
+        let uids: Vec<String> = session.ui.iter().filter(|u| session.all.get(*u).is_some_and(|m| m.ui_only)).cloned().collect();
         let ui = mods::resolve(&session.all, &uids);
         mods::log_active("user", &ui);
         let all: Vec<_> = session.sim.iter().cloned().chain(ui).collect();
         let vfs = self.lua.app_data_ref::<Arc<RwLock<Vfs>>>().map(|v| v.clone()).ok_or_else(|| LuaError::runtime("no VFS"))?;
         let vfs = vfs.read().map_err(|_| LuaError::runtime("VFS poisoned"))?;
-        mods::activate(&self.lua, &vfs, &all)
+        mods::activate(&self.lua, &vfs, &all)?;
+        self.lua.set_app_data(GameSession);
+        Ok(())
     }
 
     /// Runs `/lua/userInit.lua` (FAF's user-layer init), after loading the
     /// blueprints and categories the interface reads, as moho's user state
-    /// has them.
+    /// has them. A game's interface ([`Self::activate_session_mods`]) runs
+    /// the game's `/lua/SessionInit.lua` instead, as moho's session does:
+    /// it runs `userInit.lua`, adds the UI mods, then `UserSync.lua`.
     pub fn init(&self) -> LuaResult<()> {
         let started = std::time::Instant::now();
-        let code = {
+        let (code, session_init) = {
             let vfs = self.lua.app_data_ref::<Arc<RwLock<Vfs>>>().map(|v| v.clone()).ok_or_else(|| LuaError::runtime("no VFS"))?;
             let vfs = vfs.read().map_err(|_| LuaError::runtime("VFS poisoned"))?;
-            crate::engine::mods::script_source(&self.lua, &vfs, "lua/RuleInit.lua").map_err(LuaError::external)?
+            let session_init = self.lua.app_data_ref::<GameSession>().is_some() && vfs.contains("/lua/SessionInit.lua");
+            (crate::engine::mods::script_source(&self.lua, &vfs, "lua/RuleInit.lua").map_err(LuaError::external)?, session_init)
         };
         crate::engine::lua::execute::exec_lua_string(&self.lua, &String::from_utf8_lossy(&code), "lua/RuleInit.lua")?;
         api::blueprints::apply_defaults(&self.lua, true)?;
         api::categories::build(&self.lua)?;
         tracing::info!(ms = started.elapsed().as_millis() as u64, "user layer blueprints loaded");
         let doscript: LuaFunction = self.lua.globals().get("doscript")?;
-        doscript.call::<()>("/lua/userInit.lua")?;
+        if session_init {
+            doscript.call::<()>("/lua/SessionInit.lua")?;
+            self.lua.set_app_data(SessionInitRan);
+            self.log_ui_mods()?;
+        } else {
+            doscript.call::<()>("/lua/userInit.lua")?;
+        }
         // The front end (profile creation, the options dialog) fills the
         // profile's options with their defaults, which the game reads
         // unguarded (worldview's selection thresholds); we start without it.
@@ -566,9 +589,28 @@ impl UserVm {
             .exec()
     }
 
+    /// The UI-only mods in `__active_mods` once `SessionInit.lua` has run
+    /// (the game's choice), logged as the sim's are.
+    fn log_ui_mods(&self) -> LuaResult<()> {
+        let Some(list) = self.lua.globals().raw_get::<Option<LuaTable>>("__active_mods")? else { return Ok(()) };
+        for m in list.sequence_values::<LuaValue>() {
+            let LuaValue::Table(m) = m? else { continue };
+            if !m.raw_get::<Option<bool>>("ui_only").ok().flatten().unwrap_or(false) {
+                continue;
+            }
+            let text = |k: &str| m.raw_get::<LuaValue>(k).ok().and_then(|v| v.to_string().ok()).unwrap_or_default();
+            tracing::info!(vm = "user", uid = %text("uid"), name = %text("name"), version = %text("version"), ui_only = true, "active mod");
+        }
+        Ok(())
+    }
+
     /// Builds the in-game interface: FAF's own panels, unchanged (stage 1:
-    /// the economy bar).
+    /// the economy bar). The session's sync handling first, unless
+    /// `SessionInit.lua` ran it.
     pub fn start_hud(&self) -> LuaResult<()> {
+        if self.lua.app_data_ref::<SessionInitRan>().is_none() {
+            self.lua.globals().get::<LuaFunction>("doscript")?.call::<()>("/lua/UserSync.lua")?;
+        }
         self.lua.load(include_str!("hud.lua")).set_name("=[engine hud]").exec()
     }
 
@@ -693,6 +735,16 @@ impl UserVm {
             }
         }
         Ok(())
+    }
+
+    /// Units' names given by the sim (`SetCustomName`), replacing the last
+    /// set: `__engine_custom_names[id]`, read by `UserUnit:GetCustomName`.
+    pub fn set_custom_names(&self, names: &[(u32, String)]) -> LuaResult<()> {
+        let t = self.lua.create_table_with_capacity(0, names.len())?;
+        for (id, name) in names {
+            t.raw_set(*id, name.as_str())?;
+        }
+        self.lua.globals().raw_set("__engine_custom_names", t)
     }
 
     /// The sim's explicit one-way alliances (`IsAlly` / `IsEnemy` /
@@ -1727,7 +1779,12 @@ impl UserVm {
     pub fn frame(&self, dt: f32) -> LuaResult<()> {
         let t: f64 = self.lua.named_registry_value::<Option<f64>>("user.time")?.unwrap_or(0.0);
         self.lua.set_named_registry_value("user.time", t + dt as f64)?;
+        crate::engine::disk_watch::deliver(&self.lua, |lua| {
+            api::blueprints::apply_defaults(lua, true)?;
+            api::categories::build(lua)
+        })?;
         api::threads::run_tick(&self.lua)?;
+        self.lua.set_app_data(world_draw::FrameDelta(dt));
         controls::on_frame(&self.lua, dt)?;
         movie::tick(&self.lua, dt)?;
         cursor::update(&self.lua)

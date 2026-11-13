@@ -28,12 +28,20 @@ pub type ControlId = u32;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ControlHandle(pub ControlId);
-impl LuaUserData for ControlHandle {}
+impl LuaUserData for ControlHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 /// A camera's native side (`GetCamera`): cameras live as long as the
 /// interface, so it is never destroyed.
 pub struct CameraHandle;
-impl LuaUserData for CameraHandle {}
+impl LuaUserData for CameraHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 /// A border: textures for the vertical sides, the horizontal sides and the
 /// four corners (`SetNewTextures`), or one colour (`SetSolidColor`).
@@ -144,7 +152,8 @@ pub struct WorldView {
     pub input_locked: bool,
     pub cartographic: bool,
     pub resources: bool,
-    /// `SetCustomRender`: draws FAF's world shapes (not drawn yet).
+    /// `SetCustomRender`: the engine calls its `OnRenderWorld` each frame
+    /// (FAF's world shapes, `world_draw`).
     pub custom_render: bool,
     /// `GetsGlobalCameraCommands`: the arrow keys move its camera.
     pub global_camera: bool,
@@ -260,7 +269,7 @@ pub enum DrawItem {
     Minimap { rect: [f32; 4] },
     /// A main world view: camera `camera`'s view of the world fills `rect`
     /// (drawn under the interface, not by it).
-    World { rect: [f32; 4], camera: String },
+    World { rect: [f32; 4], camera: String, shapes: Option<std::sync::Arc<crate::engine::api::debug_draw::DebugDraw>> },
     /// A line of text with its top-left at `rect[0..2]`; `vertical`: turned a
     /// quarter anticlockwise about that corner's box (see [`Text::vertical`]).
     Text { rect: [f32; 4], text: String, family: String, size: f32, color: [f32; 4], shadow: bool, vertical: bool },
@@ -1772,7 +1781,18 @@ pub fn draw_list(lua: &Lua, head: usize) -> LuaResult<Vec<DrawItem>> {
         let item = match kind {
             Kind::Other("movie") => movie.map(|frame| DrawItem::Movie { rect: [l, t, l + w, t + h], movie: id, frame, color: [1.0, 1.0, 1.0, alpha] }),
             Kind::WorldView(WorldView { mini: true, .. }) => (w > 1.0 && h > 1.0).then_some(DrawItem::Minimap { rect: [l, t, l + w, t + h] }),
-            Kind::WorldView(WorldView { camera: Some(camera), .. }) => (w >= 1.0 && h >= 1.0).then_some(DrawItem::World { rect: [l, t, l + w, t + h], camera }),
+            Kind::WorldView(WorldView { camera: Some(camera), custom_render, .. }) => {
+                if w < 1.0 || h < 1.0 {
+                    None
+                } else {
+                    // `SetCustomRender`: its `OnRenderWorld` draws its shapes.
+                    let shapes = match (custom_render, object(lua, id)?) {
+                        (true, Some(obj)) => super::world_draw::render_world(lua, &obj)?,
+                        _ => None,
+                    };
+                    Some(DrawItem::World { rect: [l, t, l + w, t + h], camera, shapes })
+                }
+            }
             // Corners at their texture size, the sides stretched between
             // them (moho's `CMauiBorder`; sides `BorderWidth` / `BorderHeight`
             // thick), the inside left empty; or a solid frame that thick.
@@ -2752,7 +2772,7 @@ mod tests {
     #[test]
     fn under_world_items_give_way_to_views_above_them() {
         let quad = |rect: [f32; 4]| DrawItem::Quad { rect, texture: Some("m.dds".into()), uv: [0.0, 0.0, 1.0, 1.0], color: [1.0; 4], tiled: false };
-        let view = |rect: [f32; 4]| DrawItem::World { rect, camera: "PiP1".into() };
+        let view = |rect: [f32; 4]| DrawItem::World { rect, camera: "PiP1".into(), shapes: None };
         let rects = |items: &[DrawItem]| items.iter().filter_map(|i| match i { DrawItem::Quad { rect, uv, .. } => Some((*rect, *uv)), _ => None }).collect::<Vec<_>>();
         // The main view below the window's middle, a popup's view above it
         // inside it: the middle becomes a frame around the popup's picture.

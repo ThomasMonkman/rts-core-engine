@@ -62,7 +62,11 @@ struct WorldMeshes {
 
 #[derive(Clone, Copy)]
 struct WorldMeshHandle(u32);
-impl LuaUserData for WorldMeshHandle {}
+impl LuaUserData for WorldMeshHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 fn now(lua: &Lua) -> f64 {
     lua.named_registry_value::<Option<f64>>("user.time").ok().flatten().unwrap_or(0.0)

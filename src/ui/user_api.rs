@@ -263,9 +263,6 @@ pub const USER_GLOBALS: &[&str] = &[
     "UISelectAndZoomTo",
     "UISelectionByCategory",
     "UIZoomTo",
-    "UI_DrawCircle",
-    "UI_DrawLine",
-    "UI_DrawRect",
     "UnProject",
     "ValidateIPAddress",
     "ValidateUnitsList",
@@ -454,6 +451,10 @@ fn launch_replay_session(lua: &Lua, filename: &str) -> LuaResult<bool> {
             return Ok(false);
         }
     };
+    if let Some(why) = crate::engine::replay::unplayable(&text) {
+        tracing::warn!(target: "lua", filename, "LaunchReplaySession: {why}");
+        return Ok(false);
+    }
     let header = crate::engine::replay::is_recording(&text).then(|| crate::engine::replay::read_header(&text));
     if !matches!(header, Some(Ok(crate::engine::replay::Header { session: Some(_), .. }))) {
         tracing::warn!(target: "lua", filename, "LaunchReplaySession: not a recording of this engine's with its session");

@@ -351,6 +351,9 @@ pub struct Particles {
     pub fidelity: Fidelity,
     /// Where each effect emitted from this frame (render-state tests).
     pub anchors: BTreeMap<u32, (Vec3, Quat)>,
+    /// Trail segments laid this frame, by effect id: (from, to)
+    /// (render-state tests, with `record_anchors`).
+    pub trails_laid: Vec<(u32, Vec3, Vec3)>,
     /// Record `anchors` (render tests) and draw everything (no culling).
     pub record_anchors: bool,
 }
@@ -715,6 +718,7 @@ impl Particles {
             draws: Default::default(),
             fidelity: Fidelity::High,
             anchors: BTreeMap::new(),
+            trails_laid: Vec::new(),
             record_anchors: false,
         }
     }
@@ -767,6 +771,31 @@ impl Particles {
     #[allow(dead_code)]
     pub fn failures(&self) -> &[String] {
         &self.failures
+    }
+
+    /// Files changed on disk (`--enable-disk-watch`; lowercase VFS paths):
+    /// emitter, trail and beam blueprints and textures from them load again
+    /// for the effects made from now on.
+    pub fn reload(&mut self, changed: &[String]) {
+        let hit = |p: &str| !p.is_empty() && changed.iter().any(|c| *c == rts_core_engine::engine::vfs::normalise(p));
+        for (i, path) in self.assets.iter().enumerate() {
+            if path.as_deref().is_some_and(hit) {
+                if let Some(slot) = self.blueprints.get_mut(i) {
+                    *slot = None;
+                }
+                if let Some(b) = self.asset_batch.get_mut(i) {
+                    *b = BATCH_UNRESOLVED;
+                }
+            }
+        }
+        let textures: Vec<String> = self.textures.keys().filter(|p| hit(p)).cloned().collect();
+        for path in &textures {
+            self.textures.remove(path);
+            self.request_texture(path);
+        }
+        if !textures.is_empty() {
+            self.groups.retain(|(tex, ramp, _), _| !textures.contains(tex) && !textures.contains(ramp));
+        }
     }
 
     fn request_texture(&mut self, path: &str) {
@@ -1034,6 +1063,7 @@ impl Particles {
         alpha: f32,
         sight: &[([glam::Vec4; 6], LodPlane)],
         resolve: &(dyn Fn(u32, u32) -> Option<(Vec3, Quat)> + Sync),
+        launches: &[(u32, [f32; 3])],
         water: Option<f32>,
         ground: &(dyn Fn(f32, f32) -> f32 + Sync),
         zoom: f32,
@@ -1046,6 +1076,7 @@ impl Particles {
         let (work, new_tick) = (self.work, self.new_tick);
         let mut ribbons: Vec<(u32, Vec<Vertex>)> = Vec::new();
         self.anchors.clear();
+        self.trails_laid.clear();
         let effects_span = rts_core_engine::prof_span!("particles effects");
         // Where every effect is, first, in parallel (pure: interpolation,
         // the off-screen test, and an attached one's posed bone, a matrix
@@ -1070,7 +1101,13 @@ impl Particles {
                 !visible(&view, rough, reach)
             };
             let at = (e.attached && !offscreen).then(|| posed(e).unwrap_or_else(|| fallback(e, p)));
-            let delta = if e.attached { p.map_or(Vec3::ZERO, |p| Vec3::from_array(e.position) - Vec3::from_array(p.position)) } else { Vec3::ZERO };
+            // A new effect on a projectile launched this tick: the sim
+            // already flew it a tick, from its launch point (moho's motion
+            // stage runs after the script stage that fired it). Without
+            // that tick's move its trail would start a tick of flight in
+            // front of the muzzle.
+            let launched = || launches.binary_search_by_key(&e.entity, |l| l.0).ok().map(|i| Vec3::from_array(e.position) - Vec3::from_array(launches[i].1));
+            let delta = if e.attached { p.map_or_else(|| launched().unwrap_or(Vec3::ZERO), |p| Vec3::from_array(e.position) - Vec3::from_array(p.position)) } else { Vec3::ZERO };
             Placed { end, offscreen, at, delta }
         };
         if work {
@@ -1106,7 +1143,7 @@ impl Particles {
                     None => *st.anchor.get_or_insert_with(|| posed(e).unwrap_or_else(|| fallback(e, prev_of(e)))),
                 }
             };
-            let chunk_work = |effects: &[EffectView], placed: &[Placed], states: &mut [State], anchors: &mut Vec<(u32, (Vec3, Quat))>| -> Vec<(u32, Record, f32)> {
+            let chunk_work = |effects: &[EffectView], placed: &[Placed], states: &mut [State], anchors: &mut Vec<(u32, (Vec3, Quat))>, laid: &mut Vec<(u32, Vec3, Vec3)>| -> Vec<(u32, Record, f32)> {
                 let mut out = Vec::new();
                 for ((e, pl), st) in effects.iter().zip(placed).zip(states.iter_mut()) {
                     let (position, rotation) = position_of(e, pl, st);
@@ -1136,7 +1173,11 @@ impl Particles {
                         (EffectViewKind::Trail, EffectBp::Trail(t))
                             if new_tick && tick > st.tick => {
                                 st.tick = tick;
+                                let before = out.len();
                                 emit_trail(e, t, st, pl, position, alpha, shown, &view, batch, &mut out);
+                                if record {
+                                    laid.extend(out[before..].iter().map(|(_, r, _)| (e.id, Vec3::new(r.pos_rot[0], r.pos_rot[1], r.pos_rot[2]), Vec3::new(r.vel_rate[0], r.vel_rate[1], r.vel_rate[2]))));
+                                }
                             }
                         _ => {}
                     }
@@ -1144,7 +1185,7 @@ impl Particles {
                 out
             };
             let emit_span = rts_core_engine::prof_span!("particles emit");
-            let outputs: Vec<(Vec<(u32, Record, f32)>, Vec<(u32, (Vec3, Quat))>)> = {
+            let outputs: Vec<(Vec<(u32, Record, f32)>, Vec<(u32, (Vec3, Quat))>, Vec<(u32, Vec3, Vec3)>)> = {
                 use rayon::prelude::*;
                 let n = effects.len();
                 let chunk = 1024;
@@ -1156,8 +1197,9 @@ impl Particles {
                         || rts_core_engine::prof_span!("particles emit (worker)"),
                         |_, ((es, pls), sts)| {
                             let mut anchors = if record { Vec::with_capacity(es.len()) } else { Vec::new() };
-                            let out = chunk_work(es, pls, sts, &mut anchors);
-                            (out, anchors)
+                            let mut laid = Vec::new();
+                            let out = chunk_work(es, pls, sts, &mut anchors, &mut laid);
+                            (out, anchors, laid)
                         },
                     )
                     .collect::<Vec<_>>()
@@ -1169,7 +1211,8 @@ impl Particles {
             self.catchup_pending = deferred.load(std::sync::atomic::Ordering::Relaxed);
             {
                 let _s = rts_core_engine::prof_span!("particles merge");
-                for (out, anchors) in outputs {
+                for (out, anchors, laid) in outputs {
+                    self.trails_laid.extend(laid);
                     for (b, r, end) in out {
                         self.batches[b as usize].pending.push((r, end));
                     }

@@ -268,7 +268,7 @@ fn selecting_an_engineer_shows_faf_unit_panels() {
         vm.frame(1.0 / 60.0).unwrap();
     }
     let before = vm.draw_list().unwrap().len();
-    vm.update_units(&[UnitInfo { id: 7, blueprint: "uel0105".into(), army: 1, health: 1.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
+    vm.update_units(&[UnitInfo { id: 7, blueprint: "uel0105".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
     vm.set_selection(&[7]).expect("OnSelectionChanged");
     for _ in 0..60 {
         vm.frame(1.0 / 60.0).unwrap();
@@ -369,7 +369,7 @@ fn keys_run_faf_key_actions() {
     vm.start_hud().expect("game interface");
     // The first frame unlocks input (FAF's OnFirstUpdate ends the start-up input lock).
     vm.frame(1.0 / 60.0).unwrap();
-    vm.update_units(&[UnitInfo { id: 3, blueprint: "uel0201".into(), army: 1, health: 1.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
+    vm.update_units(&[UnitInfo { id: 3, blueprint: "uel0201".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
     vm.set_selection(&[3]).unwrap();
     vm.take_orders().unwrap();
     assert!(vm.key("S", false, false, false).unwrap(), "S is bound");
@@ -399,7 +399,7 @@ fn game_prefs_key_bindings_apply() {
     vm.start_hud().expect("game interface");
     // The first frame unlocks input (FAF's OnFirstUpdate ends the start-up input lock).
     vm.frame(1.0 / 60.0).unwrap();
-    vm.update_units(&[UnitInfo { id: 3, blueprint: "uel0201".into(), army: 1, health: 1.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
+    vm.update_units(&[UnitInfo { id: 3, blueprint: "uel0201".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
     vm.set_selection(&[3]).unwrap();
     vm.take_orders().unwrap();
     assert!(vm.key("K", false, false, false).unwrap(), "K is bound by the prefs");
@@ -441,7 +441,7 @@ fn camera_api_drives_the_camera() {
     assert!(vm.key("W", false, false, false).unwrap(), "W is FAF's zoom out");
     let r = vm.take_camera_requests().unwrap();
     assert!(r.iter().any(|r| r.zoom.is_some_and(|z| z > 200.0)), "zoomed out: {r:?}");
-    vm.update_units(&[UnitInfo { id: 3, blueprint: "uel0201".into(), army: 1, health: 1.0, build: 1.0, position: [300.0, 20.0, 700.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
+    vm.update_units(&[UnitInfo { id: 3, blueprint: "uel0201".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [300.0, 20.0, 700.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
     vm.lua().load("UIZoomTo({ GetUnitById('3') }, 0)").exec().unwrap();
     let r = vm.take_camera_requests().unwrap();
     assert_eq!(r.last().and_then(|r| r.focus).map(|f| (f[0], f[2])), Some((300.0, 700.0)));
@@ -541,7 +541,7 @@ fn split_view_shows_two_world_cameras() {
     }
     let worlds = |vm: &UserVm| -> Vec<(String, [f32; 4])> {
         vm.draw_list().unwrap().into_iter().filter_map(|i| match i {
-            DrawItem::World { rect, camera } => Some((camera, rect)),
+            DrawItem::World { rect, camera, .. } => Some((camera, rect)),
             _ => None,
         }).collect()
     };
@@ -582,7 +582,7 @@ fn second_head_shows_camera_head2() {
     }
     let worlds = |items: Vec<DrawItem>| -> Vec<(String, [f32; 4])> {
         items.into_iter().filter_map(|i| match i {
-            DrawItem::World { rect, camera } => Some((camera, rect)),
+            DrawItem::World { rect, camera, .. } => Some((camera, rect)),
             _ => None,
         }).collect()
     };
@@ -606,7 +606,7 @@ fn overcharge_pause_reaches_the_interface() {
     use rts_core_engine::ui::UnitInfo;
     let Some(vm) = vm() else { return };
     vm.start_hud().expect("game interface");
-    let acu = |overcharge_paused| UnitInfo { id: 7, blueprint: "uel0001".into(), army: 1, health: 1.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: Some(UnitDetail { id: 7, overcharge_paused, ..Default::default() }) };
+    let acu = |overcharge_paused| UnitInfo { id: 7, blueprint: "uel0001".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: Some(UnitDetail { id: 7, overcharge_paused, ..Default::default() }) };
     let read = || vm.lua().load("return __engine_unit(7):IsOverchargePaused()").eval::<bool>().unwrap();
     vm.update_units(&[acu(true)]).unwrap();
     assert!(read());
@@ -627,8 +627,8 @@ fn a_factorys_command_queue_is_its_rally_orders() {
     vm.start_hud().expect("game interface");
     let build = (CommandKind::BuildFactory as u8, Some("uel0201".to_string()), 2, [0.0; 3]);
     let rally = vec![(CommandKind::Move as u8, [410.0, 20.0, 600.0]), (CommandKind::Patrol as u8, [430.0, 20.0, 600.0]), (CommandKind::Patrol as u8, [430.0, 20.0, 620.0])];
-    let factory = UnitInfo { id: 7, blueprint: "ueb0101".into(), army: 1, health: 1.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: Some(UnitDetail { id: 7, commands: vec![build.clone()], factory_commands: rally, ..Default::default() }) };
-    let tank = UnitInfo { id: 8, blueprint: "uel0201".into(), army: 1, health: 1.0, build: 1.0, position: [400.0, 20.0, 610.0], work: 0.0, shield: 0.0, detail: Some(UnitDetail { id: 8, commands: vec![(CommandKind::Move as u8, None, 0, [500.0, 20.0, 500.0])], ..Default::default() }) };
+    let factory = UnitInfo { id: 7, blueprint: "ueb0101".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: Some(UnitDetail { id: 7, commands: vec![build.clone()], factory_commands: rally, ..Default::default() }) };
+    let tank = UnitInfo { id: 8, blueprint: "uel0201".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [400.0, 20.0, 610.0], work: 0.0, shield: 0.0, detail: Some(UnitDetail { id: 8, commands: vec![(CommandKind::Move as u8, None, 0, [500.0, 20.0, 500.0])], ..Default::default() }) };
     vm.update_units(&[factory, tank]).unwrap();
     let queue = |id: u32| -> Vec<String> {
         vm.lua()
@@ -650,8 +650,8 @@ fn dying_units_are_dead_to_the_interface() {
     use rts_core_engine::engine::snapshot::{EntityView, Sighting, ViewKind};
     use rts_core_engine::ui::UnitInfo;
     let Some(vm) = vm() else { return };
-    let view = |id, kind| EntityView { id, kind, army: 1, position: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0; 3], half: [1.0; 3], health: 1.0, build: 1.0, work: 0.0, shield: -1.0, blueprint: 0, mesh: 0, scale: [1.0; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 };
-    let info = |e: &EntityView| UnitInfo { id: e.id, blueprint: "uea0102".into(), army: e.army, health: e.health, build: e.build, position: e.position, work: 0.0, shield: 0.0, detail: None };
+    let view = |id, kind| EntityView { id, kind, army: 1, position: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0; 3], half: [1.0; 3], health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, work: 0.0, shield: -1.0, blueprint: 0, mesh: 0, scale: [1.0; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 };
+    let info = |e: &EntityView| UnitInfo { id: e.id, blueprint: "uea0102".into(), army: e.army, health: e.health, max_health: e.max_health, build_rate: e.build_rate, build: e.build, position: e.position, work: 0.0, shield: 0.0, detail: None };
     let dead = |id: u32| vm.lua().load(format!("return __engine_unit({id}):IsDead()")).eval::<bool>().unwrap();
     let frame = [view(7, ViewKind::Unit), view(8, ViewKind::Unit)];
     vm.update_units(&frame.iter().map(info).collect::<Vec<_>>()).unwrap();
@@ -670,7 +670,7 @@ fn dying_units_are_dead_to_the_interface() {
 fn user_units_answer_category_tests() {
     use rts_core_engine::ui::UnitInfo;
     let Some(vm) = vm() else { return };
-    let info = |id, bp: &str| UnitInfo { id, blueprint: bp.into(), army: 1, health: 1.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: None };
+    let info = |id, bp: &str| UnitInfo { id, blueprint: bp.into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: None };
     vm.update_units(&[info(3, "uel0201"), info(4, "uea0102")]).unwrap();
     let eval = |code: &str| vm.lua().load(code).eval::<String>().unwrap();
     let units = "local u = { __engine_unit(3), __engine_unit(4) }";
@@ -697,7 +697,7 @@ fn unit_details_feed_the_panels() {
         fire_state: 1,
         ..Default::default()
     };
-    vm.update_units(&[UnitInfo { id: 9, blueprint: "ueb0101".into(), army: 1, health: 1.0, build: 1.0, position: [0.0; 3], work: 0.25, shield: 0.0, detail: Some(detail) }]).unwrap();
+    vm.update_units(&[UnitInfo { id: 9, blueprint: "ueb0101".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [0.0; 3], work: 0.25, shield: 0.0, detail: Some(detail) }]).unwrap();
     let (queue, idle, work, fire): (String, bool, f64, i64) = vm
         .lua()
         .load(
@@ -721,7 +721,7 @@ fn unit_details_feed_the_panels() {
         .exec()
         .unwrap();
     let detail = UnitDetail { id: 9, commands: vec![(bf, Some("uel0201".into()), 2, [0.0; 3]), (bf, Some("uel0105".into()), 1, [0.0; 3])], ..Default::default() };
-    vm.update_units(&[UnitInfo { id: 9, blueprint: "ueb0101".into(), army: 1, health: 1.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: Some(detail) }]).unwrap();
+    vm.update_units(&[UnitInfo { id: 9, blueprint: "ueb0101".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: Some(detail) }]).unwrap();
     let heard: String = vm.lua().load("local s = {} for _, e in (NewQueue or {}) do table.insert(s, e.id .. 'x' .. e.count) end return table.concat(s, ',')").eval().unwrap();
     assert_eq!(heard, "uel0201x2,uel0105x1", "OnQueueChanged with the new queue");
     // The panel's queue edits go to the sim for the shown factory, by entry.
@@ -745,7 +745,7 @@ fn unit_stats_read_back_through_get_stat() {
         stats: vec![("VetExperience".into(), 112.0), ("VetLevel".into(), 1.0)],
         ..Default::default()
     };
-    vm.update_units(&[UnitInfo { id: 3, blueprint: "uel0201".into(), army: 1, health: 1.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: Some(detail) }]).unwrap();
+    vm.update_units(&[UnitInfo { id: 3, blueprint: "uel0201".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: Some(detail) }]).unwrap();
     let (level, exp, missing): (f64, f64, f64) = vm
         .lua()
         .load("local u = __engine_unit(3) return u:GetStat('VetLevel', 0).Value, u:GetStat('VetExperience', 0).Value, u:GetStat('Nope', 42).Value")
@@ -790,7 +790,7 @@ fn ui_frame_cost() {
     for _ in 0..420 {
         vm.frame(1.0 / 60.0).unwrap();
     }
-    vm.update_units(&[UnitInfo { id: 7, blueprint: "uel0105".into(), army: 1, health: 1.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
+    vm.update_units(&[UnitInfo { id: 7, blueprint: "uel0105".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
     vm.set_selection(&[7]).unwrap();
     // The mouse over the world: FAF's cursor update runs every frame.
     vm.mouse(rts_core_engine::ui::controls::MouseEvent::Move, 960.0, 700.0, Default::default()).unwrap();
@@ -813,7 +813,7 @@ fn early_selection_shows_unit_panels() {
     vm.set_screen(1280.0, 720.0).unwrap();
     vm.set_focus_army(1).unwrap();
     vm.start_hud().expect("game interface");
-    vm.update_units(&[UnitInfo { id: 7, blueprint: "uel0001".into(), army: 1, health: 1.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
+    vm.update_units(&[UnitInfo { id: 7, blueprint: "uel0001".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
     vm.frame(1.0 / 60.0).unwrap();
     vm.set_selection(&[7]).unwrap();
     for _ in 0..480 {
@@ -851,7 +851,7 @@ fn unit_view_names_an_enemy_units_owner() {
     for _ in 0..420 {
         vm.frame(1.0 / 60.0).unwrap();
     }
-    vm.update_units(&[UnitInfo { id: 8, blueprint: "url0107".into(), army: 2, health: 1.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: None }]).unwrap();
+    vm.update_units(&[UnitInfo { id: 8, blueprint: "url0107".into(), army: 2, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: None }]).unwrap();
     vm.set_selection(&[8]).unwrap();
     for _ in 0..10 {
         vm.frame(1.0 / 60.0).unwrap();
@@ -939,7 +939,7 @@ fn factory_selection_shows_build_icons() {
     for _ in 0..362 {
         vm.frame(1.0 / 60.0).unwrap();
     }
-    vm.update_units(&[UnitInfo { id: 9, blueprint: "ueb0101".into(), army: 1, health: 1.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
+    vm.update_units(&[UnitInfo { id: 9, blueprint: "ueb0101".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
     // FAF's startup cleared the selection; the live loop takes that request.
     vm.take_selection_request().unwrap();
     vm.set_selection(&[9]).unwrap();
@@ -947,7 +947,7 @@ fn factory_selection_shows_build_icons() {
     // a second) with the unit's data refreshed. The panel stays up across
     // them (re-setting an unchanged screen size used to dirty the layout,
     // and FAF's grid clears itself when its edge goes dirty).
-    let factory = || UnitInfo { id: 9, blueprint: "ueb0101".into(), army: 1, health: 1.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: Some(Default::default()) };
+    let factory = || UnitInfo { id: 9, blueprint: "ueb0101".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: Some(Default::default()) };
     for f in 0..60 {
         if f % 6 == 0 {
             vm.update_units(&[factory()]).unwrap();
@@ -1056,7 +1056,7 @@ fn engineer_buildables_split_into_tech_tabs() {
         vm.frame(1.0 / 60.0).unwrap();
     }
     vm.take_selection_request().unwrap();
-    vm.update_units(&[UnitInfo { id: 7, blueprint: "uel0105".into(), army: 1, health: 1.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
+    vm.update_units(&[UnitInfo { id: 7, blueprint: "uel0105".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
     vm.set_selection(&[7]).unwrap();
     let (contains, shown, other): (bool, i64, String) = vm
         .lua()
@@ -1097,7 +1097,7 @@ fn clicking_a_build_icon_arms_build_mode() {
         vm.frame(1.0 / 60.0).unwrap();
     }
     vm.take_selection_request().unwrap();
-    vm.update_units(&[UnitInfo { id: 7, blueprint: "uel0105".into(), army: 1, health: 1.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
+    vm.update_units(&[UnitInfo { id: 7, blueprint: "uel0105".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
     vm.set_selection(&[7]).unwrap();
     for _ in 0..10 {
         vm.frame(1.0 / 60.0).unwrap();
@@ -1139,7 +1139,7 @@ fn build_restrictions_lock_tech_tabs() {
         .eval()
         .unwrap();
     assert!(!restricted.is_empty());
-    let acu = |restricted: Vec<String>| UnitInfo { id: 5, blueprint: "uel0001".into(), army: 1, health: 1.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: Some(UnitDetail { id: 5, restricted, ..Default::default() }) };
+    let acu = |restricted: Vec<String>| UnitInfo { id: 5, blueprint: "uel0001".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: Some(UnitDetail { id: 5, restricted, ..Default::default() }) };
     vm.update_units(&[acu(restricted.clone())]).unwrap();
     vm.take_selection_request().unwrap();
     vm.set_selection(&[5]).unwrap();
@@ -1171,7 +1171,7 @@ fn build_restrictions_lock_tech_tabs() {
 fn unit_command_data_unions_the_selection() {
     use rts_core_engine::ui::UnitInfo;
     let Some(vm) = vm() else { return };
-    let info = |id, bp: &str| UnitInfo { id, blueprint: bp.into(), army: 1, health: 1.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: None };
+    let info = |id, bp: &str| UnitInfo { id, blueprint: bp.into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: None };
     vm.update_units(&[info(1, "uel0201"), info(2, "uel0201"), info(3, "uea0102"), info(4, "uel0105"), info(5, "uel0105")]).unwrap();
     vm.remove_units(&[5]).unwrap();
     let (ok, why): (bool, String) = vm
@@ -1229,6 +1229,8 @@ fn unchanged_unit_details_keep_their_tables() {
         blueprint: "uel0105".into(),
         army: 1,
         health: 1.0,
+        max_health: 100.0,
+        build_rate: 0.0,
         build: 1.0,
         position: [0.0; 3],
         work: 0.0,
@@ -1254,7 +1256,7 @@ fn unchanged_unit_details_keep_their_tables() {
 fn get_unit_by_id_finds_unselected_units() {
     use rts_core_engine::ui::UnitInfo;
     let Some(vm) = vm() else { return };
-    vm.set_world(vec![UnitInfo { id: 42, blueprint: "uel0001".into(), army: 1, health: 1.0, build: 1.0, position: [100.0, 20.0, 200.0], work: 0.0, shield: 0.0, detail: None }]);
+    vm.set_world(vec![UnitInfo { id: 42, blueprint: "uel0001".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [100.0, 20.0, 200.0], work: 0.0, shield: 0.0, detail: None }]);
     let (found, x, missing): (bool, f64, bool) = vm
         .lua()
         .load("local u = GetUnitById('42') local p = u and u:GetPosition() return u ~= nil, p and p[1] or -1, GetUnitById(43) == nil")
@@ -1984,7 +1986,7 @@ fn army_avatars_are_the_focus_armys_commanders() {
     use rts_core_engine::ui::UnitInfo;
     let Some(vm) = vm() else { return };
     vm.set_focus_army(1).unwrap();
-    let unit = |id, blueprint: &str, army| UnitInfo { id, blueprint: blueprint.into(), army, health: 1.0, build: 1.0, position: [100.0, 20.0, 200.0], work: 0.0, shield: 0.0, detail: None };
+    let unit = |id, blueprint: &str, army| UnitInfo { id, blueprint: blueprint.into(), army, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [100.0, 20.0, 200.0], work: 0.0, shield: 0.0, detail: None };
     vm.set_world(vec![unit(5, "uel0105", 1), unit(7, "uel0001", 1), unit(9, "ual0001", 2)]);
     let ids: Vec<String> = vm.lua().load("local out = {} for _, u in GetArmyAvatars() or {} do table.insert(out, u:GetEntityId() .. ' ' .. tostring(u:IsInCategory('COMMAND'))) end return out").eval().unwrap();
     assert_eq!(ids, ["7 true"], "army 1's ACU, not its engineer or army 2's ACU");
@@ -2067,7 +2069,7 @@ fn enhancement_orders_reach_the_enhancement_queue() {
     let Some(vm) = vm() else { return };
     vm.set_screen(1280.0, 720.0).unwrap();
     vm.start_hud().expect("game interface");
-    vm.set_world(vec![UnitInfo { id: 42, blueprint: "uel0001".into(), army: 1, health: 1.0, build: 1.0, position: [100.0, 20.0, 200.0], work: 0.0, shield: 0.0, detail: None }]);
+    vm.set_world(vec![UnitInfo { id: 42, blueprint: "uel0001".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [100.0, 20.0, 200.0], work: 0.0, shield: 0.0, detail: None }]);
     vm.frame(1.0 / 60.0).unwrap();
     let script = [("TaskName".to_string(), "EnhanceTask".to_string()), ("Enhancement".to_string(), "AdvancedEngineering".to_string())];
     vm.command_issued(CommandKind::Script, CommandTarget::None, false, None, &[42], &script).unwrap();
@@ -2089,7 +2091,7 @@ fn assisting_a_tech2_extractor_caps_it_with_storages() {
     let Some(vm) = vm() else { return };
     vm.set_screen(1280.0, 720.0).unwrap();
     vm.start_hud().expect("game interface");
-    let unit = |id, bp: &str, x| UnitInfo { id, blueprint: bp.into(), army: 1, health: 1.0, build: 1.0, position: [x, 20.0, 200.0], work: 0.0, shield: 0.0, detail: None };
+    let unit = |id, bp: &str, x| UnitInfo { id, blueprint: bp.into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [x, 20.0, 200.0], work: 0.0, shield: 0.0, detail: None };
     vm.set_world(vec![unit(42, "uel0105", 100.0), unit(43, "ueb1202", 110.0)]);
     vm.frame(1.0 / 60.0).unwrap();
     vm.set_selection(&[42]).unwrap();
@@ -2117,7 +2119,7 @@ fn enhancement_orders_stay_queued_until_the_sim_confirms() {
     let Some(vm) = vm() else { return };
     vm.set_screen(1280.0, 720.0).unwrap();
     vm.start_hud().expect("game interface");
-    let acu = |commands: Vec<(u8, Option<String>, u32, [f32; 3])>| UnitInfo { id: 42, blueprint: "uel0001".into(), army: 1, health: 1.0, build: 1.0, position: [100.0, 20.0, 200.0], work: 0.0, shield: 0.0, detail: Some(UnitDetail { id: 42, commands, ..Default::default() }) };
+    let acu = |commands: Vec<(u8, Option<String>, u32, [f32; 3])>| UnitInfo { id: 42, blueprint: "uel0001".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [100.0, 20.0, 200.0], work: 0.0, shield: 0.0, detail: Some(UnitDetail { id: 42, commands, ..Default::default() }) };
     vm.set_world(vec![acu(vec![])]);
     vm.update_units(&[acu(vec![])]).unwrap();
     vm.set_selection(&[42]).unwrap();
@@ -2399,7 +2401,7 @@ fn dragging_a_queue_entry_reorders_the_factory_queue() {
         commands: vec![(bf, Some("uel0201".into()), 2, [0.0; 3]), (bf, Some("uel0105".into()), 1, [0.0; 3]), (bf, Some("uel0101".into()), 1, [0.0; 3])],
         ..Default::default()
     };
-    let factory = UnitInfo { id: 9, blueprint: "ueb0101".into(), army: 1, health: 1.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: Some(detail) };
+    let factory = UnitInfo { id: 9, blueprint: "ueb0101".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: Some(detail) };
     vm.update_units(std::slice::from_ref(&factory)).unwrap();
     vm.set_selection(&[9]).unwrap();
     for f in 0..30 {
@@ -2450,4 +2452,60 @@ fn dragging_a_queue_entry_reorders_the_factory_queue() {
             "UNITCOMMAND_BuildFactory uel0201 x2",
         ]
     );
+}
+
+/// A unit's maximum health and build rate changed by scripts (here 5000
+/// instead of a scout's 29, and 45): the interface's `GetMaxHealth` /
+/// `GetHealth` / `GetBuildRate` follow the sim, not the blueprint.
+#[test]
+fn ui_unit_values_follow_the_sim() {
+    use rts_core_engine::ui::UnitInfo;
+    let Some(vm) = vm() else { return };
+    vm.update_units(&[UnitInfo { id: 5, blueprint: "uel0101".into(), army: 1, health: 0.25, max_health: 5000.0, build_rate: 45.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: None }]).unwrap();
+    let got: (f64, f64, f64) = vm.lua().load("local u = __engine_unit(5) return u:GetHealth(), u:GetMaxHealth(), u:GetBuildRate()").eval().unwrap();
+    assert_eq!(got, (1250.0, 5000.0, 45.0));
+}
+
+/// What the sim changes reaches the interface's UserUnit: `SetBuildRate`
+/// (an ACU's engineering upgrade) through the unit's snapshot view, and
+/// `SetCustomName` (AI and campaign commanders) through the snapshots'
+/// name list; a name given in the interface (FAF's rename dialog) wins.
+#[test]
+fn sim_build_rate_and_names_reach_the_interface() {
+    use rts_core_engine::ui::UnitInfo;
+    if !rts_core_engine::test_data::require_game("UI tests") {
+        return;
+    }
+    let mut engine = engine::Engine::new(INIT_LUA_PATH, FA_PATH, Arc::new(Mutex::new(DebugUiState::new()))).expect("engine");
+    let session = engine::session::SessionConfig { ticks: Some(0), create_initial_units: false, ai: false, ..Default::default() };
+    engine.start(&session).expect("session");
+    let (sink, rx, _request) = engine::snapshot::channel();
+    engine.set_snapshot_sink(sink);
+    let acu: u32 = engine
+        .sim_lua()
+        .load("local acu = CreateUnitHPR('uel0001', 'ARMY_1', 400, GetTerrainHeight(400, 640), 640, 0, 0, 0) acu:SetBuildRate(45) acu:SetCustomName('Brick') return tonumber(acu:GetEntityId())")
+        .eval()
+        .unwrap();
+    let (mut view, mut names) = (None, None);
+    for _ in 0..3 {
+        engine.tick().expect("tick");
+        while let Ok(mut snap) = rx.try_recv() {
+            drop(snap.ticket.take());
+            view = snap.entities.iter().find(|e| e.id == acu).copied().or(view);
+            names = snap.custom_names.take().or(names);
+        }
+    }
+    let view = view.expect("the ACU in a snapshot");
+    let names = names.expect("the names sent");
+    assert_eq!(view.build_rate, 45.0);
+    assert_eq!(&names[..], &[(acu, "Brick".to_string())]);
+
+    let vm = UserVm::with_cache(engine.vfs.clone(), engine.script_cache.clone()).expect("user vm");
+    vm.init().expect("userInit.lua");
+    vm.update_units(&[UnitInfo::from_view(&view, "uel0001".into())]).unwrap();
+    vm.set_custom_names(&names).unwrap();
+    let got: (f64, String) = vm.lua().load(format!("local u = GetUnitById('{acu}') return u:GetBuildRate(), u:GetCustomName()")).eval().unwrap();
+    assert_eq!(got, (45.0, "Brick".to_string()));
+    let renamed: String = vm.lua().load(format!("local u = GetUnitById('{acu}') u:SetCustomName('Mine') return u:GetCustomName()")).eval().unwrap();
+    assert_eq!(renamed, "Mine");
 }

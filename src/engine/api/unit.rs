@@ -136,7 +136,9 @@ fn motion_of(bp: &LuaTable, motion_type: &str) -> LuaResult<(crate::engine::sim:
         }
     };
     let mut max_speed = fx(get("MaxSpeed")?);
-    let mut turn = get("TurnRate")?.unwrap_or(90.0);
+    // `RUnitBlueprintPhysics` ctor (0x1010db00): TurnRate 0 and TurnRadius
+    // 5 unless set.
+    let mut turn = get("TurnRate")?.unwrap_or(0.0);
     let (mut winged, mut min_speed, mut lift, mut break_trigger, mut break_distance) = (false, Fx::ZERO, Fx::ZERO, Fx::ZERO, Fx::ZERO);
     let mut air_params = AirParams::default();
     if kind == MotionKind::Air {
@@ -250,20 +252,30 @@ fn motion_of(bp: &LuaTable, motion_type: &str) -> LuaResult<(crate::engine::sim:
         break_distance,
         reverse_speed: surface_fx("MaxSpeedReverse")?,
         backup_distance: surface_fx("BackUpDistance")?,
-        steer_force: surface_fx("MaxSteerForce")?,
+        // 0 (or unset): the acceleration (motion setup 0x1027ac9b).
+        steer_force: match surface_fx("MaxSteerForce")? {
+            s if s == Fx::ZERO => if surface { accel } else { Fx::ZERO },
+            s => s,
+        },
         rotate_on_spot,
-        // Unset: 0.1 rad, the value most blueprints that set it use
-        // (inferred). A zero threshold would pivot forever.
+        // Raw blueprint values, as the path spline compares them (0x101a2256).
+        corner_slowdown: surface && fx(Some(get("TurnRadius")?.unwrap_or(5.0))) > fx(Some(get("TurnRate")?.unwrap_or(0.0))),
+        // Unset: 0.1 rad (inferred). The physics constructor stores 0.5
+        // (0x1010dbbd), but the real game's Mantis still pivots 16.6
+        // degrees off course (dev/probes probe_motion), so that isn't what
+        // the motion compares; untraced. A zero threshold would pivot
+        // forever.
         rotate_threshold: if rotate_on_spot { fx(Some(get("RotateOnSpotThreshold")?.unwrap_or(0.1))).max(Fx::from_num(0.01)) } else { Fx::ZERO },
         facing_rate: surface_fx("TurnFacingRate")? * Fx::PI / Fx::from_num(180),
         layer_change_offset: surface_fx("LayerChangeOffsetHeight")?,
+        shallows_depth: if motion_type == "RULEUMT_AmphibiousFloating" { (surface_fx("LayerChangeOffsetHeight")? * 3).min(Fx::ZERO) } else { Fx::ZERO },
         attack_angle: if surface {
             fx(bp.get::<Option<LuaTable>>("AI")?.map(|ai| ai.get::<Option<f64>>("AttackAngle")).transpose()?.flatten()).max(Fx::ZERO) * Fx::PI / Fx::from_num(180)
         } else {
             Fx::ZERO
         },
-        // 0 (or unset): no limit (moho's default is +inf).
-        turn_radius: surface_fx("TurnRadius")?.max(Fx::ZERO),
+        // 0: no limit (the motion setup, 0x1027acbd); unset: 5.
+        turn_radius: if surface { fx(Some(get("TurnRadius")?.unwrap_or(5.0))).max(Fx::ZERO) } else { Fx::ZERO },
         air: air_params,
         ground: crate::engine::sim::movement::GroundParams {
             size_x: fx(bp.get::<Option<f64>>("SizeX")?.or(Some(1.0))),
@@ -310,10 +322,10 @@ fn unit_threat(lua: &Lua, bp: &LuaTable, category_index: Option<u32>) -> LuaResu
     Ok(unit_threat(level("AirThreatLevel")?, level("SurfaceThreatLevel")?, level("SubThreatLevel")?, level("EconomyThreatLevel")?, kinds))
 }
 
-/// A unit's collision box from its blueprint: half-extents `Size*/2`,
-/// sitting on `CollisionOffset*` (bottom face at the offset's y). Units with
-/// `SizeSphere` get their sphere from FAF's `OnStopBeingBuilt`.
-fn blueprint_collision(bp: &LuaTable) -> LuaResult<crate::engine::sim::entity::CollisionShape> {
+/// A unit's or prop's collision box from its blueprint: half-extents
+/// `Size*/2`, sitting on `CollisionOffset*` (bottom face at the offset's y).
+/// Units with `SizeSphere` get their sphere from FAF's `OnStopBeingBuilt`.
+pub(crate) fn blueprint_collision(bp: &LuaTable) -> LuaResult<crate::engine::sim::entity::CollisionShape> {
     let num = |k: &str| -> LuaResult<Fx> { Ok(crate::engine::sim::math::from_lua(bp.get::<Option<f64>>(k)?.unwrap_or(0.0))) };
     let half = FxVec3 { x: num("SizeX")? / 2, y: num("SizeY")? / 2, z: num("SizeZ")? / 2 };
     if half == FxVec3::default() {
@@ -367,12 +379,13 @@ pub fn spawn_unit_built_by(
         }
         None => (1.0, 1.0),
     };
-    let (storage_mass, storage_energy) = match bp.get::<Option<LuaTable>>("Economy")? {
+    let (storage_mass, storage_energy, natural_producer) = match bp.get::<Option<LuaTable>>("Economy")? {
         Some(econ) => (
             econ.get::<Option<f64>>("StorageMass")?.unwrap_or(0.0),
             econ.get::<Option<f64>>("StorageEnergy")?.unwrap_or(0.0),
+            econ.get::<Option<bool>>("NaturalProducer")?.unwrap_or(false),
         ),
-        None => (0.0, 0.0),
+        None => (0.0, 0.0, false),
     };
     // Capturable unless the blueprint lists the "Not Capturable" ability
     // (the rule FAF's UI uses; inferred for the engine).
@@ -525,6 +538,7 @@ pub fn spawn_unit_built_by(
             u.storage_mass = crate::engine::sim::math::from_lua(storage_mass);
             u.storage_energy = crate::engine::sim::math::from_lua(storage_energy);
             u.resource_consumed = Fx::ONE;
+            u.natural_producer = natural_producer;
             u.layer = layer;
             u.threat = threat;
             u.cap_cost = crate::engine::sim::math::from_lua(cap_cost);
@@ -538,9 +552,10 @@ pub fn spawn_unit_built_by(
             u.radius = crate::engine::sim::math::from_lua(radius) / 2;
             u.mass = crate::engine::sim::math::from_lua(mass.min(1.0e9));
             u.fuel_use_time = crate::engine::sim::math::from_lua(fuel_use_time);
-            u.armor_type = armor_type.map(std::sync::Arc::from);
+            // Lowercase: armour names match without regard to case (`api::armor`).
+            u.armor_type = armor_type.map(|a| std::sync::Arc::from(a.to_ascii_lowercase()));
             u.fuel_recharge = crate::engine::sim::math::from_lua(fuel_recharge);
-            u.transport_class = transport_class.clamp(1.0, 3.0) as u8;
+            u.transport_class = transport_class.clamp(0.0, 255.0) as u8;
             u.jammer = jammer;
             u.fuel_ratio = if fuel_use_time > 0.0 { Fx::ONE } else { -Fx::ONE };
             u.blueprint_command_caps = command_caps;
@@ -577,6 +592,7 @@ pub fn spawn_unit_built_by(
     if builder.is_some() {
         crate::engine::api::construction::mark_unfinished(lua, id);
     }
+    note_unit_made(lua, army, crate::engine::sim::math::from_lua(cap_cost));
     world(lua).set_base_collision(id, blueprint_collision(&bp)?);
     // Structures (finished or not) block their footprint for pathing.
     let is_structure = match (crate::engine::api::categories::domain(lua)?.named.get("STRUCTURE"), category_index) {
@@ -1058,7 +1074,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         with_unit(lua, &this, |u| u.build_restrictions = None)
     })?;
     lua_method!(lua, moho::Unit, SetCustomName = |lua, (this, name): (Obj<moho::Unit>, String)| {
-        with_unit(lua, &this, |u| u.custom_name = Some(name))
+        with_unit(lua, &this, |u| u.custom_name = Some(name))?;
+        if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
+            p.custom_name_version += 1;
+        }
+        Ok(())
     })?;
     lua_method!(lua, moho::Unit,
         /// `vector` (x, y, z) from the unit's centre in its own frame, in world
@@ -1118,6 +1138,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// saves keep a unit's facing in `Orientation[2]`).
         CreateUnitHPR = |lua, (bp, army, x, y, z, p, h, r): (String, shapes::Army, f64, f64, f64, f64, f64, f64)| {
             let index = resolve_army(lua, &army)?;
+            script_spawn_cap(lua, &bp, index)?;
             let fx = crate::engine::sim::math::from_lua;
             let q = FxQuat::from_hpr(fx(h), fx(p), fx(r));
             spawn_unit(lua, &bp, index, FxVec3::from_f64(x, y, z), q)
@@ -1128,6 +1149,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// every spawn; the argument is ignored.
         CreateUnit = |lua, (bp, army, x, y, z, qx, qy, qz, qw, _layer): (String, shapes::Army, f64, f64, f64, f64, f64, f64, f64, Option<String>)| {
             let index = resolve_army(lua, &army)?;
+            script_spawn_cap(lua, &bp, index)?;
             let fx = crate::engine::sim::math::from_lua;
             let q = FxQuat { x: fx(qx), y: fx(qy), z: fx(qz), w: fx(qw) };
             spawn_unit(lua, &bp, index, FxVec3::from_f64(x, y, z), q)
@@ -1449,21 +1471,85 @@ pub fn health_changes_tick(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
-/// Would unit `id` put army `to` over its unit cap (none, 0, or ignored:
-/// never)?
+/// Would unit `id` put army `to` over its unit cap?
 fn over_cap(lua: &Lua, id: crate::engine::sim::entity::EntityId, to: u32) -> bool {
+    let cost = world(lua).get(id).and_then(|e| e.unit.as_deref().map(|u| u.cap_cost)).unwrap_or(Fx::ONE);
+    over_cap_by(lua, to, cost)
+}
+
+/// Would a unit costing `cost` put army `to` over its unit cap? Moho's
+/// `Sim::CreateUnit` test (MohoEngine.dll 0x10317ac0): unless the army
+/// ignores the cap, `used + CapCost > cap` refuses, so a cap of 0 refuses
+/// every unit with a cost.
+fn over_cap_by(lua: &Lua, to: u32, cost: Fx) -> bool {
     let Some((cap, ignore)) = lua.app_data_ref::<crate::engine::sim::army::Armies>().and_then(|a| a.get(to).map(|a| (a.unit_cap, a.ignore_unit_cap))) else { return false };
-    if ignore || cap == 0 {
+    if ignore {
         return false;
     }
-    let w = world(lua);
-    let cost = w.get(id).and_then(|e| e.unit.as_deref().map(|u| u.cap_cost)).unwrap_or(Fx::ONE);
-    let used = w
-        .units()
-        .filter(|e| !e.destroyed && e.army == Some(to))
-        .filter_map(|e| e.unit.as_deref().map(|u| u.cap_cost))
-        .fold(Fx::ZERO, |a, b| a.saturating_add(b));
-    used.saturating_add(cost) > Fx::from_num(cap)
+    cap_used(lua, to).saturating_add(cost) > Fx::from_num(cap)
+}
+
+/// Each army's cap usage (summed `CapCost` of its live units) as of the
+/// first query this tick, plus every unit made since: one pass over the
+/// units a tick at most, so script-spawning n units costs O(n), not O(n^2).
+/// Units destroyed during the tick still count until the next one, as in
+/// the real game (FAF probe `probe_econ`: deferred `Destroy`). A cache:
+/// keyed by the tick, rebuilt after a load, so not saved.
+#[derive(Default)]
+struct CapUsage {
+    tick: Option<u64>,
+    used: std::collections::BTreeMap<u32, Fx>,
+}
+
+fn sim_tick(lua: &Lua) -> u64 {
+    lua.app_data_ref::<crate::engine::sim::scheduler::Scheduler>().map_or(0, |s| s.tick())
+}
+
+fn cap_used(lua: &Lua, army: u32) -> Fx {
+    let tick = sim_tick(lua);
+    if lua.app_data_ref::<CapUsage>().is_none() {
+        lua.set_app_data(CapUsage::default());
+    }
+    let mut usage = lua.app_data_mut::<CapUsage>().expect("CapUsage");
+    if usage.tick != Some(tick) {
+        usage.used.clear();
+        for e in world(lua).units().filter(|e| !e.destroyed) {
+            if let (Some(a), Some(u)) = (e.army, e.unit.as_deref()) {
+                let total = usage.used.entry(a).or_insert(Fx::ZERO);
+                *total = total.saturating_add(u.cap_cost);
+            }
+        }
+        usage.tick = Some(tick);
+    }
+    usage.used.get(&army).copied().unwrap_or(Fx::ZERO)
+}
+
+/// A unit was made: counted in this tick's usage if it's already summed.
+fn note_unit_made(lua: &Lua, army: u32, cost: Fx) {
+    let tick = sim_tick(lua);
+    if let Some(mut usage) = lua.app_data_mut::<CapUsage>()
+        && usage.tick == Some(tick) {
+        let total = usage.used.entry(army).or_insert(Fx::ZERO);
+        *total = total.saturating_add(cost);
+    }
+}
+
+/// `CreateUnit` / `CreateUnitHPR` past the army's unit cap: moho's bindings
+/// (0x102ac820, 0x102acbaf, 0x102acf03) ask `Sim::CreateUnit` to notify, so
+/// the brain hears `OnUnitCapLimitReached`, and raise `CreateUnit(%s)
+/// failed` on its null.
+fn script_spawn_cap(lua: &Lua, bp: &str, army: u32) -> LuaResult<()> {
+    let cost = match blueprint_table(lua, BlueprintKind::Unit, &bp.to_lowercase())?.get::<Option<LuaTable>>("General")? {
+        Some(g) => crate::engine::sim::math::from_lua(g.get::<Option<f64>>("CapCost")?.unwrap_or(1.0)),
+        None => Fx::ONE,
+    };
+    if !over_cap_by(lua, army, cost) {
+        return Ok(());
+    }
+    if let LuaValue::Table(brain) = crate::engine::api::army::brain(lua, army)? {
+        AIBrainCallbacks::on_unit_cap_limit_reached(lua, &brain, "brain")?;
+    }
+    Err(LuaError::runtime(format!("CreateUnit({bp}) failed")))
 }
 
 #[cfg(test)]

@@ -28,9 +28,6 @@ signatures! {
         BeginLoggingStats(filename: String);
         CoordinateAttacks();
         CreateUnit2(blueprint_id: String, army: Army, layer: Layer, x: f64, z: f64, heading: f64) -> Obj<moho::Unit>;
-        DrawCircle(center: Vector, diameter: f64, color: Color);
-        DrawLine(point_a: Vector, point_b: Vector, color: Color);
-        DrawLinePop(start: Vector, finish: Vector, color: Color);
         EndGame();
         EndLoggingStats(exit: Option<bool>);
         EntityCategoryCountAroundPosition(category: EntityCategory, position: Vector) -> f64;
@@ -42,7 +39,6 @@ signatures! {
         GetReclaimablesInRect(x0: f64, z0: f64, x1: f64, z1: f64) -> Option<LuaTable>;
         GetUnitsInRect(rectangle: Rect) -> Option<Vec<Obj<moho::Unit>>>;
         GetUnitsInRect(x0: f64, z0: f64, x1: f64, z1: f64) -> Option<Vec<Obj<moho::Unit>>>;
-        IsCollisionBeam(object: LuaValue) -> bool;
         LUnitMove(unit: Obj<moho::Unit>, target: Vector);
         LUnitMoveNear(unit: Obj<moho::Unit>, target: Vector, range: f64);
         MetaImpact(instigator: Obj<moho::Unit>, location: Vector, max_radius: f64, amount: f64, affects_category: Option<EntityCategory>, damage_friendly: Option<bool>);
@@ -97,9 +93,6 @@ signatures! {
         FindUnit(category: EntityCategory, need_to_be_idle: bool) -> Option<Obj<moho::Unit>>;
         /// A unit and its upgrade blueprint.
         FindUnitToUpgrade(upgrade_list: LuaTable) -> (LuaValue, LuaValue);
-        GetNumPlatoonsTemplateNamed(name: String) -> f64;
-        GetNumPlatoonsWithAI(name: String) -> f64;
-        IsAnyEngineerBuilding(category: EntityCategory) -> bool;
         /// The plan's conversion isn't identified (passed on as is).
         SetCurrentPlan(plan: LuaValue);
         SetGreaterOf(stat_name: String, value: f64);
@@ -258,9 +251,6 @@ signatures! {
         RecoilImpulse(x: f64, y: f64, z: f64);
         ScaleGetBuiltEmitter(emitter: Obj<moho::IEffect>);
         SetIsValidTarget(valid: bool);
-    }
-    moho::MotorFallDown {
-        Whack(x: f64, y: f64, z: f64, depth: f64, fall: bool);
     }
     moho::Projectile {
         SetDamage(amount: Option<f64>, radius: Option<f64>);

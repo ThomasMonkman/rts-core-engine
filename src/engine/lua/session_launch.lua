@@ -8,8 +8,9 @@
 -- ({Config = gameConfig, LocalID = peer id}, or nil): its options and
 -- players replace the ones made up here. Returns the army the local player
 -- has in the lobby's game (nil without a lobby, or as an observer). Last, the
--- game code (`GameCode::name`: 'faf', 'loud' or 'other').
-local scenarioPath, aiArmies, withAI, humanArmy, teamCount, prebuilt, launch, gameCode = ...
+-- game code (`GameCode::name`: 'faf', 'loud' or 'other'). Last, the AI chosen
+-- with `--ai` (`{default = key, [army] = key}`, or nil: the default below).
+local scenarioPath, aiArmies, withAI, humanArmy, teamCount, prebuilt, launch, gameCode, aiChoice = ...
 local isFaf, isLoud = gameCode == 'faf', gameCode == 'loud'
 teamCount = teamCount or 0
 
@@ -42,12 +43,15 @@ scenario.Options = {
     TeamShareOverflow = 'enabled',
 }
 
--- Game code that isn't FAF's (LOUD, the base game) reads options its own
--- lobby sets: the rest take its lobby's defaults (an option's `default` is
--- an index into its `values`), the base lists in lobbyoptions.lua after any
--- `/lua/CustomOptions` files, as LOUD's lobby merges them. The options
--- above win.
-if not isFaf then
+-- The rest of the options take the lobby's defaults (an option's `default`
+-- is an index into its `values`), as a game started from a lobby has them:
+-- the base lists in lobbyoptions.lua after any `/lua/CustomOptions` files
+-- (LOUD's lobby merges those), then each AI mod's
+-- `/lua/AI/LobbyOptions/lobbyoptions.lua` `AIOpts` (FAF's lobby,
+-- `ImportModAIOptions`). Scripts read them: RNGAI takes FAF's `TeamSpawn`
+-- ('fixed') to mean its enemies' start spots are known, and has its own AI
+-- options (real-game run with these defaults). The options above win.
+do
     local function addDefaults(list)
         if type(list) ~= 'table' then return end
         for _, option in ipairs(list) do
@@ -58,13 +62,20 @@ if not isFaf then
             end
         end
     end
-    local listNames = { 'LobbyGlobalOptions', 'globalOpts', 'teamOptions', 'advAIOptions', 'advGameOptions' }
+    local listNames = { 'LobbyGlobalOptions', 'globalOpts', 'teamOptions', 'AIOpts', 'advAIOptions', 'advGameOptions' }
     local files = DiskFindFiles('/lua/CustomOptions', '*.lua')
     table.insert(files, '/lua/ui/lobby/lobbyoptions.lua')
     for _, file in ipairs(files) do
         local ok, module = pcall(import, file)
         if ok then
             for _, name in ipairs(listNames) do addDefaults(rawget(module, name)) end
+        end
+    end
+    for _, mod in ipairs(__active_mods or {}) do
+        local file = mod.location and (mod.location .. '/lua/AI/LobbyOptions/lobbyoptions.lua')
+        if file and DiskGetFileInfo(file) then
+            local ok, module = pcall(import, file)
+            if ok then addDefaults(rawget(module, 'AIOpts')) end
         end
     end
 end
@@ -101,6 +112,62 @@ if not isFaf then
     end
 end
 
+-- The game's lobby AI list, with the session's mods' AIs: FAF's
+-- `GetAItypes` (it adds each sim mod's `/lua/AI/CustomAIs_v2`), else the
+-- module's `aitypes` list. FAF's asks `/lua/mods.lua` for the mods, which
+-- needs the interface (`GetPreference`): here it's given the session's
+-- `__active_mods`, the mods actually running.
+local function lobbyAITypes()
+    local env = setmetatable({}, { __index = _G })
+    env.import = function(path)
+        if string.lower(path) == '/lua/mods.lua' then
+            return { GetGameMods = function() return __active_mods or {} end }
+        end
+        return import(path)
+    end
+    local ok, err = pcall(doscript, '/lua/ui/lobby/aitypes.lua', env)
+    if not ok then
+        error("--ai: can't read the lobby's AI list (/lua/ui/lobby/aitypes.lua): " .. tostring(err), 0)
+    end
+    local list = type(rawget(env, 'GetAItypes')) == 'function' and env.GetAItypes() or rawget(env, 'aitypes')
+    return type(list) == 'table' and list or {}
+end
+
+-- The `--ai` keys, checked against that list: `--ai list` or an unknown
+-- key stops with the keys there are.
+local chosenAI = {}
+if aiChoice then
+    local types = lobbyAITypes()
+    local byKey = {}
+    for _, ai in ipairs(types) do
+        if ai.key then byKey[ai.key] = ai end
+    end
+    local function keys()
+        local lines = {}
+        for _, ai in ipairs(types) do
+            if ai.key then table.insert(lines, '  ' .. ai.key .. '  ' .. tostring(LOC and LOC(ai.name) or ai.name)) end
+        end
+        return table.concat(lines, '\n')
+    end
+    local function check(key, what)
+        if key == 'list' then
+            error('AI keys (the game\'s, and the session\'s mods\'):\n' .. keys(), 0)
+        end
+        if not byKey[key] then
+            error('--ai ' .. what .. ': no AI with the key ' .. key .. ' (an AI mod needs its --mod). The keys:\n' .. keys(), 0)
+        end
+        return byKey[key]
+    end
+    if aiChoice.default then
+        chosenAI.default = check(aiChoice.default, aiChoice.default)
+    end
+    for army, key in pairs(aiChoice) do
+        if type(army) == 'number' then
+            chosenAI[army] = check(key, army .. '=' .. key)
+        end
+    end
+end
+
 local armySetup = {}
 local index = 0
 local starts = teams[1].armies
@@ -133,17 +200,36 @@ if launch then
     starts = {}
 end
 local count = (aiArmies > 0 and aiArmies < table.getn(starts)) and aiArmies or table.getn(starts)
+if aiChoice and launch then
+    WARN('--ai is ignored: the lobby\'s launch names each slot\'s AI')
+end
+for army in pairs(chosenAI) do
+    if type(army) == 'number' and not launch then
+        if army > count then
+            error('--ai ' .. army .. '=...: there are only ' .. count .. ' armies', 0)
+        elseif army == humanArmy or not withAI then
+            error('--ai ' .. army .. '=...: army ' .. army .. ' is not an AI', 0)
+        end
+    end
+end
 for i = 1, count do
     local name = starts[i]
     index = index + 1
     local opts = playerOptions(name)
     opts.ArmyName = name
     if withAI and i ~= humanArmy then
-        opts.AIPersonality = defaultAI
+        local chosen = chosenAI[i] or chosenAI.default
+        local aiKey, aiName = defaultAI, defaultAIName
+        if chosen then
+            -- As the lobby's `GetAIPlayerData`: the list entry goes along.
+            aiKey, opts.AILobbyProperties = chosen.key, chosen
+            if not isFaf then aiName = chosen.name end
+        end
+        opts.AIPersonality = aiKey
         -- Unique, as the lobby's `MakeValidPlayerName` keeps them (its
         -- suffix format is a guess).
-        if defaultAIName then
-            opts.PlayerName = (i == 1) and defaultAIName or (defaultAIName .. ' (' .. i .. ')')
+        if aiName then
+            opts.PlayerName = (i == 1) and aiName or (aiName .. ' (' .. i .. ')')
         end
     else
         opts.Human = true

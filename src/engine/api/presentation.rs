@@ -8,7 +8,11 @@ use crate::lua_api::{Obj, lua_fn, lua_method};
 /// `_c_object` of a `moho.CDecalHandle`.
 #[derive(Clone, Copy, Debug)]
 pub struct DecalHandle(pub u32);
-impl LuaUserData for DecalHandle {}
+impl LuaUserData for DecalHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        crate::engine::api::nil_metatable::add_nil_index(methods);
+    }
+}
 
 pub fn register(lua: &Lua) -> LuaResult<()> {
     lua.set_app_data(Presentation::default());

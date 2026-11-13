@@ -21,7 +21,7 @@
     - Entities are interpolated between the last two snapshots (merge-walk by id; lerp + slerp), one tick of latency.
 - `render/camera.rs`: RTS camera (WASD/arrows, wheel zoom with tilt, middle-drag pan, hold Space and move the mouse to turn and tilt it while zoomed in closer than 125, eased back on letting go unless `cam_Free` (FAF's Ctrl-V) is on; Insert / Delete turn it and it stays turned until the view is reset (FAF's V) or the interface reverts it). 
     - Zoom is moho's: the ground across the view's longer side, which the field of view also spans.
-- egui: status bar (FPS, tick, entity counts), Logs and VFS as collapsible windows; the windows hidden until Ctrl+` (`RenderState::show_debug`), the bar shown with its own toggle at the bottom right (`show_status`).
+- egui: status bar (`status_bar.rs`: FPS, sim, tick, entity counts, the network panel), Logs and VFS as collapsible windows; the windows hidden until Ctrl+` (`RenderState::show_debug`), the bar shown with its own toggle at the bottom right (`show_status`).
 - Stage 3, debug views
     - left-click picks an entity (camera ray vs its box)
     - the **Selected** window shows blueprint, army, layer, speed, health/build, focus, its order queue and weapon states, with its path drawn. 
@@ -50,7 +50,7 @@ Each frame the present thread asks the main thread for it (a winit user event, `
 The scene draws one or more world views, each a named camera (`World::cameras`: `WorldCamera`, FAF's split view's `WorldCamera2`) in a rectangle of the frame, from the interface's world view controls (docs/architecture/ui.md, Cameras and world views). With one view the frame is what it was before views (the golden images are unchanged).
 
 - Shared once a frame (the stage, on the worker): interpolation, the pose pass and instances, particles' emission. An entity is culled only when outside every view's frustum and drawn at the finest LOD any view needs (the nearest on its LOD plane); strategic icons are decided per view (`Plan::icons`, at most `MAX_VIEWS`), so an entity past its last cutoff in one view shows its icon there while another view draws its mesh. Emitters emit when in any view (`particles::Sight`).
-- Per view (`Scene::prepare_view`, into the view's own `ViewGpu`): the terrain's detail and tiles, decal culling (`terrain::DecalDraws`), order lines (`command_graph::GraphFrame`), deposit icons (`resource_icons::IconsFrame`), range overlays (`ranges::RangesFrame`), shadow cascades, their light matrices (`shadows::Lights`) and casters, and the shaders' globals with the view's group 0. Every view is prepared before any draws, and all views' encoders finish in parallel with the rest of the frame's (no submit between views). The screen-sized targets (depth, terrain normals, range mask, bloom, SMAA) and the shadow maps are shared: the GPU runs one view's passes after the other's. Particles face each view's camera from its globals (`particles.wesl` `cam_right`/`cam_up`), so they need nothing per view. Every pass of a view sets its viewport and scissor (`View::bind`), including the terrain normals and range overlay passes (the range shader takes the view's origin); the first view clears the frame and later ones load it. Bloom and SMAA run once over the whole frame.
+- Per view (`Scene::prepare_view`, into the view's own `ViewGpu`): the terrain's detail and tiles, decal culling (`terrain::DecalDraws`), order lines (`command_graph::GraphFrame`), scripts' debug lines (`debug_lines::LinesFrame`), deposit icons (`resource_icons::IconsFrame`), range overlays (`ranges::RangesFrame`), shadow cascades, their light matrices (`shadows::Lights`) and casters, and the shaders' globals with the view's group 0. Every view is prepared before any draws, and all views' encoders finish in parallel with the rest of the frame's (no submit between views). The screen-sized targets (depth, terrain normals, range mask, bloom, SMAA) and the shadow maps are shared: the GPU runs one view's passes after the other's. Particles face each view's camera from its globals (`particles.wesl` `cam_right`/`cam_up`), so they need nothing per view. Every pass of a view sets its viewport and scissor (`View::bind`), including the terrain normals and range overlay passes (the range shader takes the view's origin); the first view clears the frame and later ones load it. Bloom and SMAA run once over the whole frame.
 - An entity's LOD comes from the nearest view that can see it (not the nearest of all views), so a zoomed-out view beside a close one doesn't give every unit on the map its full mesh.
 - Not per view yet: beams and ribbons face the first view's camera (built on the CPU with its eye); wave emission follows the first view.
 
@@ -60,6 +60,7 @@ FAF's dual-head mode: root frame 1 (`GetFrame(1)`, where FAF's `multihead.Create
 
 - The interface runs once per main frame; the second head's frames (`UserEvent::PresentReady(1)`) take the snapshots since its last (each head's scene gets every `SceneDelta`; one decided after the first snapshots gets those stashed before), the main frame's latest input with head 1's views (`World::fill_input(1, ..)`) and root frame 1's draw list, both halves at once. Each head steps the cameras it shows, at its own rate (`frame::update_camera`, `camera_head`): a camera only head 2 shows (`CameraHead2`) moves in head 2's frames (the wheel, a drag, a timed `MoveTo`), every other camera in the main frames (the keys and a followed unit move the main camera); the wheel and a drag wait for the frame of the head the cursor is on. The interface reads the cameras once per main frame.
 - The cursor is on one head at a time (`RenderState::cursor_head`, from the window it moved on): picks, the view under a point, the wheel and drag (`World::set_active_head`), and the interface's hit tests (`UserVm::set_mouse_head`) are that head's. Keys are shared. egui's windows are the main window's only.
+- Closing the second head's window closes that head only (`RenderState::close_second_head`; moho exits the game): its present thread, surface and scene go, the interface is told it has one head (root frame 1's controls stay, drawn nowhere), and the main window carries on. It comes back with the next run.
 - Both heads' models load their textures through one cache (`texture_load::Cache`, `Models::share_textures`): each texture is in GPU memory once. The rest is the head's own: the screen-sized targets, shadow maps, the map's textures, mesh buffers, particles.
 - Either window can be hidden without stopping the other. Both heads share one device, and an acquire or present waiting on a hidden window's vblank holds it. A window winit reports covered (`Occluded`: macOS, X11) or minimised (resized to nothing: Windows) isn't asked for drawables (`Command::Hidden`, `RenderState::apply_visibility`); its frames draw offscreen, at 10 Hz, except a hidden main window while head 2 shows: the interface runs in its frames, so they keep head 2's refresh. Wayland reports neither, and Mesa's Fifo present waits for the frame callback a covered window never gets, so on Wayland vsync is Mailbox where offered, paced by the present thread to the monitor's refresh (`state::present_mode`, `Presenter::pace`).
 - Not yet: the minimap and the interface's engine images (`Command::Image`) draw on the main window only.
@@ -71,7 +72,7 @@ Every wgpu object is labelled, and the labels reach the backend, so a frame capt
 A frame's command buffers, in submit order:
 - `frame: start (GPU timing)`: the start of the GPU timing bracket (`GPU timing: frame start`, on adapters with timestamp queries; `GPU timing: frame end` closes it in the last buffer).
 - `frame: shadows + terrain normals`: one pass per sun cascade (`shadows: cascade 0 (near)` ...), then `terrain: normals + depth` (groups `terrain`, `decals: map`, `decals: sim (scorch marks, ...)`, `decals: interface`), then the ground-depth copy for the range overlays.
-- `frame: world`: the `world` pass, in debug groups in draw order: `sky`, `terrain` (then the albedo decals and `tread marks + footprints`), `boxes (models still loading) + icons`, `models`, `particles: underwater`, `water`, `models: shields + effect techniques`, then (after `ranges: mask` and `ranges: composite`, or the refraction copy, each resuming the pass as `world (after ...)`) `particles: beams`, `particles`, `particles: lights`, `ghosts: queued builds`, `resource icons`, `command graph (order lines)`, `ghosts: placement`.
+- `frame: world`: the `world` pass, in debug groups in draw order: `sky`, `terrain` (then the albedo decals and `splats`), `boxes (models still loading) + icons`, `models`, `particles: underwater`, `water`, `models: shields + effect techniques`, then (after `ranges: mask` and `ranges: composite`, or the refraction copy, each resuming the pass as `world (after ...)`) `particles: beams`, `particles`, `particles: lights`, `ghosts: queued builds`, `resource icons`, `command graph (order lines)`, `debug lines`, `ghosts: placement`.
 - `frame: post (bloom, SMAA)`: group `bloom` (`bloom: copy glow`, the blur passes), `bloom: add to frame`, then `SMAA: edges`, `SMAA: blend weights`, `SMAA: resolve`.
 - `frame: overlays + interface + debug windows`: `world overlays (selection, drag box)`, `interface`, `debug windows (egui)`.
 
@@ -95,15 +96,16 @@ FA/FAF's terrain as `effects/terrain.fx` draws it, from the map's `.scmap` (read
 - Not yet: the terrain casting into the shadow map (moho's `TTerrainDepth`; ours bakes a horizon map), glow and water-albedo decals, skybox, biplanar mapping, FA's screen-space refraction, decal mask textures (`DecalMaskTexture`).
 - Check against the `.scmap`'s own preview image (the editor's top-down render, first blob in the file).
 
-## Tread marks and footprints (`render/terrain.rs` `lay_treads`)
-FAF lays both itself, as timed splats: tread marks from `TreadComponent` (a thread per
+## Splats: tread marks, footprints (`render/terrain.rs` `lay_splats`)
+Moho calls them splats (`CreateSplat`, `CreateSplatOnBone`; drawn by `TSplats`). FAF lays most
+of them itself: tread marks from `TreadComponent` (a thread per
 `Treads.TreadMarks` entry calling `CreateSplatOnBone` every `TreadMarksInterval`, life
 `TreadLifeTime` or 1 s; it starts only once the engine has reported the terrain type the unit
 is on, `OnTerrainTypeChange`), footprints from `OnAnimCollision`. Timed splats skip the decal
 layer and come with the next snapshot (`Snapshot::splats`); the terrain renderer puts them in a
-ring of 16384 instances per texture (`TreadInstance`: centre, half extents, heading, birth,
+ring of 16384 instances per texture (`SplatInstance`: centre, half extents, heading, birth,
 lifetime, LOD distance), written where its head is (nothing rebuilt per frame), drawn after the
-albedo decals and lit like them (FA's `TSplats`). Like a decal, `vs_tread` lays each mark on the
+albedo decals and lit like them (FA's `TSplats`). Like a decal, `vs_splat` lays each mark on the
 terrain's own cells under it from the height buffer (every instance draws the grid the ring's
 largest mark needs at this frame's step; the rest collapse), so marks follow the ground exactly
 It fades a mark as moho does (opaque, eased
@@ -113,6 +115,9 @@ range. No
 marks under water. Splat sizes are full extents (moho's `CreateSplat` places the corner at the
 centre minus half the size), so small units' tracks (engineers: 0.55 x 0.4 of a two-strip
 texture) are faint by design.
+A splat whose texture is still loading waits (`Splats::waiting`, retried each frame) rather than
+being dropped: its own request starts the load, so a one-off splat would otherwise never show.
+It is dropped if the texture fails or its lifetime runs out first.
 
 ## Shoreline waves (`render/particles.rs` `emit_waves`)
 The `.scmap`'s wave generators (`scmap::WaveGenerator`, field order as moho's
@@ -129,6 +134,9 @@ says, coloured over its life by the ramp (`waveramptest.dds` on Seton's). They g
 ordinary particle batches, above the water. Moho times periods on the wall clock
 (`gpg::time::Timer::ElapsedSeconds`); ours on the particle clock (ticks / 10), so a paused
 game doesn't pile waves up and they follow game speed.
+
+## Debug lines (`render/debug_lines.rs`)
+Scripts' lines and circles: the sim's debug canvas (`DrawLine`, `DrawLinePop`, `DrawCircle`; `api/debug_draw.rs`, emptied each beat, in the snapshot's `debug.draw`) and each world view's interface shapes (`UI_DrawLine`, `UI_DrawCircle`, `UI_DrawRect` from its `OnRenderWorld`; `ui/world_draw.rs`, on `camera::View::shapes`). One instance per segment (a circle is 32): the vertex shader projects the ends, clips at the near plane and widens the segment on screen (world width, at least a few pixels). The CPU lists the sim canvas's segments once per snapshot and uploads a view's buffer only when its segments change. Alpha blended without depth, after the order lines (FAF's patch draws its shapes that way).
 
 ## Command graph (`render/command_graph.rs`)
 The selected units' queued orders, as moho draws them: order lines (unit to

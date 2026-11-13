@@ -224,19 +224,25 @@ impl VfsIndex {
         for m in self.mounts.iter().filter(|m| !m.source.exists()) {
             tracing::warn!(source = %m.source.display(), "vfs: mount point not found (skipped)");
         }
+        // A mount that can't be read (a stray .7z or a broken zip in the
+        // mods/maps folder) is warned about and skipped, so one bad file
+        // doesn't stop the game starting.
         let mounted_list: Vec<Mounted> = self
             .mounts
             .par_iter()
             .filter(|mount_point| mount_point.source.exists())
-            .map(|mount_point| -> io::Result<Mounted> {
+            .filter_map(|mount_point| {
                 let _s = crate::prof_span!("vfs index mount (worker)");
-                if mount_point.source.is_dir() {
-                    Ok(Mounted::Folder(get_folder_index(mount_point)?))
+                let mounted = if mount_point.source.is_dir() {
+                    get_folder_index(mount_point).map(Mounted::Folder)
                 } else {
                     get_archive_index(mount_point).map(Mounted::Archieve)
-                }
+                };
+                mounted
+                    .inspect_err(|e| tracing::warn!(source = %mount_point.source.display(), error = %e, "vfs: can't read mount (skipped)"))
+                    .ok()
             })
-            .collect::<io::Result<_>>()?;
+            .collect();
         let _ = index_span;
 
         // First mount wins: merge in mount order.
@@ -363,6 +369,36 @@ impl Vfs {
         self.index.file_system.keys().map(|s| s.as_str())
     }
 
+    /// The folders mounted from disk (canonical where they exist), what
+    /// `--enable-disk-watch` watches (`engine::disk_watch`).
+    pub fn folder_sources(&self) -> Vec<PathBuf> {
+        self.index.mounts.iter().filter(|m| m.source.is_dir()).map(|m| std::fs::canonicalize(&m.source).unwrap_or_else(|_| m.source.clone())).collect()
+    }
+
+    /// Forgets the translated source of `path` (it changed on disk), so the
+    /// next read reads the file again.
+    pub fn invalidate(&self, path: &str) {
+        self.layer.processed_cache.write().unwrap().remove(&normalise(path));
+    }
+
+    /// The scripts a change to `path` (normalised) changes: `path` itself
+    /// and, for a hook file, the script it hooks. A hook folder is one of
+    /// the VFS's (the init file's, the engine's) or a mod's: any `/hook`
+    /// folder (`<mod>/hook/lua/x.lua` hooks `/lua/x.lua`).
+    pub fn changed_scripts(&self, path: &str) -> Vec<String> {
+        let mut out = vec![path.to_string()];
+        let base = self
+            .index
+            .hook_dirs
+            .iter()
+            .find_map(|d| path.strip_prefix(d.as_str()).filter(|r| r.starts_with('/')))
+            .or_else(|| path.find("/hook/").map(|i| &path[i + "/hook".len()..]));
+        if let Some(base) = base {
+            out.push(base.to_string());
+        }
+        out
+    }
+
     pub fn paths_by_patterns(
         &self,
         patterns: &[&str],
@@ -437,7 +473,7 @@ impl Vfs {
         }
         // Compare canonical paths when the file exists, so `../x/..` and
         // absolute spellings of a mounted folder both match.
-        let lower = std::fs::canonicalize(path).map_or_else(|_| unixy.clone(), |c| c.to_string_lossy().replace('\\', "/")).to_lowercase();
+        let lower = std::fs::canonicalize(crate::engine::api::io::disk_path(path)).map_or_else(|_| unixy.clone(), |c| c.to_string_lossy().replace('\\', "/")).to_lowercase();
         for (src, mountpoint) in &self.index.folder_roots {
             if let Some(rest) = lower.strip_prefix(src.as_str())
                 && (rest.is_empty() || rest.starts_with('/')) {
@@ -632,6 +668,31 @@ impl Vfs {
         Ok(())
     }
 
+    /// The files a script's chunk is made of, as [`append_hooks`](Self::append_hooks)
+    /// joins them: the script, then each hook (with `extra`'s), each with
+    /// the chunk line its first line lands on. The translation keeps every
+    /// line where it was, so a chunk line maps back to a line of one of
+    /// these files (the Lua debugger, `engine::lua::debugger`).
+    pub fn chunk_segments(&self, path: &str, extra: &[String]) -> io::Result<Vec<(String, u32)>> {
+        let key = normalise(path);
+        let loc = self.index.file_system.get(&key).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("not in VFS: {path}")))?;
+        let mut out = vec![(key.clone(), 1)];
+        if !matches!(extension(&key), Some("lua" | "bp")) || self.index.hook_dirs.iter().chain(extra).any(|d| key.starts_with(d.as_str()) && key[d.len()..].starts_with('/')) {
+            return Ok(out);
+        }
+        let lines = |bytes: &[u8]| bytes.iter().filter(|&&b| b == b'\n').count() as u32;
+        let mut prev = loc;
+        for dir in self.index.hook_dirs.iter().chain(extra) {
+            let hook_path = format!("{dir}{key}");
+            let Some(hook) = self.index.file_system.get(&hook_path) else { continue };
+            // The previous part's lines, then the `\n` that joins them.
+            let start = out.last().unwrap().1 + lines(&prev.get_file(&self.index.archieves)?) + 1;
+            out.push((hook_path, start));
+            prev = hook;
+        }
+        Ok(out)
+    }
+
     /// All VFS file paths in sorted order.
     pub fn sorted_paths(&self) -> &[String] {
         &self.index.sorted_paths
@@ -760,6 +821,27 @@ mod tests {
         assert_eq!(vfs.disk_to_local(&dir.join("units/a_unit.bp").to_string_lossy()), "/units/a_unit.bp");
         assert_eq!(vfs.disk_to_local(&dir.join("units/../units/a_unit.bp").to_string_lossy()), "/units/a_unit.bp");
         assert_eq!(vfs.disk_to_local("/elsewhere/x.lua"), "/elsewhere/x.lua");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A mount that isn't a readable archive (a stray .7z in the mods
+    /// folder) is skipped and the other mounts still load.
+    #[test]
+    fn unreadable_archive_mount_is_skipped() {
+        let dir = std::env::temp_dir().join(format!("vfs_badzip_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("ok/lua")).unwrap();
+        std::fs::write(dir.join("ok/lua/a.lua"), b"a").unwrap();
+        std::fs::write(dir.join("junk.7z"), b"7z\xbc\xaf\x27\x1c not a zip").unwrap();
+        let vfs = Vfs::new(
+            vec![
+                MountPoint { source: dir.join("junk.7z"), mountpoint: "/mods/junk.7z".into() },
+                MountPoint { source: dir.join("ok"), mountpoint: "/".into() },
+            ],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(vfs.read("/lua/a.lua").unwrap(), b"a");
+        assert!(!vfs.contains("/mods/junk.7z/anything"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

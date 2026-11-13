@@ -9,6 +9,7 @@ and `src/ui/net_lobby.rs` + `src/ui/lobby.lua` (FAF's lobby natives).
 | Layer | File | What |
 |---|---|---|
 | Link | `net/link.rs` | Reliable, ordered byte channel to one peer over UDP: numbered 1100-byte chunks, cumulative ack + 64-bit selective ack in every packet, RTT-based resend (`srtt + 4*rttvar`, doubling, 30 ms..2 s), keepalive every 250 ms. RTT is measured from every packet, keepalives included (as moho's `CNetUDPConnection`: a ring of sent-packet times matched by echoed serial, MohoEngine.dll 0x10080f00): each header carries the sender's clock, the last stamp it got and how long it held it, so an idle lobby's `ping` stays current. Pure state machine (tested under 30% loss + reordering). |
+| Conditioner | `net/conditioner.rs` | Testing: latency, jitter, spikes and loss on this client's packets each way, set from the stats bar's network panel or `RTS_NET_LAG`. |
 | Transport | `net/transport.rs` | Where packets go: the UDP socket, or an [iroh](https://iroh.computer) endpoint beside it for peers joined by internet join code (below). |
 | Mesh | `net/core.rs` | One UDP socket per client (listens and connects). Host = member 1; a joiner gets an id and the other members' addresses (`Welcome`) and connects to each: full mesh, no relay. Events (`Event`) queue for the lobby UI, then the lockstep. `Established` gossip feeds FAF's `establishedPeers`. Peers silent 20 s are lost; `Bye` on close is immediate. |
 | Wire | `net/wire.rs` | Frames: `u32` length + tag. Lua tables as `LuaData` (canonical key order); commands as replay lines (`sim::input::encode`, exact fixed-point bits). |
@@ -163,9 +164,12 @@ copy would show as a desync at the first checksum.
   needn't agree: each turn carries its own `sched`. The launch sets the
   starting delay for everyone (from the links).
 
-  Bad connections on one machine: `RTS_NET_LAG=<base>:<jitter>[:<1 in n>:<spike>]`
-  (ms) holds every UDP packet a client sends, to test how the delay copes with a bad line (stalls
-  and the delay chosen show in the log's `lockstep:` lines).
+  Bad connections on one machine: the stats bar's network panel (click its `net` readout) sets
+  latency, jitter, spikes and loss on this client's packets, outgoing and incoming, while the game
+  runs (`net/conditioner.rs`: the transport asks it the fate of every UDP and iroh packet; held
+  ones overtake each other). `RTS_NET_LAG=<base>:<jitter>[:<1 in n>:<spike>[:<loss ‰>]]` (ms) sets
+  the outgoing ones at start, for headless runs. Stalls and the delay chosen show in the log's
+  `lockstep:` lines; changes log as `network: conditions`.
 
 - **Slow machines slow the game.** Each client measures its tick cost
   (smoothed, waiting excluded) and sends `capacity` = fastest speed it keeps
@@ -260,7 +264,7 @@ cargo run --release -- --headless --net-join 10.0.0.5:16010 --net-bot --speed 1 
 | `--log h.log` | A log file per client, so the runs can be compared |
 | `--net-name NAME` | The player's name in the lobby (default `Player`) |
 
-To check for desyncs, set `RTS_TRACE_TICKS=0-1200` on every client and diff the `trace tick=` lines across the logs. Each log ends with `lockstep: totals`: turns, waits and desyncs. `RTS_NET_LAG=<base>:<jitter>` adds latency and jitter to one client's packets (see [Lockstep](#lockstep) above).
+To check for desyncs, set `RTS_TRACE_TICKS=0-1200` on every client and diff the `trace tick=` lines across the logs. Each log ends with `lockstep: totals`: turns, waits and desyncs. `RTS_NET_LAG=<base>:<jitter>` adds latency and jitter to one client's packets (or the network panel, in a windowed client) (see [Lockstep](#lockstep) above).
 
 Ports: game 16010 up (port 0 = first free from 16010), discovery 16000.
 Windows needs an inbound UDP rule (the test PC has "rts-core-engine game (UDP
@@ -285,7 +289,7 @@ gets from `CreateUI` once connected, so `Group(nil)` throws (moho's
 object"). As in the real game, the "Connecting..." dialog's Abort Connect
 still returns to the menu.
 
-Dev switches: `RTS_NET_JITTER_MS`, `RTS_NET_SLOW_MS`, `RTS_GAME_UI_LUA=file`
+Dev switches: `RTS_NET_JITTER_MS`, `RTS_NET_SLOW_MS`, `RTS_NET_GAME_SPEED` (the harness's lobby Game Speed: `normal` (default, fixed), `fast` or `adjustable`), `RTS_GAME_UI_LUA=file`
 (Lua run in the game's interface after a lobby launch, for scripted UI
 tests), `__engine_controls()` (every live control, to find a button by its
 label in `--ui-lua` scripts), `__engine_screenshot_now = true` (with

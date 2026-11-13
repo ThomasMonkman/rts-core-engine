@@ -104,9 +104,20 @@ With FAF's interface up, its own key map and panels work as in the real game
 - **Selected**: the first selected unit's state.
 - **Logs** and **VFS**: the log and the mounted game files.
 
-The status bar along the bottom shows FPS; the CPU and GPU time per frame and which of CPU, GPU or
-vsync limits the frame rate; process and GPU memory; sim ms/tick and ticks/s; the speed selector,
-tick and entity counts. The ⏷ at its right end hides it; ⏶ in the bottom-right corner brings it back.
+The status bar along the bottom is one line of fixed-width readouts (`src/render/status_bar.rs`):
+pause and game speed; FPS, the time a frame took to make (the slowest of main thread, render thread and GPU; not the gap between frames) and what limits it (`cpu`, `gpu` or `vsync`); sim ms/tick,
+its p99, ticks/s now and `max`, the ticks/s the
+sim's typical tick cost allows; game time and tick; entity counts. Hover a readout for the detail:
+the CPU / render / GPU split, memory, draw calls and a frame-time graph; p50 and a tick-cost graph.
+On a narrow window the readouts that don't fit wrap onto a second line (entities first). `copy` puts a one-line summary for bug
+reports on the clipboard. The ⏷ at its right end hides the bar; ⏶ in the bottom-right corner brings it back.
+
+The `net` readout shows the worst round trip and our input delay in a lobby or a game (`offline`
+outside one), and flags `shaped` (conditions on, below), `DESYNC` and `waiting on <player>`. It's
+always there, in every build, so conditions can be set before hosting or joining. Click `net` for the network
+panel: each peer's path, ping, p99, input delay and max speed, and **conditions**: latency, jitter,
+loss and spikes on this client's packets, each way, with presets (LAN, Wi-Fi, intercontinental,
+awful, moon: ~2.6 s round trip). They apply at once to UDP and iroh alike and aren't saved (`src/net/conditioner.rs`).
 
 ### Test scenes
 
@@ -213,15 +224,19 @@ and a map from a vault needs the same `--vault`. File format and internals:
 | `--script <file.lua>` | a Lua file from disk, run in the sim after `BeginSession` | none |
 | `--player <army>` | the army you play: a human slot with its commander | none (observer) |
 | `--no-ai` | no AI and no starting commanders (a `--script` drives the units) | off |
+| `--ai <[N=]KEY>` | the AI the armies get, by lobby key (repeatable): `KEY` for every AI army, `N=KEY` for army N. E.g. `--ai RNGStandard --ai 1=easy --ai 2=adaptive`: slot 1 runs easy, slot 2 adaptive, and every other AI slot RNGStandard. An AI mod's keys need its `--mod`. `--ai list` stops with the keys there are (the game's lobby list plus the session's mods' `CustomAIs_v2`); an unknown key does too. Ignored with a lobby launch; recorded in the replay | FAF: `adaptive`; other game code: its lobby's first |
 | `--prebuilt` | FAF's PrebuiltUnits option: each army starts with a small base | off |
 | `--fog <none\|explored\|unexplored>` | the FogOfWar option | explored |
 | `--victory <condition>` | the Victory option: `sandbox` (never ends), `demoralization`, `domination`, `eradication`, `decapitation` | sandbox |
 | `--mod <uid>` | run a mod as if the lobby had it on (repeatable; recorded in the replay) | none |
-| `--vault <dir>` | mount a FAF vault folder's `maps/` and `mods/`, e.g. `--vault ../faf-vault` | none |
+| `--vault <dir>` | mount a FAF vault folder's `maps/` and `mods/` (either may be missing: a folder with only `mods/` works), e.g. `--vault ../faf-vault` | none |
 | `--log <file>` | log file; give runs in parallel separate files | `game.log` |
 | `--record <file>` / `--no-record` | record to this file / don't record | windowed: `replays/` |
 | `--replay <file>` | play a recording (headless too; `--ticks` still applies) | off |
 | `--stall-timeout <secs>` | seconds without a tick before the watchdog reports a stall; 0 = off | 30 |
+| `--lua-debug [port]` | serve the Lua debugger (Debug Adapter Protocol) on `127.0.0.1:port` for VS Code: [debugging-lua.md](debugging-lua.md) | off; 4711 |
+| `--lua-debug-wait` | with `--lua-debug` (implied): run no Lua until the debugger has attached | off |
+| `--enable-disk-watch` | reload game files edited on disk while the game runs: scripts, blueprints, models, textures (the game's `/EnableDiskWatch`, for modding): [lua-bridge.md](../architecture/lua-bridge.md#reloading-changed-files) | off |
 
 The run-ahead process for replay seeking uses `--keyframes-out`, `--keyframe-every`, `--background`
 and `--parent-pid` ([replays.md](../architecture/replays.md)). Networked games use `--net-host`,

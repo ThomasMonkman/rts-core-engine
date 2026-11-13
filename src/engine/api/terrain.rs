@@ -9,10 +9,9 @@ use crate::engine::sim::terrain::Terrain;
 use crate::engine::vfs::Vfs;
 use crate::lua_api::{Obj, lua_fn, lua_method};
 
-/// Loads the `.scmap` named by `ScenarioInfo.map` into the sim [`Terrain`].
-pub fn load_map(lua: &Lua) -> LuaResult<()> {
-    let scenario: LuaTable = lua.globals().get("ScenarioInfo")?;
-    let path: String = scenario.get("map")?;
+/// Loads the `.scmap` at VFS path `path` into the sim [`Terrain`].
+pub fn load_map(lua: &Lua, path: &str) -> LuaResult<()> {
+    let path = path.to_owned();
     let bytes = {
         let vfs = lua.app_data_ref::<Arc<RwLock<Vfs>>>().expect("VFS not in app_data").clone();
         let vfs = vfs.read().expect("VFS poisoned");
@@ -209,7 +208,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
         /// Sets the playable area (campaign maps grow it; FAF's
         /// ScenarioFramework also records it in `ScenarioInfo.PlayableArea`).
-        /// Stored for now: units and the camera aren't held inside it yet.
+        /// Units are held inside it after each move (`api::movement`, unless
+        /// their army is let out); paths and flow fields don't know it.
         SetPlayableRect = |lua, (x0, z0, x1, z1): (f64, f64, f64, f64)| {
             let fx = crate::engine::sim::math::from_lua;
             lua.set_app_data(PlayableRect { min_x: fx(x0.min(x1)), min_z: fx(z0.min(z1)), max_x: fx(x0.max(x1)), max_z: fx(z0.max(z1)) });

@@ -1,0 +1,68 @@
+{
+  "name": "faf-lua-debug",
+  "displayName": "FAF Lua debugger (rts-core-engine)",
+  "description": "Debug the game's Lua in rts-core-engine: attaches to the engine's --lua-debug server (Debug Adapter Protocol over TCP).",
+  "publisher": "rts-core-engine",
+  "version": "0.0.1",
+  "license": "GPL-3.0-or-later",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Debuggers"],
+  "main": "./extension.js",
+  "activationEvents": ["onDebug"],
+  "contributes": {
+    "breakpoints": [{ "language": "lua" }],
+    "debuggers": [
+      {
+        "type": "faf-lua",
+        "label": "FAF Lua (rts-core-engine)",
+        "languages": ["lua"],
+        "configurationAttributes": {
+          "attach": {
+            "properties": {
+              "port": { "type": "number", "default": 4711, "description": "The engine's --lua-debug port." },
+              "host": { "type": "string", "default": "127.0.0.1" }
+            }
+          },
+          "launch": {
+            "properties": {
+              "program": { "type": "string", "default": "cargo", "description": "What to run (the engine, or cargo)." },
+              "args": {
+                "type": "array",
+                "items": { "type": "string" },
+                "default": ["run", "--", "--session", "--lua-debug-wait", "--no-audio"],
+                "description": "Its arguments. --lua-debug=<port> is added unless one is given."
+              },
+              "cwd": { "type": "string", "default": "${workspaceFolder}" },
+              "port": { "type": "number", "default": 4711 },
+              "timeout": { "type": "number", "default": 600000, "description": "Milliseconds to wait for the engine to start listening (a cargo build can take a while)." }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "faf-lua",
+            "request": "launch",
+            "name": "Engine: skirmish (Lua debug)",
+            "args": ["run", "--", "--session", "--lua-debug-wait", "--no-audio"]
+          },
+          {
+            "type": "faf-lua",
+            "request": "attach",
+            "name": "Attach to the engine's Lua",
+            "port": 4711
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "FAF Lua: attach",
+            "body": { "type": "faf-lua", "request": "attach", "name": "Attach to the engine's Lua", "port": 4711 }
+          },
+          {
+            "label": "FAF Lua: launch",
+            "body": { "type": "faf-lua", "request": "launch", "name": "Engine (Lua debug)", "args": ["run", "--", "--session", "--lua-debug-wait", "--no-audio"] }
+          }
+        ]
+      }
+    ]
+  }
+}

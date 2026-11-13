@@ -329,7 +329,7 @@ fn pick_up(lua: &Lua, transport_id: EntityId, beacon: EntityId) {
     }
     let storage = transport::storage_slots(lua, transport_id);
     let mut room_storage = storage.saturating_sub(transport::stored_units(lua, transport_id).len() as u32) as i64;
-    let mut room: [i64; 3] = [1, 2, 3].map(|class| transport::free_slots(lua, transport_id, class).len() as i64);
+    let mut room: [i64; 4] = [1, 2, 3, 4].map(|class| transport::free_slots(lua, transport_id, class).len() as i64);
     for unit in waiting {
         let ok = {
             let w = entity::world(lua);
@@ -342,7 +342,7 @@ fn pick_up(lua: &Lua, transport_id: EntityId, beacon: EntityId) {
         if !crate::engine::sim::carry::can_carry(&passenger, &carrier) {
             continue;
         }
-        let class = transport::class_of(lua, unit).clamp(1, 3) as usize - 1;
+        let class = transport::class_of(lua, unit).clamp(1, 4) as usize - 1;
         let fits = if storage > 0 { room_storage > 0 } else { room[class] > 0 };
         if !fits {
             continue;

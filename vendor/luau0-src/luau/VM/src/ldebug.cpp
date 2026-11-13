@@ -513,6 +513,22 @@ int lua_breakpoint(lua_State* L, int funcindex, int line, int enabled)
     return target;
 }
 
+// RTS-CORE-ENGINE DEBUGGER: see lua.h.
+int lua_breakpointclosure(lua_State* L, const void* closure, int line, int enabled)
+{
+    Closure* cl = (Closure*)closure;
+    if (!cl || cl->isC)
+        return -1;
+
+    Proto* p = cl->l.p;
+    int target = getnextline(p, line);
+
+    if (target != -1)
+        luaG_breakpoint(L, p, target, bool(enabled));
+
+    return target;
+}
+
 static void getcoverage(Proto* p, int depth, int* buffer, size_t size, void* context, lua_Coverage callback)
 {
     memset(buffer, -1, size * sizeof(int));

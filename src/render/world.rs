@@ -35,7 +35,7 @@ pub struct SceneDelta {
     pub effect_assets: Vec<(u32, String)>,
     pub terrain: Option<Arc<TerrainView>>,
     pub fog: Option<crate::engine::snapshot::FogUpdate>,
-    pub marks: Vec<super::terrain::TreadMark>,
+    pub splats: Vec<super::terrain::Splat>,
     pub decals: Option<Arc<Vec<crate::engine::assets::scmap::Decal>>>,
     /// The first of a new session's engine (`Snapshot::new_session`): the
     /// head's scene starts afresh before taking it.
@@ -234,7 +234,7 @@ pub struct World {
     pub blueprint_order_categories: Option<Arc<Vec<u16>>>,
     /// Cargo-slot classes (bits 1 / 2 / 4) and cargo class (1..3) per
     /// blueprint (same index): the load cursors only where boarding works.
-    pub blueprint_transport: Option<Arc<Vec<(u8, u8)>>>,
+    pub blueprint_transport: Option<Arc<Vec<(u8, u8, u8)>>>,
     pub blueprint_selection_priority: Option<Arc<Vec<u8>>>,
     pub blueprint_icons: Option<Arc<Vec<String>>>,
     pub blueprint_icon_zoom: Option<Arc<Vec<f32>>>,
@@ -286,6 +286,8 @@ pub struct World {
     pub upgraded: Vec<(u32, u32)>,
     /// Launches for cameras following their launcher (`frame::camera_follows`).
     pub camera_follows: Vec<rts_core_engine::engine::sim::presentation::CameraFollow>,
+    /// Units' custom names (`Snapshot::custom_names`).
+    pub custom_names: Option<Arc<Vec<(u32, String)>>>,
     pub army_display: Option<Arc<Vec<crate::engine::snapshot::ArmyDisplay>>>,
     pub team_colors: Option<Vec<u32>>,
     pub army_rgb: Arc<Vec<[f32; 3]>>,
@@ -351,6 +353,7 @@ impl World {
             focus_army_changed: None,
             upgraded: Vec::new(),
             camera_follows: Vec::new(),
+            custom_names: None,
             army_display: None,
             team_colors: None,
             army_rgb: Arc::new(Vec::new()),
@@ -612,10 +615,10 @@ impl World {
             }
             // Timed splats: FAF's tread marks (`TreadComponent`) and
             // footprints, laid and faded by the terrain renderer.
-            let marks = snap
+            let splats = snap
                 .splats
                 .drain(..)
-                .map(|sp| super::terrain::TreadMark {
+                .map(|sp| super::terrain::Splat {
                     texture: sp.texture,
                     centre: [sp.centre[0], sp.centre[2]],
                     heading: sp.heading,
@@ -700,6 +703,9 @@ impl World {
             if let Some(a) = snap.alliances.take() {
                 self.alliances = Some(a);
             }
+            if let Some(n) = snap.custom_names.take() {
+                self.custom_names = Some(n);
+            }
             if let Some(c) = snap.army_display.take() {
                 self.army_display = Some(c);
                 self.rebuild_army_rgb();
@@ -753,7 +759,7 @@ impl World {
                 effect_assets: std::mem::take(&mut snap.new_effect_assets),
                 terrain: snap.terrain.take(),
                 fog: snap.fog.take(),
-                marks,
+                splats,
                 decals: snap.decals.take(),
                 new_session: snap.new_session,
                 snapshot: Arc::new(snap),
@@ -1044,7 +1050,7 @@ mod pick_timing {
         use glam::Vec3;
         let mut w = super::World::new(1920, 1080);
         let units: Vec<EntityView> = (0..48_000u32)
-            .map(|i| EntityView { id: i + 1, kind: ViewKind::Unit, army: 1, position: [(i % 220) as f32 * 4.0, 20.0, (i / 220) as f32 * 4.0], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0, 0.5, 0.0], half: [0.5, 0.5, 0.7], health: 1.0, build: 1.0, work: 0.0, shield: -1.0, blueprint: 0, mesh: i % 50, scale: [0.1; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 })
+            .map(|i| EntityView { id: i + 1, kind: ViewKind::Unit, army: 1, position: [(i % 220) as f32 * 4.0, 20.0, (i / 220) as f32 * 4.0], rotation: [0.0, 0.0, 0.0, 1.0], center: [0.0, 0.5, 0.0], half: [0.5, 0.5, 0.7], health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, work: 0.0, shield: -1.0, blueprint: 0, mesh: i % 50, scale: [0.1; 3], pose_start: 0, pose_len: 0, sighting: Sighting::Seen, in_builder: false, attached: false, scroll: [0.0; 4], order_flags: 0 })
             .collect();
         w.frame.entities = std::sync::Arc::new(units);
         w.add_mesh_bounds(&(0..50).map(|m| (m, [-5.0, 0.0, -7.0, 5.0, 8.0, 7.0])).collect::<Vec<_>>());
