@@ -130,6 +130,11 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // Only this window closes: the game runs on with one head.
+                WindowEvent::CloseRequested => {
+                    s.close_second_head();
+                    return;
+                }
                 WindowEvent::RedrawRequested | WindowEvent::Focused(_) => return,
                 _ => {}
             }
