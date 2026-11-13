@@ -87,8 +87,32 @@ pub fn build(lua: &Lua) -> LuaResult<()> {
         categories = domain.named.len(),
         "entity categories built"
     );
+    expose_metatable(lua, CategorySet::empty(domain.len()))?;
     lua.set_app_data(Arc::new(domain));
     lua.globals().set("categories", categories)
+}
+
+/// Lets `getmetatable(categories.X)` return the category metatable, as
+/// moho's does: FAF's `/lua/system/categories.lua` (since 3841) replaces
+/// its `__add` / `__sub` / `__mul` with ones that cache their results.
+/// mlua hides a userdata's metatable behind `__metatable = false`; this
+/// takes that field off `EntityCategory`'s. mlua tells its types apart by
+/// the metatable's identity, not its fields, so a script that edits them
+/// changes only what the operators do.
+fn expose_metatable(lua: &Lua, any: CategorySet) -> LuaResult<()> {
+    let ud = lua.create_userdata(EntityCategory(any))?;
+    // SAFETY: the stack holds [ud]; its metatable is pushed (every mlua
+    // userdata has one) and its `__metatable` raw-set to nil (no
+    // metamethods run); `exec_raw` restores the stack.
+    unsafe {
+        lua.exec_raw::<()>(ud, |state| {
+            if mlua::ffi::lua_getmetatable(state, -1) != 0 {
+                mlua::ffi::lua_pushstring(state, c"__metatable".as_ptr());
+                mlua::ffi::lua_pushnil(state);
+                mlua::ffi::lua_rawset(state, -3);
+            }
+        })
+    }
 }
 
 /// A weapon blueprint restriction string (`TargetRestrictOnlyAllow =
@@ -309,6 +333,23 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(r, "2:uel0001:true");
+    }
+
+    /// FAF 3841's `/lua/system/categories.lua` wraps the operators.
+    #[test]
+    fn scripts_can_wrap_the_operators() {
+        let lua = lua_with_blueprints();
+        let r: (i64, bool, bool) = lua
+            .load(
+                "local mt = getmetatable(categories.ALLUNITS)
+                 local add, calls = mt.__add, 0
+                 function mt.__add(a, b) calls = calls + 1 return add(a, b) end
+                 local c = categories.COMMAND + categories.ENGINEER
+                 return calls, EntityCategoryContains(c, 'uel0105'), c == categories.LAND",
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(r, (1, true, true));
     }
 
     #[test]
