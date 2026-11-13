@@ -72,6 +72,14 @@ impl ScriptCache {
         }
     }
 
+    /// `path` changed on disk (`engine::disk_watch`): its translated source
+    /// and bytecode are dropped, so the next load reads the file again.
+    pub fn forget(&self, path: &str) {
+        let key = Self::key(path);
+        self.vfs.read().unwrap().invalidate(&key);
+        self.cache.write().unwrap().remove(&key);
+    }
+
     /// The VFS the scripts come from.
     pub fn vfs(&self) -> &Arc<RwLock<Vfs>> {
         &self.vfs

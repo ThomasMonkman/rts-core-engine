@@ -773,6 +773,31 @@ impl Particles {
         &self.failures
     }
 
+    /// Files changed on disk (`--enable-disk-watch`; lowercase VFS paths):
+    /// emitter, trail and beam blueprints and textures from them load again
+    /// for the effects made from now on.
+    pub fn reload(&mut self, changed: &[String]) {
+        let hit = |p: &str| !p.is_empty() && changed.iter().any(|c| *c == rts_core_engine::engine::vfs::normalise(p));
+        for (i, path) in self.assets.iter().enumerate() {
+            if path.as_deref().is_some_and(hit) {
+                if let Some(slot) = self.blueprints.get_mut(i) {
+                    *slot = None;
+                }
+                if let Some(b) = self.asset_batch.get_mut(i) {
+                    *b = BATCH_UNRESOLVED;
+                }
+            }
+        }
+        let textures: Vec<String> = self.textures.keys().filter(|p| hit(p)).cloned().collect();
+        for path in &textures {
+            self.textures.remove(path);
+            self.request_texture(path);
+        }
+        if !textures.is_empty() {
+            self.groups.retain(|(tex, ramp, _), _| !textures.contains(tex) && !textures.contains(ramp));
+        }
+    }
+
     fn request_texture(&mut self, path: &str) {
         if path.is_empty() || self.textures.contains_key(path) {
             return;

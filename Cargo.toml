@@ -187,6 +187,8 @@ arboard = { version = "3", default-features = false, features = ["wayland-data-c
 rfd = "0.17"
 # The machine a log came from (OS, CPU, memory: src/diagnostics.rs).
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+# Watching the folder mounts for `--enable-disk-watch` (src/engine/disk_watch.rs).
+notify = "8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { version = "29", default-features = false, features = ["std", "metal", "wgsl", "parking_lot"] }

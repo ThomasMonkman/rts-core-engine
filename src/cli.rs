@@ -339,6 +339,14 @@ pub struct Cli {
     #[arg(long, value_name = "N[@B]", value_parser = parse_audit_key)]
     pub audit_test: Option<String>,
 
+    /// Reload game files edited on disk while the game runs (the game's
+    /// `/EnableDiskWatch`): scripts (the next `import` runs them again),
+    /// blueprints (FAF's `ReloadBlueprint`), models and textures. The
+    /// interface reloads every frame, the sim between ticks (not in a
+    /// networked game).
+    #[arg(long)]
+    pub enable_disk_watch: bool,
+
     /// The game's own `/switch` arguments that had no meaning here and
     /// were dropped (see [`moho_args`]), logged at startup.
     #[arg(skip)]
@@ -359,6 +367,7 @@ pub struct Cli {
 ///   "..\LOUD\bin\LoudDataPath.lua"` (a path from `bin/`) and `/log
 ///   "LOUD\bin\LOUD.log"` (from the working directory; older versions pass
 ///   `..\LOUD\bin\LOUD.log`, from `bin/`).
+/// - `/EnableDiskWatch` becomes `--enable-disk-watch`.
 /// - Any other `/switch` (one word after the slash, so
 ///   `/maps/x/x_scenario.lua` stays a value) is dropped with the values
 ///   after it, as moho ignores switches it doesn't read.
@@ -396,6 +405,11 @@ pub fn moho_args(args: Vec<OsString>, exe_dir: Option<&Path>) -> (Vec<OsString>,
             continue;
         }
         let name = arg.to_string_lossy().to_ascii_lowercase();
+        // Switches without a value.
+        if name == "/enablediskwatch" {
+            out.push("--enable-disk-watch".into());
+            continue;
+        }
         let ours = match name.as_str() {
             "/init" => Some(("--fa", is_file, true)),
             "/log" => Some(("--log", in_a_folder, false)),
@@ -683,6 +697,10 @@ mod tests {
         // repository root (the tests' working directory) has these.
         let c = Cli::try_parse_from(moho_args(args(&["exe", "/log", "src/x.log", "/init", "Cargo.toml"]), Some(bin)).0).unwrap();
         assert_eq!((c.fa, c.log), (Some(PathBuf::from("Cargo.toml")), Some(PathBuf::from("src/x.log"))));
+        // A switch without a value keeps the next argument.
+        let c = Cli::try_parse_from(moho_args(args(&["exe", "/EnableDiskWatch", "/log", "b.log"]), Some(bin)).0).unwrap();
+        assert!(c.enable_disk_watch);
+        assert_eq!(c.log, Some(PathBuf::from("b.log")));
     }
 
     #[test]

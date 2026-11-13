@@ -297,6 +297,14 @@ pub fn roll_zigzags(projectiles: &mut Projectiles, rng: &mut crate::engine::sim:
     }
 }
 
+impl Projectiles {
+    /// Drops the parsed blueprints (they were reloaded from disk:
+    /// `engine::disk_watch`); projectiles already out keep theirs.
+    pub fn forget_templates(&mut self) {
+        self.templates.clear();
+    }
+}
+
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Projectiles {
     /// Sorted by id.

@@ -346,6 +346,11 @@ impl ModHooks {
         Some(compiled)
     }
 
+    /// Drops `path`'s hooked bytecode (it or a hook changed on disk).
+    pub fn forget(&self, path: &str) {
+        self.compiled.lock().unwrap().remove(&normalise(path));
+    }
+
     /// The mods' hook folders that apply to `path` (none when no mod hooks it).
     pub fn dirs_for(&self, path: &str) -> &[String] {
         if self.hooked.contains(&normalise(path)) { &self.dirs } else { &[] }

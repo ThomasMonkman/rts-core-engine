@@ -168,6 +168,7 @@ pub(crate) struct WalkOuts(BTreeMap<EntityId, WalkOut>);
 /// Invalid ids fall back to a one-cell footprint.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Footprints(BTreeMap<String, (Fx, Fx)>);
+crate::engine::api::blueprints::derived_cache!(Footprints);
 
 pub(crate) fn footprint_half(lua: &Lua, bp: &str) -> LuaResult<(Fx, Fx)> {
     if let Some(h) = lua.app_data_ref::<Footprints>().and_then(|f| f.0.get(bp).copied()) {
@@ -1388,8 +1389,9 @@ fn auto_assist(lua: &Lua) {
 /// highest cost resource"), read once per blueprint.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DecayRates(BTreeMap<String, Fx>);
+crate::engine::api::blueprints::derived_cache!(DecayRates);
 
-fn decay_rate(lua: &Lua, bp_id: &str) -> LuaResult<Fx> {
+pub(crate) fn decay_rate(lua: &Lua, bp_id: &str) -> LuaResult<Fx> {
     if let Some(r) = lua.app_data_ref::<DecayRates>().and_then(|d| d.0.get(bp_id).copied()) {
         return Ok(r);
     }
