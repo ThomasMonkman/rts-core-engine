@@ -201,6 +201,7 @@ lua_State* lua_newstate(lua_Alloc f, void* ud)
     g->gray = NULL;
     g->grayagain = NULL;
     g->weak = NULL;
+    g->ephemeron = NULL; // RTS-CORE-ENGINE EPHEMERON
     g->totalbytes = sizeof(LG);
     g->gcgoal = LUAI_GCGOAL;
     g->gcstepmul = LUAI_GCSTEPMUL;

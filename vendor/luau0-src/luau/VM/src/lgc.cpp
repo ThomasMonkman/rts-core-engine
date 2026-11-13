@@ -302,9 +302,46 @@ static const char* gettablemode(global_State* g, LuaTable* h)
     return NULL;
 }
 
+// RTS-CORE-ENGINE EPHEMERON: a table entry's key or value (its type and
+// object) that is an unmarked object. Strings are never weak, so never dead
+// here; unlike `iscleared`, this doesn't mark one.
+static inline bool isdeadside(int tt, GCObject* o)
+{
+    return tt > LUA_TSTRING && tt != LUA_TDEADKEY && iswhite(o);
+}
+
+/*
+** RTS-CORE-ENGINE EPHEMERON: one entry of a table that is weak on one side
+** only. Its strong side is kept alive by the table only while its weak side
+** is alive: a weak-keyed table's value while the key is (as Lua 5.2+), and a
+** weak-valued table's key while the value is. Otherwise the entry is about to
+** be cleared, and marking its strong side would keep an object alive that
+** nothing refers to after this collection.
+** Returns 0 if the strong side is still white and the weak side not (yet)
+** alive: marking elsewhere may still reach the weak side.
+*/
+static int markentry(global_State* g, LuaNode* n, int weakkey)
+{
+    // a key is a TKey, not a TValue: take each side's type and object apart
+    int strongtt = weakkey ? ttype(gval(n)) : ttype(gkey(n));
+    int weaktt = weakkey ? ttype(gkey(n)) : ttype(gval(n));
+    GCObject* strong = weakkey ? gval(n)->value.gc : gkey(n)->value.gc;
+    GCObject* weak = weakkey ? gkey(n)->value.gc : gval(n)->value.gc;
+
+    // strings refer to nothing: `cleartable` marks those of the entries
+    // that stay
+    if (!isdeadside(strongtt, strong))
+        return 1; // nothing to mark
+    if (isdeadside(weaktt, weak))
+        return 0;
+    reallymarkobject(g, strong);
+    return 1;
+}
+
 static int traversetable(global_State* g, LuaTable* h)
 {
     int i;
+    bool pending = false;
     int weakkey = 0;
     int weakvalue = 0;
     if (h->metatable)
@@ -315,22 +352,17 @@ static int traversetable(global_State* g, LuaTable* h)
     {
         weakkey = (strchr(modev, 'k') != NULL);
         weakvalue = (strchr(modev, 'v') != NULL);
-        if (weakkey || weakvalue)
-        {                         // is really weak?
-            h->gclist = g->weak;  // must be cleared after GC, ...
-            g->weak = obj2gco(h); // ... so put in the appropriate list
-        }
     }
 
-    if (weakkey && weakvalue)
-        return 1;
     if (!weakvalue)
     {
         i = h->sizearray;
         while (i--)
             markvalue(g, &h->array[i]);
     }
-    i = sizenode(h);
+    // a table weak on both sides marks nothing (upstream returned before the
+    // array part; it is linked for clearing below now)
+    i = (weakkey && weakvalue) ? 0 : sizenode(h);
     while (i--)
     {
         LuaNode* n = gnode(h, i);
@@ -340,11 +372,28 @@ static int traversetable(global_State* g, LuaTable* h)
         else
         {
             LUAU_ASSERT(!ttisnil(gkey(n)));
-            if (!weakkey)
+            // RTS-CORE-ENGINE EPHEMERON: the strong side of a half-weak
+            // entry is marked only once its weak side is alive (the array
+            // part above has integer keys, so it needs none of this). What
+            // can't be decided yet waits for `convergeephemerons`.
+            if (weakkey != weakvalue)
+            {
+                if (!markentry(g, n, weakkey))
+                    pending = true;
+            }
+            else if (!weakkey)
+            {
                 markvalue(g, gkey(n));
-            if (!weakvalue)
                 markvalue(g, gval(n));
+            }
         }
+    }
+    if (weakkey || weakvalue)
+    {
+        // must be cleared after GC, so put in the appropriate list
+        GCObject** list = pending ? &g->ephemeron : &g->weak;
+        h->gclist = *list;
+        *list = obj2gco(h);
     }
     return weakkey || weakvalue;
 }
@@ -546,6 +595,58 @@ static int isobjcleared(GCObject* o)
 #define iscleared(o) (iscollectable(o) && isobjcleared(gcvalue(o)))
 
 /*
+** RTS-CORE-ENGINE EPHEMERON: finishes the half-weak tables whose entries
+** `traversetable` could not all decide (see `markentry`). Upstream Luau marks
+** the strong side of every entry, so a weak-keyed table's value, or a
+** weak-valued table's key, outlived a dead entry by one collection (and one
+** that referred back to its own weak side was never collected). A collection
+** then left dead objects in the heap, and a second one right after freed
+** more: a saved heap (lsnapshot.cpp) held objects that a load's collection
+** dropped.
+**
+** Marking one entry's strong side can make another entry's weak side alive
+** (in this table or another), and can reach half-weak tables not seen
+** before, so this repeats until a pass over every pending table marks
+** nothing. Call it when nothing is gray; it leaves nothing gray. Entries
+** still undecided are dead: `cleartable` removes them afterwards.
+*/
+static size_t convergeephemerons(global_State* g)
+{
+    size_t work = 0;
+    bool marked;
+    do
+    {
+        marked = false;
+        // tables first reached by the propagation below are linked in at the
+        // head; they are walked in the next pass
+        for (GCObject* l = g->ephemeron; l; l = gco2h(l)->gclist)
+        {
+            LuaTable* h = gco2h(l);
+            work += sizeof(LuaNode) * sizenode(h);
+
+            const char* modev = gettablemode(g, h);
+            LUAU_ASSERT(modev);
+            int weakkey = strchr(modev, 'k') != NULL;
+
+            int i = sizenode(h);
+            while (i--)
+            {
+                LuaNode* n = gnode(h, i);
+                if (ttisnil(gval(n)))
+                    continue;
+                int strongtt = weakkey ? ttype(gval(n)) : ttype(gkey(n));
+                GCObject* strong = weakkey ? gval(n)->value.gc : gkey(n)->value.gc;
+                if (isdeadside(strongtt, strong) && markentry(g, n, weakkey))
+                    marked = true;
+            }
+        }
+        if (marked)
+            work += propagateall(g);
+    } while (marked);
+    return work;
+}
+
+/*
 ** clear collected entries from weaktables
 */
 static size_t cleartable(lua_State* L, GCObject* l)
@@ -573,13 +674,22 @@ static size_t cleartable(lua_State* L, GCObject* l)
             if (!ttisnil(gval(n)))
             {
                 // can we clear key or value?
-                if (iscleared(gkey(n)) || iscleared(gval(n)))
+                // RTS-CORE-ENGINE EPHEMERON: decided before any string is
+                // marked. Upstream marked a string key and then removed the
+                // entry for its value: the string stayed in the heap,
+                // unreferenced, until the next collection.
+                if (isdeadside(ttype(gkey(n)), gkey(n)->value.gc) || isdeadside(ttype(gval(n)), gval(n)->value.gc))
                 {
                     setnilvalue(gval(n)); // remove value ...
                     removeentry(n);       // remove entry from table
                 }
                 else
                 {
+                    // the entry stays: its strings are `values', never weak
+                    if (ttisstring(gkey(n)))
+                        stringmark(&gkey(n)->value.gc->ts);
+                    if (ttisstring(gval(n)))
+                        stringmark(tsvalue(gval(n)));
                     activevalues++;
                 }
             }
@@ -690,6 +800,7 @@ static void markroot(lua_State* L)
     g->gray = NULL;
     g->grayagain = NULL;
     g->weak = NULL;
+    g->ephemeron = NULL; // RTS-CORE-ENGINE EPHEMERON
     markobject(g, g->mainthread);
     // make global table be traversed before main stack
     markobject(g, g->mainthread->gt);
@@ -774,6 +885,14 @@ static size_t atomic(lua_State* L)
     // remark weak tables
     g->gray = g->weak;
     g->weak = NULL;
+    // RTS-CORE-ENGINE EPHEMERON: and those with undecided entries (traversing
+    // a table again links it into one of the two lists again)
+    while (GCObject* e = g->ephemeron)
+    {
+        g->ephemeron = gco2h(e)->gclist;
+        gco2h(e)->gclist = g->gray;
+        g->gray = e;
+    }
     LUAU_ASSERT(!iswhite(obj2gco(g->mainthread)));
     markobject(g, L); // mark running thread
     markmt(g);        // mark basic metatables (again)
@@ -792,9 +911,15 @@ static size_t atomic(lua_State* L)
     g->gcmetrics.currcycle.atomictimegray += recordGcDeltaTime(currts);
 #endif
 
+    // RTS-CORE-ENGINE EPHEMERON: everything reachable without the strong
+    // side of a half-weak table's entry is marked now; decide those entries
+    work += convergeephemerons(g);
+
     // remove collected objects from weak tables
     work += cleartable(L, g->weak);
     g->weak = NULL;
+    work += cleartable(L, g->ephemeron);
+    g->ephemeron = NULL;
 
 #ifdef LUAI_GCMETRICS
     g->gcmetrics.currcycle.atomictimeclear += recordGcDeltaTime(currts);
@@ -1104,6 +1229,7 @@ void luaC_fullgc(lua_State* L)
         g->gray = NULL;
         g->grayagain = NULL;
         g->weak = NULL;
+        g->ephemeron = NULL; // RTS-CORE-ENGINE EPHEMERON
         g->gcstate = GCSsweep;
     }
     LUAU_ASSERT(g->gcstate == GCSpause || g->gcstate == GCSsweep);

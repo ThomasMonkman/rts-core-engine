@@ -234,6 +234,7 @@ void luaC_validate(lua_State* L)
             LUAU_ASSERT(!isdead(g, obj2gco(g->mt[i])));
 
     validategraylist(g, g->weak);
+    validategraylist(g, g->ephemeron); // RTS-CORE-ENGINE EPHEMERON
     validategraylist(g, g->gray);
     validategraylist(g, g->grayagain);
 
