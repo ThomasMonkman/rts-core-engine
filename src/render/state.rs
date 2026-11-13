@@ -857,6 +857,31 @@ impl RenderState {
         self.pace_main();
     }
 
+    /// The second head's window was closed: the head goes, the game runs
+    /// on (moho exits; issue #25). Its present thread ends with its
+    /// channel and frees its surface and scene. The interface is down to
+    /// one head: root frame 1's controls stay, drawn nowhere, and what
+    /// asks `GetNumRootFrames` from here on opens on the main window. It
+    /// isn't made again this run (Secondary Adapter is read once).
+    pub fn close_second_head(&mut self) {
+        let Some(h) = self.second.take() else { return };
+        // Off the screen now (the thread drops the window after its frame).
+        if let Some(window) = &h.window {
+            window.set_visible(false);
+        }
+        drop(h);
+        self.cursor_head = 0;
+        self.input.cursor = None;
+        self.world.set_head_views(1, Vec::new());
+        self.world.set_active_head(0);
+        for vm in self.ui.iter().chain(&self.ui_booting) {
+            vm.set_heads(1);
+        }
+        tracing::info!("second head closed");
+        self.pace_main();
+        self.apply_visibility();
+    }
+
     /// The main window paces its frames by its monitor's refresh while a
     /// second head with a window shares the device (`Presenter::pace`: each
     /// head's wait for a drawable otherwise holds up the other's submits);
