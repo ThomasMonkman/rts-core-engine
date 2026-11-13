@@ -528,6 +528,11 @@ fn shield_splash() {
 }
 
 #[test]
+fn shield_absolver() {
+    scenario("shield_absolver", 300);
+}
+
+#[test]
 fn health_changed() {
     scenario("health_changed", 60);
 }
