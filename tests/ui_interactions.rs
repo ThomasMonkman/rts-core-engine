@@ -179,7 +179,10 @@ fn every_key_action_runs_clean() {
     }
     // Known gaps, each a feature of its own (docs/guides/audits.md section 3);
     // anything else fails.
-    const KNOWN_GAPS: [(&str, &str); 4] = [
+    const KNOWN_GAPS: [(&str, &str); 5] = [
+        // FAF 3841's own bug, the same error in the real game (probe_3841):
+        // the module's global is nil until a template is saved.
+        ("access to nonexistent global variable \"TempTemplate\"", "FAF: Temporary Template hotkey with none saved"),
         ("'GetSpecialFilePath'", "save / load (quick save)"),
         ("'InternalSaveGame'", "save / load (quick save)"),
         ("'RenderOverlayEconomy'", "renderer: the economy overlay"),

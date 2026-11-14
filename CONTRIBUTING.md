@@ -9,7 +9,7 @@ For what the project is, see the [README](README.md). For how it's built, see [`
 
 - **Rust**: nothing to choose. `rust-toolchain.toml` pins a nightly, and rustup installs it on the first build. Every lockstep peer must build with the same compiler, so it's bumped deliberately, never floating.
 - **Supreme Commander: Forged Alliance**: a bought copy (Steam or GOG). The engine ships no game assets: models, textures, sounds and maps come from your install, found automatically or given with `--game-dir`.
-- **FAF's Lua**: free. A checkout of [FAForever/fa](https://github.com/FAForever/fa) beside this repo, on tag **3839**, the version the engine is developed and tested against (the golden tests assume it): `git clone https://github.com/FAForever/fa ../fa && git -C ../fa checkout 3839`.
+- **FAF's Lua**: free. A checkout of [FAForever/fa](https://github.com/FAForever/fa) beside this repo, on tag **3841**, the version the engine is developed and tested against (the golden tests assume it): `git clone https://github.com/FAForever/fa ../fa && git -C ../fa checkout 3841`.
 - **Linux**: `libasound2-dev`, `pkg-config` and Vulkan drivers. macOS and Windows need nothing extra.
 
 ### Reference checkouts

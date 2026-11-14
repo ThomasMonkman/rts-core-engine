@@ -1513,7 +1513,7 @@ fn advance_target(
             // candidate over when there are none (MohoEngine.dll 0x101c5178),
             // so a weapon whose blueprint has no `TargetPriorities` (FAF's
             // `SetWeaponPriorities` sets none) only takes targets it's given:
-            // the Fire Beetle's ExplosionRadiusRingDummyWeapon, the air
+            // the Fire Beetle's ExplosionRadiusRingDummyWeapon (FAF before 3841), the air
             // transports' GuidanceSystem.
             let rank = |e: &crate::engine::sim::entity::Entity| -> usize {
                 w.priorities.iter().position(|p| e.category_index.is_some_and(|c| p.contains(c))).unwrap_or(usize::MAX)
@@ -2368,7 +2368,7 @@ mod tests {
     }
 
     /// A weapon without target priorities (no `TargetPriorities` in its
-    /// blueprint, e.g. the Fire Beetle's ExplosionRadiusRingDummyWeapon)
+    /// blueprint, e.g. the air transports' GuidanceSystem)
     /// finds nothing of its own (MohoEngine.dll 0x101c5178), but takes an
     /// ordered target.
     #[test]
