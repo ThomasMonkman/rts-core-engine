@@ -379,7 +379,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                 });
                 // Nor does a unit an earlier event this tick killed (the pass
                 // holds a killed unit's fire): the Fire Beetle's Suicide
-                // `OnFire` kills it, and its ExplosionRadiusRingDummyWeapon,
+                // `OnFire` kills it, and its ExplosionRadiusRingDummyWeapon (FAF before 3841),
                 // holding the same target and as ready, never fires in FAF
                 // (probe_firsttick).
                 let killed = entity::world(lua).get(ev.unit).is_none_or(|e| e.destroyed || e.cold.killed);
@@ -650,9 +650,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             // along the weapon's aim. Silo missiles never aim, nor do homing
             // missiles from fixed tubes: they leave along the muzzle bone
             // (straight up from a TML or a cruiser's hatches; FAF's flight
-            // script then steers them up and over).
+            // script then steers them up and over). Nor does a fixed weapon's
+            // shot at a projectile: the Brick's anti-torpedo flare leaves
+            // along its muzzle bone (0.82, 0.57, 0 in the unit's frame)
+            // whichever side the torpedoes come from (FAF probe
+            // `probe_brick2`).
             let (at, rotation) = entity::posed_bone(lua, u, bone);
-            let direction = if (st.silo.is_some() || (st.fixed_muzzle && st.lead_speed.is_some())) && bone.is_some() {
+            let along_muzzle = (st.silo.is_some() || (st.fixed_muzzle && (st.lead_speed.is_some() || st.targets_projectiles))) && bone.is_some();
+            let direction = if along_muzzle {
                 rotation.rotate(FxVec3 { x: Fx::ZERO, y: Fx::ZERO, z: Fx::ONE })
             } else {
                 st.aim_direction(st.frame(u))
@@ -662,7 +667,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             // was taken, and a missile covers more than the hit radius in
             // that time.
             let led = match st.target {
-                Some(WeaponTarget::Entity(t)) if st.targets_projectiles && st.muzzle_velocity > Fx::ZERO => {
+                Some(WeaponTarget::Entity(t)) if st.targets_projectiles && st.muzzle_velocity > Fx::ZERO && !along_muzzle => {
                     let velocity = lua.app_data_ref::<crate::engine::sim::projectile::Projectiles>().and_then(|ps| ps.get(t).map(|p| p.velocity()));
                     match (w.get(t).filter(|e| !e.destroyed).map(|e| e.position()), velocity) {
                         (Some(p), Some(v)) => {

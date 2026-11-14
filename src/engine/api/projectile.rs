@@ -390,13 +390,16 @@ pub fn spawn_projectile(lua: &Lua, launcher: EntityId, bp_path: &str, position: 
     Ok(Obj::new(obj))
 }
 
-/// Tick pass: moves projectiles, then runs `OnImpact(targetType, target)`
-/// for each impact in id order. A projectile whose lifetime ran out is destroyed
-/// if its script didn't do so; one that hit the surface and survived stops
-/// colliding with it, so the impact fires once.
+/// Tick pass: runs `OnImpact(targetType, target)` for last tick's impacts
+/// in id order ([`run_impacts`]), then moves projectiles and keeps the
+/// impacts found for the next tick. A projectile whose lifetime ran out is
+/// destroyed if its script didn't do so; one that hit the surface and
+/// survived stops colliding with it, so the impact fires once.
 pub fn tick(lua: &Lua) -> LuaResult<()> {
-    use crate::engine::sim::projectile::{self, ImpactKind};
-    let mut impacts = Vec::new();
+    use crate::engine::sim::projectile;
+    // Last step's impacts first: units have moved a step since.
+    let pending = lua.app_data_mut::<Projectiles>().map(|mut ps| std::mem::take(&mut ps.pending_impacts)).unwrap_or_default();
+    run_impacts(lua, pending)?;
     {
         let (Some(mut ps), Some(mut w)) = (lua.app_data_mut::<Projectiles>(), lua.app_data_mut::<crate::engine::sim::entity::EntityWorld>()) else {
             return Ok(());
@@ -436,7 +439,9 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         if let Some(mut rng) = lua.app_data_mut::<crate::engine::sim::rng::SimRng>() {
             projectile::roll_zigzags(&mut ps, &mut rng);
         }
+        let mut impacts = Vec::new();
         projectile::step(&mut ps, &mut w, env, &mut impacts);
+        ps.pending_impacts = impacts;
     }
     // The rest is the projectiles' scripts: water crossings, collision
     // checks, impacts (and the damage they deal: `OnDamage`, `OnKilled`).
@@ -487,7 +492,18 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         }
     }
     projectiles(lua).script_crossings = entered;
+    Ok(())
+}
+
+/// Runs `OnImpact(targetType, target)` for each impact, in id order (see
+/// [`Projectiles::pending_impacts`]). A projectile destroyed since its
+/// impact was found gets none.
+fn run_impacts(lua: &Lua, impacts: Vec<crate::engine::sim::projectile::Impact>) -> LuaResult<()> {
+    use crate::engine::sim::projectile::ImpactKind;
     for impact in impacts {
+        if !world(lua).get(impact.id).is_some_and(|e| !e.destroyed) {
+            continue;
+        }
         let Some(obj) = crate::engine::api::entity::object(lua, impact.id)? else { continue };
         let target = match impact.target {
             Some(t) => crate::engine::api::entity::object(lua, t)?.map_or(LuaNil, LuaValue::Table),
@@ -520,7 +536,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             continue;
         }
         match impact.kind {
-            ImpactKind::Air => crate::engine::api::entity::destroy(lua, &Obj::new(obj.clone()))?,
+            ImpactKind::Air | ImpactKind::Underwater => crate::engine::api::entity::destroy(lua, &Obj::new(obj.clone()))?,
             // Still flying after hitting the ground: no more surface hits.
             ImpactKind::Terrain => {
                 if let Some(p) = projectiles(lua).get_mut(impact.id) {
