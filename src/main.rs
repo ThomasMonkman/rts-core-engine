@@ -53,7 +53,14 @@ fn ask_for_install(overrides: &install::Overrides, mut missing: install::Missing
                 "This engine runs Forged Alliance Forever's game code, and it wasn't found.\n\nChoose the FAF client's data folder (C:\\ProgramData\\FAForever), or a download of github.com/FAForever/fa.",
             )
         };
-        let text = if retry { format!("That folder isn't the one.\n\n{text}") } else { text.to_string() };
+        // A folder given on the command line that isn't the one: say so,
+        // as the search never looked anywhere else.
+        let given = if missing.game { &missing.game_given } else { &missing.fa_given };
+        let text = match given {
+            _ if retry => format!("That folder isn't the one.\n\n{text}"),
+            Some(g) => format!("The folder given with {} isn't the one:\n{}\n\n{text}", g.by, g.path.display()),
+            None => text.to_string(),
+        };
         tracing::warn!("{missing}");
         let go = rfd::MessageDialog::new().set_level(rfd::MessageLevel::Info).set_title(title).set_description(text).set_buttons(rfd::MessageButtons::OkCancel).show();
         if go != rfd::MessageDialogResult::Ok {
@@ -72,6 +79,10 @@ fn ask_for_install(overrides: &install::Overrides, mut missing: install::Missing
             }
             Err(m) => m,
         };
+        // The folder just picked, not the command line's.
+        if let Some(g) = if asked_for_game { missing.game_given.as_mut() } else { missing.fa_given.as_mut() } {
+            g.by = "the folder picker";
+        }
         retry = if asked_for_game { missing.game } else { missing.fa };
     }
 }
@@ -192,6 +203,10 @@ fn main() -> std::process::ExitCode {
     if let Some(msg) = &log_fallback {
         tracing::warn!("{msg}");
     }
+    // What the program was run with, as the OS split it (so a path cut at
+    // a space, or a folder given to the wrong option, shows in a sent log).
+    let cwd = std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default();
+    tracing::info!(args = ?std::env::args_os().collect::<Vec<_>>(), %cwd, "launched");
     if !cli.ignored_moho_args.is_empty() {
         tracing::info!("ignored the game's command-line switches: {}", cli.ignored_moho_args.join(" "));
     }
@@ -211,7 +226,13 @@ fn main() -> std::process::ExitCode {
             None => return std::process::ExitCode::from(EXIT_START_FAILED),
         },
     };
-    tracing::info!(init = %found.init.display(), game = %found.game.display(), log = %log_path.display(), "game files");
+    let vault_shown = cli.vault.as_ref().map(|v| v.display().to_string()).unwrap_or_else(|| "none".into());
+    tracing::info!(init = %found.init.display(), init_from = found.init_from, game = %found.game.display(), game_from = found.game_from, vault = %vault_shown, log = %log_path.display(), "game files");
+    // A `--vault` with neither folder mounts nothing: say so here, not as a
+    // map or mod that's missing later.
+    if let Some(v) = cli.vault.as_ref().filter(|v| !v.join("maps").is_dir() && !v.join("mods").is_dir()) {
+        tracing::warn!("--vault {}: no maps/ or mods/ folder in it, so nothing is mounted from it", v.display());
+    }
     let (init_path, game_path) = (found.init.to_string_lossy().into_owned(), found.game.to_string_lossy().into_owned());
 
     // The weapon-audit flags run their own audit sessions, not the CLI's:

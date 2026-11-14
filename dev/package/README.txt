@@ -76,7 +76,9 @@ it goes in the settings folder instead:
 
 settings.ini holds the two folders; delete a line to choose again. From a
 terminal, --game-dir <folder> and --fa <folder> set them for one run, and
---help lists every option.
+--help lists every option. --fa is FAF's game code only: a folder of your
+own maps and mods (with maps and / or mods folders inside) goes to
+--vault <folder>.
 
 
 Licence
