@@ -17,7 +17,7 @@ First match wins:
 
 | # | Where | Notes |
 |---|---|---|
-| 1 | `--fa <DIR>` / `--game-dir <DIR>`, then `RTS_FA` / `RTS_GAME_DIR` | a path given here that's wrong is an error, not skipped |
+| 1 | `--fa <DIR>` / `--game-dir <DIR>`, then `RTS_FA` / `RTS_GAME_DIR` | a path given here that's wrong is an error, not skipped: nothing else is tried, and a saved pick isn't used in its place (the message names the folder, what gave it and what was expected in it) |
 | 1½ | the folder above the executable's (game folder only) | when it stands in for the game's `bin/SupremeCommander.exe` (below); an absolute path, so it wins over the dev layout's `../`, which a launcher's working directory can point anywhere |
 | 2 | `../fa`, `../Supreme Commander Forged Alliance` | the development layout, relative to the working directory (ahead of the settings, so a saved pick never redirects `cargo run`) |
 | 3 | `settings.ini` in the settings folder | written when the player picks folders in the "not found" dialog; a saved folder that's gone is skipped |
@@ -28,6 +28,12 @@ First match wins:
 A game folder must hold `gamedata/units.scd`. If something is still missing, a windowed run asks with a
 native folder picker (`rfd`) and saves the answer; a headless run logs what's missing and how to give
 it, and exits with code 2.
+
+`--fa` is FAF's Lua, never a folder of maps and mods: that's `--vault <DIR>` (a folder with `maps/`
+and / or `mods/` in it, [running.md](running.md)). A vault given as `--fa` has no init file, so it's
+"not found" on every start, even after a folder was picked and saved; the message says it looks like
+a vault. A player's usual command is `rts-core-engine --vault "<folder with maps and mods>"`, with
+`--fa "<FAF folder>"` only when FAF isn't found by itself.
 
 Two adjustments make any FAF install work from anywhere:
 
@@ -80,7 +86,10 @@ so release-only differences show up there first. Seen 2026-10-07: release `Prop.
 
 Players send `game.log` (beside the program). Besides the engine's usual lines it has:
 
-- **At startup**: `system` (build `<version>+<commit>`, OS, CPU, threads, RAM total / free),
+- **At startup**: `launched` (the arguments the program was run with, as the OS split them, and
+  the working directory), `game files` (the init file, the game folder and what found each:
+  `--fa`, `settings.ini`, `a Steam library`, ...; the `--vault` folder and the log),
+  `system` (build `<version>+<commit>`, OS, CPU, threads, RAM total / free),
   `graphics` (GPU, kind, backend, driver, PCI ids) and `screen` (monitor, size, refresh, scale).
 - **Graphics errors** (`target: graphics`): every wgpu validation error, logged instead of
   crashing (wgpu's default aborts); the first 10 in full, then one in 100. A lost GPU device
