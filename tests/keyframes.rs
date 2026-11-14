@@ -126,6 +126,58 @@ fn a_loaded_keyframe_plays_on_as_the_original() {
     }
 }
 
+/// A keyframe taken just after scripts dropped cached category results
+/// loads to the same heap. FAF caches `a * b` as `cache[a][b]`: `cache` has
+/// weak keys, each row weak values (`/lua/system/categories.lua`). A dropped
+/// temporary is then a dead key holding a row (`A * B * C`) or the key of a
+/// dead value (`A - (B * C)`), and upstream Luau kept the row, or the key,
+/// for one more collection: the saved heap held objects the load's
+/// collection dropped (`RTS-CORE-ENGINE EPHEMERON`, `tests/lua_ephemerons.rs`).
+/// AIs do this all game; the default skirmish's first minute doesn't.
+#[test]
+fn a_keyframe_after_dropped_category_results_loads_the_same() {
+    if !have_data() {
+        return;
+    }
+    let mut original = started();
+    to_collection_tick(&mut original, 100);
+    original.tick().expect("tick");
+    original
+        .sim_lua()
+        .load(
+            r#"
+            local c = categories
+            local _ = c.LAND * c.MOBILE * c.TECH1                       -- a row keyed by the temporary LAND * MOBILE
+            _ = c.ALLUNITS - (c.AIR * c.TECH2)                          -- a temporary as the key of a dead result
+            _ = (c.NAVAL + c.TECH3) - (c.STRUCTURE * (c.AIR + c.LAND))  -- and chains of both
+            KeyframeTestKept = c.ALLUNITS - (c.NAVAL * c.TECH3)         -- held: its temporary stays, through the row
+            "#,
+        )
+        .exec()
+        .expect("category expressions");
+    let now = tick_of(&original);
+    to_collection_tick(&mut original, now);
+    let at = tick_of(&original);
+    let saved = keyframe::save(original.sim_lua(), at).expect("save");
+
+    let loaded = started();
+    keyframe::load(loaded.sim_lua(), &saved).expect("load");
+    let resaved = keyframe::save(loaded.sim_lua(), at).expect("save the loaded sim");
+    if saved.heap != resaved.heap {
+        report_contents(&original, &loaded);
+    }
+    if let Some(d) = difference(&saved, &resaved) {
+        panic!("the loaded sim saves differently: {d}");
+    }
+    // The held result is the cached one in both: the same object again.
+    for engine in [&original, &loaded] {
+        let hit: bool = engine.sim_lua().load("return KeyframeTestKept == categories.ALLUNITS - (categories.NAVAL * categories.TECH3)").eval().expect("cache hit");
+        assert!(hit, "the held result left the cache");
+    }
+    use rts_core_engine::engine::lua::heap_snapshot::gcid_next;
+    assert_eq!(gcid_next(loaded.sim_lua()).unwrap(), gcid_next(original.sim_lua()).unwrap(), "gcids part");
+}
+
 /// A keyframe taken mid-ferry (`tests/scenarios/ferry_service.lua`: units
 /// riding the route on their beacon order, then delivered) loads and plays
 /// on as a straight replay: the ferry routes and waits (`api::ferry`) are

@@ -198,6 +198,7 @@ typedef struct global_State
     GCObject* gray;      // list of gray objects
     GCObject* grayagain; // list of objects to be traversed atomically
     GCObject* weak;     // list of weak tables (to be cleared)
+    GCObject* ephemeron; // RTS-CORE-ENGINE EPHEMERON: weak-keyed, strong-valued tables (lgc.cpp `convergeephemerons`)
 
 
     size_t GCthreshold;                       // when totalbytes > GCthreshold, run GC step
