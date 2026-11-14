@@ -4991,7 +4991,7 @@ checksum = "9278fb35b3e730abe136e9b395b5b81b96d06b9f5478a50f0c8430a2237b22de"
 
 [[package]]
 name = "rts-core-engine"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ab_glyph",
  "arboard",

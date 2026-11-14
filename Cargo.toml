@@ -2,7 +2,7 @@ cargo-features = ["codegen-backend"]
 
 [package]
 name = "rts-core-engine"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 # Never published to crates.io (cargo-about then leaves it out of the
 # third-party notices).
