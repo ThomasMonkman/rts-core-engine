@@ -1,12 +1,11 @@
--- Scenario test (tests/scenarios.rs): the Fire Beetle's
--- ExplosionRadiusRingDummyWeapon, as FAF plays it (probe_dummies,
--- probe_firsttick):
---  * no `TargetPriorities`, so it never finds a target of its own (moho's
---    search passes every candidate over without priority classes,
---    MohoEngine.dll 0x101c5178): a beetle left beside an enemy, its Suicide
---    kept off, never acquires with the ring;
---  * on an attack order the Suicide fires and kills the beetle; the ring,
---    holding the same target, gets no OnFire after that;
+-- Scenario test (tests/scenarios.rs): weapons that deal no damage of their
+-- own, as FAF plays them (probe_dummies, probe_firsttick, probe_3841):
+--  * the Fire Beetle's `Suicide` (Damage 0 since FAF 3841, which also
+--    dropped its ExplosionRadiusRingDummyWeapon): a beetle left beside an
+--    enemy with it kept off acquires and fires nothing and lives;
+--  * on an attack order the Suicide fires once and kills the beetle, whose
+--    death weapon (fired by the script, never through OnFire) does its 1100
+--    to the target;
 --  * Damage 0 target trackers that have priorities (the mobile shield's)
 --    acquire and call OnFire at their rate, as in FAF.
 rawset(_G, "ScenarioResult", { done = false, failures = {}, notes = {} })
@@ -62,12 +61,16 @@ ForkThread(function()
         target(464, 906)
         hook('tank', make('uel0201', 'ARMY_1', 464, 896))
         WaitTicks(50)
-        local ring = 'ExplosionRadiusRingDummyWeapon'
-        check(counts['idle ' .. ring].got == 0, 'idle ring acquired nothing: got ' .. counts['idle ' .. ring].got)
-        check(counts['idle ' .. ring].fire == 0, 'idle ring never fired: ' .. counts['idle ' .. ring].fire)
+        for k, c in counts do
+            if string.find(k, '^idle ') then
+                check(c.got == 0 and c.fire == 0, k .. ' acquired and fired nothing: got ' .. c.got .. ' fire ' .. c.fire)
+            end
+        end
+        check(not idle.Dead and not idle:BeenDestroyed(), 'idle beetle lives')
         check(counts['atk Suicide'].fire == 1, 'attacking beetle fired its Suicide once: ' .. counts['atk Suicide'].fire)
         check(atk.Dead or atk:BeenDestroyed(), 'attacking beetle died')
-        check(counts['atk ' .. ring].fire == 0, 'the ring of a beetle its Suicide killed never fired: ' .. counts['atk ' .. ring].fire)
+        check(counts['atk DeathWeapon'].fire == 0, 'the death weapon gets no OnFire: ' .. counts['atk DeathWeapon'].fire)
+        check(t:GetHealth() == 30000 - 1100, 'the target took the death weapon\'s 1100: ' .. (30000 - t:GetHealth()))
         local tracker
         for k, c in counts do
             if string.find(k, '^shield ') then tracker = c end

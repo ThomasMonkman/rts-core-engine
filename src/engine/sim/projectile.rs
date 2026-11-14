@@ -331,6 +331,16 @@ pub struct Projectiles {
     /// (a flare riding its projectile) is entered by what it sweeps over.
     #[serde(default)]
     pub script_sphere_centers: Vec<(EntityId, FxVec3)>,
+    /// Impacts found last step, in id order: their `OnImpact` runs at the
+    /// start of the next projectile pass (moho's `Projectile::Impact`,
+    /// MohoEngine.dll 0x1027f130, at the start of the projectile's next
+    /// `MotionTick`), the projectile waiting at the impact point. What it
+    /// hit has moved a step by then (FAF probe: a SAM is 2.000, the
+    /// scout's sphere, from where the scout was a tick before `OnImpact`),
+    /// which FAF's `Projectile.OnImpact` allows for by moving a blast one
+    /// step of the target's velocity on.
+    #[serde(default)]
+    pub pending_impacts: Vec<Impact>,
 }
 
 impl Projectiles {
@@ -394,6 +404,8 @@ pub enum ImpactKind {
     UnitUnderwater,
     /// A shield bubble, entered from outside.
     Shield,
+    /// Nothing, under water: its lifetime ran out there.
+    Underwater,
 }
 
 impl ImpactKind {
@@ -407,6 +419,7 @@ impl ImpactKind {
             ImpactKind::UnitUnderwater => "UnitUnderwater",
             ImpactKind::Shield => "Shield",
             ImpactKind::Projectile => "Projectile",
+            ImpactKind::Underwater => "Underwater",
         }
     }
 
@@ -424,7 +437,7 @@ impl ImpactKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Impact {
     pub id: EntityId,
     pub kind: ImpactKind,
@@ -746,6 +759,16 @@ fn advance(
     if gravity != Fx::ZERO {
         p.velocity.y += gravity * dt;
         p.speed = p.velocity.length();
+        // An accelerating projectile's `MaxSpeed` caps what the ballistic
+        // acceleration adds too (FAF probe `probe_brick`: the Brick's
+        // anti-torpedo flare, `MaxSpeed` 1 and 2 of upward ballistic
+        // acceleration, climbs at exactly 0.1 a tick).
+        if p.acceleration != Fx::ZERO
+            && let Some(max) = p.max_speed
+            && p.speed > max {
+            p.velocity = p.velocity * (max / p.speed);
+            p.speed = max;
+        }
     }
     // The step uses the mean of the velocities before and after
     // (`MotionTick` 0x1027d44d: position += (old + new) x 0.05), so shots
@@ -758,6 +781,14 @@ fn advance(
     } else {
         let mean = |a: Fx, b: Fx| if a == b { a * dt } else { (a + b) / 2 * dt };
         FxVec3 { x: position.x + mean(v0.x, p.velocity.x), y: position.y + mean(v0.y, p.velocity.y), z: position.z + mean(v0.z, p.velocity.z) }
+    };
+    // A `StayUnderwater` projectile in the water is held just under the
+    // surface (FAF probe `probe_brick`: the Brick's anti-torpedo flare,
+    // launched from the seabed and rising 0.1 a tick, stops at the water
+    // height less 0.01 and stays there until its lifetime ends).
+    let next = match terrain.and_then(|t| t.water_surface) {
+        Some(w) if p.stay_underwater && position.y < w && next.y > w - Fx::from_num(0.01) => FxVec3 { y: w - Fx::from_num(0.01), ..next },
+        _ => next,
     };
     let turned = p.velocity_align && turned;
     let spinning = p.angular_velocity != FxVec3::default();
@@ -828,7 +859,11 @@ fn advance(
         && let Some(ticks) = p.lifetime_ticks.as_mut() {
         *ticks = ticks.saturating_sub(1);
         if *ticks == 0 {
-            impact = Some(ImpactKind::Air);
+            // Moho's expiry is impact type 3 + the in-water flag
+            // (0x1027d748): `Underwater` under the surface (FAF probe
+            // `probe_brick`: the Brick's flare, held under it, ends so).
+            let submerged = terrain.is_some_and(|t| t.water_surface.is_some_and(|w| next.y < w && w > t.height_at(next.x, next.z)));
+            impact = Some(if submerged { ImpactKind::Underwater } else { ImpactKind::Air });
         }
     }
     // The water surface, where the sea is deeper than the ground.

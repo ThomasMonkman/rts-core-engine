@@ -56,6 +56,14 @@ the heap holds only live objects (the collection goes through the keyframe
 raw call: mlua's `gc_collect` makes two closures per call), and a load ends
 with a collection too.
 
+"Only live objects" needs the collector to finish in one go: a second
+collection right after must free nothing, or the load's collection drops
+objects the saved game still had. Upstream Luau doesn't promise that for
+weak tables, so the vendored collector is patched (`RTS-CORE-ENGINE
+EPHEMERON` in `MOHO_PATCHES.md`; `tests/lua_ephemerons.rs` checks it on
+random object graphs, `heap_snapshot::contents` before and after a second
+collection is how to check a real game).
+
 ## Recordings
 
 How to record and play one: [running.md](../guides/running.md#replays). The file is ours, not moho's

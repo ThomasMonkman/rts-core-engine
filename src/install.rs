@@ -27,11 +27,14 @@ use std::path::{Path, PathBuf};
 const GAME_FOLDER: &str = "Supreme Commander Forged Alliance";
 
 /// Resolved locations: the init file run to build the VFS mounts, and the
-/// Forged Alliance install folder (`fa_path` in FAF's init files).
+/// Forged Alliance install folder (`fa_path` in FAF's init files), each
+/// with how it was found (for the log).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Install {
     pub init: PathBuf,
     pub game: PathBuf,
+    pub init_from: &'static str,
+    pub game_from: &'static str,
 }
 
 /// Locations given explicitly (command line), ahead of the search.
@@ -41,22 +44,57 @@ pub struct Overrides {
     pub game: Option<PathBuf>,
 }
 
-/// What [`locate`] couldn't find (either may be missing).
+/// A folder the player gave, and what gave it (`--fa`, `RTS_FA`, ...).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Given {
+    pub path: PathBuf,
+    pub by: &'static str,
+}
+
+/// What [`locate`] couldn't find (either may be missing). A `*_given`
+/// folder was named by the player and isn't the right one: nothing else
+/// was searched for it.
 #[derive(Debug, Default)]
 pub struct Missing {
     pub fa: bool,
     pub game: bool,
+    pub fa_given: Option<Given>,
+    pub game_given: Option<Given>,
 }
+
+/// Where an init file is looked for in a folder given as FAF's: a FAF
+/// repository checkout's (at the root before FAF 3839, in `setup/bin/`
+/// since), then a FAF client data folder's.
+const INIT_FILES: [&str; 3] = ["init_local_development.lua", "setup/bin/init_local_development.lua", "bin/init_faf.lua"];
+
+/// The file that makes a folder a Forged Alliance install.
+const GAME_FILE: &str = "gamedata/units.scd";
 
 impl std::fmt::Display for Missing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.game {
-            writeln!(f, "Supreme Commander: Forged Alliance wasn't found (a folder with gamedata/units.scd).")?;
+            match &self.game_given {
+                Some(g) if !g.path.exists() => writeln!(f, "Supreme Commander: Forged Alliance wasn't found: {} (given with {}) doesn't exist.", g.path.display(), g.by)?,
+                Some(g) => writeln!(f, "Supreme Commander: Forged Alliance wasn't found in {} (given with {}): it has no {GAME_FILE}.", g.path.display(), g.by)?,
+                None => writeln!(f, "Supreme Commander: Forged Alliance wasn't found (a folder with {GAME_FILE}).")?,
+            }
             writeln!(f, "  Give its install folder with --game-dir <DIR> (or RTS_GAME_DIR).")?;
         }
         if self.fa {
-            writeln!(f, "FAF's Lua wasn't found (the FAF client's data folder, or a checkout of github.com/FAForever/fa).")?;
-            writeln!(f, "  Give it with --fa <DIR> (or RTS_FA).")?;
+            match &self.fa_given {
+                Some(g) if !g.path.exists() => writeln!(f, "FAF's Lua wasn't found: {} (given with {}) doesn't exist.", g.path.display(), g.by)?,
+                Some(g) => {
+                    writeln!(f, "FAF's Lua wasn't found in {} (given with {}): it has none of {}.", g.path.display(), g.by, INIT_FILES.join(", "))?;
+                    if is_vault_dir(&g.path) {
+                        writeln!(f, "  That folder has maps/ or mods/ in it, so it looks like a vault: --vault <DIR> takes it, not {}.", g.by)?;
+                    }
+                }
+                None => writeln!(f, "FAF's Lua wasn't found.")?,
+            }
+            writeln!(f, "  Give the FAF client's data folder, a checkout of github.com/FAForever/fa or an init file with --fa <DIR> (or RTS_FA).")?;
+        }
+        if self.fa_given.is_some() || self.game_given.is_some() {
+            writeln!(f, "  A folder given this way is the only one tried: leave the option out to search for it (and use a saved pick).")?;
         }
         if let Some(p) = settings_path() {
             write!(f, "Both can also be set in {}", p.display())?;
@@ -67,23 +105,24 @@ impl std::fmt::Display for Missing {
 
 /// Finds both locations; see the module docs for the order.
 pub fn locate(overrides: &Overrides) -> Result<Install, Missing> {
-    let settings = read_settings();
     let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
-    let explicit_fa = overrides.fa.clone().or_else(|| env("RTS_FA"));
-    let explicit_game = overrides.game.clone().or_else(|| env("RTS_GAME_DIR"));
+    let given = |flag: &Option<PathBuf>, by: &'static str, var: &'static str| flag.clone().map(|path| Given { path, by }).or_else(|| env(var).map(|path| Given { path, by: var }));
+    locate_from(given(&overrides.fa, "--fa", "RTS_FA"), given(&overrides.game, "--game-dir", "RTS_GAME_DIR"), read_settings())
+}
 
+fn locate_from(explicit_fa: Option<Given>, explicit_game: Option<Given>, settings: Settings) -> Result<Install, Missing> {
     let init = match &explicit_fa {
         // Given but wrong: say so rather than quietly using something else.
-        Some(p) => init_file(p),
-        None => fa_candidates(settings.fa).iter().find_map(|p| init_file(p)),
+        Some(g) => init_file(&g.path).map(|i| (g.by, i)),
+        None => fa_candidates(settings.fa).into_iter().find_map(|(from, p)| Some((from, init_file(&p)?))),
     };
     let game = match &explicit_game {
-        Some(p) => is_game_dir(p).then(|| p.clone()),
-        None => game_candidates(settings.game, init.as_deref()).into_iter().find(|p| is_game_dir(p)),
+        Some(g) => is_game_dir(&g.path).then(|| (g.by, g.path.clone())),
+        None => game_candidates(settings.game, init.as_ref().map(|(_, i)| i.as_path())).into_iter().find(|(_, p)| is_game_dir(p)),
     };
     match (init, game) {
-        (Some(init), Some(game)) => Ok(Install { init, game }),
-        (init, game) => Err(Missing { fa: init.is_none(), game: game.is_none() }),
+        (Some((init_from, init)), Some((game_from, game))) => Ok(Install { init, game, init_from, game_from }),
+        (init, game) => Err(Missing { fa_given: explicit_fa.filter(|_| init.is_none()), game_given: explicit_game.filter(|_| game.is_none()), fa: init.is_none(), game: game.is_none() }),
     }
 }
 
@@ -94,42 +133,49 @@ pub fn init_file(path: &Path) -> Option<PathBuf> {
     if path.is_file() {
         return Some(path.to_path_buf());
     }
-    ["init_local_development.lua", "setup/bin/init_local_development.lua", "bin/init_faf.lua"].iter().map(|f| path.join(f)).find(|f| f.is_file())
+    INIT_FILES.iter().map(|f| path.join(f)).find(|f| f.is_file())
+}
+
+/// A vault-shaped folder (what `--vault` takes): has `maps/` or `mods/`.
+fn is_vault_dir(path: &Path) -> bool {
+    path.join("maps").is_dir() || path.join("mods").is_dir()
 }
 
 /// A Forged Alliance install: has the game's unit archive.
 pub fn is_game_dir(path: &Path) -> bool {
-    path.join("gamedata/units.scd").is_file()
+    path.join(GAME_FILE).is_file()
 }
 
-fn fa_candidates(saved: Option<PathBuf>) -> Vec<PathBuf> {
-    let mut c = vec![PathBuf::from("../fa")];
-    c.extend(saved);
+/// Where FAF's Lua is looked for, in order, each with what it is.
+fn fa_candidates(saved: Option<PathBuf>) -> Vec<(&'static str, PathBuf)> {
+    let mut c = vec![("the development layout", PathBuf::from("../fa"))];
+    c.extend(saved.map(|p| ("settings.ini", p)));
     for dir in exe_dirs() {
-        c.push(dir.join("fa"));
-        c.push(dir.join("FAForever"));
+        c.push(("beside the program", dir.join("fa")));
+        c.push(("beside the program", dir.join("FAForever")));
     }
-    c.extend(faf_client_dir());
+    c.extend(faf_client_dir().map(|p| ("the FAF client's folder", p)));
     c
 }
 
-fn game_candidates(saved: Option<PathBuf>, init: Option<&Path>) -> Vec<PathBuf> {
+/// Where the game is looked for, in order, each with what it is.
+fn game_candidates(saved: Option<PathBuf>, init: Option<&Path>) -> Vec<(&'static str, PathBuf)> {
     // Standing in for the game's own `bin/SupremeCommander.exe` (as LOUD
     // runs it): the install the program is in, ahead of everything else,
     // as an absolute path (the dev layout's `../` is read from the working
     // directory, which a launcher can set to anything).
-    let mut c: Vec<PathBuf> = exe_dirs().first().and_then(|d| d.parent()).map(Path::to_path_buf).into_iter().collect();
-    c.push(Path::new("..").join(GAME_FOLDER));
-    c.extend(saved);
-    c.extend(exe_dirs().into_iter().map(|d| d.join(GAME_FOLDER)));
+    let mut c: Vec<(&'static str, PathBuf)> = exe_dirs().first().and_then(|d| d.parent()).map(|p| ("the folder above the program's", p.to_path_buf())).into_iter().collect();
+    c.push(("the development layout", Path::new("..").join(GAME_FOLDER)));
+    c.extend(saved.map(|p| ("settings.ini", p)));
+    c.extend(exe_dirs().into_iter().map(|d| ("beside the program", d.join(GAME_FOLDER))));
     // The FAF client records the install it plays with in `fa_path.lua`,
     // beside its `bin/` (the chosen FAF data folder first).
     let faf_dirs = init.and_then(|i| i.parent()?.parent().map(Path::to_path_buf)).into_iter().chain(faf_client_dir());
-    c.extend(faf_dirs.filter_map(|d| std::fs::read_to_string(d.join("fa_path.lua")).ok()).filter_map(|t| lua_string(&t, "fa_path")).map(PathBuf::from));
+    c.extend(faf_dirs.filter_map(|d| std::fs::read_to_string(d.join("fa_path.lua")).ok()).filter_map(|t| lua_string(&t, "fa_path")).map(|p| ("the FAF client's fa_path.lua", PathBuf::from(p))));
     for lib in steam_libraries() {
-        c.push(lib.join("steamapps/common").join(GAME_FOLDER));
+        c.push(("a Steam library", lib.join("steamapps/common").join(GAME_FOLDER)));
     }
-    c.extend(gog_dirs());
+    c.extend(gog_dirs().into_iter().map(|p| ("GOG's folder", p)));
     c
 }
 
@@ -508,6 +554,41 @@ mod tests {
         assert!(!is_game_dir(&game));
         std::fs::write(game.join("gamedata/units.scd"), "").unwrap();
         assert!(is_game_dir(&game));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A folder given with `--fa` / `--game-dir` that isn't the right one
+    /// is named in the message, with what was expected in it, what gave it,
+    /// and (a vault given as FAF's) which option takes it instead.
+    #[test]
+    fn a_wrong_given_folder_is_named() {
+        let dir = std::env::temp_dir().join(format!("install_given_test_{}", std::process::id()));
+        let (vault, fa, game) = (dir.join("my vault"), dir.join("fa"), dir.join("game"));
+        std::fs::create_dir_all(vault.join("maps")).unwrap();
+        std::fs::create_dir_all(fa.join("setup/bin")).unwrap();
+        std::fs::write(fa.join("setup/bin/init_local_development.lua"), "").unwrap();
+        std::fs::create_dir_all(game.join("gamedata")).unwrap();
+        std::fs::write(game.join(GAME_FILE), "").unwrap();
+        let given = |path: &Path, by| Some(Given { path: path.to_path_buf(), by });
+
+        // A vault as --fa: the saved pick isn't used in its place.
+        let saved = Settings { fa: Some(fa.clone()), game: None };
+        let missing = locate_from(given(&vault, "--fa"), given(&game, "--game-dir"), saved).unwrap_err();
+        assert!(missing.fa && !missing.game && missing.game_given.is_none());
+        let text = missing.to_string();
+        for want in [vault.display().to_string().as_str(), "given with --fa", "setup/bin/init_local_development.lua", "bin/init_faf.lua", "--vault <DIR>", "leave the option out"] {
+            assert!(text.contains(want), "{want:?} not in:\n{text}");
+        }
+
+        // A folder that isn't the game, and one that isn't there.
+        let text = locate_from(given(&fa, "RTS_FA"), given(&vault, "RTS_GAME_DIR"), Settings::default()).unwrap_err().to_string();
+        assert!(text.contains("given with RTS_GAME_DIR") && text.contains("it has no gamedata/units.scd") && !text.contains("FAF's Lua"), "{text}");
+        let text = locate_from(given(&dir.join("nope"), "--fa"), given(&game, "--game-dir"), Settings::default()).unwrap_err().to_string();
+        assert!(text.contains("doesn't exist") && !text.contains("--vault"), "{text}");
+
+        // Both right (a space in the path is fine): found, with what gave each.
+        let found = locate_from(given(&fa, "--fa"), given(&game, "RTS_GAME_DIR"), Settings::default()).unwrap();
+        assert_eq!(found, Install { init: fa.join("setup/bin/init_local_development.lua"), game, init_from: "--fa", game_from: "RTS_GAME_DIR" });
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -104,6 +104,11 @@ DETERMINISM`):
   `GridReclaim.UpdateList` then updated a different 8 cells, and an AI
   engineer chose another reclaim cell). Now a cycle runs whole, so it depends
   only on reachability.
+- **One collection frees everything dead** (`lgc.cpp`
+  `convergeephemerons`). A table weak on one side keeps an entry's other
+  side only while the weak side is alive; upstream kept it one collection
+  longer, which a keyframe load could not reproduce
+  (`docs/architecture/replays.md`).
 - **Object keys hash by creation order** (`gcid` on tables, userdata,
   closures, threads, buffers), not by address.
 - **`tostring(obj)` prints the `gcid`**, not the address; FAF builds strings

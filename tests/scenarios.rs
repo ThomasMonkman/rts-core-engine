@@ -144,8 +144,13 @@ fn dummy_weapons() {
 }
 
 #[test]
-fn beetle_ring() {
-    scenario("beetle_ring", 80);
+fn damageless_weapons() {
+    scenario("damageless_weapons", 80);
+}
+
+#[test]
+fn splash_on_aircraft() {
+    scenario("splash_on_aircraft", 170);
 }
 
 #[test]

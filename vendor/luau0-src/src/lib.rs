@@ -136,6 +136,16 @@ impl Build {
             config.define("LUA_USE_LONGJMP", "1");
         }
 
+        // RTS-CORE-ENGINE EPHEMERON: `RTS_LUAU_HARDMEMTESTS=1` builds the VM
+        // with its asserts and with `luaC_validate` (every reference in the
+        // heap checked) run at each `lua_gc` call and each triggered
+        // collection. For testing collector patches; far too slow to play.
+        println!("cargo:rerun-if-env-changed=RTS_LUAU_HARDMEMTESTS");
+        if std::env::var_os("RTS_LUAU_HARDMEMTESTS").is_some_and(|v| v != "0") {
+            config.define("HARDMEMTESTS", "1");
+            config.define("LUAU_ENABLE_ASSERT", None);
+        }
+
         if cfg!(not(debug_assertions)) {
             config.define("NDEBUG", None);
             config.opt_level(2);
@@ -324,6 +334,7 @@ impl AddFilesByExt for cc::Build {
 pub const _MOHO_PATCHED_SOURCES: &[&str] = &[
     include_str!("../luau/VM/src/lvmutils.cpp"),
     include_str!("../luau/VM/src/lgc.cpp"),
+    include_str!("../luau/VM/src/lgcdebug.cpp"),
     include_str!("../luau/VM/src/ltable.cpp"),
     include_str!("../luau/VM/src/lstate.cpp"),
     include_str!("../luau/VM/src/lstate.h"),
