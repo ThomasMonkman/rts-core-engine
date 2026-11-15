@@ -929,11 +929,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
 
     // Platoon orders: to the platoon's live units (of `squad`, if given).
     fn platoon_units(lua: &Lua, platoon: &LuaTable, squad: &Option<String>) -> LuaResult<Vec<EntityId>> {
-        let units: LuaTable = match squad {
+        // (An empty squad's `GetSquadUnits` is nil.)
+        let units: Option<LuaTable> = match squad {
             Some(s) => platoon.call_method("GetSquadUnits", s.as_str())?,
             None => platoon.call_method("GetPlatoonUnits", ())?,
         };
-        units_of(lua, &LuaValue::Table(units))
+        match units {
+            Some(units) => units_of(lua, &LuaValue::Table(units)),
+            None => Ok(Vec::new()),
+        }
     }
     // A platoon with a formation moves in it: `kind` becomes its `Form*`
     // variant (`formed`), laid out by `formations.lua`.

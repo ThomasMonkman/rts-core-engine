@@ -325,7 +325,9 @@ fn unit_threat(lua: &Lua, bp: &LuaTable, category_index: Option<u32>) -> LuaResu
         land: is("LAND"),
         experimental: is("EXPERIMENTAL"),
         commander: is("COMMAND"),
-        artillery: is("ARTILLERY"),
+        // Mobile artillery and the Fatboy read 0 Artillery threat in the real
+        // game (dev/probes probe_ai_find); structures unverified.
+        artillery: is("ARTILLERY") && is("STRUCTURE"),
     };
     Ok(unit_threat(level("AirThreatLevel")?, level("SurfaceThreatLevel")?, level("SubThreatLevel")?, level("EconomyThreatLevel")?, kinds))
 }

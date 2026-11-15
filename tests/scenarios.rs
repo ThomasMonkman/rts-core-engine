@@ -179,6 +179,11 @@ fn max_health() {
 }
 
 #[test]
+fn brain_platoon_shapes() {
+    scenario("brain_platoon_shapes", 40);
+}
+
+#[test]
 fn blocking_terrain() {
     scenario("blocking_terrain", 20);
 }

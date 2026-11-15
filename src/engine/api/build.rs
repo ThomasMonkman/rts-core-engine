@@ -727,13 +727,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             can_build(lua, entity::entity_id(&this)?, &bp)
         })?;
     lua_method!(lua, moho::AIBrain,
-        /// The first unit id listed for `buildingType` in the (faction's)
-        /// template that `builder` can build; nil if none.
-        DecideWhatToBuild = |lua, (_brain, builder, building_type, template): (Obj<moho::AIBrain>, Obj<moho::Unit>, String, shapes::List<Vec<String>>)| {
+        /// The first unit id listed for `buildingType` (ignoring case) in the (faction's)
+        /// template that `builder` can build; nil if none, or with no template (dev/probes
+        /// probe_ai_build / probe_ai_misc).
+        DecideWhatToBuild = |lua, (_brain, builder, building_type, template): (Obj<moho::AIBrain>, Obj<moho::Unit>, String, Option<shapes::List<Vec<String>>>)| {
             let builder = entity::entity_id(&builder)?;
+            let Some(template) = template else { return Ok(None) };
             for entry in template.into_inner().sequence_values::<LuaTable>() {
                 let entry = entry?;
-                if entry.raw_get::<Option<String>>(1)?.as_deref() != Some(building_type.as_str()) {
+                if !entry.raw_get::<Option<String>>(1)?.is_some_and(|t| t.eq_ignore_ascii_case(&building_type)) {
                     continue;
                 }
                 for id in entry.sequence_values::<LuaValue>().skip(1) {

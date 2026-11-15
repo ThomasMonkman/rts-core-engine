@@ -194,7 +194,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// scripts already (it is destroyed at the tick's end): FAF follows a true `PlatoonExists`
         /// with `GetPlatoonPosition`, which would be nil.
         PlatoonExists = |lua, (_brain, platoon): (Obj<moho::AIBrain>, LuaValue)| {
-            let LuaValue::Table(t) = platoon else { return Ok(false) };
+            // Not a game object (nil, a plain table): the real game raises (dev/probes
+            // probe_ai_misc).
+            let expected = || LuaError::runtime("Expected a game object. (Did you call with '.' instead of ':'?)");
+            let LuaValue::Table(t) = platoon else { return Err(expected()) };
+            if t.raw_get::<LuaValue>(script_object::C_OBJECT)?.is_nil() {
+                return Err(expected());
+            }
             let Ok(id) = platoon_id(&t) else { return Ok(false) };
             // A platoon whose last unit died this tick is gone for scripts
             // already (it's destroyed at the tick's end): FAF follows a true
@@ -231,10 +237,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_method!(lua, moho::Platoon,
-        /// The live members of the named squad (case-insensitive), in insertion order.
+        /// The live members of the named squad (case-insensitive), in insertion order; nil for an
+        /// empty squad, as in the real game (dev/probes probe_ai_platoon), which FAF's
+        /// `if squadUnits then` guards rely on.
         GetSquadUnits = |lua, (this, squad): (Obj<moho::Platoon>, String)| {
             let ids = live_members(lua, &this, |s| s.eq_ignore_ascii_case(&squad))?;
-            crate::engine::api::entity::objects_table::<moho::Unit>(lua, &ids)
+            if ids.is_empty() {
+                return Ok(None);
+            }
+            crate::engine::api::entity::objects_table::<moho::Unit>(lua, &ids).map(Some)
         })?;
     lua_method!(lua, moho::Platoon,
         /// Mean member position (fixed-point), nil when empty.
@@ -549,6 +560,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// `OnUnitsAddedToPlatoon`; nil if the template can't be filled.
         FormPlatoon = |lua, (this, template, multiplier, location, radius): (Obj<moho::Platoon>, shapes::PlatoonTemplate, Option<f64>, Option<shapes::Vector>, Option<f64>)| {
             let (name, plan, squads) = parse_template(lua, &template, multiplier.unwrap_or(1.0))?;
+            // A template with no unit lines raises in the real game (dev/probes probe_ai_misc).
+            if squads.is_empty() {
+                return Err(LuaError::runtime("get as string expected but got nil"));
+            }
             let Some(picked) = select_for_template(lua, &this, &squads, read_location(location.as_deref())?, radius)? else {
                 return Ok(None);
             };
@@ -606,11 +621,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(shapes::List::<Obj<moho::Platoon>>::new(out))
         })?;
     lua_method!(lua, moho::AIBrain,
-        /// Creates a platoon for the brain's army with the given label and plan (empty when nil) and
-        /// runs its `OnCreate`.
+        /// Creates a platoon for the brain's army with the given label and plan and runs its
+        /// `OnCreate`. As in the real game (dev/probes probe_ai_misc), no plan gives nil and no
+        /// arguments raise.
         MakePlatoon = |lua, (brain, label, plan): (Obj<moho::AIBrain>, Option<String>, Option<String>)| {
             let ArmyHandle(army) = script_object::handle(&brain)?;
-            make_platoon(lua, army, label.as_deref().unwrap_or(""), plan.as_deref().unwrap_or(""))
+            let Some(label) = label else { return Err(LuaError::runtime("CAiBrain:MakePlatoon()")) };
+            let Some(plan) = plan else { return Ok(None) };
+            make_platoon(lua, army, &label, &plan).map(Some)
         },
     )?;
     lua_method!(lua, moho::AIBrain,
