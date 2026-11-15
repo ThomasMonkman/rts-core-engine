@@ -61,6 +61,10 @@ pub struct Bitmap {
     pub solid: Option<[f32; 4]>,
     /// Sub-rectangle of the texture `(u0, v0, u1, v1)`.
     pub uv: [f32; 4],
+    /// The part of the texture inside its border (`SetNewTexture`'s
+    /// `border`, 1 pixel by default), which is what is drawn: `uv` is within
+    /// it. `None`: the whole texture.
+    pub inner: Option<[f32; 4]>,
     pub tiled: bool,
     /// `SetColorMask` (FAF patch): multiplies the texture.
     pub mask: Option<[f32; 4]>,
@@ -681,8 +685,11 @@ fn root_of(c: &Controls, mut id: ControlId) -> ControlId {
 pub const SCMAP_PREVIEW: &str = "#scmap:";
 
 /// Width and height of a `.dds` / `.png` texture from its header (0, 0 if it won't read).
+/// `GetTextureDimensions`: the size less the 1-pixel border, as a bitmap
+/// with that texture is (`probe_api_spot`: 4 x 32 gives `2 30`).
 pub fn texture_dimensions(lua: &Lua, path: &str) -> (u32, u32) {
-    texture_size(lua, path)
+    let (w, h) = texture_size(lua, path);
+    (w.saturating_sub(2), h.saturating_sub(2))
 }
 
 fn texture_size(lua: &Lua, path: &str) -> (u32, u32) {
@@ -1344,17 +1351,27 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     }
     lua_method!(lua, moho::Bitmap,
         /// Sets the texture (a path, or a list of paths for an animation) and updates `BitmapWidth` / `BitmapHeight`.
-        SetNewTexture = |lua, (this, file, _border): (Obj<moho::Bitmap>, Loose<Either<String, Vec<String>>>, Option<f64>)| {
+        /// As moho (`probe_ui_controls` bmp): the texture's outer `border`
+        /// pixels (FAF's `SetTexture` passes 1) aren't part of the bitmap, so
+        /// a 64 x 64 icon is 62 x 62 and draws its inner 62 x 62 pixels.
+        SetNewTexture = |lua, (this, file, border): (Obj<moho::Bitmap>, Loose<Either<String, Vec<String>>>, Option<f64>)| {
         let textures: Vec<String> = match &*file {
             LuaValue::String(s) => vec![s.to_str()?.to_string()],
             LuaValue::Table(t) => t.clone().sequence_values::<String>().collect::<LuaResult<_>>()?,
             _ => Vec::new(),
         };
-        let (w, h) = textures.first().map_or((0, 0), |t| texture_size(lua, t));
+        let border = border.unwrap_or(1.0).max(0.0) as u32;
+        let (tw, th) = textures.first().map_or((0, 0), |t| texture_size(lua, t));
+        let (w, h) = (tw.saturating_sub(2 * border), th.saturating_sub(2 * border));
+        let inner = (border > 0 && w > 0 && h > 0).then(|| {
+            let (bu, bv) = (border as f32 / tw as f32, border as f32 / th as f32);
+            [bu, bv, 1.0 - bu, 1.0 - bv]
+        });
         with_bitmap(lua, &this, |b| {
             b.textures = textures;
             b.frame = 0;
             b.solid = None;
+            b.inner = inner;
         })?;
         set_var(&this, "BitmapWidth", w)?;
         set_var(&this, "BitmapHeight", h)
@@ -1395,6 +1412,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             with_bitmap(lua, &this, |b| {
                 b.textures = src.textures;
                 b.solid = src.solid;
+                b.inner = src.inner;
             })?;
         }
         Ok(())
@@ -1773,7 +1791,11 @@ pub fn draw_list(lua: &Lua, head: usize) -> LuaResult<Vec<DrawItem>> {
                     let base = b.solid.unwrap_or(b.mask.unwrap_or([1.0; 4]));
                     let color = [base[0], base[1], base[2], base[3] * alpha];
                     let texture = if b.solid.is_some() { None } else { b.textures.get(b.frame.min(b.textures.len() - 1)).cloned() };
-                    DrawItem::Quad { rect: [l, t, l + w, t + h], texture, uv: b.uv, color, tiled: b.tiled }
+                    let uv = match b.inner.filter(|_| !b.tiled) {
+                        Some(r) => [r[0] + b.uv[0] * (r[2] - r[0]), r[1] + b.uv[1] * (r[3] - r[1]), r[0] + b.uv[2] * (r[2] - r[0]), r[1] + b.uv[3] * (r[3] - r[1])],
+                        None => b.uv,
+                    };
+                    DrawItem::Quad { rect: [l, t, l + w, t + h], texture, uv, color, tiled: b.tiled }
                 }),
                 Kind::Text(tx) => Some({
                     let color = [tx.color[0], tx.color[1], tx.color[2], tx.color[3] * alpha];

@@ -2670,3 +2670,35 @@ fn hidden_flag_goes_down_the_tree() {
         ]
     );
 }
+
+/// A bitmap is its texture less the 1-pixel border (moho; `probe_ui_controls`
+/// bmp: a 64 x 64 icon is 62 x 62, the 4 x 32 economy strip 2 x 30), it draws
+/// the texture's inner pixels, and `GetTextureDimensions` agrees.
+#[test]
+fn bitmaps_leave_out_the_texture_border() {
+    let Some(vm) = vm() else { return };
+    vm.set_screen(1280.0, 720.0).unwrap();
+    let sizes: Vec<f64> = vm
+        .lua()
+        .load(
+            r#"
+            local Bitmap = import('/lua/maui/bitmap.lua').Bitmap
+            local LayoutHelpers = import('/lua/maui/layouthelpers.lua')
+            local icon = Bitmap(GetFrame(0), '/textures/ui/common/icons/units/uel0001_icon.dds')
+            LayoutHelpers.AtLeftTopIn(icon, GetFrame(0), 10, 20)
+            local strip = Bitmap(GetFrame(0), '/textures/ui/common/game/economic-overlay/econ_bmp_m.dds')
+            local w, h = GetTextureDimensions('/textures/ui/common/game/economic-overlay/econ_bmp_m.dds')
+            return { icon.BitmapWidth(), icon.BitmapHeight(), strip.BitmapWidth(), strip.BitmapHeight(), w, h }
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(sizes, [62.0, 62.0, 2.0, 30.0, 2.0, 30.0]);
+    let quad = vm.draw_list().unwrap().into_iter().find_map(|i| match i {
+        DrawItem::Quad { rect, texture: Some(t), uv, .. } if t.contains("uel0001_icon") => Some((rect, uv)),
+        _ => None,
+    });
+    let (rect, uv) = quad.expect("the icon draws");
+    assert_eq!(rect, [10.0, 20.0, 72.0, 82.0]);
+    assert_eq!(uv, [1.0 / 64.0, 1.0 / 64.0, 63.0 / 64.0, 63.0 / 64.0], "its inner 62 x 62 pixels");
+}
