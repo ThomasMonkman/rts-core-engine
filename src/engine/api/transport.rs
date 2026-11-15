@@ -10,14 +10,21 @@
 //! unset) takes a free small / medium / large slot.
 //!
 //! Per tick, in unit id order:
-//! - Loading: a unit whose current order is `TransportLoadUnits` on a live
-//!   transport walks to it (movement); once within reach (XZ) the beam picks
-//!   it up: `OnStartTransportBeamUp(transport, bone)` runs, the unit holds
-//!   still and rises to its slot over ~9 ticks (~0.9 s, cosine-eased, each
-//!   boarder on its own rise so boarding overlaps), then it is attached at
-//!   the reserved slot, `transport:OnTransportAttach(bone, unit)` runs
-//!   (FAF's handler calls `unit:OnAttachedToTransport`), and the order
-//!   ends. No fitting slot: the order ends unloaded.
+//! - Loading onto an air transport (a pick-up, [`join_pickup`] /
+//!   [`pick_up`]): the transport joins the load order given to its cargo
+//!   and flies to the cargo, which gathers at its group's centre
+//!   (movement); it comes down to its `TransportHoverHeight` over it, and
+//!   the cargo standing in reach goes up the beam together:
+//!   `OnStartTransportBeamUp(transport, bone)` runs, the unit holds still
+//!   and rises to its slot over ~9 ticks (~0.9 s, cosine-eased), then it is
+//!   attached at the reserved slot, `transport:OnTransportAttach(bone,
+//!   unit)` runs (FAF's handler calls `unit:OnAttachedToTransport`), and
+//!   the order ends. No fitting slot: the order ends unloaded.
+//! - Loading otherwise (a carrier, an air staging platform, a ferrying
+//!   transport at its beacon, a transport that has left the load order for
+//!   another): a unit whose current order is `TransportLoadUnits` on a live
+//!   transport goes to it (movement); once within reach (XZ) it boards the
+//!   same way, each boarder on its own rise.
 //! - Reverse loading: a transport ordered onto a unit
 //!   (`TransportReverseLoadUnits`: right-clicking a unit with a transport
 //!   selected) flies out to it (movement) and the unit boards the same way
@@ -76,11 +83,16 @@
 //! `OnStopTransportBeamUp`. No room: the transport's brain hears
 //! `OnTransportFull`. Air staging platforms (docking) skip all of these.
 //!
-//! Inferred, not verified: the reach rule, slot sizes from bone names without
-//! adjacent-slot blocking, the transport waiting rather than flying to its
-//! cargo, and unloading all passengers at once (the engine detaches
-//! everything in one call: `TransportDetachAllUnits` 0x101d3d00 loops the
-//! attached set with no pacing counter).
+//! From the real game (dev/probes probe_mov_air TR1..TR3,
+//! probe_ai_transport): the transport flying to its cargo and the cargo
+//! attaching together, the flight heights, the cargo's fall and the
+//! callbacks of a killed transport's cargo. Inferred, not verified: the
+//! reach rule, where each unit of the cargo waits (the real game gives each
+//! a spot under the transport; ours lets the group settle round its
+//! centre), slot sizes from bone names without adjacent-slot blocking, and
+//! unloading all passengers at once (the engine detaches everything in one
+//! call: `TransportDetachAllUnits` 0x101d3d00 loops the attached set with
+//! no pacing counter).
 
 use std::collections::BTreeMap;
 
@@ -283,9 +295,28 @@ struct Beam {
 /// Ticks a unit spends on the beam before attaching (moho 0x101eb661).
 const BEAM_TICKS: u32 = 9;
 
+/// Air transports picking cargo up ([`pick_up`]): transport to its state.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub struct Pickups(BTreeMap<EntityId, Pickup>);
+
+/// One transport's pick-up.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+struct Pickup {
+    /// The load order it is for.
+    command: crate::engine::sim::command::CommandId,
+    /// Ticks in a row it has hovered in place with all the cargo left
+    /// standing out of its reach.
+    stalled: u32,
+}
+
+/// How long a transport in place waits on cargo that has stopped out of its
+/// reach (it can't get to the gather point) before going to it.
+const STALL_TICKS: u32 = 10;
+
 pub fn register(lua: &Lua) -> LuaResult<()> {
     lua.set_app_data(Loading::default());
     lua.set_app_data(Beaming::default());
+    lua.set_app_data(Pickups::default());
     lua.set_app_data(FerryTasks::default());
     crate::engine::api::ferry::register(lua);
     lua.set_app_data(CarrierLaunches::default());
@@ -999,6 +1030,179 @@ fn load_aboard(lua: &Lua, transport: EntityId, unit: EntityId, id: crate::engine
     }
 }
 
+/// A load order was just given: an air transport it names joins it, to come
+/// and pick its cargo up, as the real game's does (dev/probes probe_mov_air
+/// TR1..TR3, probe_ai_transport: "units and transport get one order each";
+/// the T1 transport 28 from its four tanks set off on the order's tick,
+/// they closed up on their group's centre, it came down over them and all
+/// four attached on one tick; [`pick_up`]). The order's gather point is the centre of
+/// its units; with `clear` (a player's order without Shift) the transport
+/// drops what it was doing, else the order waits its turn in its queue (a
+/// script's `IssueTransportUnload` given straight after then follows the
+/// load).
+///
+/// Not for carriers and air staging platforms (aircraft fly to those), a
+/// transport riding something, or one on a ferry route (its beacon's units
+/// board it there): those keep the cargo coming to the transport.
+pub(crate) fn join_pickup(lua: &Lua, command: crate::engine::sim::command::CommandId, clear: bool) {
+    let (transport, units) = {
+        let Some(c) = lua.app_data_ref::<Commands>() else { return };
+        match c.get(command) {
+            Some(cmd) if cmd.kind == CommandKind::TransportLoadUnits => match cmd.target {
+                CommandTarget::Entity(t) if cmd.units.binary_search(&t).is_err() && !c.queue(t).any(|q| q.kind == CommandKind::Ferry) => (t, cmd.units.clone()),
+                _ => return,
+            },
+            _ => return,
+        }
+    };
+    let flies = entity::world(lua)
+        .get(transport)
+        .filter(|e| !e.destroyed && !e.cold.killed && e.attachment.is_none() && e.fraction_complete >= Fx::ONE)
+        .and_then(|e| e.unit.as_deref())
+        .is_some_and(|u| u.motion_params.kind == crate::engine::sim::movement::MotionKind::Air && u.staging.is_none());
+    if !flies || storage_slots(lua, transport) > 0 || is_staging(lua, transport) || lua.app_data_ref::<crate::engine::api::ferry::FerryRoutes>().is_some_and(|r| r.0.contains_key(&transport)) {
+        return;
+    }
+    let Some(gather) = centre(lua, &units) else { return };
+    let Some(mut c) = lua.app_data_mut::<Commands>() else { return };
+    if clear {
+        c.clear(transport);
+    }
+    if let Some(cmd) = c.get_mut(command) {
+        cmd.gather = Some(gather);
+    }
+    c.join(command, transport);
+}
+
+/// The mean position of the live ones of `units`.
+fn centre(lua: &Lua, units: &[EntityId]) -> Option<FxVec3> {
+    let w = entity::world(lua);
+    let (mut sum, mut n) = (FxVec3::default(), 0i32);
+    for p in units.iter().filter_map(|&u| w.get(u).filter(|e| !e.destroyed).map(|e| e.position())) {
+        sum = sum + p;
+        n += 1;
+    }
+    (n > 0).then(|| sum * (Fx::ONE / Fx::from_num(n)))
+}
+
+/// One tick of a transport's side of a pick-up (its current order is the
+/// load order it joined). It flies to the order's gather point and comes
+/// down to its `TransportHoverHeight` over it (movement) while the cargo
+/// gathers there. Once it hovers in place, every unit of the order that is
+/// on the order, at a standstill and in reach starts up the beam (each onto
+/// a slot of its own, id order), `BEAM_TICKS` to the attach: cargo that was
+/// waiting goes up together and attaches on one tick, later arrivals as
+/// they get there. With nothing left to come the order ends and it climbs
+/// away. The real game's four waiting tanks rose together over 9 ticks and
+/// attached on one tick, `OnStopTransportLoading` on that tick, lift-off on
+/// the next (dev/probes probe_mov_air TR1; TR2's eight units the same); a
+/// platoon's three units still closing up as their transport arrived
+/// attached over 10 ticks (probe_ai_transport `LoadUnits`).
+///
+/// Ours starts the beam as soon as the transport is in place: the real one
+/// hovered 13 ticks more before it settled, and 3 more before the beam
+/// (shorter waits are wanted here). Inferred, for cargo that can't get
+/// there (a group split by water, a gather point it can't stand on): when
+/// what is left has stood out of reach for `STALL_TICKS`, the gather point
+/// moves to the unit nearest the transport, which comes to it.
+fn pick_up(lua: &Lua, transport: EntityId, id: crate::engine::sim::command::CommandId) -> LuaResult<()> {
+    let order = lua.app_data_ref::<Commands>().and_then(|c| c.get(id).and_then(|cmd| Some((cmd.gather?, cmd.units.clone()))));
+    let Some((gather, members)) = order else {
+        pop(lua, transport);
+        return Ok(());
+    };
+    let mut state = lua.app_data_ref::<Pickups>().and_then(|p| p.0.get(&transport).copied()).filter(|p| p.command == id).unwrap_or(Pickup { command: id, stalled: 0 });
+    let save = |lua: &Lua, state: Pickup| {
+        if let Some(mut p) = lua.app_data_mut::<Pickups>() {
+            p.0.insert(transport, state);
+        }
+    };
+    // The cargo still to come: (unit, position, radius, at a standstill on
+    // this order, rising on the beam).
+    let pending: Vec<(EntityId, FxVec3, Fx, bool, bool)> = {
+        let w = entity::world(lua);
+        let c = lua.app_data_ref::<Commands>();
+        let beaming = lua.app_data_ref::<Beaming>();
+        members
+            .iter()
+            .filter(|&&u| u != transport)
+            .filter_map(|&u| {
+                let e = w.get(u).filter(|e| !e.destroyed && !e.cold.killed && e.attachment.is_none())?;
+                let d = e.unit.as_deref()?;
+                let waiting = d.motion_state.speed == Fx::ZERO && c.as_ref().is_some_and(|c| c.current(u).is_some_and(|cur| cur.id == id));
+                Some((u, e.position(), d.radius, waiting, beaming.as_ref().is_some_and(|b| b.0.contains_key(&u))))
+            })
+            .collect()
+    };
+    if pending.is_empty() {
+        if let Some(mut p) = lua.app_data_mut::<Pickups>() {
+            p.0.remove(&transport);
+        }
+        pop(lua, transport);
+        return Ok(());
+    }
+    let Some((tpos, speed, radius)) = entity::world(lua).get(transport).and_then(|e| Some((e.position(), e.unit.as_deref()?.motion_state.speed, e.unit.as_deref()?.radius))) else { return Ok(()) };
+    let in_place = xz_dist2(tpos, gather) <= Fx::from_num(2.25) && speed < Fx::ONE && at_hover_height(lua, transport, tpos);
+    if !in_place {
+        state.stalled = 0;
+        save(lua, state);
+        return Ok(());
+    }
+    // In reach: under the transport, or settled in the clump the cargo
+    // makes round the gather point.
+    let count = pending.len() as u32;
+    let in_reach = |pos: FxVec3, r: Fx| {
+        let reach = (radius + r + Fx::from_num(3)).max(crate::engine::sim::avoidance::crowd_radius(r, count) + Fx::ONE);
+        xz_dist2(pos, tpos) <= reach.saturating_mul(reach)
+    };
+    let ready: Vec<EntityId> = pending.iter().filter(|&&(_, pos, r, waiting, rising)| waiting && !rising && in_reach(pos, r)).map(|p| p.0).collect();
+    if ready.is_empty() {
+        // Nothing to take, nothing on the beam, and all that is left
+        // stands out of reach: after a while, go to the nearest.
+        let stuck = pending.iter().all(|&(_, pos, r, waiting, rising)| waiting && !rising && !in_reach(pos, r));
+        state.stalled = if stuck { state.stalled + 1 } else { 0 };
+        if state.stalled >= STALL_TICKS {
+            state.stalled = 0;
+            let nearest = pending.iter().min_by_key(|p| (xz_dist2(p.1, tpos), p.0)).map(|p| p.1);
+            if let (Some(at), Some(mut c)) = (nearest, lua.app_data_mut::<Commands>())
+                && let Some(cmd) = c.get_mut(id) {
+                cmd.gather = Some(at);
+            }
+        }
+        save(lua, state);
+        return Ok(());
+    }
+    state.stalled = 0;
+    let done = |lua: &Lua, unit: EntityId| {
+        if lua.app_data_ref::<Commands>().and_then(|c| c.current(unit).map(|c| c.id)) == Some(id) {
+            pop(lua, unit);
+        }
+    };
+    for unit in ready {
+        let (passenger, carrier) = carry_sides(lua, unit, transport);
+        if !crate::engine::sim::carry::can_carry(&passenger, &carrier) {
+            done(lua, unit);
+            continue;
+        }
+        match free_slots(lua, transport, class_of(lua, unit)).first().copied() {
+            Some(bone) => {
+                start_beam(lua, transport, unit, bone, false)?;
+                // Refused (or died) on the beam: its order ends.
+                if lua.app_data_ref::<Beaming>().is_none_or(|b| !b.0.contains_key(&unit)) {
+                    done(lua, unit);
+                }
+            }
+            None => {
+                tracing::debug!(unit, transport, "transport full; load order dropped");
+                transport_full(lua, transport)?;
+                done(lua, unit);
+            }
+        }
+    }
+    save(lua, state);
+    Ok(())
+}
+
 /// Whether `filter` keeps `passenger` (`None` keeps everything).
 fn in_category(lua: &Lua, passenger: EntityId, filter: Option<&crate::engine::sim::category::CategorySet>) -> bool {
     filter.is_none_or(|f| entity::world(lua).get(passenger).and_then(|e| e.category_index).is_some_and(|i| f.contains(i)))
@@ -1100,6 +1304,11 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
     for carrier in ended {
         set_state(lua, carrier, "TransportUnloading", false);
     }
+    // Pick-ups whose order is gone (done, or the transport was given
+    // another) are over.
+    if let (Some(c), Some(mut p)) = (lua.app_data_ref::<Commands>(), lua.app_data_mut::<Pickups>()) {
+        p.0.retain(|&transport, pickup| c.current(transport).is_some_and(|cmd| cmd.id == pickup.command));
+    }
     begin_loading(lua)?;
     ferry_tasks(lua)?;
     crate::engine::api::ferry::waits(lua);
@@ -1108,19 +1317,38 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
     // Rises in progress first: finishes attach before the order pass reads
     // them (the load order that boarded each one ends on the attach).
     beam_tick(lua)?;
-    let orders: Vec<(EntityId, CommandKind, CommandTarget, Option<crate::engine::sim::category::CategorySet>, crate::engine::sim::command::CommandId)> = {
+    // (With whether the order is a pick-up: its transport joined it,
+    // [`join_pickup`], and still has it queued.)
+    let orders: Vec<(EntityId, CommandKind, CommandTarget, Option<crate::engine::sim::category::CategorySet>, crate::engine::sim::command::CommandId, bool)> = {
         let Some(c) = lua.app_data_ref::<Commands>() else { return Ok(()) };
         c.units_doing(&[K::TransportLoadUnits, K::TransportReverseLoadUnits, K::TransportUnloadUnits, K::TransportUnloadSpecificUnits, K::DetachFromTransport])
             .into_iter()
-            .filter_map(|u| c.current(u).map(|c| (u, c.kind, c.target, c.category.clone(), c.id)))
+            .filter_map(|u| {
+                c.current(u).map(|c| {
+                    let pickup = c.gather.is_some() && matches!(c.target, CommandTarget::Entity(t) if c.units.binary_search(&t).is_ok());
+                    (u, c.kind, c.target, c.category.clone(), c.id, pickup)
+                })
+            })
             .collect()
     };
     let waiting = crate::engine::api::ferry::beacon_orders(lua);
-    for (unit, kind, target, category, id) in orders {
+    for (unit, kind, target, category, id, pickup) in orders {
         let Some(pos) = entity::world(lua).get(unit).filter(|e| !e.destroyed).map(|e| e.position()) else { continue };
         match (kind, target) {
             // A load onto a ferry beacon waits there (`ferry::waits`).
             (K::TransportLoadUnits, CommandTarget::Entity(_)) if waiting.binary_search(&(unit, id)).is_ok() => {}
+            // An air transport on the load order it joined: it picks its
+            // cargo up.
+            (K::TransportLoadUnits, CommandTarget::Entity(transport)) if pickup && transport == unit => {
+                pick_up(lua, unit, id)?;
+            }
+            // Cargo of a pick-up gathers (`movement`) and rises on the
+            // transport's beam ([`pick_up`]); its order ends once aboard.
+            (K::TransportLoadUnits, CommandTarget::Entity(_)) if pickup => {
+                if entity::world(lua).get(unit).is_some_and(|e| e.attachment.is_some()) {
+                    pop(lua, unit);
+                }
+            }
             // The passenger walks to the transport (`movement`); aboard once
             // in reach.
             (K::TransportLoadUnits, CommandTarget::Entity(transport)) => {

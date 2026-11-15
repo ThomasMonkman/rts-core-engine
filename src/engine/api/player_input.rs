@@ -334,6 +334,11 @@ fn finish(lua: &Lua, c: &PlayerCommand, units: &[EntityId], target: CommandTarge
         }
         kind => {
             let handle = issue(lua, units, kind, target, None, 0);
+            // An air transport comes for the units ordered aboard it,
+            // dropping what it was doing unless the order is queued.
+            if kind == CommandKind::TransportLoadUnits {
+                crate::engine::api::transport::join_pickup(lua, handle.0, !c.queue);
+            }
             // The interface's patrol loops home (`Command::patrol_home`).
             if kind == CommandKind::Patrol
                 && let Some(cmd) = lua.app_data_mut::<Commands>().expect("Commands not in app_data").get_mut(handle.0) {

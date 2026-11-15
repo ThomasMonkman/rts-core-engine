@@ -823,6 +823,12 @@ fn goal(cmd: Option<&crate::engine::sim::command::Command>, world: &EntityWorld,
         // Right up to it (`api::sacrifice::REACH`; the real engineer walks
         // in, dev/probes probe_unit_build G8).
         K::Sacrifice => touch(cmd.target).map(|p| (p, crate::engine::api::sacrifice::REACH, false)),
+        // A load order its air transport joined (`api::transport`'s
+        // pick-up): the cargo gathers at the order's gather point and the
+        // transport flies there.
+        K::TransportLoadUnits if gathers(cmd, unit) || cmd.target == CommandTarget::Entity(unit) => {
+            cmd.gather.map(|g| (g, if cmd.target == CommandTarget::Entity(unit) { Fx::ZERO } else { Fx::ONE }, false))
+        }
         // Board a transport (`api::transport` attaches it once in reach).
         K::TransportLoadUnits => at(cmd.target).map(|p| (p, Fx::ONE, false)),
         // Fly out to a unit to pick it up (`api::transport` boards it once
@@ -851,6 +857,17 @@ fn goal(cmd: Option<&crate::engine::sim::command::Command>, world: &EntityWorld,
         // (`api::ferry`); the ferry order itself holds still.
         K::Ferry => None,
         _ => None,
+    }
+}
+
+/// Whether `unit` is cargo gathering for a pick-up: its load order has a
+/// gather point and the transport it names is one of the order's units
+/// (`api::transport`). The cargo settles round the point as a group sent to
+/// one spot does.
+fn gathers(cmd: &crate::engine::sim::command::Command, unit: EntityId) -> bool {
+    match (cmd.kind, cmd.target, cmd.gather) {
+        (CommandKind::TransportLoadUnits, CommandTarget::Entity(t), Some(_)) => t != unit && cmd.units.binary_search(&t).is_ok(),
+        _ => false,
     }
 }
 
@@ -1723,7 +1740,10 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
         // At rest on a work order: hold anywhere in work range (pushed off
         // the units parked at the same spot, it stays there).
         let parked = !completes && !chasing && pace.is_none() && state.speed == Fx::ZERO && cmd.is_some_and(|c| is_work(c.kind)) && dist <= radius + work_slack();
-        if dist <= radius || parked || (completes && crowded()) {
+        // (Cargo gathering for a pick-up settles in a clump round the
+        // gather point, as a group moved to one spot does.)
+        let gathering = cmd.is_some_and(|c| gathers(c, unit));
+        if dist <= radius || parked || ((completes || gathering) && crowded()) {
             arrived = completes;
             // A formation move ends with each member turned on the spot to
             // the layout's facing: the real game's six tanks all finished
@@ -1918,9 +1938,9 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
                 // (Not boarding or working: those still push. Only a crowd
                 // gathering at one point closes up round it: not formation
                 // members, each bound for its own slot.)
-                let squad = cmd.filter(|c| c.issued > 1 && moving(c.kind)).map(|c| {
-                    let gathering = matches!(c.kind, CommandKind::Move | CommandKind::AggressiveMove) && c.slot(unit).is_none();
-                    crate::engine::sim::avoidance::Squad { cmd: c.id, goal: (completes && final_leg && gathering).then_some((g, c.issued)) }
+                let squad = cmd.filter(|c| c.issued > 1 && (moving(c.kind) || gathering)).map(|c| {
+                    let closes_up = gathering || (completes && matches!(c.kind, CommandKind::Move | CommandKind::AggressiveMove) && c.slot(unit).is_none());
+                    crate::engine::sim::avoidance::Squad { cmd: c.id, goal: (final_leg && closes_up).then_some((g, c.issued)) }
                 });
                 let (steer, squad_pace) = if p.kind == MotionKind::Air {
                     (steer, None)

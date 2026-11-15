@@ -192,7 +192,12 @@ fn targeted(lua: &Lua, name: &'static str, kind: CommandKind) -> LuaResult<()> {
             units.retain(|&u| !refuses(lua, u, kind, target, false, &all));
             // (A ferry order's `OnFerryPointSet` comes as a transport starts
             // it: `transport::ferry_tasks`.)
-            Ok(issue(lua, &units, kind, target, None, 0))
+            let handle = issue(lua, &units, kind, target, None, 0);
+            // An air transport comes for the units ordered aboard it.
+            if kind == CommandKind::TransportLoadUnits {
+                crate::engine::api::transport::join_pickup(lua, handle.0, false);
+            }
+            Ok(handle)
         },
     )
 }
@@ -1058,7 +1063,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             };
             let all = sorted_unique(&units);
             units.retain(|&u| !refuses(lua, u, K::TransportLoadUnits, target, false, &all));
-            Ok(issue(lua, &units, K::TransportLoadUnits, target, None, 0))
+            let handle = issue(lua, &units, K::TransportLoadUnits, target, None, 0);
+            crate::engine::api::transport::join_pickup(lua, handle.0, false);
+            Ok(handle)
         })?;
     lua_method!(lua, moho::Platoon,
         /// The platoon's transports unload everything at `pos`: `IssueTransportUnload`'s order.

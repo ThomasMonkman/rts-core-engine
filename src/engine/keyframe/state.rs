@@ -82,6 +82,7 @@ saved_types! {
     "attack_vectors" => api::attack_vectors::AttackVectors,
     "beaming" => api::transport::Beaming,
     "loading" => api::transport::Loading,
+    "pickups" => api::transport::Pickups,
     "ferry_tasks" => api::transport::FerryTasks,
     "ferry_routes" => api::ferry::FerryRoutes,
     "ferry_waits" => api::ferry::FerryWaits,
