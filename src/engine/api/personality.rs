@@ -3,8 +3,8 @@
 //! Moho's personality tables live in the binary; FAF ships none, and
 //! scenario saves set `personality = ''`. Until real data turns up, every
 //! brain gets the same neutral personality: emphases/tendencies 0.5 (no
-//! preference), sizes 1 (no scaling), `AdjustDelay` returns the delay
-//! unchanged. All values are inferred placeholders, not moho's.
+//! preference), sizes 1 (no scaling): inferred placeholders, not moho's.
+//! `AdjustDelay` is the real game's formula (probed).
 
 use crate::lua_api::shapes;
 use std::collections::BTreeMap;
@@ -97,8 +97,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// Placeholder: 2 for every brain.
         GetDifficulty = |_, _this: Obj<moho::AIPersonality>| Ok(2.0))?;
     lua_method!(lua, moho::AIPersonality,
-        /// Returns `delay` unchanged (placeholder).
-        AdjustDelay = |_, (_this, delay, _factor): (Obj<moho::AIPersonality>, f64, Option<f64>)| Ok(delay))?;
+        /// `delay x (1 + trunc(factor) x 0.5)`: dev/probes probe_ai_brain / probe_ai_misc, (10, 1) =
+        /// 15, (10, 1.5) = 15, (10, 3) = 25, (10, -1) = 5, (100, 0.9) = 100, (-10, 2) = -20.
+        /// (IEEE multiply and add are exact-rounded, so the same everywhere.)
+        AdjustDelay = |_, (_this, delay, factor): (Obj<moho::AIPersonality>, f64, Option<f64>)| Ok(adjust_delay(delay, factor.unwrap_or(0.0))))?;
     for name in ["GetFavouriteStructures", "GetFavouriteUnits"] {
         crate::lua_api::add_class_fn(
             lua,
@@ -120,4 +122,20 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(lua.app_data_ref::<PersonalityNames>().and_then(|n| n.0.get(&army).cloned()).unwrap_or_default())
         })?;
     Ok(())
+}
+
+/// `AIPersonality:AdjustDelay(delay, factor)`.
+fn adjust_delay(delay: f64, factor: f64) -> f64 {
+    delay * (1.0 + factor.trunc() * 0.5)
+}
+
+#[cfg(test)]
+mod tests {
+    /// dev/probes probe_ai_brain / probe_ai_misc.
+    #[test]
+    fn adjust_delay_matches_the_real_game() {
+        for (a, b, want) in [(10.0, 1.0, 15.0), (10.0, 1.5, 15.0), (10.0, 2.0, 20.0), (10.0, 3.0, 25.0), (10.0, -1.0, 5.0), (100.0, 0.9, 100.0), (-10.0, 2.0, -20.0)] {
+            assert_eq!(super::adjust_delay(a, b), want, "({a}, {b})");
+        }
+    }
 }
