@@ -488,15 +488,24 @@ impl ThreatMap {
         self.ring_threat(c, r, rings, ty, brain, counts)
     }
 
-    /// The cell whose ring holds the most threat: its centre and the value.
-    /// Ties go to the first cell in row-major order.
-    pub fn highest(&self, rings: u32, ty: ThreatType, brain: u32, counts: &dyn Fn(u32) -> bool) -> (FxVec3, Fx) {
-        let mut best = (0, 0, Fx::ZERO);
+    /// The cell whose ring holds the most threat: its centre (y = 0) and the
+    /// value. Ties (the empty map included) go to the cell whose centre is
+    /// nearest `origin` (the brain's start position; then row-major order):
+    /// dev/probes probe_ai_threat, army 1 starting at (672.5, 346.5): nothing
+    /// known gives (672, 0, 352), the Fatboy's cell (5, 13) with ring 1 the
+    /// ring cell nearest the start, (416, 0, 800).
+    pub fn highest(&self, rings: u32, ty: ThreatType, brain: u32, counts: &dyn Fn(u32) -> bool, origin: crate::engine::sim::math::FxVec2) -> (FxVec3, Fx) {
+        let dist2 = |c: u32, r: u32| {
+            let m = self.center(c, r);
+            let (dx, dz) = (m.x - origin.x, m.z - origin.z);
+            dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz))
+        };
+        let mut best = (0, 0, Fx::MIN, Fx::MAX);
         for r in 0..self.rows {
             for c in 0..self.cols {
                 let t = self.ring_threat(c, r, rings, ty, brain, counts);
-                if t > best.2 {
-                    best = (c, r, t);
+                if t > best.2 || (t == best.2 && dist2(c, r) < best.3) {
+                    best = (c, r, t, dist2(c, r));
                 }
             }
         }
@@ -577,14 +586,14 @@ mod tests {
         let mut map = ThreatMap::new(256, 256);
         map.update(&w, 0, &[], &exact);
         let enemies = |a: u32| a != 1;
-        let (pos, t) = map.highest(0, ThreatType::Overall, 1, &enemies);
+        let (pos, t) = map.highest(0, ThreatType::Overall, 1, &enemies, Default::default());
         assert_eq!((pos, t), (FxVec3::from_f64(48.0, 0.0, 48.0), Fx::from_num(15)));
-        let (pos, t) = map.highest(0, ThreatType::Land, 1, &enemies);
+        let (pos, t) = map.highest(0, ThreatType::Land, 1, &enemies, Default::default());
         assert_eq!((pos, t), (FxVec3::from_f64(208.0, 0.0, 208.0), Fx::from_num(12)));
         assert_eq!(map.threat_at(FxVec3::from_f64(70.0, 0.0, 70.0), 0, ThreatType::Overall, 1, &enemies), Fx::ZERO);
         assert_eq!(map.threat_at(FxVec3::from_f64(70.0, 0.0, 70.0), 1, ThreatType::Overall, 1, &enemies), Fx::from_num(15));
         let only3 = |a: u32| a == 3;
-        assert_eq!(map.highest(0, ThreatType::Overall, 1, &only3).1, Fx::from_num(12));
+        assert_eq!(map.highest(0, ThreatType::Overall, 1, &only3, Default::default()).1, Fx::from_num(12));
         assert_eq!(map.around(FxVec3::from_f64(40.0, 0.0, 40.0), 1, ThreatType::Structures, 1, &enemies), vec![(Fx::from_num(48), Fx::from_num(48), Fx::from_num(5))]);
         let line = map.between(FxVec3::from_f64(10.0, 0.0, 10.0), FxVec3::from_f64(250.0, 0.0, 250.0), ThreatType::Overall, 1, &enemies);
         assert_eq!(line, Fx::from_num(27));
@@ -601,10 +610,10 @@ mod tests {
         let knows = |_: u32, e: &Entity| if e.position().x < Fx::from_num(100) { Knowledge::Detected } else { Knowledge::Unknown };
         map.update(&w, 0, &[1, 2], &knows);
         let enemies = |a: u32| a == 2;
-        assert_eq!(map.highest(0, ThreatType::Overall, 1, &enemies).1, Fx::from_num(10), "the unknown 12 doesn't count");
+        assert_eq!(map.highest(0, ThreatType::Overall, 1, &enemies, Default::default()).1, Fx::from_num(10), "the unknown 12 doesn't count");
         assert_eq!(map.threat_at(FxVec3::from_f64(200.0, 0.0, 200.0), 0, ThreatType::Overall, 1, &enemies), Fx::ZERO);
         let own = |a: u32| a == 2;
-        assert_eq!(map.highest(0, ThreatType::Overall, 2, &own).1, Fx::from_num(12), "own threat is exact");
+        assert_eq!(map.highest(0, ThreatType::Overall, 2, &own, Default::default()).1, Fx::from_num(12), "own threat is exact");
     }
 
     /// dev/probes probe_ai_threat / probe_ai_find: a mobile unit out of sight
@@ -701,5 +710,19 @@ mod tests {
         map.assign(1, p, Fx::from_num(100), Fx::ONE, ThreatType::Land);
         map.update(&w, 420, &[], &exact);
         assert_eq!(get(&map, p, ThreatType::Land), 0.0, "decay 1: gone at the first update");
+    }
+
+    #[test]
+    fn highest_ties_go_to_the_cell_nearest_the_start() {
+        let mut w = EntityWorld::default();
+        let land = ThreatKinds { land: true, ..Default::default() };
+        let mut map = ThreatMap::new(1024, 1024);
+        map.update(&w, 0, &[], &exact);
+        let enemies = |a: u32| a == 2;
+        let start = crate::engine::sim::math::FxVec2 { x: Fx::from_num(672.5), z: Fx::from_num(346.5) };
+        assert_eq!(map.highest(0, ThreatType::Overall, 1, &enemies, start), (FxVec3::from_f64(672.0, 0.0, 352.0), Fx::ZERO));
+        unit(&mut w, 2, 352.0, 880.0, 10, land); // cell (5, 13)
+        map.update(&w, 30, &[], &exact);
+        assert_eq!(map.highest(1, ThreatType::Overall, 1, &enemies, start), (FxVec3::from_f64(416.0, 0.0, 800.0), Fx::from_num(10)));
     }
 }

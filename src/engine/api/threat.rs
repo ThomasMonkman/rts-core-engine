@@ -87,21 +87,16 @@ fn query<R>(
     Ok(f(&map, me, &counts))
 }
 
-fn surface(lua: &Lua, mut p: FxVec3) -> FxVec3 {
-    if let Some(t) = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>() {
-        p.y = t.surface_at(p.x, p.z);
-    }
-    p
-}
-
 pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::AIBrain,
-        /// Centre of the cell (plus `ring` neighbours) with the most threat, and
-        /// that threat; ties go to the first cell in row-major order.
+        /// Centre of the cell (plus `ring` neighbours) with the most threat (y = 0), and
+        /// that threat; ties (and an empty map) go to the cell nearest the brain's start.
         GetHighestThreatPosition = |lua, (brain, ring, _restriction, ty, army): (Obj<moho::AIBrain>, f64, Option<bool>, Option<String>, Option<u32>)| {
             let ty = threat_type(ty)?;
-            let (pos, t) = query(lua, &brain, army, true, |m, me, counts| m.highest(rings(ring), ty, me, counts))?;
-            Ok((entity::vector(lua, surface(lua, pos))?, t.to_num::<f64>()))
+            let ArmyHandle(me) = script_object::handle(&brain)?;
+            let start = lua.app_data_ref::<Armies>().and_then(|a| a.get(me).and_then(|a| a.start)).unwrap_or_default();
+            let (pos, t) = query(lua, &brain, army, true, |m, me, counts| m.highest(rings(ring), ty, me, counts, start))?;
+            Ok((entity::vector(lua, pos)?, t.to_num::<f64>()))
         },
     )?;
     lua_method!(lua, moho::AIBrain,
