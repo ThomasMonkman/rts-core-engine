@@ -47,6 +47,23 @@ impl MotionKind {
         })
     }
 
+    /// What `SetSpeedMult(m)` does to this kind's top speed. Surface units
+    /// (land, hover, amphibious, naval and subs) take a multiplier under 1
+    /// squared and one of 1 or more as it is; aircraft take it as it is.
+    /// The real game's T1 tank (3.40) runs 0.21 / 0.85 / 1.91 / 2.75 at
+    /// m = 0.25 / 0.5 / 0.75 / 0.9 and 5.10 / 10.17 at 1.5 / 3, the hover
+    /// tank and frigate the same law, and FAF's `SubSpeedMultiplier` 0.9 /
+    /// `WaterSpeedMultiplier` 0.945 come out 0.81 / 0.893 (dev/probes
+    /// probe_mov_mult, probe_mov_naval). Gunships follow neither law in the
+    /// real game (0.5 gives ~0.43): not modelled, linear here.
+    pub fn speed_mult(self, m: Fx) -> Fx {
+        if self != MotionKind::Air && self != MotionKind::None && m < Fx::ONE {
+            m.saturating_mul(m)
+        } else {
+            m
+        }
+    }
+
     /// It can be on land (its occupancy caps include `LAND`).
     pub fn on_land(self) -> bool {
         self.caps().is_some_and(|c| c & crate::engine::sim::nav::caps::LAND != 0)
@@ -1296,7 +1313,7 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
         return None;
     }
     let mult = data.motion;
-    let mut max_speed = p.max_speed.saturating_mul(mult.speed);
+    let mut max_speed = p.max_speed.saturating_mul(p.kind.speed_mult(mult.speed));
     if let Some(t) = env.terrain.filter(|_| p.shallows_depth < Fx::ZERO) {
         let pos = e.position();
         max_speed = max_speed.saturating_mul(shallows_factor(p.shallows_depth, t, pos.x, pos.z));

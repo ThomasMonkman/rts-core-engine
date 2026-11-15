@@ -1478,3 +1478,8 @@ fn weapon_api_returns() {
 fn destroyed_salvo() {
     scenario("destroyed_salvo", 20);
 }
+
+#[test]
+fn speed_mult_law() {
+    scenario("speed_mult_law", 80);
+}
