@@ -2620,3 +2620,53 @@ fn builders_focus_the_unit_they_build() {
         .unwrap();
     assert_eq!(got, ("ueb0101".into(), "ueb0101".into(), "ueb3201".into()));
 }
+
+/// `Hide` / `Show` / `SetHidden` set the flag down the tree, calling
+/// `OnHide` each time, except below a child whose `OnHide` returns true;
+/// `EnableHitTest()` isn't recursive (`probe_ui_controls` ctl, real game).
+#[test]
+fn hidden_flag_goes_down_the_tree() {
+    let Some(vm) = vm() else { return };
+    let got: Vec<String> = vm
+        .lua()
+        .load(
+            r#"
+            local Group = import('/lua/maui/group.lua').Group
+            local g = Group(GetFrame(0))
+            local child = Group(g)
+            local grand = Group(child)
+            local out, hides = {}, ''
+            local function flags() return tostring(g:IsHidden()) .. ' ' .. tostring(child:IsHidden()) .. ' ' .. tostring(grand:IsHidden()) end
+            child.OnHide = function(self, hidden) hides = hides .. 'child:' .. tostring(hidden) .. ';' end
+            grand.OnHide = function(self, hidden) hides = hides .. 'grand:' .. tostring(hidden) .. ';' end
+            g:Hide()
+            table.insert(out, flags() .. ' ' .. hides) hides = ''
+            child:Show()
+            table.insert(out, flags() .. ' ' .. hides) hides = ''
+            g:Show() hides = ''
+            g:SetHidden(true) g:SetHidden(true)
+            table.insert(out, flags() .. ' ' .. hides) hides = ''
+            child.OnHide = function(self, hidden) hides = hides .. 'veto;' return true end
+            g:Show()
+            table.insert(out, flags() .. ' ' .. hides)
+            child.OnHide = nil
+            g:Show()
+            g:DisableHitTest(true)
+            g:EnableHitTest()
+            table.insert(out, tostring(g:IsHitTestDisabled()) .. ' ' .. tostring(child:IsHitTestDisabled()) .. ' ' .. tostring(grand:IsHitTestDisabled()))
+            return out
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(
+        got,
+        [
+            "true true true child:true;grand:true;",
+            "true false false child:false;grand:false;",
+            "true true true child:true;grand:true;child:true;grand:true;",
+            "false true true veto;",
+            "false true true",
+        ]
+    );
+}

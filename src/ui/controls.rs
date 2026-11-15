@@ -924,7 +924,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_method!(lua, moho::Control,
-        /// Hit testing: recursive by default when enabling (annotations).
+        /// Hit testing: not recursive unless asked.
         DisableHitTest = |lua, (this, recursive): (Obj<moho::Control>, Option<bool>)| {
             let id = id_of(&this)?;
             let mut c = controls(lua);
@@ -937,10 +937,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_method!(lua, moho::Control,
+        /// Not recursive unless asked (`probe_ui_controls` ctl: after
+        /// `DisableHitTest(true)`, `EnableHitTest()` leaves the children
+        /// disabled).
         EnableHitTest = |lua, (this, recursive): (Obj<moho::Control>, Option<bool>)| {
             let id = id_of(&this)?;
             let mut c = controls(lua);
-            let ids = if recursive.unwrap_or(true) { subtree(&c, id) } else { vec![id] };
+            let ids = if recursive.unwrap_or(false) { subtree(&c, id) } else { vec![id] };
             for i in ids {
                 if let Some(ctl) = c.map.get_mut(&i) {
                     ctl.hit_test = true;
@@ -951,26 +954,39 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::Control,
         /// True when the control doesn't take mouse events.
         IsHitTestDisabled = |lua, this: Obj<moho::Control>| with(lua, &this, |c| !c.hit_test))?;
+    /// `Hide` / `Show` / `SetHidden`, as moho does (`probe_ui_controls` ctl):
+    /// the control's flag is set and its `OnHide(hidden)` runs, always, even
+    /// when the flag doesn't change; then every descendant gets the same flag
+    /// and `OnHide`, depth first, except one whose `OnHide` returns true:
+    /// it and its subtree keep their own flags. So showing a parent shows
+    /// every descendant that doesn't veto, and `IsHidden` is true down a
+    /// hidden subtree. The control's own `OnHide` returning true keeps the
+    /// change from its children (FAF's economy bar shows its rate texts from
+    /// `warningBG.OnHide`, after siblings that return true).
     fn set_hidden(lua: &Lua, this: &LuaTable, hidden: bool) -> LuaResult<()> {
-        let changed = with(lua, this, |c| std::mem::replace(&mut c.hidden, hidden) != hidden)?;
-        if changed {
-            notify_hide(lua, id_of(this)?, hidden)?;
-        }
-        Ok(())
-    }
-    /// `OnHide(hidden)` down the tree, depth first; a control's returning
-    /// true keeps it from that control's own children only (FAF's
-    /// economy bar shows its rate texts from `warningBG.OnHide`, after
-    /// siblings that return true).
-    fn notify_hide(lua: &Lua, id: ControlId, hidden: bool) -> LuaResult<()> {
-        if let Some(obj) = object(lua, id)?
-            && let Some(f) = obj.get::<Option<LuaFunction>>("OnHide")?
-            && f.call::<Option<bool>>((obj.clone(), hidden)).unwrap_or(None) == Some(true) {
+        let id = id_of(this)?;
+        with(lua, this, |c| c.hidden = hidden)?;
+        if on_hide(lua, id, hidden)? {
             return Ok(());
         }
+        hide_children(lua, id, hidden)
+    }
+    /// The control's `OnHide(hidden)`: true when it vetoes.
+    fn on_hide(lua: &Lua, id: ControlId, hidden: bool) -> LuaResult<bool> {
+        let Some(obj) = object(lua, id)? else { return Ok(false) };
+        let Some(f) = obj.get::<Option<LuaFunction>>("OnHide")? else { return Ok(false) };
+        Ok(f.call::<Option<bool>>((obj.clone(), hidden)).unwrap_or(None) == Some(true))
+    }
+    fn hide_children(lua: &Lua, id: ControlId, hidden: bool) -> LuaResult<()> {
         let children = controls(lua).map.get(&id).map(|c| c.children.clone()).unwrap_or_default();
         for child in children {
-            notify_hide(lua, child, hidden)?;
+            if on_hide(lua, child, hidden)? {
+                continue;
+            }
+            if let Some(c) = controls(lua).map.get_mut(&child) {
+                c.hidden = hidden;
+            }
+            hide_children(lua, child, hidden)?;
         }
         Ok(())
     }
