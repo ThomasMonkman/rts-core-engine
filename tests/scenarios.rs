@@ -1468,3 +1468,8 @@ fn child_projectile() {
 fn homing_centre() {
     scenario("homing_centre", 50);
 }
+
+#[test]
+fn weapon_api_returns() {
+    scenario("weapon_api_returns", 20);
+}

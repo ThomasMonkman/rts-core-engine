@@ -90,7 +90,7 @@ pub const UNUSED: &[(&str, &[&str], &str)] = &[
     ),
     (
         "weapon_methods",
-        &["ChangeDamageRadius", "ChangeDamageType", "DoInstaHit", "TransferTarget"],
+        &["DoInstaHit", "TransferTarget"],
         "no script in FAF, the original game or the AI mods calls them",
     ),
     ("AimManipulator", &["OnTarget", "SetAimHeadingOffset"], "no script in FAF, the original game or the AI mods calls them"),

@@ -524,21 +524,33 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::Weapon,
         /// Fires now, whatever the fire clock and target say: runs `OnFire` (FAF's
         /// fire beetle detonates through it, the Seraphim energy ball fires its
-        /// beam at the target it just set). True if it fired (inferred: false
-        /// when the unit is gone).
+        /// beam at the target it just set). Returns nothing (`probe_wpn_ctrl`
+        /// `manual`: `tostring(w:FireWeapon())` raised in the real game); a
+        /// unit that's gone doesn't fire.
         FireWeapon = |lua, this: Obj<moho::Weapon>| {
         let WeaponHandle { unit, .. } = handle(&this)?;
-        if !entity::world(lua).get(unit).is_some_and(|e| !e.destroyed) {
-            return Ok(false);
+        if entity::world(lua).get(unit).is_some_and(|e| !e.destroyed) {
+            WeaponCallbacks::on_fire(lua, &this, "weapon")?;
         }
-        WeaponCallbacks::on_fire(lua, &this, "weapon")?;
-        Ok(true)
+        Ok(())
     })?;
     lua_method!(lua, moho::Weapon,
         /// Overrides the weapon's damage.
         ChangeDamage = |lua, (this, damage): (Obj<moho::Weapon>, f64)| {
         with_state(lua, &this, |w| w.damage = Some(crate::engine::sim::math::from_lua(damage)))
     })?;
+    lua_method!(lua, moho::Weapon,
+        /// Sets the engine weapon's damage radius. Moho keeps it and nothing
+        /// reads it (FAF's `engine/Sim/UnitWeapon.lua`: non-functional; FAF's
+        /// projectiles take their radius from Lua), so it does nothing here.
+        /// It exists: `probe_wpn_ctrl` `dmg`, `ChangeDamageRadius=true`.
+        ChangeDamageRadius = |_lua, (_this, _radius): (Obj<moho::Weapon>, f64)| Ok(())
+    )?;
+    lua_method!(lua, moho::Weapon,
+        /// Sets the engine weapon's damage type: as `ChangeDamageRadius`,
+        /// kept by moho and read by nothing (`probe_wpn_ctrl` `dmg`).
+        ChangeDamageType = |_lua, (_this, _kind): (Obj<moho::Weapon>, String)| Ok(())
+    )?;
     lua_method!(lua, moho::Weapon,
         /// Sets the firing spread (degrees, gaussian); nil is 0.
         SetFiringRandomness = |lua, (this, r): (Obj<moho::Weapon>, Option<f64>)| {

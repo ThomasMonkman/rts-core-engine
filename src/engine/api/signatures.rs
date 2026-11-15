@@ -171,8 +171,6 @@ signatures! {
     }
     // Stubs, from moho's bindings (MohoEngine.dll 0x102b4390..0x102b66d0).
     moho::Weapon {
-        ChangeDamageRadius(value: f64);
-        ChangeDamageType(type_name: String);
         DoInstaHit(bone: Bone, r: f64, g: f64, b: f64, glow: f64, width: f64, texture: String, lifetime: f64);
         /// Transfers the target from one weapon to another; `other`'s reader
         /// (0x102b1d90) isn't identified.
