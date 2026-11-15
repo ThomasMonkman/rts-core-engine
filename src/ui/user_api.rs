@@ -970,15 +970,39 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         function GetIdleFactories() return idle('FACTORY STRUCTURE') end
         -- The game world is running (the interface exists only then).
         function WorldIsPlaying() return true end
-        -- Selects the player's units in a category expression, as the
-        -- `UI_SelectByCategory` console command does (render/console.rs).
+        -- Selecting from the interface is synchronous, as in moho: the new
+        -- selection is what `GetSelectedUnits()` returns on the next line and
+        -- what selection orders given after it go to (FAF selects a factory,
+        -- issues a build and reselects in one frame: construction.lua,
+        -- hotbuild.lua). The engine adopts it as the player's selection at
+        -- the end of the frame (`UserVm::take_selection_request`), which then
+        -- runs `OnSelectionChanged`. Dead units are left out.
+        local function select_units(units)
+            local list, seen = {}, {}
+            for _, u in units or {} do
+                local id = type(u) == 'table' and rawget(u, '_id')
+                if id and not seen[id] and not u:IsDead() then
+                    seen[id] = true
+                    table.insert(list, u)
+                end
+            end
+            table.sort(list, function(a, b) return rawget(a, '_id') < rawget(b, '_id') end)
+            rawset(_G, '__engine_selection', list[1] and list or nil)
+            local request = {}
+            for i, u in ipairs(list) do request[i] = u end
+            rawset(_G, '__engine_select_request', request)
+        end
+        -- Selects the player's units in a category expression (moho's own
+        -- rules: `__engine_select_by_category`), at once like `SelectUnits`.
         function UISelectionByCategory(expression, addToCurSel, inViewFrustum, nearestToMouse, mustBeIdle)
-            local flags = ''
-            if addToCurSel then flags = flags .. '+add ' end
-            if inViewFrustum then flags = flags .. '+inview ' end
-            if nearestToMouse then flags = flags .. '+nearest ' end
-            if mustBeIdle then flags = flags .. '+idle ' end
-            ConExecute('UI_SelectByCategory ' .. flags .. expression)
+            local ids = __engine_select_by_category(expression, addToCurSel and true or false, inViewFrustum and true or false, nearestToMouse and true or false, mustBeIdle and true or false)
+            if not ids then return end
+            local units = {}
+            for _, id in ids do
+                local u = GetUnitById(id)
+                if u then table.insert(units, u) end
+            end
+            select_units(units)
         end
         function GetSelectedUnits()
             local sel = rawget(_G, '__engine_selection')
@@ -987,14 +1011,12 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             for i, u in ipairs(sel) do copy[i] = u end
             return copy
         end
-        -- Selecting from the interface: the engine adopts it as the
-        -- player's selection (`UserVm::take_selection_request`).
-        function SelectUnits(units) rawset(_G, '__engine_select_request', units or {}) end
+        function SelectUnits(units) select_units(units) end
         function AddSelectUnits(units)
             local all = {}
             for _, u in rawget(_G, '__engine_selection') or {} do table.insert(all, u) end
             for _, u in units or {} do table.insert(all, u) end
-            rawset(_G, '__engine_select_request', all)
+            select_units(all)
         end
         -- The session's scenario (the engine fills __engine_session when it
         -- knows the map; until then a minimal one). `Share` is the lobby's
@@ -1253,11 +1275,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         -- into player commands for the selection (`UserVm::take_orders`).
         local orders = {}
         rawset(_G, '__engine_ui_orders', orders)
+        -- Orders to "the selection" go to the selection as it is when given
+        -- (see `select_units` above), not at the end of the frame.
+        local function selected() return GetSelectedUnits() or {} end
         function GetUnitCommandFromCommandCap(cap) return 'UNITCOMMAND_' .. string.gsub(cap, '^RULEUCC_', '') end
-        function IssueCommand(command, a, b) table.insert(orders, { command = command, arg = a, clear = b }) end
+        function IssueCommand(command, a, b) table.insert(orders, { units = selected(), command = command, arg = a, clear = b }) end
         function IssueUnitCommand(units, command, a, b) table.insert(orders, { units = units, command = command, arg = a, clear = b }) end
         function IssueUnitCommandToUnit(unit, command, a, b) table.insert(orders, { units = { unit }, command = command, arg = a, clear = b }) end
-        function IssueBlueprintCommand(command, bp, count, clear) table.insert(orders, { command = command, bp = bp, count = count, clear = clear }) end
+        function IssueBlueprintCommand(command, bp, count, clear) table.insert(orders, { units = selected(), command = command, bp = bp, count = count, clear = clear }) end
         function IssueBlueprintCommandToUnits(units, command, bp, count, clear) table.insert(orders, { units = units, command = command, bp = bp, count = count, clear = clear }) end
         function IssueBlueprintCommandToUnit(unit, command, bp, count, clear) table.insert(orders, { units = { unit }, command = command, bp = bp, count = count, clear = clear }) end
         -- Unit settings (the order panel's toggles), sent like orders.
@@ -1268,7 +1293,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         function SetPausedOfUnit(unit, paused) SetPaused({ unit }, paused) end
         -- `state` is the bit's current state: it flips.
         function ToggleScriptBit(units, bit, state) table.insert(orders, { units = units, toggle = 'bit', bit = bit, value = (not state) and 1 or 0 }) end
-        function IssueDockCommand(clear) table.insert(orders, { command = 'UNITCOMMAND_Dock', clear = clear }) end
+        function IssueDockCommand(clear) table.insert(orders, { units = selected(), command = 'UNITCOMMAND_Dock', clear = clear }) end
         -- Key maps (key name -> action), the most recently added first.
         local keymaps = {}
         function IN_AddKeyMapTable(map) table.insert(keymaps, map) end
@@ -1346,7 +1371,12 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 return Ok(());
             };
             let with_selection = with_selection.unwrap_or(false);
-            let units = if with_selection { lua.named_registry_value::<Option<Vec<u32>>>("user.selection")?.unwrap_or_default() } else { Vec::new() };
+            // The selection as the interface sees it now (`SelectUnits` is
+            // synchronous).
+            let units: Vec<u32> = match lua.globals().raw_get::<Option<LuaTable>>("__engine_selection")? {
+                Some(t) if with_selection => t.sequence_values::<LuaTable>().filter_map(|u| u.ok()?.raw_get::<Option<u32>>("_id").ok().flatten()).collect(),
+                _ => Vec::new(),
+            };
             let callback = crate::engine::sim::input::SimCallback {
                 func: func.to_string_lossy(),
                 args: crate::engine::sim::lua_data::LuaData::from_lua(&callback.raw_get::<LuaValue>("Args")?),

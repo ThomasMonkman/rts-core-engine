@@ -190,6 +190,20 @@ struct UiDeposits(Arc<Vec<(u8, f64, f64, f64)>>);
 #[derive(Default)]
 struct UiBusy(Vec<u32>);
 
+/// Units that can't be selected (sorted): cargo in a transport, units still
+/// being built inside their factory. `UISelectionByCategory` skips them.
+#[derive(Default)]
+struct UiUnselectable(Vec<u32>);
+
+/// What `UISelectionByCategory` needs of the renderer's view this frame
+/// ([`UserVm::set_select_scope`]): whether a point is on screen
+/// (`inViewFrustum`), and the point `nearestToMouse` measures from (the
+/// ground under the cursor, else the camera's focus).
+pub struct SelectScope {
+    pub in_view: Box<dyn Fn([f32; 3]) -> bool>,
+    pub from: Option<[f32; 3]>,
+}
+
 /// Focus-army units hurt since the last beat (`OnFocusArmyUnitDamaged`).
 #[derive(Default)]
 struct DamagedUnits(Vec<u32>);
@@ -501,6 +515,58 @@ impl UserVm {
                 }
                 let f: LuaFunction = lua.globals().get("__engine_filter_category")?;
                 f.call::<Vec<u32>>((list, category))
+            })?;
+        lua_fn!(&lua, global_raw,
+            /// `UISelectionByCategory`'s units (user_api.rs), worked out at once
+            /// as moho does, so `GetSelectedUnits()` on the next line sees them:
+            /// the focus army's units (any army's with none) in the category
+            /// expression, idle / on screen / the one nearest the cursor when
+            /// asked, plus the selection when adding. Structures still being
+            /// built count; cargo and units inside their factory don't (as the
+            /// real game's `UISelectionByCategory('ALLUNITS')`). Nil when none,
+            /// leaving the selection as it is.
+            #[lua(internal)]
+            __engine_select_by_category = |lua, (expr, add, in_view, nearest, idle): (String, bool, bool, bool, bool)| {
+                let focus = lua.named_registry_value::<Option<i64>>("user.focus_army")?.unwrap_or(-1);
+                let units: Vec<(u32, std::sync::Arc<str>, [f32; 3])> = match lua.app_data_ref::<UiWorld>() {
+                    Some(w) => {
+                        let skip = lua.app_data_ref::<UiUnselectable>();
+                        w.0.iter()
+                            .filter(|u| focus < 1 || i64::from(u.army) == focus)
+                            .filter(|u| skip.as_ref().is_none_or(|s| s.0.binary_search(&u.id).is_err()))
+                            .map(|u| (u.id, u.blueprint.clone(), u.position))
+                            .collect()
+                    }
+                    None => Vec::new(),
+                };
+                let list = lua.create_table_with_capacity(units.len() * 2, 0)?;
+                for (id, bp, _) in &units {
+                    list.push(*id)?;
+                    list.push(&**bp)?;
+                }
+                let f: LuaFunction = lua.globals().get("__engine_filter_category")?;
+                let mut ids: Vec<u32> = f.call((list, expr))?;
+                let position = |id: u32| units.binary_search_by_key(&id, |u| u.0).ok().map(|i| units[i].2);
+                if idle && let Some(busy) = lua.app_data_ref::<UiBusy>() {
+                    ids.retain(|id| busy.0.binary_search(id).is_err());
+                }
+                let scope = lua.app_data_ref::<SelectScope>();
+                if in_view && let Some(scope) = scope.as_ref() {
+                    ids.retain(|&id| position(id).is_some_and(|p| (scope.in_view)(p)));
+                }
+                if nearest && let Some(from) = scope.as_ref().and_then(|s| s.from) {
+                    let d2 = |id: u32| position(id).map_or(f32::MAX, |p| (p[0] - from[0]).powi(2) + (p[2] - from[2]).powi(2));
+                    ids = ids.into_iter().min_by(|a, b| d2(*a).total_cmp(&d2(*b)).then(a.cmp(b))).into_iter().collect();
+                }
+                drop(scope);
+                if add {
+                    ids.extend(lua.globals().raw_get::<Option<LuaTable>>("__engine_selection")?.into_iter().flat_map(|t| {
+                        t.sequence_values::<LuaTable>().filter_map(|u| u.ok()?.raw_get::<Option<u32>>("_id").ok().flatten()).collect::<Vec<_>>()
+                    }));
+                }
+                ids.sort_unstable();
+                ids.dedup();
+                Ok(if ids.is_empty() { None } else { Some(ids) })
             })?;
         Ok(Self { lua })
     }
@@ -1047,6 +1113,16 @@ impl UserVm {
     /// The units with orders this tick (sorted): the rest are idle.
     pub fn set_busy(&self, busy: &[u32]) {
         self.lua.set_app_data(UiBusy(busy.to_vec()));
+    }
+
+    /// Units that can't be selected this tick (sorted; see [`UiUnselectable`]).
+    pub fn set_unselectable(&self, ids: Vec<u32>) {
+        self.lua.set_app_data(UiUnselectable(ids));
+    }
+
+    /// The renderer's view for this frame's `UISelectionByCategory` calls.
+    pub fn set_select_scope(&self, scope: SelectScope) {
+        self.lua.set_app_data(scope);
     }
 
     /// Units the interface holds data for (selected, or looked up), sorted.

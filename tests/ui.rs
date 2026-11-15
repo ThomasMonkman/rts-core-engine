@@ -2509,3 +2509,51 @@ fn sim_build_rate_and_names_reach_the_interface() {
     let renamed: String = vm.lua().load(format!("local u = GetUnitById('{acu}') u:SetCustomName('Mine') return u:GetCustomName()")).eval().unwrap();
     assert_eq!(renamed, "Mine");
 }
+
+/// `SelectUnits` and `UISelectionByCategory` are synchronous, as in moho
+/// (`probe_ui_units` X, C): `GetSelectedUnits()` on the next line sees the new
+/// selection, and FAF's select / order / reselect in one frame
+/// (construction.lua, hotbuild.lua) gives the order to the unit selected
+/// when it was issued, not the one selected at the end of the frame.
+#[test]
+fn selecting_from_lua_is_synchronous() {
+    use rts_core_engine::ui::UnitInfo;
+    let Some(vm) = vm() else { return };
+    vm.set_focus_army(1).unwrap();
+    vm.start_hud().expect("game interface");
+    vm.frame(1.0 / 60.0).unwrap();
+    let unit = |id, blueprint: &str| UnitInfo { id, blueprint: blueprint.into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None };
+    let units = [unit(3, "uel0201"), unit(5, "ueb0101")];
+    vm.update_units(&units).unwrap();
+    vm.set_world(units.to_vec());
+    vm.set_selection(&[3]).unwrap();
+    vm.take_orders().unwrap();
+    let (same_frame, same_object): (u32, bool) = vm
+        .lua()
+        .load(
+            r#"
+            local tank, fac = GetUnitById(3), GetUnitById(5)
+            SelectUnits({ fac })
+            local now = GetSelectedUnits()
+            IssueBlueprintCommand('UNITCOMMAND_BuildFactory', 'uel0106', 1)
+            SelectUnits({ tank })
+            return table.getn(now), now[1] == fac
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!((same_frame, same_object), (1, true), "GetSelectedUnits() on the next line");
+    let orders = vm.take_orders().unwrap();
+    assert_eq!(orders.len(), 1, "{orders:?}");
+    assert_eq!(orders[0].units, Some(vec![5]), "the build goes to the factory selected when it was issued");
+    assert_eq!(vm.take_selection_request().unwrap(), Some(vec![3]), "the frame ends with the tank selected");
+    let by_category: String = vm
+        .lua()
+        .load("UISelectionByCategory('FACTORY', false, false, false, false) local s = GetSelectedUnits() return s[1]:GetUnitId() .. ' ' .. table.getn(s)")
+        .eval()
+        .unwrap();
+    assert_eq!(by_category, "ueb0101 1", "UISelectionByCategory: seen on the next line");
+    assert_eq!(vm.take_selection_request().unwrap(), Some(vec![5]));
+    let cleared: bool = vm.lua().load("SelectUnits(nil) return GetSelectedUnits() == nil").eval().unwrap();
+    assert!(cleared, "SelectUnits(nil): nil at once");
+}

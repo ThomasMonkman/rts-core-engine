@@ -88,7 +88,9 @@ only rebuilt when that part changed, so a big selection doesn't make thousands o
 
 **Selection.** When the renderer's selection changes, `UserVm::set_selection` runs FAF's
 `gamemain.OnSelectionChanged`, so the unit view, orders and construction panels follow it. Details
-arrive a beat after the selection, so the interface re-runs it when they do.
+arrive a beat after the selection, so the interface re-runs it when they do. Selecting from the
+interface (`SelectUnits`, `UISelectionByCategory`) is synchronous as in moho: `GetSelectedUnits()`
+and selection orders see it on the next line, and the renderer adopts it at the end of the frame.
 
 **Sync.** At the end of each beat the sim copies its `Sync` table (`engine::sync`; engine objects
 become entity ids) into the next snapshot. The renderer gives each copy to the interface in order and
