@@ -874,6 +874,21 @@ fn transport_death() {
 }
 
 #[test]
+fn transport_pickup() {
+    scenario("transport_pickup", 800);
+}
+
+#[test]
+fn transport_flight_height() {
+    scenario("transport_flight_height", 600);
+}
+
+#[test]
+fn transport_killed_cargo() {
+    scenario("transport_killed_cargo", 400);
+}
+
+#[test]
 fn ship_sinks() {
     scenario("ship_sinks", 700);
 }
