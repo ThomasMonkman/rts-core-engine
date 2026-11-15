@@ -1428,3 +1428,8 @@ fn cant_be_killed() {
 fn shield_inside_out() {
     scenario("shield_inside_out", 200);
 }
+
+#[test]
+fn shield_centre() {
+    scenario("shield_centre", 200);
+}

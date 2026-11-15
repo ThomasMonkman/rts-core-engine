@@ -57,9 +57,19 @@ pub enum EntityKind {
 }
 
 /// This entity rides on `parent` (`AttachBoneTo` / `AttachTo`): `self_bone`
-/// is kept on `parent_bone` (`None` = entity origin), shifted by
+/// is kept on `parent_bone` (`None` = entity origin, [`CENTRE_BONE`] = half
+/// the parent's height above it), shifted by
 /// `EntityCold::parent_offset` in the parent's frame (`SetParentOffset`;
 /// cold, since only attached entities read it).
+/// Parent bone -1 (`AttachBoneTo(-1, owner, -1)`, `AttachTo(owner, -1)`):
+/// half the parent's `SizeY` above its origin, not the origin. FAF's shield
+/// bubbles hang there: `ueb4202` (`SizeY` 2.5, `CollisionOffsetY` -0.25,
+/// `ShieldVerticalOffset` -3) took every impact exactly 13 from origin +
+/// (0, -1.75, 0), `uel0307` (`SizeY` 0.5) from (0, -2.75, 0)
+/// (`probe_wpn_shield` `geo.*`): the collision offset plays no part, and an
+/// origin-based bubble sat `SizeY/2` low.
+pub const CENTRE_BONE: u32 = u32::MAX;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Attachment {
     pub parent: EntityId,
@@ -1070,7 +1080,10 @@ impl EntityWorld {
         let Some(p) = self.get(a.parent) else { return };
         let orientation = p.orientation;
         let offset = self.dense[i].cold.parent_offset;
-        let bone_at = a.parent_bone.and_then(|b| posed(p, b)).unwrap_or_else(|| p.bone_world_position(a.parent_bone));
+        let bone_at = match a.parent_bone {
+            Some(CENTRE_BONE) => p.collision_centre(),
+            bone => bone.and_then(|b| posed(p, b)).unwrap_or_else(|| p.bone_world_position(bone)),
+        };
         let target = bone_at + orientation.rotate(offset);
         let c = &mut self.dense[i];
         c.orientation = orientation;
@@ -1148,6 +1161,16 @@ impl Entity {
     /// The volume projectiles hit: the script override, else the blueprint's.
     pub fn collision_shape(&self) -> CollisionShape {
         self.cold.collision.unwrap_or(self.cold.base_collision)
+    }
+
+    /// Bone -1 ([`CENTRE_BONE`]): half the blueprint `SizeY` (the
+    /// collision box's half height) above the origin, in the entity's frame;
+    /// the origin without a box.
+    pub fn collision_centre(&self) -> FxVec3 {
+        match self.cold.base_collision {
+            CollisionShape::Box { half, .. } => self.position + self.orientation.rotate(FxVec3 { x: Fx::ZERO, y: half.y, z: Fx::ZERO }),
+            CollisionShape::Sphere { .. } | CollisionShape::None => self.position,
+        }
     }
 
     /// World position of `bone` in its rest pose (manipulators not yet

@@ -136,6 +136,16 @@ fn set_attached(lua: &Lua, id: EntityId, on: bool) {
 
 /// Attaches with the parent bone as posed by its manipulators (the rest pose
 /// for a parent without any). A unit enters its `Attached` state.
+/// The parent bone of an attachment: bone -1 is the centre of the parent's
+/// collision box ([`crate::engine::sim::entity::CENTRE_BONE`]).
+fn resolve_parent_bone(lua: &Lua, parent: EntityId, bone: &LuaValue) -> LuaResult<Option<u32>> {
+    match bone {
+        LuaValue::Integer(-1) => Ok(Some(crate::engine::sim::entity::CENTRE_BONE)),
+        LuaValue::Number(n) if *n == -1.0 => Ok(Some(crate::engine::sim::entity::CENTRE_BONE)),
+        _ => crate::engine::api::manipulator::resolve_bone(lua, parent, bone),
+    }
+}
+
 pub fn attach_posed(lua: &Lua, child: EntityId, attachment: crate::engine::sim::entity::Attachment) {
     {
         let manips = lua.app_data_ref::<crate::engine::sim::manipulator::Manipulators>();
@@ -1010,7 +1020,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             let parent = entity_id(&parent)?;
             let attachment = crate::engine::sim::entity::Attachment {
                 parent,
-                parent_bone: resolve_bone(lua, parent, &parent_bone)?,
+                parent_bone: resolve_parent_bone(lua, parent, &parent_bone)?,
                 self_bone: resolve_bone(lua, child, &self_bone)?,
             };
             attach_posed(lua, child, attachment);
@@ -1023,7 +1033,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             let parent = entity_id(&parent)?;
             let attachment = crate::engine::sim::entity::Attachment {
                 parent,
-                parent_bone: crate::engine::api::manipulator::resolve_bone(lua, parent, &parent_bone)?,
+                parent_bone: resolve_parent_bone(lua, parent, &parent_bone)?,
                 self_bone: None,
             };
             attach_posed(lua, child, attachment);
