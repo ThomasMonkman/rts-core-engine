@@ -1483,3 +1483,8 @@ fn destroyed_salvo() {
 fn speed_mult_law() {
     scenario("speed_mult_law", 80);
 }
+
+#[test]
+fn warp_move() {
+    scenario("warp_move", 80);
+}

@@ -1404,14 +1404,47 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
 
     lua_fn!(lua, global,
         /// Moves `obj` to `pos`, and turns it to `orient` (a quaternion) if given.
+        ///
+        /// A unit that moves on the ground or water is put on its layer's
+        /// height there at once, whatever `y` it's given (the real game's
+        /// idle tank warped 10 up reads its old height straight after, where
+        /// ours floated for good). And a unit warped on a move gives the move
+        /// up: on the next tick its queue is empty and it's idle, braking to
+        /// a halt from the new spot (dev/probes probe_mov_api W2 / W3,
+        /// probe_mov_mult WP; ours drove on to the goal). Only a plain move
+        /// was probed; that aggressive moves and patrols go the same way
+        /// (moho's navigator is reset) is inferred.
         Warp = |lua, (obj, pos, orient): (Obj<moho::Entity>, shapes::Vector, Option<shapes::Quaternion>)| {
+            use crate::engine::sim::command::{CommandKind, Commands};
+            use crate::engine::sim::layer::Layer;
+            use crate::engine::sim::movement::MotionKind;
             let id = entity_id(&obj)?;
-            let p = read_vector(&pos)?;
+            let mut p = read_vector(&pos)?;
             let q = orient.as_deref().map(read_quat).transpose()?;
-            let mut w = world(lua);
-            match q {
-                Some(q) => w.set_transform(id, p, q),
-                None => w.set_position(id, p),
+            let ground = world(lua).get(id).and_then(|e| e.unit.as_deref()).filter(|u| matches!(u.motion_params.kind, MotionKind::Land | MotionKind::Hover | MotionKind::Amphibious | MotionKind::Water)).map(|u| u.layer);
+            if let Some(layer) = ground
+                && let Some(t) = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>() {
+                match layer {
+                    Layer::Land | Layer::Seabed => p.y = t.height_at(p.x, p.z),
+                    Layer::Water => p.y = t.surface_at(p.x, p.z),
+                    _ => {}
+                }
+            }
+            {
+                let mut w = world(lua);
+                match q {
+                    Some(q) => w.set_transform(id, p, q),
+                    None => w.set_position(id, p),
+                }
+                // Stood (and tilted) to the ground there on the next tick.
+                if ground.is_some()
+                    && let Some(u) = w.get_mut(id).and_then(|e| e.unit.as_deref_mut()) {
+                    u.on_ground = false;
+                }
+            }
+            if let Some(mut c) = lua.app_data_mut::<Commands>()
+                && c.dispatched(id).is_some_and(|c| matches!(c.kind, CommandKind::Move | CommandKind::FormMove | CommandKind::AggressiveMove | CommandKind::FormAggressiveMove | CommandKind::Patrol | CommandKind::FormPatrol)) {
+                c.pop_front(id);
             }
             Ok(())
         })?;
