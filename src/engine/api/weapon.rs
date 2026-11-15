@@ -594,7 +594,19 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// Targets a ground position (an `{x, y, z}` table).
         SetTargetGround = |lua, (this, loc): (Obj<moho::Weapon>, shapes::Vector)| {
         let p = FxVec3::from_f64(loc.raw_get(1)?, loc.raw_get(2)?, loc.raw_get(3)?);
-        with_state(lua, &this, |w| w.target = Some(WeaponTarget::Ground(p)))
+        // A script's target isn't the attack order's: left marked as the
+        // order's, the next tick read it as the order re-pointing and
+        // halted fire, which ended a salvo in flight. FAF's UEF carpet
+        // bomb calls this before every bomb after the first
+        // (`TIFCarpetBombWeapon.CreateProjectileAtMuzzle`), so it dropped 2
+        // of its 4. The order takes the weapon back without a halt.
+        with_state(lua, &this, |w| {
+            let target = Some(WeaponTarget::Ground(p));
+            if w.target != target {
+                w.target = target;
+                w.target_from_order = false;
+            }
+        })
     })?;
     lua_method!(lua, moho::Weapon,
         /// Progress of the reload, 1 = ready.

@@ -316,6 +316,11 @@ fn bomber() {
 }
 
 #[test]
+fn strategic_bomber_drop() {
+    scenario("strategic_bomber_drop", 200);
+}
+
+#[test]
 fn gunship_circle() {
     scenario("gunship_circle", 1400);
 }

@@ -3458,10 +3458,15 @@ pub fn apply(world: &mut EntityWorld, commands: &mut Commands, moved: &[Moved], 
             static MOVING: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("Moving").expect("state"));
             let moving = *MOVING;
             u.states.set(moving, m.state.speed != Fx::ZERO);
-            // In an attack run or tail chase (moho sets it in
-            // `ComputeAirCombatTactics`; its bombs drop only then).
+            // In an attack run, tail chase or break-off (moho's
+            // `ComputeAirCombatTactics` sets it in states 1 and 2,
+            // 0x1029bd5f, and in 6, 0x1029bf13; `CalcMoveAir` clears it
+            // every tick first, 0x1029e4e6). Its bombs drop only then. The
+            // break-off counts: a bomber ordered onto a target already
+            // inside `BreakOffDistance` goes straight from 0 to 6 and bombs
+            // on that pass (FAF's strategic bombers, 50, at a target 38 out).
             static RUN: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("MakingAttackRun").expect("state"));
-            u.states.set(*RUN, matches!(m.state.combat, 1 | 2));
+            u.states.set(*RUN, matches!(m.state.combat, 1 | 2 | 6));
         }
         if m.arrived && commands.dispatched(m.unit).is_some() {
             use crate::engine::sim::command::CommandKind as K;
