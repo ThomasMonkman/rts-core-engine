@@ -1101,6 +1101,11 @@ fn patrol_single() {
 }
 
 #[test]
+fn engineer_attack_move() {
+    scenario("engineer_attack_move", 900);
+}
+
+#[test]
 fn initial_rally() {
     scenario("initial_rally", 1700);
 }

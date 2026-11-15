@@ -266,12 +266,16 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         script_object::create(lua, EntityHandle(id), moho::class_table(lua, "navigator_methods")?).map(Obj::<moho::Navigator>::new)
     })?;
     lua_method!(lua, moho::Navigator,
-        /// Stops a move in progress: a move-type current order is dropped.
+        /// Stops a move in progress: a plain move order is dropped. An
+        /// attack-move stays: FAF's `ConstructionUnit.OnPrepareArmToBuild`
+        /// aborts the move of an engineer that starts reclaiming on one, and
+        /// the real engineer stays on the order, reclaiming along the way
+        /// (dev/probes probe_unit_misc A).
         AbortMove = |lua, this: Obj<moho::Navigator>| {
         let id = entity_id(&this)?;
         if let Some(mut c) = lua.app_data_mut::<Commands>() {
             use CommandKind as K;
-            if c.current(id).is_some_and(|cmd| matches!(cmd.kind, K::Move | K::FormMove | K::AggressiveMove | K::FormAggressiveMove)) {
+            if c.current(id).is_some_and(|cmd| matches!(cmd.kind, K::Move | K::FormMove)) {
                 c.pop_front(id);
             }
         }
