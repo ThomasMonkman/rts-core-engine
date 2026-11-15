@@ -128,6 +128,17 @@ const MAX_QUEUED: usize = 500;
 /// Issues an order to `units` (a clearing one has emptied their queues
 /// first), leaving out units with more than [`MAX_QUEUED`] queued.
 pub(crate) fn issue(lua: &Lua, units: &[EntityId], kind: CommandKind, target: CommandTarget, blueprint: Option<String>, count: u32) -> CommandHandle {
+    // A build of a blueprint that doesn't exist is queued to nobody: the real
+    // game's `AIBrain:BuildStructure` returns false for one and the game
+    // carries on (dev/probes probe_ai_misc); queued, it would only fail when
+    // the builder got there.
+    let units = match (&blueprint, kind) {
+        (Some(bp), CommandKind::BuildMobile | CommandKind::BuildFactory | CommandKind::Upgrade) if !unit_blueprint_known(lua, bp) => {
+            tracing::warn!(target: "lua", blueprint = %bp, ?kind, "build order for an unknown unit blueprint; not queued");
+            &[][..]
+        }
+        _ => units,
+    };
     let mut c = commands(lua);
     let capped: Vec<EntityId>;
     let units = if units.iter().any(|&u| c.queue_len(u) > MAX_QUEUED) {
@@ -153,6 +164,12 @@ pub(crate) fn issue(lua: &Lua, units: &[EntityId], kind: CommandKind, target: Co
         tracing::info!(tick = crate::engine::api::sim_time::current_tick(lua), command = handle.0, ?kind, ?target, units = units.len(), "ISSUE {}", trace.replace('\n', " | "));
     }
     handle
+}
+
+/// Whether `bp` (lower case) is a registered unit blueprint.
+pub(crate) fn unit_blueprint_known(lua: &Lua, bp: &str) -> bool {
+    lua.app_data_ref::<crate::engine::api::blueprints::BlueprintRegistry>()
+        .is_some_and(|r| r.get(crate::engine::api::blueprints::BlueprintKind::Unit, bp).is_some())
 }
 
 /// Registers `name(units, target)`.
@@ -858,9 +875,16 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::AIBrain,
         /// Queues a BuildMobile order. AI locations are `{x, z, ...}` (FAF
         /// converts them the same way for `IssueBuildMobile`); `relative`
-        /// ones are offsets from the builder.
+        /// ones are offsets from the builder. An unknown blueprint queues
+        /// nothing and returns false, as in the real game (dev/probes
+        /// probe_ai_misc); otherwise nothing is returned (what the real one
+        /// returns then is not settled).
         BuildStructure = |lua, (_brain, builder, bp, loc, relative): (Obj<moho::AIBrain>, Obj<moho::Unit>, String, shapes::Vector, Option<bool>)| {
             let builder = entity::entity_id(&builder)?;
+            let bp = bp.to_lowercase();
+            if !unit_blueprint_known(lua, &bp) {
+                return Ok(Some(false));
+            }
             let num = |i: usize| -> LuaResult<f64> { Ok(loc.raw_get::<Option<f64>>(i)?.unwrap_or(0.0)) };
             let (mut x, mut z) = (num(1)?, num(2)?);
             if relative.unwrap_or(false)
@@ -873,8 +897,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 .app_data_ref::<crate::engine::sim::terrain::Terrain>()
                 .map_or(0.0, |t| t.height_at(crate::engine::sim::math::from_lua(x), crate::engine::sim::math::from_lua(z)).to_num::<f64>());
             let target = CommandTarget::Ground(FxVec3::from_f64(x, y, z));
-            issue(lua, &[builder], K::BuildMobile, target, Some(bp.to_lowercase()), 1);
-            Ok(())
+            issue(lua, &[builder], K::BuildMobile, target, Some(bp), 1);
+            Ok(None)
         })?;
     lua_fn!(lua, global,
         /// Whether the command is finished (true for nil).

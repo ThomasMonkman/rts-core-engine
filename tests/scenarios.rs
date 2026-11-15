@@ -1081,6 +1081,11 @@ fn rebuild_bonus_ids() {
 }
 
 #[test]
+fn bad_orders() {
+    scenario("bad_orders", 1100);
+}
+
+#[test]
 fn initial_rally() {
     scenario("initial_rally", 1700);
 }

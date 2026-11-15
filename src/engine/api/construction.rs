@@ -285,6 +285,15 @@ fn ready_to_start(lua: &Lua, builder: EntityId) -> LuaResult<Option<(BuildOrder,
     let commands = lua.app_data_ref::<Commands>();
     let Some(cmd) = commands.as_ref().and_then(|c| c.current(builder)) else { return Ok(None) };
     let Some(bp) = cmd.blueprint.clone() else { return Ok(None) };
+    // A blueprint that doesn't exist (orders are checked at issue,
+    // `api::command::issue`; this is the backstop): the order is dropped.
+    if matches!(cmd.kind, CommandKind::BuildMobile | CommandKind::BuildFactory | CommandKind::Upgrade)
+        && !crate::engine::api::command::unit_blueprint_known(lua, &bp) {
+        drop(commands);
+        tracing::warn!(target: "lua", builder, blueprint = %bp, "build order for an unknown unit blueprint; dropped");
+        lua.app_data_mut::<Commands>().expect("Commands").pop_front(builder);
+        return Ok(None);
+    }
     let (site, reach) = {
         let w = entity::world(lua);
         // Moho's dispatch hold: a factory rolling a unit off

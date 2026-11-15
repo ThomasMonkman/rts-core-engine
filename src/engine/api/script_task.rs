@@ -107,8 +107,12 @@ fn create(lua: &Lua, unit: EntityId, command: CommandId) -> LuaResult<()> {
     let class = match &name {
         Some(n) => {
             let import: LuaFunction = lua.globals().get("import")?;
-            match import.call::<LuaTable>(format!("/lua/sim/tasks/{n}.lua")) {
-                Ok(m) => m.get::<Option<LuaTable>>(n.as_str())?,
+            // A module that doesn't exist, or doesn't define the task (FAF's
+            // module tables raise on a missing name): the order is dropped
+            // and the game carries on, as in the real game (dev/probes
+            // probe_unit_orders, `badscript`).
+            match import.call::<LuaTable>(format!("/lua/sim/tasks/{n}.lua")).and_then(|m| m.get::<Option<LuaTable>>(n.as_str())) {
+                Ok(m) => m,
                 Err(e) => {
                     tracing::warn!(target: "lua", "script task '{n}' failed to load: {e}");
                     None
@@ -122,7 +126,14 @@ fn create(lua: &Lua, unit: EntityId, command: CommandId) -> LuaResult<()> {
         finish_order(lua, unit, command);
         return Ok(());
     };
-    let obj: LuaTable = class.call(())?;
+    let obj: LuaTable = match class.call(()) {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(target: "lua", task = ?name, "script task failed to instantiate: {e}; dropped");
+            finish_order(lua, unit, command);
+            return Ok(());
+        }
+    };
     obj.raw_set(script_object::C_OBJECT, ScriptTaskHandle(unit))?;
     registry(lua, OBJECTS)?.raw_set(unit, obj.clone())?;
     lua.app_data_mut::<ScriptTasks>().expect("ScriptTasks").by_unit.insert(unit, Task { command, wake: tick_now(lua) });
