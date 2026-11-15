@@ -16,7 +16,7 @@
 13|delk002|2|uea0101|pass|7|300
 13@180|delk002|2|uea0101|pass|5|300
 14|dra0202|1|ura0101|pass|4|38
-15|dra0202|2|urb1101|pass|8|450
+15|dra0202|2|urb1101|pass|8|150
 16|dra0202|3|-|non-attack|0|0
 17|drl0204|1|urb1101|pass|3|120
 17@180|drl0204|1|urb1101|pass|3|60
