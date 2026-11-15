@@ -1493,3 +1493,8 @@ fn warp_move() {
 fn plane_move_end() {
     scenario("plane_move_end", 520);
 }
+
+#[test]
+fn staging_lands() {
+    scenario("staging_lands", 440);
+}

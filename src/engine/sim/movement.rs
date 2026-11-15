@@ -1204,6 +1204,15 @@ pub fn leaning(bank: (Fx, Fx)) -> bool {
     bank.0.saturating_mul(bank.0).saturating_add(bank.1.saturating_mul(bank.1)) > Fx::from_num(1e-6)
 }
 
+/// Where the air staging pad `cmd` docks onto stands: a load order onto a
+/// live `AIRSTAGINGPLATFORM` that isn't a carrier (carriers take aircraft
+/// inside, `api::transport`).
+fn staging_pad(cmd: Option<&crate::engine::sim::command::Command>, world: &EntityWorld) -> Option<FxVec3> {
+    let cmd = cmd.filter(|c| c.kind == CommandKind::TransportLoadUnits)?;
+    let CommandTarget::Entity(t) = cmd.target else { return None };
+    world.get(t).filter(|t| !t.destroyed && t.unit.as_deref().and_then(|u| u.staging.as_deref()).is_some_and(|s| !s.carrier)).map(|t| t.position())
+}
+
 /// Horizontal distance.
 fn dist2(a: FxVec3, b: FxVec3) -> Fx {
     let (dx, dz) = (b.x - a.x, b.z - a.z);
@@ -1453,12 +1462,24 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     // spot and lands there (`sim::landing`). The real game's T3 fighters do
     // (dev/probes probe_air); ours circled.
     let mut land_search = false;
-    let holding = winged && !immobile && goal.is_none() && cmd.is_none();
+    // Docking on an air staging pad (a load order onto one): over the pad
+    // (within `StartTurnDistance`, at least a unit) a plane lands on it as
+    // an idle one lands on its spot, without the wait, and the pad takes it
+    // once it's down (`api::transport`). The real game's interceptor
+    // arrived over the pad at t~41, came down to about half its height,
+    // circled, and touched down and docked at t=153 (dev/probes
+    // probe_mov_air F4; ours docked on arrival, 11 s sooner).
+    let pad = if p.kind == MotionKind::Air && p.winged && !immobile { staging_pad(cmd, world) } else { None };
+    let docking = pad.filter(|&d| winged && (state.landing == Some(d) || dist2(pos, d) <= p.air.start_turn_distance.max(Fx::ONE)));
+    let holding = winged && !immobile && ((goal.is_none() && cmd.is_none()) || docking.is_some());
     let state = if winged && !immobile {
         // (It looks for a spot only once nearly stopped over its point:
         // every plane in the real-game probe started down from a hover.
         // Inferred.)
-        let (mut s, search) = landing_state(p, state, pos, holding && state.speed < Fx::ONE, holding, env.tick.unwrap_or(0));
+        let (mut s, search) = landing_state(p, state, pos, holding && docking.is_none() && state.speed < Fx::ONE, holding, env.tick.unwrap_or(0));
+        if docking.is_some() {
+            s.landing = docking;
+        }
         if holding {
             if let Some(at) = s.landing.or(s.hold) {
                 goal = Some((at, Fx::ZERO, false));
@@ -1499,7 +1520,8 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     // then takes off.
     let landed = data.layer != crate::engine::sim::layer::Layer::Air && (!p.winged || state.landing.is_some());
     if p.kind == MotionKind::Air && landed {
-        if cmd.is_none() && data.navigator_goal.is_none() {
+        // (Down on the pad it's docking on: it waits for the pad to take it.)
+        if (cmd.is_none() && data.navigator_goal.is_none()) || pad.is_some_and(|d| dist2(pos, d) <= Fx::ONE) {
             return None;
         }
         let mut m = still(unit, e, MotionState { vertical: VerticalMotion::Up, idle_since: None, hold: None, landing: None, ..state });

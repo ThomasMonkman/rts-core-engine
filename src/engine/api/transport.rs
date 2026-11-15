@@ -493,6 +493,12 @@ fn attach(lua: &Lua, transport: EntityId, unit: EntityId, bone: u32, hang: bool)
     }
     if is_staging(lua, transport) {
         set_state(lua, unit, "Refueling", true);
+        // Docked, it's at rest (the real game's docked interceptor reads
+        // `GetVelocity` 0; ours kept its flight speed).
+        if let Some(u) = entity::world(lua).get_mut(unit).and_then(|e| e.unit.as_deref_mut()) {
+            u.motion_state.speed = Fx::ZERO;
+            u.motion_state.climb = Fx::ZERO;
+        }
     }
     let name = bone_name(lua, transport, bone);
     if let (Some(t), Some(u)) = (object(lua, transport)?, object(lua, unit)?) {
@@ -913,7 +919,21 @@ fn load_aboard(lua: &Lua, transport: EntityId, unit: EntityId, id: crate::engine
         done(lua);
         return Ok(Boarding::Full);
     }
-    match free_slots(lua, transport, class_of(lua, unit)).first().copied() {
+    let free = free_slots(lua, transport, class_of(lua, unit)).first().copied();
+    // A plane docks on an air staging pad only once it's down on it
+    // (movement lands it there): the real game's interceptor touched down
+    // on the deck (`Air -> Land` at h 1.35) and docked the next tick
+    // (dev/probes probe_mov_air F4).
+    let flying = entity::world(lua).get(unit).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.motion_params.winged && u.motion_params.kind == crate::engine::sim::movement::MotionKind::Air && u.layer == crate::engine::sim::layer::Layer::Air);
+    if flying && is_staging(lua, transport)
+        && let Some(bone) = free {
+        let deck = slot_world(lua, transport, bone).map_or(tpos.y, |s| s.y);
+        if pos.y > deck + Fx::from_num(0.1) {
+            return Ok(Boarding::Waiting);
+        }
+        crate::engine::api::movement::set_layer(lua, unit, crate::engine::sim::layer::Layer::Land)?;
+    }
+    match free {
         // Boards over the next ticks: the order stays until the attach
         // lands (or FAF clears it, refusing the slot).
         Some(bone) => {
