@@ -179,6 +179,11 @@ fn max_health() {
 }
 
 #[test]
+fn platoon_find_intel() {
+    scenario("platoon_find_intel", 60);
+}
+
+#[test]
 fn threat_external_factory() {
     scenario("threat_external_factory", 60);
 }
