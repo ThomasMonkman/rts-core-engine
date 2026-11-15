@@ -25,6 +25,18 @@ mod tests {
         assert_eq!(r, "ARMY_9|NEUTRAL_CIVILIAN;a|b|c");
     }
 
+    /// `_TRACEBACK` exists (FAF calls it on two warning paths) and returns
+    /// its arguments joined, then the traceback.
+    #[test]
+    fn traceback_global() {
+        let lua = mlua::Lua::new();
+        super::register(&lua).unwrap();
+        let r: String = lua.load("return _TRACEBACK(2, 'String has malformed loc tag')").eval().unwrap();
+        assert!(r.starts_with("2String has malformed loc tag\nstack traceback:"), "{r}");
+        let t: bool = lua.load("local t = {} return _TRACEBACK(t) == t").eval().unwrap();
+        assert!(t);
+    }
+
     /// `unpack(arg)` passes every vararg, nils included (Lua 5.0 reads the
     /// length from `n`).
     #[test]

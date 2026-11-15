@@ -240,6 +240,7 @@ sim  WARN native
 sim  WaitFor luau
 sim  Warp native
 sim  _ALERT native
+sim  _TRACEBACK luau
 sim  __engine_IssueTransportReverseLoad native
 sim  __forin luau
 sim  _c_CreateEntity native
@@ -1227,6 +1228,7 @@ user WaitFor luau
 user WorldIsLoading native
 user WorldIsPlaying luau
 user _ALERT native
+user _TRACEBACK luau
 user __disc_close native
 user __disc_count native
 user __disc_open native
