@@ -1091,6 +1091,11 @@ fn issue_stop() {
 }
 
 #[test]
+fn build_cancel() {
+    scenario("build_cancel", 300);
+}
+
+#[test]
 fn initial_rally() {
     scenario("initial_rally", 1700);
 }
