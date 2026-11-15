@@ -855,8 +855,18 @@ fn advance(
         return Motion { live: true, turned, position: at, orientation: q, impact: Some(ImpactKind::Air), target: None, water: None, entered: None };
     }
 
-    // Units and shield bubbles first: anything hit along this tick's path,
-    // earliest wins.
+    // The surface first: where along this tick's path the projectile meets
+    // the water (coming down, `DestroyOnWater`) or the ground.
+    let surface = match terrain {
+        Some(t) if p.collide_surface => surface_hit(p, position, next, t),
+        _ => None,
+    };
+    if let (Some(_), Some(t)) = (surface.filter(|s| s.1 == ImpactKind::Terrain && p.bounces_left > 0), terrain) {
+        return bounce(p, position, next, t, q, turned);
+    }
+
+    // Units and shield bubbles: anything hit along this tick's path before
+    // the surface, earliest wins.
     if p.collide_entity {
         let unit = first_unit_hit(p, position, next, army, world, env, buf);
         let shield = first_shield_hit(p, position, next, env.shields, Some((army, env.armies)));
@@ -876,28 +886,18 @@ fn advance(
             && hit.is_none_or(|(t, ..)| tp < t) {
             hit = Some((tp, target, ImpactKind::Projectile));
         }
-        if let Some((t, target, kind)) = hit {
+        if let Some((t, target, kind)) = hit
+            && surface.is_none_or(|(ts, _)| t <= ts) {
             let at = position + (next - position) * t;
             return Motion { live: true, turned, position: at, orientation: q, impact: Some(kind), target: Some(target), water: None, entered: None };
         }
     }
 
     let mut impact = None;
-    if p.collide_surface
-        && let Some(t) = terrain {
-        let ground = t.height_at(next.x, next.z);
-        match t.water_surface {
-            // Hits the surface coming down, if it's `DestroyOnWater`
-            // (default off); else it only enters the water
-            // (`OnEnterWater`) and goes on, to the seabed or its target
-            // (moho's `Projectile::CheckCollision`, MohoEngine.dll
-            // 0x1027e570: the water impact needs blueprint physics
-            // +0x78, copied to the projectile's +0x29f).
-            Some(w) if p.destroy_on_water && w > ground && next.y <= w && position.y > w => impact = Some(ImpactKind::Water),
-            _ if next.y <= ground && p.bounces_left > 0 => return bounce(p, position, next, t, q, turned),
-            _ if next.y <= ground => impact = Some(ImpactKind::Terrain),
-            _ => {}
-        }
+    let mut end = next;
+    if let Some((t, kind)) = surface {
+        impact = Some(kind);
+        end = position + (next - position) * t;
     }
     if impact.is_none()
         && let Some(ticks) = p.lifetime_ticks.as_mut() {
@@ -921,7 +921,77 @@ fn advance(
         (w > t.height_at(next.x, next.z)).then_some(crossed)
     });
     let entered = if p.collide_entity && !env.script_spheres.is_empty() { first_shield_hit(p, position, next, env.script_spheres, None).map(|(_, id)| id) } else { None };
-    Motion { live: true, turned, position: next, orientation: q, impact, target: None, water, entered }
+    Motion { live: true, turned, position: end, orientation: q, impact, target: None, water, entered }
+}
+
+/// Where (fraction 0..1 of the step `from -> to`) the path first meets the
+/// surface, and as what: the water plane coming down through it when the
+/// projectile is `DestroyOnWater` and the sea is deeper than the ground
+/// there (else it only enters the water and goes on to the seabed: moho's
+/// `Projectile::CheckCollision`, MohoEngine.dll 0x1027e570, needs blueprint
+/// physics +0x78, copied to the projectile's +0x29f), or the ground.
+///
+/// The impact is at the contact point, not the step's end (FAF's `OnImpact`
+/// centres its `DamageArea` there): `probe_wpn_proj` `imp.terrain ... pos
+/// 6.02,-0.02,6.02`, `sea.water ... pos 9.00,0.00,0.00` (ours had put them
+/// up to a step on, below the surface). The ground is sampled about once a
+/// unit along the step, so a ridge between the ends stops the shot, and the
+/// crossing is refined by bisection. A path that starts at or under the
+/// ground hits it where it starts if it ends under it too (`kin.laserup
+/// ... pos 0.00,1.00,-32.00`, the launch point), and not at all if it comes
+/// out (a muzzle a little under a steep slope still fires out).
+fn surface_hit(p: &ProjectileState, from: FxVec3, to: FxVec3, terrain: &Terrain) -> Option<(Fx, ImpactKind)> {
+    let lerp = |t: Fx| from + (to - from) * t;
+    let above = |t: Fx| {
+        let at = lerp(t);
+        at.y - terrain.height_at(at.x, at.z)
+    };
+    let water = match terrain.water_surface {
+        Some(w) if p.destroy_on_water && from.y > w && to.y <= w => {
+            let t = ((from.y - w) / (from.y - to.y)).clamp(Fx::ZERO, Fx::ONE);
+            let at = lerp(t);
+            (w > terrain.height_at(at.x, at.z)).then_some(t)
+        }
+        _ => None,
+    };
+    let f0 = from.y - terrain.height_at(from.x, from.z);
+    let f1 = to.y - terrain.height_at(to.x, to.z);
+    let ground = if f0 <= Fx::ZERO {
+        (f1 <= Fx::ZERO).then_some(Fx::ZERO)
+    } else {
+        let span = (to.x - from.x).abs() + (to.z - from.z).abs();
+        // Well clear of the ground at both ends: no slope climbs 8 in 1
+        // between them.
+        if f1 > Fx::ZERO && f0.min(f1) > span * 8 {
+            None
+        } else {
+            let steps = span.ceil().to_num::<i64>().clamp(1, 64);
+            let step = Fx::ONE / Fx::from_num(steps);
+            let mut lo = Fx::ZERO;
+            let mut hit = None;
+            for i in 1..=steps {
+                let (t, f) = if i == steps { (Fx::ONE, f1) } else { let t = step * Fx::from_num(i); (t, above(t)) };
+                if f <= Fx::ZERO {
+                    hit = Some(t);
+                    break;
+                }
+                lo = t;
+            }
+            hit.map(|mut hi| {
+                for _ in 0..10 {
+                    let mid = (lo + hi) / 2;
+                    if above(mid) <= Fx::ZERO { hi = mid } else { lo = mid }
+                }
+                hi
+            })
+        }
+    };
+    match (water, ground) {
+        (Some(w), Some(g)) if g < w => Some((g, ImpactKind::Terrain)),
+        (Some(w), _) => Some((w, ImpactKind::Water)),
+        (None, Some(g)) => Some((g, ImpactKind::Terrain)),
+        (None, None) => None,
+    }
 }
 
 /// Where a homing projectile at `position` steers this tick, if anywhere.

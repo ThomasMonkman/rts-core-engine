@@ -1438,3 +1438,8 @@ fn shield_centre() {
 fn damage_area_self() {
     scenario("damage_area_self", 30);
 }
+
+#[test]
+fn ground_contact() {
+    scenario("ground_contact", 40);
+}
