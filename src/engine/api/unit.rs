@@ -436,6 +436,23 @@ pub fn spawn_unit_built_by(
         && let Some(surface) = lua.app_data_ref::<Terrain>().map(|t| t.surface_at(position.x, position.z)) {
         world(lua).set_position(id, FxVec3 { y: surface + depth, ..position });
     }
+    // Everything else starts on its layer's height too: on the ground or the
+    // seabed, or on the water for hover units and floating structures. The
+    // real game's tank made 30 up stands on the ground at once, a tank or a
+    // power generator made at the water surface sits on the seabed, and a
+    // hover tank, an engineer or a torpedo launcher made on the seabed is on
+    // the surface (dev/probes probe_unit_api `layer`).
+    if builder.is_none() && !matches!(motion_params.kind, crate::engine::sim::movement::MotionKind::Air | crate::engine::sim::movement::MotionKind::Water) {
+        use crate::engine::sim::layer::Layer;
+        let y = lua.app_data_ref::<Terrain>().and_then(|t| match layer {
+            Layer::Land | Layer::Seabed => Some(t.height_at(position.x, position.z)),
+            Layer::Water => Some(t.surface_at(position.x, position.z)),
+            _ => None,
+        });
+        if let Some(y) = y {
+            world(lua).set_position(id, FxVec3 { y, ..position });
+        }
+    }
     let threat = unit_threat(lua, &bp, category_index)?;
     let skirt = skirt_of_bp(&bp)?;
     let caps = |key: &str, names: &[&str]| -> LuaResult<u32> {

@@ -246,6 +246,11 @@ fn blueprint_defaults() {
 }
 
 #[test]
+fn spawn_height() {
+    scenario("spawn_height", 20);
+}
+
+#[test]
 fn reclaim_unit() {
     scenario("reclaim_unit", 1200);
 }
