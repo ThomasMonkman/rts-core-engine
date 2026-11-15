@@ -571,10 +571,11 @@ fn projectile_collision(c: &mut Criterion) {
     g.finish();
 }
 
-/// AI threat map: the once-per-tick rebuild over 2000 units (8 armies) and
-/// the two common queries on a 20 km map (16x16 cells of 64).
+/// AI threat map: the 30-tick update over 2000 units (8 armies, every brain
+/// detecting half of the others' units and remembering the rest) and the two
+/// common queries on a 20 km map (16x16 cells of 64).
 fn threat(c: &mut Criterion) {
-    use rts_core_engine::engine::sim::threat::{unit_threat, ThreatKinds, ThreatMap, ThreatType};
+    use rts_core_engine::engine::sim::threat::{unit_threat, Knowledge, ThreatKinds, ThreatMap, ThreatType};
     let (mut world, _) = battle(1000);
     let ids: Vec<u32> = world.iter().map(|e| e.id).collect();
     for (i, id) in ids.into_iter().enumerate() {
@@ -584,15 +585,20 @@ fn threat(c: &mut Criterion) {
     }
     let mut map = ThreatMap::new(1024, 1024);
     let enemies = |a: u32| a != 1;
+    let brains: Vec<u32> = (1..=8).collect();
+    let all = |_: u32, _: &rts_core_engine::engine::sim::entity::Entity| Knowledge::Detected;
+    map.update(&world, 0, &brains, &all);
+    let half = |_: u32, e: &rts_core_engine::engine::sim::entity::Entity| if e.id % 2 == 0 { Knowledge::Detected } else { Knowledge::Unknown };
+    let mut now = 0;
     let mut g = c.benchmark_group("threat");
-    g.bench_function("refresh/2000 units", |b| {
+    g.bench_function("update/2000 units 8 brains", |b| {
         b.iter(|| {
-            map.invalidate();
-            map.refresh(black_box(&world), None);
+            now += 30;
+            map.update(black_box(&world), now, &brains, &half);
         })
     });
-    map.refresh(&world, None);
-    g.bench_function("highest/ring 1", |b| b.iter(|| black_box(map.highest(1, ThreatType::Overall, 1, &enemies))));
+    let origin = rts_core_engine::engine::sim::math::FxVec2::default();
+    g.bench_function("highest/ring 1", |b| b.iter(|| black_box(map.highest(1, ThreatType::Overall, 1, &enemies, origin))));
     let p = rts_core_engine::engine::sim::math::FxVec3::from_f64(500.0, 0.0, 500.0);
     g.bench_function("at/ring 1", |b| b.iter(|| black_box(map.threat_at(p, 1, ThreatType::AntiSurface, 1, &enemies))));
     g.finish();
