@@ -88,6 +88,7 @@ saved_types! {
     "carrier_launches" => api::transport::CarrierLaunches,
     "beams" => api::beam::Beams,
     "captures" => api::capture::Captures,
+    "sacrifices" => api::sacrifice::Sacrifices,
     "cheats" => api::command_source::Cheats,
     "reported" => api::economy_event::Reported,
     "falling" => api::movement::Falling,

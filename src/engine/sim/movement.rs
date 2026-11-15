@@ -802,7 +802,10 @@ fn goal(cmd: Option<&crate::engine::sim::command::Command>, world: &EntityWorld,
             });
             building.or_else(|| touch(cmd.target)).map(|p| (p, build_range, false))
         }
-        K::Repair | K::Reclaim | K::Capture | K::Sacrifice => touch(cmd.target).map(|p| (p, build_range, false)),
+        K::Repair | K::Reclaim | K::Capture => touch(cmd.target).map(|p| (p, build_range, false)),
+        // Right up to it (`api::sacrifice::REACH`; the real engineer walks
+        // in, dev/probes probe_unit_build G8).
+        K::Sacrifice => touch(cmd.target).map(|p| (p, crate::engine::api::sacrifice::REACH, false)),
         // Board a transport (`api::transport` attaches it once in reach).
         K::TransportLoadUnits => at(cmd.target).map(|p| (p, Fx::ONE, false)),
         // Fly out to a unit to pick it up (`api::transport` boards it once
