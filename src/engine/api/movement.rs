@@ -518,15 +518,11 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                 && e.unit.as_deref().is_some_and(|u| {
                     u.layer == crate::engine::sim::layer::Layer::Air
                         && u.motion_params.air.transport_hover_height > Fx::ZERO
-                        && terrain.as_deref().is_some_and(|t| {
-                            let want = if commands.current(e.id).is_some_and(|c| c.kind.is_transport_load_unload()) {
-                                u.motion_params.air.transport_hover_height
-                            } else {
-                                u.motion_params.elevation
-                            };
-                            let p = e.position();
-                            (p.y - t.surface_at(p.x, p.z) - want).abs() > Fx::from_num(0.05)
-                        })
+                        && (commands.current(e.id).is_some_and(|c| c.kind.is_transport_load_unload())
+                            || terrain.as_deref().is_some_and(|t| {
+                                let p = e.position();
+                                (p.y - t.surface_at(p.x, p.z) - u.motion_params.elevation).abs() > Fx::from_num(0.05)
+                            }))
                 })
         }).map(|e| e.id));
         if candidates.len() != before {

@@ -82,9 +82,9 @@ impl CommandKind {
         Self::ALL.get((v as usize).checked_sub(1)?).copied()
     }
 
-    /// A transport load/unload order: while one is active the transport
-    /// flies at its `TransportHoverHeight` (it lowers for the tractor /
-    /// drop and climbs back once the order ends).
+    /// A transport load/unload order: on one the transport lowers to its
+    /// `TransportHoverHeight` over the order's point (for the tractor /
+    /// drop) and climbs back once the order ends.
     pub fn is_transport_load_unload(self) -> bool {
         matches!(self, Self::TransportLoadUnits | Self::TransportReverseLoadUnits | Self::TransportUnloadUnits | Self::TransportUnloadSpecificUnits)
     }

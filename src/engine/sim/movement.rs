@@ -2439,7 +2439,8 @@ struct Hover<'a> {
     /// before its ratio).
     aim_range: Fx,
     max_speed: Fx,
-    /// A load/unload order flies at `TransportHoverHeight`, not `Elevation`.
+    /// On a load/unload order: it lowers to `TransportHoverHeight` over
+    /// the order's point (`hover_step`).
     transport_dip: bool,
     /// Its motion state with this tick's idle bookkeeping (`landing_state`).
     state: MotionState,
@@ -2852,10 +2853,16 @@ fn hover_step(e: &crate::engine::sim::entity::Entity, data: &crate::engine::sim:
     let mut lift_push = Fx::ZERO;
     let mut height = p.elevation;
     if let Some(ground) = surface_height(p.kind, h.env.terrain, next.x, next.z, Fx::ZERO) {
-        // A transport on a load/unload order flies at its
-        // `TransportHoverHeight`, not its `Elevation`: it lowers for the
-        // tractor / drop and climbs back once the order ends (moho's
-        // `ShouldHoverInsteadOfLand`, MohoEngine.dll 0x1029b210).
+        // A transport on a load/unload order flies the leg at its
+        // `Elevation` and comes down to its `TransportHoverHeight` only
+        // over the pick-up / drop point: from where its target velocity
+        // drops below its top speed (within that distance of the point),
+        // and it climbs back once the order ends. The real game's T1
+        // transport flew both legs at h 8.2..8.8 and started down 10.3
+        // (pick-up) and 8.7..10.4 (drop) short, on the tick it began to
+        // brake (`Top -> Down` with `TopSpeed -> Stopping`), reaching 3.5
+        // as it stopped (dev/probes probe_mov_air TR1 / TR2); ours flew
+        // the whole leg at the hover height.
         // Landing (`CalcMoveAir` 0x1029df76): down to half its `Elevation`
         // on the way, onto the ground within 0.5 of the spot.
         let elevation = if let Some(d) = to_spot {
@@ -2866,7 +2873,7 @@ fn hover_step(e: &crate::engine::sim::entity::Entity, data: &crate::engine::sim:
             } else {
                 p.elevation / 2
             }
-        } else if p.air.transport_hover_height > Fx::ZERO && h.transport_dip {
+        } else if p.air.transport_hover_height > Fx::ZERO && h.transport_dip && h.goal.is_some_and(|(g, _, _)| dist2(next, g) <= h.max_speed) {
             p.air.transport_hover_height
         } else {
             p.elevation
