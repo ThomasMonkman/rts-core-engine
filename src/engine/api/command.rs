@@ -1030,6 +1030,57 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             units.retain(|&u| !refuses(lua, u, K::TransportLoadUnits, target, false, &all));
             Ok(issue(lua, &units, K::TransportLoadUnits, target, None, 0))
         })?;
+    // The platoon's live transports (TRANSPORTATION) and the rest of its
+    // live units in `category` (all of them for none).
+    fn platoon_transports(lua: &Lua, this: &Obj<moho::Platoon>, category: Option<&crate::engine::sim::category::CategorySet>) -> LuaResult<(Vec<EntityId>, Vec<EntityId>)> {
+        let all = platoon_units(lua, this, &None)?;
+        let transport = crate::engine::api::categories::domain(lua)?.named.get("TRANSPORTATION").cloned();
+        let w = entity::world(lua);
+        let cat = |u: EntityId| w.get(u).and_then(|e| e.category_index);
+        let (transports, others): (Vec<EntityId>, Vec<EntityId>) =
+            all.into_iter().partition(|&u| transport.as_ref().zip(cat(u)).is_some_and(|(t, i)| t.contains(i)));
+        let others = others.into_iter().filter(|&u| category.is_none_or(|c| cat(u).is_some_and(|i| c.contains(i)))).collect();
+        Ok((transports, others))
+    }
+    lua_method!(lua, moho::Platoon,
+        /// Loads the platoon's live units in `category` into its first transport: the same
+        /// load order as `IssueTransportLoad(units, transport)`. The command runs until they're
+        /// aboard. (The real game, dev/probes probe_ai_transport, also gives the transport an
+        /// order and returns a table; several transports untested, ours uses the first.)
+        LoadUnits = |lua, (this, category): (Obj<moho::Platoon>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>)| {
+            let (transports, mut units) = platoon_transports(lua, &this, Some(&category.0))?;
+            let target = match transports.first() {
+                Some(&t) => CommandTarget::Entity(t),
+                None => {
+                    units.clear();
+                    CommandTarget::None
+                }
+            };
+            let all = sorted_unique(&units);
+            units.retain(|&u| !refuses(lua, u, K::TransportLoadUnits, target, false, &all));
+            Ok(issue(lua, &units, K::TransportLoadUnits, target, None, 0))
+        })?;
+    lua_method!(lua, moho::Platoon,
+        /// The platoon's transports unload everything at `pos`: `IssueTransportUnload`'s order.
+        UnloadAllAtLocation = |lua, (this, pos): (Obj<moho::Platoon>, shapes::OrderTarget)| {
+            let (mut transports, _) = platoon_transports(lua, &this, None)?;
+            let target = target_of(&pos)?;
+            let all = sorted_unique(&transports);
+            transports.retain(|&u| !refuses(lua, u, K::TransportUnloadUnits, target, false, &all));
+            Ok(issue(lua, &transports, K::TransportUnloadUnits, target, None, 0))
+        })?;
+    lua_method!(lua, moho::Platoon,
+        /// The platoon's transports unload their cargo in `category` at `pos`:
+        /// `IssueTransportUnloadSpecific`'s order. The real game takes it for air transports
+        /// too, not only carriers (dev/probes probe_ai_transport).
+        UnloadUnitsAtLocation = |lua, (this, category, pos): (Obj<moho::Platoon>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>, shapes::OrderTarget)| {
+            let (transports, _) = platoon_transports(lua, &this, None)?;
+            let handle = issue(lua, &transports, K::TransportUnloadSpecificUnits, target_of(&pos)?, None, 0);
+            if let Some(c) = commands(lua).get_mut(handle.0) {
+                c.category = Some(category.0.clone());
+            }
+            Ok(handle)
+        })?;
     lua_method!(lua, moho::Platoon,
         /// Whether `cmd` is still running (false for nil).
         IsCommandsActive = |lua, (_this, cmd): (Obj<moho::Platoon>, Option<LuaUserDataRef<CommandHandle>>)| {

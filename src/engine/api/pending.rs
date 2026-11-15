@@ -60,7 +60,7 @@ pub const UNUSED: &[(&str, &[&str], &str)] = &[
         &[
             "CanConsiderFormingPlatoon", "Destroy", "DisbandOnIdle", "FerryToLocation", "FindClosestUnitToBase", "FindFurthestUnit",
             "FindHighestValueUnit", "GetAIPlan", "GetFactionIndex", "GetFerryBeacons", "GetPersonality", "GetPlatoonLifetimeStats",
-            "SwitchAIPlan", "UnloadUnitsAtLocation", "UseTeleporter",
+            "SwitchAIPlan", "UseTeleporter",
         ],
         "scripts disband through the brain and ask the brain for its faction and personality",
     ),
@@ -107,11 +107,7 @@ pub const UNUSED: &[(&str, &[&str], &str)] = &[
 /// here (a real registration replaces the stub either way). The user VM
 /// stubs its methods from FAF's annotations at run time
 /// (`ui::user_api::register_method_stubs`).
-pub const TO_REVIEW: &[(&str, &[&str])] = &[
-    // The campaign's transport platoons (ScenarioPlatoonAI); need platoon
-    // transport orders.
-    ("platoon_methods", &["LoadUnits", "UnloadAllAtLocation"]),
-];
+pub const TO_REVIEW: &[(&str, &[&str])] = &[];
 
 /// Registers [`UNUSED`]'s and [`TO_REVIEW`]'s stubs where the class has no
 /// such method yet. Run after the real methods are registered.
