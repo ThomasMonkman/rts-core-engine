@@ -1458,3 +1458,8 @@ fn can_fire_reload() {
 fn salvo_busy() {
     scenario("salvo_busy", 160);
 }
+
+#[test]
+fn child_projectile() {
+    scenario("child_projectile", 30);
+}

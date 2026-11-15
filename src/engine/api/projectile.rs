@@ -773,12 +773,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         }
     })?;
     lua_method!(lua, moho::Projectile,
-        /// A child at the parent's position, heading the same way at the same
-        /// speed, aimed at the parent's target (fragmentation shells, splitting
-        /// missiles). Its launcher is the parent projectile, as moho's
-        /// `PROJ_Create(sim, bp, army, parent, parent transform, ...)` call
-        /// (MohoEngine.dll 0x10283d31); FAF's wrapper copies the parent's
-        /// `Launcher` field for damage credit.
+        /// A child at the parent's position, heading the same way at its
+        /// own blueprint's `InitialSpeed`, aimed at the parent's target
+        /// (fragmentation shells, splitting missiles). Its launcher is the
+        /// parent's launcher (the parent itself once that is gone).
+        /// `probe_wpn_misc2`, `probe_wpn_proj2` `child *`: under a parent
+        /// slowed to 6/s, children step 2.0 (InitialSpeed 20) and 1.2 (12) a
+        /// tick, and `GetLauncher` is the parent's launcher unit.
         CreateChildProjectile = |lua, (this, bp): (Obj<moho::Projectile>, String)| {
         let id = entity_id(&this)?;
         let (position, facing) = {
@@ -786,10 +787,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             let e = w.get(id).ok_or_else(|| LuaError::runtime("CreateChildProjectile: projectile no longer exists"))?;
             (e.position(), e.orientation)
         };
-        let (velocity, target) = projectiles(lua).get(id).map(|p| (p.velocity(), p.target)).unwrap_or((FxVec3::default(), None));
+        let (velocity, target, launcher) = projectiles(lua).get(id).map(|p| (p.velocity(), p.target, p.launcher)).unwrap_or((FxVec3::default(), None, None));
+        let launcher = launcher.filter(|&l| world(lua).get(l).is_some()).unwrap_or(id);
         let direction = velocity.normalized().or_else(|| Some(facing.rotate(FxVec3 { x: Fx::ZERO, y: Fx::ZERO, z: Fx::ONE })));
-        let launch = Launch { direction, speed: Some(velocity.length()), target, ..Default::default() };
-        spawn_projectile(lua, id, &bp, position, launch)
+        let launch = Launch { direction, target, ..Default::default() };
+        spawn_projectile(lua, launcher, &bp, position, launch)
     })?;
     lua_method!(lua, moho::Projectile,
         /// Toggles both entity and surface collision; returns self for chaining.
