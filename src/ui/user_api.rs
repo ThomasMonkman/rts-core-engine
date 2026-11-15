@@ -557,7 +557,7 @@ fn blueprint_commands(domain: &CategoryDomain, bp: &LuaTable) -> LuaResult<Bluep
 }
 
 /// moho's `GetUnitCommandData`: the command caps and toggle caps any of
-/// `units` has (sorted), and what any of them can build, or will once the
+/// `units` has (sorted), and what every one of them can build, or will once the
 /// upgrades it has queued are done (a factory upgrading to T2 offers T2
 /// units to queue behind the upgrade), less what the sim's build
 /// restrictions forbid that unit now (the ACU's T2/T3 until its engineering
@@ -616,29 +616,33 @@ fn unit_command_data(lua: &Lua, units: &[Obj<moho::UserUnit>]) -> LuaResult<(Vec
                 own = Some(own.map_or_else(|| cat.clone(), |o| o.union(cat)));
             }
         }
-        if let Some(mut o) = own {
-            for id in &restricted {
-                if let Ok(cat) = domain.parse(id) {
-                    o = o.difference(&cat);
-                }
+        let mut o = own.unwrap_or_else(|| CategorySet::empty(domain.entries.len()));
+        for id in &restricted {
+            if let Ok(cat) = domain.parse(id) {
+                o = o.difference(&cat);
             }
-            own_sets.push(o);
         }
+        own_sets.push(o);
     }
+    // Orders are what any unit has; what can be built is what every unit can
+    // build (the real game: engineer + factory, or engineer + tank, offer
+    // nothing; `probe_ui_hover` build).
     let (mut orders, mut toggles) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
-    let mut buildable = CategorySet::empty(domain.entries.len());
+    let empty = CategorySet::empty(domain.entries.len());
+    let mut buildable: Option<CategorySet> = None;
+    let mut meet = |set: &CategorySet| buildable = Some(buildable.as_ref().map_or_else(|| set.clone(), |b| b.intersection(set)));
     for e in used.values().filter(|e| e.any) {
         let c = e.commands.as_ref().expect("only blueprints that exist are used");
         orders.extend(c.orders.iter().cloned());
         toggles.extend(c.toggles.iter().cloned());
-        if let (true, Some(cat)) = (e.plain, &c.buildable) {
-            buildable = buildable.union(cat);
+        if e.plain {
+            meet(c.buildable.as_ref().unwrap_or(&empty));
         }
     }
     for o in &own_sets {
-        buildable = buildable.union(o);
+        meet(o);
     }
-    Ok((orders.into_iter().collect(), toggles.into_iter().collect(), EntityCategory(buildable)))
+    Ok((orders.into_iter().collect(), toggles.into_iter().collect(), EntityCategory(buildable.unwrap_or(empty))))
 }
 
 pub fn register(lua: &Lua) -> LuaResult<()> {

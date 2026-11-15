@@ -1165,14 +1165,16 @@ fn build_restrictions_lock_tech_tabs() {
 }
 
 /// `GetUnitCommandData` over a mixed selection: the union of the
-/// blueprints' command and toggle caps (sorted, each once) and of what each
-/// can build; a dead unit adds nothing, and no units build nothing.
+/// blueprints' command and toggle caps (sorted, each once), and what every
+/// one of them can build (the real game: engineer + tank or engineer +
+/// factory build nothing, `probe_ui_hover` build); a dead unit adds nothing,
+/// and no units build nothing.
 #[test]
 fn unit_command_data_unions_the_selection() {
     use rts_core_engine::ui::UnitInfo;
     let Some(vm) = vm() else { return };
     let info = |id, bp: &str| UnitInfo { id, blueprint: bp.into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: None };
-    vm.update_units(&[info(1, "uel0201"), info(2, "uel0201"), info(3, "uea0102"), info(4, "uel0105"), info(5, "uel0105")]).unwrap();
+    vm.update_units(&[info(1, "uel0201"), info(2, "uel0201"), info(3, "uea0102"), info(4, "uel0105"), info(5, "uel0105"), info(6, "ueb0101"), info(7, "uel0105")]).unwrap();
     vm.remove_units(&[5]).unwrap();
     let (ok, why): (bool, String) = vm
         .lua()
@@ -1204,7 +1206,12 @@ fn unit_command_data_unions_the_selection() {
             if table.concat(orders, ',') ~= caps(ids, 'CommandCaps') then return false, 'orders ' .. table.concat(orders, ',') end
             if table.concat(toggles, ',') ~= caps(ids, 'ToggleCaps') then return false, 'toggles ' .. table.concat(toggles, ',') end
             local _, _, engineer = GetUnitCommandData({ __engine_unit(4) })
-            if not (buildable == engineer and EntityCategoryContains(buildable, 'ueb1101')) then return false, 'buildable' end
+            if not EntityCategoryContains(engineer, 'ueb1101') then return false, 'engineer' end
+            if EntityCategoryContains(buildable, 'ueb1101') then return false, 'engineer + tank builds' end
+            local _, _, both = GetUnitCommandData({ __engine_unit(4), __engine_unit(7) })
+            if not (both == engineer) then return false, 'two engineers' end
+            local _, _, mixed = GetUnitCommandData({ __engine_unit(4), __engine_unit(6) })
+            if EntityCategoryContains(mixed, 'ueb1101') or EntityCategoryContains(mixed, 'uel0105') then return false, 'engineer + factory builds' end
             local o, t, none = GetUnitCommandData({})
             if table.getn(o) ~= 0 or table.getn(t) ~= 0 or EntityCategoryContains(none, 'ueb1101') then return false, 'empty' end
             return true, ''
