@@ -1448,3 +1448,8 @@ fn ground_contact() {
 fn projectile_lifetime() {
     scenario("projectile_lifetime", 200);
 }
+
+#[test]
+fn can_fire_reload() {
+    scenario("can_fire_reload", 100);
+}

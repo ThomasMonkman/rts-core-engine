@@ -617,9 +617,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         })
     })?;
     lua_method!(lua, moho::Weapon,
-        /// True if the weapon is enabled and its fire clock has run out.
+        /// True if the weapon is enabled and aimed on its target, whatever
+        /// its reload: moho's `CanFire` (stunned / busy / layer / aim, no
+        /// reload term; FAF's `engine/Sim/UnitWeapon.lua`). `probe_wpn_ctrl`
+        /// `fireclock`: false before the first shot, then true every tick
+        /// while `GetFireClockPct` runs 0.0..0.9. FAF's counted-projectile
+        /// weapons (`DefaultProjectileWeapon` and the SMD scripts) read it
+        /// in the middle of a reload.
         CanFire = |lua, this: Obj<moho::Weapon>| {
-        with_state(lua, &this, |w| w.enabled && w.fire_clock == 0)
+        with_state(lua, &this, |w| w.enabled && w.on_target)
     })?;
     lua_method!(lua, moho::Weapon,
         /// The projectile blueprint table, or nil when the weapon has none.
