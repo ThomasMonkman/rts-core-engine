@@ -2783,3 +2783,29 @@ fn keyboard_focus_has_one_holder() {
         .unwrap();
     assert_eq!(got, [true; 7]);
 }
+
+/// `Edit:SetText` and `ClearText` call `OnTextChanged(new, old)` when the
+/// text changes (`probe_ui_controls` edit: `>abcdef;`, then `123>;`).
+#[test]
+fn edit_set_text_calls_on_text_changed() {
+    let Some(vm) = vm() else { return };
+    let log: String = vm
+        .lua()
+        .load(
+            r#"
+            local Edit = import('/lua/maui/edit.lua').Edit
+            local e = Edit(GetFrame(0))
+            local log = ''
+            e.OnTextChanged = function(self, new, old) log = log .. old .. '>' .. new .. ';' end
+            e:SetText('abcdef')
+            e:SetText('abcdef')
+            e:SetMaxChars(3)
+            e:SetText('123456')
+            e:ClearText()
+            return log
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(log, ">abcdef;abcdef>123;123>;");
+}

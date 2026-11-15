@@ -1565,22 +1565,16 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         })
     }
     lua_method!(lua, moho::Edit,
-        /// Sets the text, cut to `MaxChars`; the caret moves to the end.
-        SetText = |lua, (this, text): (Obj<moho::Edit>, Option<String>)| {
-            with_edit(lua, &this, |e| {
-                let t: String = text.unwrap_or_default().chars().take(e.max_chars.max(0) as usize).collect();
-                e.caret = t.chars().count() as i64;
-                e.text.text = t;
-            })
-            .map(|_| ())
-        })?;
+        /// Sets the text, cut to `MaxChars`; the caret moves to the end, and
+        /// `OnTextChanged(new, old)` runs if the text changed
+        /// (`probe_ui_controls` edit: `SetText('abcdef')` logs `>abcdef;`).
+        SetText = |lua, (this, text): (Obj<moho::Edit>, Option<String>)| set_edit_text(lua, id_of(&this)?, &text.unwrap_or_default()))?;
     lua_method!(lua, moho::Edit,
         GetText = |lua, this: Obj<moho::Edit>| with_edit(lua, &this, |e| e.text.text.clone()).map(Option::unwrap_or_default))?;
     lua_method!(lua, moho::Edit,
-        ClearText = |lua, this: Obj<moho::Edit>| with_edit(lua, &this, |e| {
-            e.text.text.clear();
-            e.caret = 0;
-        }).map(|_| ()))?;
+        /// Empties the text, with `OnTextChanged` as `SetText` (`ClearText`
+        /// on "123" logs `123>;`).
+        ClearText = |lua, this: Obj<moho::Edit>| set_edit_text(lua, id_of(&this)?, ""))?;
         lua_method!(lua, moho::Edit,
             SetNewFont = |lua, (this, family, size): (Obj<moho::Edit>, Option<String>, Option<f32>)| {
             with_edit(lua, &this, |e| {
@@ -2660,6 +2654,24 @@ fn edit_text(lua: &Lua, id: ControlId, f: impl FnOnce(&mut Vec<char>, &mut usize
         f(&mut chars, &mut caret, e.max_chars.max(0) as usize);
         e.caret = caret.min(chars.len()) as i64;
         e.text.text = chars.into_iter().collect();
+        (e.text.text != old).then(|| (e.text.text.clone(), old))
+    };
+    if let Some((new, old)) = change {
+        hook(lua, id, "OnTextChanged", (new, old))?;
+    }
+    Ok(())
+}
+
+/// Sets edit `id`'s text from Lua (`SetText`, `ClearText`): cut to its
+/// `MaxChars`, the caret at the end, then `OnTextChanged(new, old)` if the
+/// text changed. Unlike typing it works on a disabled edit.
+fn set_edit_text(lua: &Lua, id: ControlId, text: &str) -> LuaResult<()> {
+    let change = {
+        let mut c = controls(lua);
+        let Some(Control { kind: Kind::Edit(e), .. }) = c.map.get_mut(&id) else { return Ok(()) };
+        let t: String = text.chars().take(e.max_chars.max(0) as usize).collect();
+        e.caret = t.chars().count() as i64;
+        let old = std::mem::replace(&mut e.text.text, t);
         (e.text.text != old).then(|| (e.text.text.clone(), old))
     };
     if let Some((new, old)) = change {
