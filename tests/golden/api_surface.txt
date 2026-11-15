@@ -1245,6 +1245,7 @@ user __engine_key_action luau
 user __engine_overlay_filters luau
 user __engine_overlay_version luau
 user __engine_predict_command luau
+user __engine_select_by_category native
 user __engine_toggle_ping_grid luau
 user __engine_unit luau
 user __engine_user_decals luau
