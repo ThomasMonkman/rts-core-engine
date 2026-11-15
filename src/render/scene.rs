@@ -718,6 +718,13 @@ impl Stage {
                     p.what = What::Blip;
                     return p;
                 }
+                // A unit seen before, on radar now: its own icon in army
+                // colour at any zoom, no mesh (a structure shows as
+                // remembered, its icon in colour).
+                if e.sighting == crate::engine::snapshot::Sighting::Identified && e.kind != ViewKind::Structure {
+                    p.what = What::Icon;
+                    return p;
+                }
                 let unit = matches!(e.kind, ViewKind::Unit | ViewKind::Structure);
                 // An upgrade being built inside its structure (no box) shows
                 // no icon of its own: the structure's stands for both.

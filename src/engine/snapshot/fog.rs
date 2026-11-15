@@ -203,6 +203,8 @@ fn filter_entities(world: &EntityWorld, grids: &IntelGrids, army: u32, side: &(d
         }
     };
     let mut detected = detections.into_iter();
+    // Remembered structures on the side's radar now (id order).
+    let mut on_radar: Vec<u32> = Vec::new();
     entities.retain_mut(|v| {
         let d = detected.next().flatten();
         // Props are the map's.
@@ -227,12 +229,18 @@ fn filter_entities(world: &EntityWorld, grids: &IntelGrids, army: u32, side: &(d
             return true;
         }
         if fog.memory.contains_key(&v.id) {
-            // Shown as remembered, below.
+            // Shown as remembered, below (identified while on radar).
+            if d.any() {
+                on_radar.push(v.id);
+            }
             return false;
         }
         // A dying unit leaves no contact behind (it isn't a unit any more).
+        // A contact seen before keeps its identity (probe_intel_icons: its
+        // full icon in army colour); one never seen is a plain blip.
         if d.any() && v.kind != ViewKind::Dying {
-            *v = EntityView { pose_start: 0, pose_len: 0, sighting: Sighting::Blip, ..*v };
+            let sighting = if grids.ever_seen(army, v.id) { Sighting::Identified } else { Sighting::Blip };
+            *v = EntityView { pose_start: 0, pose_len: 0, sighting, ..*v };
             return true;
         }
         false
@@ -251,7 +259,8 @@ fn filter_entities(world: &EntityWorld, grids: &IntelGrids, army: u32, side: &(d
     }
     let kept = std::mem::take(entities);
     entities.reserve(kept.len() + fog.memory.len());
-    let mut remembered = fog.memory.values().filter(|(_, seen)| *seen != now).map(|(v, _)| *v).peekable();
+    let identified = |v: EntityView| if on_radar.binary_search(&v.id).is_ok() { EntityView { sighting: Sighting::Identified, ..v } } else { v };
+    let mut remembered = fog.memory.values().filter(|(_, seen)| *seen != now).map(|(v, _)| identified(*v)).peekable();
     for v in kept {
         while let Some(r) = remembered.next_if(|r| r.id < v.id) {
             entities.push(r);

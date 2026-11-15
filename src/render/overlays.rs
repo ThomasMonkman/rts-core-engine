@@ -359,21 +359,26 @@ pub fn icon_items(scene: &Sources, cache: &mut IconCache) -> (Vec<rts_core_engin
     let input = scene.input;
     let Some(names) = input.blueprint_icons.clone() else { return (out, Vec::new()) };
     let vfs = scene.scene.vfs().cloned();
-    // Units; blips and remembered structures (both grey: no army colour,
-    // identified shapes only for the latter); then the enemy jammers' fake
-    // contacts (no entity).
+    // Units (seen, or identified on radar: army colour); blips (a plain
+    // contact shape, grey) and remembered structures (their own icon,
+    // grey); then the enemy jammers' fake contacts (no entity: the
+    // jammer's contact shape).
     let fakes = scene.scene.latest.as_ref().map(|l| l.fake_blips.clone()).unwrap_or_default();
     let scale = input.ui_scale;
     let icon_scale = input.settings.icon_scale;
     let margin = 32.0 * scale * icon_scale;
     // Icon names (blips: their generic shape), borrowed or made per kind.
-    let blip_names: std::collections::BTreeMap<u32, String> = scene
+    let layers = input.blueprint_icon_layer.as_deref();
+    let layer_of = |bp: u32| layers.and_then(|l| l.get(bp as usize).copied()).unwrap_or(0);
+    let blip_names: std::collections::BTreeMap<u32, &'static str> = scene
         .scene
         .icons
         .iter()
         .flatten()
         .filter(|i| i.4 == super::scene::IconKind::Blip)
-        .filter_map(|&(_, _, _, bp, _, _)| Some((bp, unidentified_icon(names.get(bp as usize).filter(|n| !n.is_empty())?))))
+        .map(|i| i.3)
+        .chain(fakes.iter().map(|f| f.blueprint))
+        .filter_map(|bp| Some((bp, unidentified_icon(names.get(bp as usize).filter(|n| !n.is_empty())?, layer_of(bp) == AIR_LAYER))))
         .collect();
     let info_of = |icon_info: &mut std::collections::HashMap<String, IconInfo>, name: &str| -> (u32, u32) {
         if let Some(i) = icon_info.get(name) {
@@ -402,22 +407,20 @@ pub fn icon_items(scene: &Sources, cache: &mut IconCache) -> (Vec<rts_core_engin
         .enumerate()
         .filter_map(|(i, name)| Some((input.views.iter().find(|v| v.camera == *name)?.clone(), *input.cameras.get(name)?, i)))
         .collect();
-    let layers = input.blueprint_icon_layer.as_deref();
-    let layer_of = |bp: u32| layers.and_then(|l| l.get(bp as usize).copied()).unwrap_or(0);
-    // Laid out: (id, icon name, army, rect, alpha, the view's rect, draw layer).
-    let mut laid: Vec<(u32, &str, Option<u32>, [f32; 4], f32, [f32; 4], u8)> = Vec::new();
+    // Laid out: (id, icon name, tint, rect, alpha, the view's rect, draw layer).
+    let mut laid: Vec<(u32, &str, Option<[f32; 3]>, [f32; 4], f32, [f32; 4], u8)> = Vec::new();
     for (view, cam, i) in &lists {
         let shown = scene.scene.icons[*i].iter().filter_map(|&(id, pos, army, bp, kind, alpha)| {
             let name = names.get(bp as usize).filter(|n| !n.is_empty())?;
             // (A contact's layer would give its kind away: the bottom one.)
             Some(match kind {
-                super::scene::IconKind::Blip => (id, pos, None, blip_names.get(&bp)?.as_str(), alpha, 0),
+                super::scene::IconKind::Blip => (id, pos, Some(CONTACT), *blip_names.get(&bp)?, alpha, 0),
                 // Greyed by the tint (no army), its real shape: scouted.
-                super::scene::IconKind::Remembered => (id, pos, None, name.as_str(), alpha, layer_of(bp)),
-                super::scene::IconKind::Full => (id, pos, Some(army), name.as_str(), alpha, layer_of(bp)),
+                super::scene::IconKind::Remembered => (id, pos, Some(UNIDENTIFIED), name.as_str(), alpha, layer_of(bp)),
+                super::scene::IconKind::Full => (id, pos, Some(crate::render::scene::army_color(&input.army_rgb, army)), name.as_str(), alpha, layer_of(bp)),
             })
         });
-        let fake = fakes.iter().map(|f| (u32::MAX, f.position, None, FAKE_BLIP_ICON, 1.0, 0));
+        let fake = fakes.iter().map(|f| (u32::MAX, f.position, Some(CONTACT), blip_names.get(&f.blueprint).copied().unwrap_or(LAND_CONTACT), 1.0, 0));
         let [l, t, r, b] = view.rect;
         for (id, pos, army, name, alpha, layer) in shown.chain(fake) {
             let Some([x, y]) = view.project(cam, glam::Vec3::from_array(pos)) else { continue };
@@ -450,7 +453,7 @@ pub fn icon_items(scene: &Sources, cache: &mut IconCache) -> (Vec<rts_core_engin
             (true, false) => 2,
             (true, true) => 3,
         };
-        let [r, g, b] = army.map_or(UNIDENTIFIED, |a| crate::render::scene::army_color(&input.army_rgb, a));
+        let [r, g, b] = army.unwrap_or(UNIDENTIFIED);
         let Some(info) = cache.info.get(name) else { continue };
         // The state's texture at its own size, on the resting icon's centre.
         let (w, h) = info.sizes[state];
@@ -512,23 +515,38 @@ fn icon_half_size((w, h): (u32, u32), icon_scale: f32, display: f32) -> (f32, f3
 /// MohoEngine.dll 0x100f2980).
 pub const UNIDENTIFIED: [f32; 3] = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0];
 
-/// Jammer fakes have no unit: drawn as an unidentified land contact.
-const FAKE_BLIP_ICON: &str = "icon_land_generic";
+/// A radar / sonar contact's tint over its generic shape: the real game draws
+/// the shape's fill (texel grey 123) as (94, 94, 94) (FAF probe
+/// `probe_intel_icons`, measured), so the tint is about 0.77 here, not FAF's
+/// `UnidentifiedColor` (which stays the remembered structures' grey).
+pub const CONTACT: [f32; 3] = [197.0 / 255.0, 197.0 / 255.0, 197.0 / 255.0];
 
-/// A blip's icon: the shape of its unit's strategic icon without tech level
-/// or role (`icon_land2_antiair` -> `icon_land_generic`), from the game's
-/// `*_generic` icon set (inferred: which icon moho draws for a radar
-/// contact isn't confirmed, see docs/research/verifying-against-the-binary.md).
-fn unidentified_icon(name: &str) -> String {
-    let shape = name.strip_prefix("icon_").and_then(|r| r.split('_').next()).map(|s| s.trim_end_matches(|c: char| c.is_ascii_digit())).filter(|s| !s.is_empty());
+/// The land contact's shape (also when a contact's unit has no icon).
+const LAND_CONTACT: &str = "icon_land_generic";
+
+/// The draw layer of aircraft icons (`snapshot::icon_layer`).
+const AIR_LAYER: u8 = 1;
+
+/// A radar / sonar contact's (or a jammer fake's) shape, from its unit's
+/// strategic icon: the game's four contact shapes (`GenericIcons` in
+/// `/lua/ui/game/strategicIcons.lua`, the plain grey `icon_*_generic`
+/// textures): a diamond for every land unit (commanders, bots and land
+/// experimentals included), a square for structures and factories, a
+/// half-dome for ships and subs alike (FAF probe `probe_intel_icons`). An
+/// aircraft's contact while flying isn't confirmed: ours keeps its own
+/// generic air shape (fighter, bomber, gunship), and an air experimental's.
+fn unidentified_icon(name: &str, air: bool) -> &'static str {
+    let shape = name.strip_prefix("icon_").and_then(|r| r.split('_').next()).map(|s| s.trim_end_matches(|c: char| c.is_ascii_digit())).unwrap_or("");
     match shape {
-        Some(s) if GENERIC_SHAPES.contains(&s) => format!("icon_{s}_generic"),
-        _ => FAKE_BLIP_ICON.to_string(),
+        "structure" | "factory" | "factoryhq" => "icon_structure_generic",
+        "ship" | "sub" => "icon_ship_generic",
+        "fighter" => "icon_fighter_generic",
+        "bomber" => "icon_bomber_generic",
+        "gunship" => "icon_gunship_generic",
+        "experimental" if air => "icon_experimental_generic",
+        _ => LAND_CONTACT,
     }
 }
-
-/// The shapes the game has a tech-less `icon_<shape>_generic` for.
-const GENERIC_SHAPES: [&str; 11] = ["bomber", "bot", "commander", "experimental", "factory", "fighter", "gunship", "land", "ship", "structure", "sub"];
 
 /// Zoom from which projectiles are drawn as strategic icons (moho's
 /// `UI_StrategicProjectileLOD`, 128 by default: MohoEngine.dll .data
@@ -661,6 +679,24 @@ mod bar_tests {
         assert!(bar_visible(&carried, true, &rules(Some(1))), "attached, option on");
         assert!(!bar_visible(&carried, true, &super::BarRules { show_attached: false, ..rules(Some(1)) }), "attached, option off");
         assert!(!bar_visible(&enemy, true, &super::BarRules { render: false, ..rules(Some(1)) }), "ui_RenderUnitBars off");
+    }
+
+    /// probe_intel_icons: a never-seen contact is one of four plain shapes,
+    /// giving away no class beyond land / structure / naval (aircraft keep
+    /// theirs: unconfirmed).
+    #[test]
+    fn contacts_show_the_plain_generic_shapes() {
+        use super::unidentified_icon as shape;
+        for land in ["icon_land1_directfire", "icon_land2_antiair", "icon_bot1_engineer", "icon_commander_generic", "icon_experimental_generic"] {
+            assert_eq!(shape(land, false), "icon_land_generic", "{land}");
+        }
+        assert_eq!(shape("icon_structure1_directfire", false), "icon_structure_generic");
+        assert_eq!(shape("icon_factory2_land", false), "icon_structure_generic");
+        assert_eq!(shape("icon_factoryhq3_air", false), "icon_structure_generic");
+        assert_eq!(shape("icon_ship2_directfire", false), "icon_ship_generic");
+        assert_eq!(shape("icon_sub2_antinavy", false), "icon_ship_generic", "subs as ships");
+        assert_eq!(shape("icon_fighter1_antiair", true), "icon_fighter_generic");
+        assert_eq!(shape("icon_experimental_generic", true), "icon_experimental_generic", "an air experimental");
     }
 
     #[test]

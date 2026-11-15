@@ -158,6 +158,10 @@ pub enum Sighting {
     /// A structure seen before and out of sight now: its last-seen state
     /// (it may be gone).
     Remembered,
+    /// A unit seen before, out of sight now but on radar / sonar: its full
+    /// strategic icon in its army's colour (no mesh for a mobile unit; a
+    /// structure is its remembered state). FAF probe `probe_intel_icons`.
+    Identified,
 }
 
 /// The fog of war texture's changes (see [`Snapshot::fog`]).

@@ -439,9 +439,17 @@ over the sim's intel grids) to what that army's side knows:
   they are; radar / sonar contacts it doesn't see as **blips**
   (`Sighting::Blip`): no mesh, never handed to the interface (no
   `GetUnitById`, selection data, rollover, range rings, health bar), drawn
-  at any zoom as an unidentified strategic icon, the unit icon's shape
-  without tech or role (`icon_land2_antiair` -> `icon_land_generic`) in
-  FAF's `UnidentifiedColor` grey (inferred icon); minimap dots grey too;
+  at any zoom, at the texture's pixel size, as one of the game's plain
+  contact shapes (`GenericIcons` in `strategicIcons.lua`, the
+  `icon_*_generic` textures): a diamond for every land unit (commanders and
+  experimentals too), a square for structures, a half-dome for ships and
+  subs; aircraft keep their own generic air shape (a flying aircraft's
+  real contact is unconfirmed). Tinted to the measured (94, 94, 94) grey
+  (`overlays::CONTACT`; FAF probe `probe_intel_icons`); minimap dots grey;
+- enemy units seen before and on radar / sonar now, out of sight
+  (`Sighting::Identified`): their full strategic icon in their army's
+  colour at any zoom, no mesh (a structure keeps its remembered mesh, its
+  icon coloured), handed to the interface (rollover) like the real game;
 - enemy structures seen before and out of sight now at their last-seen
   spot as it was when last seen (`Sighting::Remembered`): the mesh keeps
   the last-sighting's rest pose, greyed by the vision pass's 0.67 factor
@@ -453,8 +461,9 @@ over the sim's intel grids) to what that army's side knows:
   position is visible) — then it draws live — or the sim forgets the
   sighting (`FlushIntelInRect`); minimap dots grey too;
 - other enemy or army-less entities (projectiles, shield bubbles), effects
-  and tread marks only where the side has eyes; jammer fakes
-  (`Snapshot::fake_blips`) as grey land blips.
+  and tread marks only where the side has eyes; jammer fakes the side
+  believes in (`Snapshot::fake_blips`: on its radar, not known fakes) as
+  their jammer's contact shape.
 
 The terrain gets a **fog texture** (group 0 binding 9, R8, one texel per
 2x2 vision cell, the 4x4 radar / sonar / omni cells covering four): `vision::fog_level` per cell (unexplored / explored /
