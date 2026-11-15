@@ -250,9 +250,11 @@ pub struct Controls {
     /// The last button press on a control (button, control, time, x, y),
     /// for double clicks.
     last_press: Option<(u8, ControlId, f64, f32, f32)>,
-    /// Controls holding the keyboard focus, oldest first, and whether each
-    /// blocks the key map.
-    focus: Vec<(ControlId, bool)>,
+    /// The control holding the keyboard focus, and whether it blocks the key
+    /// map. One holder, no stack: when it abandons the focus nobody has it
+    /// (`probe_ui_controls` focus: `GetCurrentFocusControl` is nil after the
+    /// second taker abandons, not the first taker).
+    focus: Option<(ControlId, bool)>,
     /// A scrollbar whose thumb is held, and where on the thumb (pixels
     /// along its axis).
     scroll_drag: Option<(ControlId, f64)>,
@@ -1044,14 +1046,17 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         AcquireKeyboardFocus = |lua, (this, blocks): (Obj<moho::Control>, Option<bool>)| acquire_focus(lua, id_of(&this)?, blocks.unwrap_or(false)))?;
     lua_method!(lua, moho::Control,
         /// Gives up the keyboard focus.
-        AbandonKeyboardFocus = |lua, this: Obj<moho::Control>| {
-            let id = id_of(&this)?;
-            controls(lua).focus.retain(|f| f.0 != id);
-            Ok(())
-        })?;
+        AbandonKeyboardFocus = |lua, this: Obj<moho::Control>| abandon_focus(lua, id_of(&this)?))?;
     lua_method!(lua, moho::Control,
-        #[lua(stub)]
-        GetCurrentFocusControl = |_, _args: LuaMultiValue| Ok(LuaNil))?;
+        /// The control holding the keyboard focus (`AcquireKeyboardFocus`,
+        /// `Edit:AcquireFocus`), whichever control it's called on.
+        GetCurrentFocusControl = |lua, _this: Obj<moho::Control>| {
+            let id = focused(lua).map(|f| f.0);
+            match id {
+                Some(id) => object(lua, id),
+                None => Ok(None),
+            }
+        })?;
     lua_method!(lua, moho::Control,
         #[lua(stub)]
         Dump = |_, _args: LuaMultiValue| Ok(()))?;
@@ -1629,11 +1634,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// An edit with the focus takes every key (typing doesn't run hotkeys).
         AcquireFocus = |lua, this: Obj<moho::Edit>| acquire_focus(lua, id_of(&this)?, true))?;
     lua_method!(lua, moho::Edit,
-        AbandonFocus = |lua, this: Obj<moho::Edit>| {
-            let id = id_of(&this)?;
-            controls(lua).focus.retain(|f| f.0 != id);
-            Ok(())
-        })?;
+        AbandonFocus = |lua, this: Obj<moho::Edit>| abandon_focus(lua, id_of(&this)?))?;
     lua_method!(lua, moho::Edit,
         SetNewCaretColor = |lua, (this, c): (Obj<moho::Edit>, Option<String>)| with_edit(lua, &this, |e| e.caret_color = c.as_deref().and_then(parse_color).unwrap_or([1.0; 4])).map(|_| ()))?;
     lua_method!(lua, moho::Edit,
@@ -2230,7 +2231,7 @@ fn press_focus(lua: &Lua, target: ControlId, x: f32) -> LuaResult<()> {
     };
     let previous = focused_edit(lua).filter(|&p| p != target);
     if let Some(p) = previous {
-        controls(lua).focus.retain(|f| f.0 != p);
+        abandon_focus(lua, p)?;
         hook(lua, p, "OnLoseKeyboardFocus", ())?;
     }
     if let Some(e) = edit {
@@ -2556,13 +2557,7 @@ pub fn key_down(lua: &Lua, name: &str, mods: Modifiers, repeat: bool) -> LuaResu
         bubble(lua, Some(id), &e)?;
         return Ok(Some(true));
     }
-    let focus = {
-        let mut c = controls(lua);
-        let live: Vec<(ControlId, bool)> = c.focus.iter().copied().filter(|f| c.map.contains_key(&f.0)).collect();
-        c.focus = live;
-        c.focus.last().copied()
-    };
-    let Some((id, blocks)) = focus else { return Ok(None) };
+    let Some((id, blocks)) = focused(lua) else { return Ok(None) };
     let e = key_event(lua, name, mods)?;
     bubble(lua, Some(id), &e)?;
     Ok(Some(blocks))
@@ -2580,13 +2575,8 @@ fn key_event(lua: &Lua, name: &str, mods: Modifiers) -> LuaResult<LuaTable> {
 /// `blocks` keeps them from the key map. The previous holder hears
 /// `OnKeyboardFocusChange`.
 fn acquire_focus(lua: &Lua, id: ControlId, blocks: bool) -> LuaResult<()> {
-    let previous = {
-        let mut c = controls(lua);
-        let previous = c.focus.last().map(|f| f.0).filter(|&p| p != id && c.map.contains_key(&p));
-        c.focus.retain(|f| f.0 != id);
-        c.focus.push((id, blocks));
-        previous
-    };
+    let previous = focused(lua).map(|f| f.0).filter(|&p| p != id);
+    controls(lua).focus = Some((id, blocks));
     if let Some(p) = previous {
         hook(lua, p, "OnKeyboardFocusChange", ())?;
     }
@@ -2616,9 +2606,26 @@ pub fn typing(lua: &Lua) -> bool {
 
 /// The edit holding the keyboard focus, if the focus is an edit.
 fn focused_edit(lua: &Lua) -> Option<ControlId> {
-    let c = controls(lua);
-    let (id, _) = c.focus.iter().rev().find(|f| c.map.contains_key(&f.0))?;
-    matches!(c.map.get(id)?.kind, Kind::Edit(_)).then_some(*id)
+    let (id, _) = focused(lua)?;
+    matches!(controls(lua).map.get(&id)?.kind, Kind::Edit(_)).then_some(id)
+}
+
+/// The focus holder, if it still exists (a destroyed holder drops it).
+fn focused(lua: &Lua) -> Option<(ControlId, bool)> {
+    let mut c = controls(lua);
+    if c.focus.is_some_and(|f| !c.map.contains_key(&f.0)) {
+        c.focus = None;
+    }
+    c.focus
+}
+
+/// `id` gives up the keyboard focus, if it holds it.
+fn abandon_focus(lua: &Lua, id: ControlId) -> LuaResult<()> {
+    let mut c = controls(lua);
+    if c.focus.is_some_and(|f| f.0 == id) {
+        c.focus = None;
+    }
+    Ok(())
 }
 
 /// The Windows virtual key for a key named FAF's way (its

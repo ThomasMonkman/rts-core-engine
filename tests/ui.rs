@@ -2748,3 +2748,38 @@ fn text_measures_like_moho() {
         ]
     );
 }
+
+/// One keyboard focus holder, which `GetCurrentFocusControl` returns on any
+/// control; when it abandons nobody has the focus (`probe_ui_controls`
+/// focus).
+#[test]
+fn keyboard_focus_has_one_holder() {
+    let Some(vm) = vm() else { return };
+    let got: Vec<bool> = vm
+        .lua()
+        .load(
+            r#"
+            local Group = import('/lua/maui/group.lua').Group
+            local Edit = import('/lua/maui/edit.lua').Edit
+            local g, t = Group(GetFrame(0)), Group(GetFrame(0))
+            local e = Edit(GetFrame(0))
+            local out = { g:GetCurrentFocusControl() == nil }
+            g:AcquireKeyboardFocus(false)
+            table.insert(out, t:GetCurrentFocusControl() == g)
+            t:AcquireKeyboardFocus(true)
+            table.insert(out, g:GetCurrentFocusControl() == t)
+            t:AbandonKeyboardFocus()
+            table.insert(out, g:GetCurrentFocusControl() == nil)
+            e:AcquireFocus()
+            table.insert(out, g:GetCurrentFocusControl() == e)
+            g:AbandonKeyboardFocus()
+            table.insert(out, g:GetCurrentFocusControl() == e)
+            e:AbandonFocus()
+            table.insert(out, g:GetCurrentFocusControl() == nil)
+            return out
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(got, [true; 7]);
+}
