@@ -1185,7 +1185,10 @@ impl UserVm {
     fn selection_changed(&self, ids: &[u32], refresh: bool) -> LuaResult<()> {
         let unit: LuaFunction = self.lua.globals().get("__engine_unit")?;
         let old: Vec<u32> = self.lua.named_registry_value::<Option<Vec<u32>>>("user.selection")?.unwrap_or_default();
-        if old == ids && !refresh {
+        // The interface may have selected since (`SelectUnits` is
+        // synchronous): then the same ids are still a change for it.
+        let current: Vec<u32> = self.lua.globals().raw_get::<Option<LuaTable>>("__engine_selection")?.map_or_else(Vec::new, |t| t.sequence_values::<LuaTable>().filter_map(|u| u.ok()?.raw_get::<Option<u32>>("_id").ok().flatten()).collect());
+        if old == ids && current == ids && !refresh {
             return Ok(());
         }
         let list = |ids: &mut dyn Iterator<Item = u32>| -> LuaResult<LuaTable> {
