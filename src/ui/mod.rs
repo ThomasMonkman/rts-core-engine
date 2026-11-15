@@ -211,7 +211,9 @@ fn avatar_priority(lua: &Lua, blueprint: &str) -> LuaResult<Option<i64>> {
         .raw_get::<Option<LuaTable>>("__blueprints")?
         .and_then(|b| b.raw_get::<Option<LuaTable>>(blueprint).ok().flatten())
         .and_then(|bp| bp.raw_get::<Option<LuaTable>>("General").ok().flatten())
-        .and_then(|g| g.raw_get::<Option<i64>>("QuickSelectPriority").ok().flatten());
+        .and_then(|g| g.raw_get::<Option<i64>>("QuickSelectPriority").ok().flatten())
+        // 0 is the reflected default every blueprint carries: not an avatar.
+        .filter(|&p| p != 0);
     if let Some(mut a) = lua.app_data_mut::<AvatarPriorities>() {
         a.0.insert(blueprint.to_string(), priority);
     }

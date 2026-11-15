@@ -241,6 +241,11 @@ fn reclaim() {
 /// Reclaiming a unit takes its health down with its fraction, so
 /// one broken off partway is left as weak as it is see-through.
 #[test]
+fn blueprint_defaults() {
+    scenario("blueprint_defaults", 10);
+}
+
+#[test]
 fn reclaim_unit() {
     scenario("reclaim_unit", 1200);
 }

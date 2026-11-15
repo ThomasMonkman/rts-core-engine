@@ -27,11 +27,14 @@ ForkThread(function()
     if p then note(string.format('unit ended at %.1f, %.1f', p[1], p[3])) end
     check(p and VDist2(p[1], p[3], r[1], r[3]) < 3, 'the first unit walked to the rally point')
     -- A factory whose blueprint gives no InitialRallyX/Z (FAF's land
-    -- factories, LOUD's) rallies on its own spot, from its creation: moho's
-    -- constructor issues it for every FACTORY.
+    -- factories) rallies 5 in front of itself, the engine's default
+    -- `InitialRallyZ` (dev/probes probe_unit_build G3: factory at 736,224,
+    -- rally 736,229), from its creation: moho's constructor issues it for
+    -- every FACTORY.
     local land = CreateUnitHPR('ueb0101', 'ARMY_1', 420, GetTerrainHeight(420, 600), 600, 0, 0, 0)
     local lr = land:GetRallyPoint()
-    check(lr and math.abs(lr[1] - 420) < 0.5 and math.abs(lr[3] - 600) < 0.5, 'a land factory rallies on its own spot')
+    note(string.format('land factory rally %.1f, %.1f', lr[1], lr[3]))
+    check(lr and math.abs(lr[1] - 420) < 0.5 and math.abs(lr[3] - 605) < 0.5, 'a land factory rallies 5 in front of itself')
     IssueBuildFactory({land}, 'uel0105', 1)
     local eng
     for _ = 1, 200 do

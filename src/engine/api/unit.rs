@@ -26,10 +26,11 @@ pub(crate) fn with_unit<R: Default>(
 
 /// Lua module + class for a unit blueprint: explicit `ScriptModule`/
 /// `ScriptClass`, else `<Source minus _unit.bp>_script.lua` and its `TypeClass`.
+/// Empty strings, the reflected default every blueprint carries, mean unset.
 fn script_of(bp: &LuaTable, id: &str) -> LuaResult<(String, String)> {
     if let (Some(m), Some(c)) = (
-        bp.get::<Option<String>>("ScriptModule")?,
-        bp.get::<Option<String>>("ScriptClass")?,
+        bp.get::<Option<String>>("ScriptModule")?.filter(|s| !s.is_empty()),
+        bp.get::<Option<String>>("ScriptClass")?.filter(|s| !s.is_empty()),
     ) {
         return Ok((m, c));
     }
