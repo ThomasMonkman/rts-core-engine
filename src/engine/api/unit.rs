@@ -862,28 +862,46 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::Unit,
         /// Whether the unit can path to `goal` (a position or an entity's):
         /// the goal is in the unit's connected region for its footprint
-        /// class. One result, as moho's binding (MohoEngine.dll 0x102a9840;
-        /// FAF's AI also reads a second, always nil). Fliers: true
-        /// (inferred; FAF's AI doesn't ask them).
+        /// class (MohoEngine.dll 0x102a9840). A second value is a position,
+        /// as in the real game (dev/probes probe_unit_api `risky`,
+        /// probe_api_spot; FAF's AI reads it, `AI/aiutilities.lua:1434`):
+        /// the goal's cell centre on the ground when it can, else the last
+        /// open cell on the straight line towards the goal (inferred: the
+        /// real game's false cases were all on a unit's first tick).
+        /// Fliers: true and the goal (the real game's is NaN). A structure
+        /// takes the real game down; ours: true.
         CanPathTo = |lua, (this, goal): (Obj<moho::Unit>, shapes::OrderTarget)| {
         let id = entity_id(&this)?;
         let to = match crate::engine::api::command::target_of(&goal)? {
             crate::engine::sim::command::CommandTarget::Entity(e) => match world(lua).get(e) {
                 Some(e) => e.position(),
-                None => return Ok(false),
+                None => return Ok((false, None)),
             },
             crate::engine::sim::command::CommandTarget::Ground(p) => p,
-            _ => return Ok(false),
+            _ => return Ok((false, None)),
         };
         let (from, class) = {
             let w = world(lua);
-            let Some(e) = w.get(id) else { return Ok(false) };
-            let Some(u) = e.unit.as_deref() else { return Ok(false) };
-            let Some(mut nav) = lua.app_data_mut::<crate::engine::sim::nav::NavGrid>() else { return Ok(false) };
+            let Some(e) = w.get(id) else { return Ok((false, None)) };
+            let Some(u) = e.unit.as_deref() else { return Ok((false, None)) };
+            let Some(mut nav) = lua.app_data_mut::<crate::engine::sim::nav::NavGrid>() else { return Ok((false, None)) };
             (e.position(), crate::engine::sim::movement::nav_class(u, &nav).inspect(|&c| nav.ensure(c)))
         };
-        let Some(class) = class else { return Ok(true) };
-        Ok(lua.app_data_mut::<crate::engine::sim::nav::NavGrid>().is_some_and(|mut nav| nav.reachable(class, from, to)))
+        let Some(class) = class else { return Ok((true, Some(crate::engine::api::entity::vector(lua, to)?))) };
+        let (ok, (x, z)) = {
+            let Some(mut nav) = lua.app_data_mut::<crate::engine::sim::nav::NavGrid>() else { return Ok((false, None)) };
+            let ok = nav.reachable(class, from, to);
+            let spot = if ok {
+                let cell = nav.cell_for(class, to);
+                nav.point_of(class, cell)
+            } else {
+                let p = nav.clamp_along(class, from, to);
+                (p.x, p.z)
+            };
+            (ok, spot)
+        };
+        let y = lua.app_data_ref::<Terrain>().map_or(to.y, |t| t.height_at(x, z));
+        Ok((ok, Some(crate::engine::api::entity::vector(lua, FxVec3 { x, y, z })?)))
     })?;
     lua_method!(lua, moho::Unit,
         /// How many units the unit's queued factory and engineer build orders
