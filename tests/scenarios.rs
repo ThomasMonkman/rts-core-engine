@@ -1453,3 +1453,8 @@ fn projectile_lifetime() {
 fn can_fire_reload() {
     scenario("can_fire_reload", 100);
 }
+
+#[test]
+fn salvo_busy() {
+    scenario("salvo_busy", 160);
+}
