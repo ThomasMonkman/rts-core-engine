@@ -43,8 +43,8 @@ pub struct MovementScratch {
     landing_spots: crate::engine::sim::landing::LandingSpots,
 }
 
-/// Aircraft killed in the air, falling (sim state): unit -> its fall
-/// (`movement::crash_step`).
+/// Units falling (sim state): aircraft killed in the air and cargo let go
+/// above the ground, unit -> its fall (`movement::crash_step`).
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Falling(pub std::collections::BTreeMap<u32, movement::Fall>);
 
@@ -110,9 +110,28 @@ pub fn start_falling(lua: &Lua, unit: u32) {
     }
 }
 
-/// Moves falling dead aircraft; those that hit the ground or water take
-/// that layer (`OnLayerChange`), then get `OnImpact(with)` (moho's order,
-/// 0x1029eee6 then 0x1029f0c9: FAF's wreck and sinking read the layer).
+/// Cargo let go above the ground falls: moho's `Unit::DetachFrom` tells the
+/// motion (`CUnitMotion::NotifyDetached` 0x10298069), which goes ballistic
+/// with the velocity the carrier had. The real game's tanks, set down from
+/// a T1 transport hovering at 3.5, took 12 ticks to reach the ground
+/// (heights 3.00, 2.73, 2.43, 2.07, ...: 0.049 a tick each tick) and
+/// changed layer there; the dead cargo of a killed one flew on at the
+/// transport's 10.45 and hit the ground 16 ticks later (dev/probes
+/// probe_mov_air TR1, TR3). No tumble (not seen in the probe's positions;
+/// a live unit has to land upright). `velocity` is per tick.
+pub fn start_cargo_fall(lua: &Lua, unit: u32, velocity: FxVec3) {
+    if let Some(mut f) = lua.app_data_mut::<Falling>() {
+        f.0.insert(unit, movement::Fall { velocity, spin: crate::engine::sim::math::FxQuat::IDENTITY });
+    }
+}
+
+/// Moves falling units (dead aircraft, cargo let go in the air). A dead one
+/// that hits the ground or water takes that layer (`OnLayerChange`), then
+/// gets `OnImpact(with)` (moho's order, 0x1029eee6 then 0x1029f0c9: FAF's
+/// wreck and sinking read the layer). A live one (cargo set down) takes the
+/// layer its motion has there and is stood on the ground by the next
+/// movement pass; no `OnImpact`. (Moho also kills a live one that lands
+/// where it can't stand, 0x1029f094: not done, ours leaves it there.)
 fn crash_tick(lua: &Lua) -> LuaResult<()> {
     let mut landed = Vec::new();
     {
@@ -124,6 +143,15 @@ fn crash_tick(lua: &Lua) -> LuaResult<()> {
         movement::crash_step(&mut world, terrain.as_deref(), &mut falling.0, &mut landed);
     }
     for (unit, with) in landed {
+        let alive = {
+            let w = crate::engine::api::entity::world(lua);
+            w.get(unit).filter(|e| !e.cold.killed).map(|e| (e.unit.as_deref().map(|u| (u.motion_params.kind, u.motion_params.layer_change_offset)).unwrap_or_default(), e.position()))
+        };
+        if let Some(((kind, offset), p)) = alive {
+            let wet = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>().is_some_and(|t| t.water_surface.is_some_and(|w| crate::engine::sim::layer::wet(kind, t.height_at(p.x, p.z), w, offset)));
+            set_layer(lua, unit, crate::engine::sim::layer::Layer::for_motion(kind, wet))?;
+            continue;
+        }
         let layer = match with {
             movement::CrashSurface::Terrain => crate::engine::sim::layer::Layer::Land,
             movement::CrashSurface::Water => crate::engine::sim::layer::Layer::Water,
@@ -507,9 +535,10 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             candidates.dedup();
         }
         // Transports short of their flight height keep a movement tick: one
-        // on a load/unload order lowers to its `TransportHoverHeight`, one
-        // that just finished climbs back to its `Elevation` (moho's
-        // `ShouldHoverInsteadOfLand`, MohoEngine.dll 0x1029b210).
+        // on a load/unload order lowers to its `TransportHoverHeight` over
+        // the order's point, one that just finished climbs back to its
+        // `Elevation` (moho's `ShouldHoverInsteadOfLand`, MohoEngine.dll
+        // 0x1029b210).
         let terrain = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>();
         let before = candidates.len();
         candidates.extend(world.units().filter(|e| {
@@ -597,6 +626,11 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                 };
                 build_sites.push_first(u, (crate::engine::api::construction::snap_site(lua, bp, target)?, skirt));
             }
+        }
+        // Units in a fall don't drive or get stood on the ground: the fall
+        // moves them (`crash_tick`).
+        if let Some(falling) = lua.app_data_ref::<Falling>().filter(|f| !f.0.is_empty()) {
+            candidates.retain(|u| !falling.0.contains_key(u));
         }
         let _section = crate::prof_span!("movement step");
         let env = movement::Env { terrain: terrain.as_deref(), nav: nav.as_deref(), engaged: Some(&engaged), air_targets: Some(&air_targets), ground_targets: Some(&ground_targets), aim_ranges: Some(&aim_ranges), order_ranges: Some(&order_ranges), build_sites: Some(&build_sites), chases: Some(&chases), face: Some(&face), crowd: Some(avoidance.index()), flows: Some(flows), granted: None, tick: Some(crate::engine::api::sim_time::current_tick(lua)) };

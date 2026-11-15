@@ -24,14 +24,18 @@
 //!   once the transport is in reach (the passenger holds no order of its
 //!   own, so the beam-up refusal read off its load order doesn't apply).
 //! - Unloading: a transport whose current order is `TransportUnloadUnits`
-//!   flies to the point; there, each passenger (id order) is set down on the
-//!   ground under its slot and `transport:OnTransportDetach(bone, unit)`
-//!   runs; the order ends. `TransportUnloadSpecificUnits` unloads only cargo
+//!   flies to the point at its `Elevation` and comes down to its
+//!   `TransportHoverHeight` over it (movement); there, each passenger (id
+//!   order) is let go, `transport:OnTransportDetach(bone, unit)` runs, and
+//!   it falls to the ground under its slot ([`detach`]); the order ends. `TransportUnloadSpecificUnits` unloads only cargo
 //!   in the command's category (`IssueTransportUnloadSpecific`). With
 //!   nothing aboard (of that category) the order ends at once; a submerged
 //!   `SurfacingSub` surfaces before it sets off (moho's `CUnitUnloadUnits`).
 //! - Detaching: a passenger ordered out (`DetachFromTransport`) leaves the
-//!   transport at once, set down below, its order done.
+//!   transport at once and falls, its order done. Script's
+//!   `Entity:DetachFrom` on cargo does the same ([`script_detach`]): FAF
+//!   detaches a unit killed aboard that way, so a killed transport's cargo
+//!   (which FAF kills first) comes off it, falls and gets `OnImpact`.
 //! - Ferrying: a transport on a ferry route reads `Ferrying` and loops it
 //!   for as long as the order stands: to the beacon, picking up the units
 //!   waiting there, out along the route, unloading at its end, and back
@@ -523,12 +527,18 @@ fn bone_name(lua: &Lua, entity: EntityId, bone: u32) -> String {
     entity::world(lua).get(entity).and_then(|e| e.cold.skeleton.as_ref().and_then(|s| s.bones.get(bone as usize).map(|b| b.name.clone()))).unwrap_or_default()
 }
 
-/// Detaches `unit` from `transport`, sets it on the surface below, and runs
-/// the callbacks.
+/// Detaches `unit` from `transport` and runs the callbacks. An aircraft
+/// leaves a platform at its height and flies off. Anything else let go
+/// above the surface falls to it with the velocity the transport had
+/// (`movement::start_cargo_fall`), keeping the `Air` layer it rode in until
+/// it lands; on the surface already, it is set down at once and takes the
+/// layer of where it stands (after the detach callbacks, which expect the
+/// unit still airborne).
 fn detach(lua: &Lua, transport: EntityId, unit: EntityId) -> LuaResult<()> {
     end_service(lua, unit);
-    let bone = {
+    let (bone, drop) = {
         let mut w = entity::world(lua);
+        let carried = w.get(transport).filter(|t| !t.destroyed).map_or(FxVec3::default(), |t| crate::engine::sim::movement::flight_velocity(t, None));
         let Some(e) = w.get_mut(unit) else { return Ok(()) };
         let bone = e.attachment.and_then(|a| a.parent_bone);
         e.attachment = None;
@@ -536,12 +546,11 @@ fn detach(lua: &Lua, transport: EntityId, unit: EntityId) -> LuaResult<()> {
         let air = e.unit.as_deref().is_some_and(|u| u.motion_params.kind == crate::engine::sim::movement::MotionKind::Air);
         drop(w);
         let y = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>().map_or(p.y, |t| t.surface_at(p.x, p.z));
-        // Aircraft leave a platform at its height and fly off; ground units
-        // are put down.
-        if !air {
+        let falls = !air && p.y - y > Fx::from_num(0.1);
+        if !air && !falls {
             entity::world(lua).set_position(unit, FxVec3 { y, ..p });
         }
-        bone
+        (bone, falls.then_some(carried))
     };
     set_state(lua, unit, "Attached", false);
     set_state(lua, unit, "Refueling", false);
@@ -549,8 +558,12 @@ fn detach(lua: &Lua, transport: EntityId, unit: EntityId) -> LuaResult<()> {
     if let (Some(t), Some(u)) = (object(lua, transport)?, object(lua, unit)?) {
         UnitCallbacks::on_transport_detach(lua, &t, "unit", name, Obj::new(u))?;
     }
-    // Set down: back to the layer of where it landed (after the detach
-    // callbacks, which expect the unit still airborne).
+    if let Some(velocity) = drop {
+        if entity::world(lua).get(unit).is_some_and(|e| !e.destroyed && e.attachment.is_none()) {
+            crate::engine::api::movement::start_cargo_fall(lua, unit, velocity);
+        }
+        return Ok(());
+    }
     let (kind, offset, p) = match entity::world(lua).get(unit) {
         Some(e) => (e.unit.as_deref().map(|u| u.motion_params.kind).unwrap_or_default(), e.unit.as_deref().map_or(Fx::ZERO, |u| u.motion_params.layer_change_offset), e.position()),
         None => return Ok(()),
@@ -558,6 +571,38 @@ fn detach(lua: &Lua, transport: EntityId, unit: EntityId) -> LuaResult<()> {
     let wet = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>().is_some_and(|t| t.water_surface.is_some_and(|w| crate::engine::sim::layer::wet(kind, t.height_at(p.x, p.z), w, offset)));
     crate::engine::api::movement::set_layer(lua, unit, crate::engine::sim::layer::Layer::for_motion(kind, wet))?;
     Ok(())
+}
+
+/// The transport `unit` rides as cargo on one of its attach points: not a
+/// unit stored inside a carrier, on a factory's build bone, or on any
+/// other `AttachBoneTo` parent.
+fn carried_by(lua: &Lua, unit: EntityId) -> Option<EntityId> {
+    let w = entity::world(lua);
+    let e = w.get(unit)?;
+    let a = e.attachment?;
+    if e.unit.as_deref()?.stored_in.is_some() {
+        return None;
+    }
+    let parent = w.get(a.parent).filter(|p| !p.destroyed)?;
+    let carries = parent.unit.as_deref()?.blueprint_command_caps & 0x100 != 0 || parent.unit.as_deref()?.staging.is_some();
+    let slot = parent.cold.skeleton.as_ref()?.bones.get(a.parent_bone? as usize).is_some_and(|b| slot_class(&b.name).is_some());
+    (carries && slot).then_some(a.parent)
+}
+
+/// `Entity:DetachFrom` on a transport's cargo: the transport hears
+/// `OnTransportDetach(bone, unit)` and the unit falls (unless
+/// `skip_ballistic`: it stays where it was let go). So a unit killed aboard
+/// leaves its transport: FAF's `OnAttachedKilled` detaches it, and the real
+/// game's log reads `OnTransportDetach`, `OnDetachedFromTransport`, then
+/// the cargo's `OnKilled` (dev/probes probe_mov_air TR3); ours left the
+/// dead cargo attached, with no callbacks. False: not cargo, nothing done.
+pub(crate) fn script_detach(lua: &Lua, unit: EntityId, skip_ballistic: bool) -> LuaResult<bool> {
+    let Some(transport) = carried_by(lua, unit) else { return Ok(false) };
+    detach(lua, transport, unit)?;
+    if skip_ballistic && let Some(mut f) = lua.app_data_mut::<crate::engine::api::movement::Falling>() {
+        f.0.remove(&unit);
+    }
+    Ok(true)
 }
 
 /// A transport's real unit passengers, id order. Plain `AttachTo` children

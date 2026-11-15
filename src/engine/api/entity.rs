@@ -654,7 +654,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         })?;
     lua_method!(lua, moho::Entity,
         /// Detaches this entity from what it is attached to.
-        DetachFrom = |lua, (this, _skip_ballistic): (Obj<moho::Entity>, Option<bool>)| {
+        ///
+        /// A transport's cargo leaves it as an unload does: the transport
+        /// hears `OnTransportDetach` and the unit falls from where it was
+        /// (`skipBallistic`: it doesn't), `transport::script_detach`.
+        DetachFrom = |lua, (this, skip_ballistic): (Obj<moho::Entity>, Option<bool>)| {
+            if crate::engine::api::transport::script_detach(lua, entity_id(&this)?, skip_ballistic.unwrap_or(false))? {
+                return Ok(());
+            }
             let parent = with_entity_mut(lua, &this, |e| e.attachment.take().map(|a| a.parent))?;
             take_off(lua, entity_id(&this)?, parent)
         })?;
