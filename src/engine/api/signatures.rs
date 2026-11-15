@@ -10,7 +10,8 @@
 //! its closure's). When you implement a stub, its closure's types replace
 //! the signature and `tests/api_types.rs` asks you to delete it here.
 //! Globals both VMs have (FAF's `Core.lua`) are here; the user VM's own are
-//! in `src/ui/signatures.rs`.
+//! in `src/ui/signatures.rs`. Argument counts follow the real game's
+//! bindings where dev/probes `probe_api_arity` measured them.
 
 #![allow(unused_imports)]
 
@@ -26,15 +27,16 @@ use crate::lua_api::{Obj, signatures};
 signatures! {
     global {
         BeginLoggingStats(filename: String);
-        CoordinateAttacks();
+        CoordinateAttacks(units: LuaValue);
         CreateUnit2(blueprint_id: String, army: Army, layer: Layer, x: f64, z: f64, heading: f64) -> Obj<moho::Unit>;
         EndGame();
         EndLoggingStats(exit: Option<bool>);
-        EntityCategoryCountAroundPosition(category: EntityCategory, position: Vector) -> f64;
+        EntityCategoryCountAroundPosition(category: EntityCategory, position: Vector, radius: f64, army: LuaValue) -> f64;
         EntityCategoryEmpty(category: EntityCategory) -> bool;
         GenerateRandomOrientation() -> Quaternion;
         GetBlueprint(object: LuaValue) -> Blueprint;
         GetEntitiesInRect(rectangle: Rect) -> Option<Vec<Obj<moho::Entity>>>;
+        GetEntitiesInRect(x0: f64, z0: f64, x1: f64, z1: f64) -> Option<Vec<Obj<moho::Entity>>>;
         GetReclaimablesInRect(rectangle: Rect) -> Option<LuaTable>;
         GetReclaimablesInRect(x0: f64, z0: f64, x1: f64, z1: f64) -> Option<LuaTable>;
         GetUnitsInRect(rectangle: Rect) -> Option<Vec<Obj<moho::Unit>>>;
@@ -42,18 +44,18 @@ signatures! {
         LUnitMove(unit: Obj<moho::Unit>, target: Vector);
         LUnitMoveNear(unit: Obj<moho::Unit>, target: Vector, range: f64);
         MetaImpact(instigator: Obj<moho::Unit>, location: Vector, max_radius: f64, amount: f64, affects_category: Option<EntityCategory>, damage_friendly: Option<bool>);
-        PlayLoop(manager: LuaValue, sound: SoundHandle) -> SoundHandle;
+        PlayLoop(sound: SoundHandle) -> SoundHandle;
         PointVector(px: f64, py: f64, pz: f64, vx: f64, vy: f64, vz: f64) -> (Vector, Vector);
         RPCSound(sound: LuaTable);
         LOG(out: LuaValue, rest: mlua::Variadic<LuaValue>);
         SPEW(out: LuaValue, rest: mlua::Variadic<LuaValue>);
         SelectedUnit() -> Obj<moho::Unit>;
-        SetAlliedVictory(state: bool);
+        SetAlliedVictory(army: Army, state: bool);
         SetArmyStatsSyncArmy(army: Army);
         SetTerrainType(x: f64, z: f64, type_: LuaTable);
         SetTerrainTypeRect(rect: Rect, type_: LuaTable);
         SimConExecute(command: String);
-        StopLoop(manager: LuaValue, handle: SoundHandle);
+        StopLoop(handle: SoundHandle);
         WaitFor(object: LuaValue);
         SubmitXMLArmyStats();
         Trace(enable: bool);

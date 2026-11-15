@@ -256,6 +256,11 @@ fn order_states() {
 }
 
 #[test]
+fn arity_lenient() {
+    scenario("arity_lenient", 10);
+}
+
+#[test]
 fn reclaim_unit() {
     scenario("reclaim_unit", 1200);
 }

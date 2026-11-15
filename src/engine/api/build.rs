@@ -688,9 +688,12 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// template's squads (`{ name, plan, { unitId, min, max, squad, formation }, ... }`);
         /// nil if none can. A template that isn't a table gives nil (LOUD
         /// passes `false` for a faction's empty template), as moho's
-        /// (MohoEngine.dll 0x1017d514: not `IsTable`, `PushNil`).
-        CanBuildPlatoon = |lua, (_brain, template, factories): (Obj<moho::AIBrain>, shapes::Loose<shapes::PlatoonTemplate>, shapes::List<Obj<moho::Unit>>)| {
+        /// (MohoEngine.dll 0x1017d514: not `IsTable`, `PushNil`). `factories`
+        /// is optional, as in the real game's binding (2..3 arguments,
+        /// dev/probes probe_api_arity); without it, nil (inferred).
+        CanBuildPlatoon = |lua, (_brain, template, factories): (Obj<moho::AIBrain>, shapes::Loose<shapes::PlatoonTemplate>, Option<shapes::List<Obj<moho::Unit>>>)| {
             let LuaValue::Table(template) = template.into_inner() else { return Ok(None) };
+            let Some(factories) = factories else { return Ok(None) };
             let mut ids = Vec::new();
             for line in template.sequence_values::<LuaValue>().skip(2) {
                 if let LuaValue::Table(line) = line?
