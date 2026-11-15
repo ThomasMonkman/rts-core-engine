@@ -1324,7 +1324,7 @@ fn update_ui(s: &mut RenderState, dt: f32) {
             s.player.selection = std::mem::take(&mut s.pending_select);
         }
         if let Some(code) = s.pending_ui_lua.take()
-            && let Err(e) = vm.lua().load(code.as_str()).set_name("=--ui-lua").exec() {
+            && let Err(e) = rts_core_engine::ui::run_source(vm.lua(), &code, "=--ui-lua") {
             tracing::warn!(target: "lua", "--ui-lua failed: {e}");
         }
     }

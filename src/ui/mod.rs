@@ -2053,6 +2053,14 @@ impl UserVm {
     }
 }
 
+/// Runs interface Lua that isn't in the VFS (the console's `ui_lua`,
+/// `--ui-lua`): translated from SupCom Lua first, as every game script is
+/// (docs/architecture/lua-bridge.md), so it sees the same dialect as FAF's.
+pub fn run_source(lua: &Lua, code: &str, name: &str) -> LuaResult<()> {
+    let code = crate::engine::lua_translation::translate(code);
+    lua.load(code).set_name(name).exec()
+}
+
 /// Runs a console command line in the user layer (see [`UserVm::console`]);
 /// FAF's `ConExecute` comes here too.
 pub fn console(lua: &Lua, line: &str) -> LuaResult<()> {
@@ -2060,10 +2068,7 @@ pub fn console(lua: &Lua, line: &str) -> LuaResult<()> {
     let (cmd, rest) = line.split_once(char::is_whitespace).map_or((line, ""), |(c, r)| (c, r.trim()));
     let import = || -> LuaResult<LuaFunction> { lua.globals().get("import") };
     match cmd.to_ascii_lowercase().as_str() {
-        "ui_lua" => {
-            let code = crate::engine::lua_translation::translate(rest);
-            lua.load(code).set_name("=[console]").exec()?;
-        }
+        "ui_lua" => run_source(lua, rest, "=[console]")?,
         // Alt-F2 (`debug_create_unit`): FAF's spawn menu, opened or closed
         // (MohoEngine.dll imports `/lua/ui/dialogs/createunit.lua`; the sim
         // checks cheats when a spawn arrives).
@@ -2109,6 +2114,15 @@ pub fn console(lua: &Lua, line: &str) -> LuaResult<()> {
 mod tests {
     use super::*;
     use crate::engine::sim::command::CommandKind as K;
+
+    /// `--ui-lua` and the console's `ui_lua` take SupCom Lua (`!=`, `#`
+    /// comments, bit operators), like any game script.
+    #[test]
+    fn run_source_translates_supcom_lua() {
+        let lua = Lua::new();
+        run_source(&lua, "# comment\nr = (1 != 2) and (6 & 3)", "=test").unwrap();
+        assert_eq!(lua.globals().get::<i64>("r").unwrap(), 2);
+    }
 
     #[test]
     fn transport_order_names_round_trip() {
