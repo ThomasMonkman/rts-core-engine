@@ -1555,7 +1555,7 @@ fn advance_target(
                 // `IsSeenEver` holds, MohoEngine.dll 0x101c5152 ->
                 // 0x10169500, 0x101c51c6).
                 let identified = || match (intel, army) {
-                    (Some(g), Some(a)) => g.ever_seen(a, id) || g.detect(a, e).seen,
+                    (Some(g), Some(a)) => g.ever_seen(a, id) || g.detect(a, e).eyes(),
                     _ => true,
                 };
                 let score = match barrel {

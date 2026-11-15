@@ -282,7 +282,7 @@ fn destroy_dying(lua: &Lua) -> LuaResult<()> {
         let seen: Vec<bool> = match lua.app_data_ref::<IntelGrids>() {
             Some(g) => entries
                 .iter()
-                .map(|&(_, army, x, z)| g.detection(army, crate::engine::sim::math::FxVec3 { x, y: crate::engine::sim::math::Fx::ZERO, z }, crate::engine::sim::layer::Layer::Land).seen)
+                .map(|&(_, army, x, z)| g.detection(army, crate::engine::sim::math::FxVec3 { x, y: crate::engine::sim::math::Fx::ZERO, z }, crate::engine::sim::layer::Layer::Land).eyes())
                 .collect(),
             None => vec![true; entries.len()],
         };
@@ -315,7 +315,8 @@ fn destroy_dying(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
-/// What `army` knows of `unit` now, and whether it has ever seen it.
+/// What `army` knows of `unit` now, and whether it has ever seen it
+/// optically (`IsSeenEver`: omni doesn't count, probe_intel_jam).
 fn knowledge(lua: &Lua, army: u32, unit: EntityId) -> (Detection, bool) {
     let w = world(lua);
     let Some(e) = w.get(unit).filter(|e| !e.destroyed) else { return (Detection::default(), false) };
@@ -331,7 +332,7 @@ fn knowledge(lua: &Lua, army: u32, unit: EntityId) -> (Detection, bool) {
         return (Detection { seen: true, ..Default::default() }, true);
     };
     let now = grids.detect(army, e);
-    (now, now.seen || grids.ever_seen(army, unit))
+    (now, now.seen || grids.ever_seen_optically(army, unit))
 }
 
 fn is_structure(lua: &Lua, unit: EntityId) -> bool {
@@ -433,8 +434,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         GetBlip = |lua, (this, army): (Obj<moho::Unit>, shapes::Army)| {
             let id = entity_id(&this)?;
             let army = resolve_army(lua, &army)?;
-            let (now, ever) = knowledge(lua, army, id);
-            if !now.any() && !(ever && is_structure(lua, id)) {
+            let (now, _) = knowledge(lua, army, id);
+            let sighted = || lua.app_data_ref::<IntelGrids>().is_none_or(|g| g.ever_seen(army, id));
+            if !now.any() && !(is_structure(lua, id) && sighted()) {
                 return Ok(None);
             }
             let blip = blip_object(lua, &blips(lua)?, &blip_class(lua)?, army, id)?;

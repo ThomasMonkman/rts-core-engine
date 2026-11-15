@@ -99,7 +99,7 @@ const FOG_PARALLEL_MIN: usize = 8192;
 
 /// Eyes (vision, water vision or omni) on `p` for `army`'s side.
 fn eyes_on(grids: &IntelGrids, army: u32, p: FxVec3) -> bool {
-    grids.detection(army, p, Layer::Land).seen || grids.detection(army, p, Layer::Sub).seen
+    grids.detection(army, p, Layer::Land).eyes() || grids.detection(army, p, Layer::Sub).eyes()
 }
 
 /// Cuts `snap` down to what `view` knows and adds its fog texture changes.
@@ -221,7 +221,7 @@ fn filter_entities(world: &EntityWorld, grids: &IntelGrids, army: u32, side: &(d
             return eyes_on(grids, army, e.position());
         }
         let Some(d) = d else { return false };
-        if d.seen {
+        if d.eyes() {
             if v.kind == ViewKind::Structure {
                 let remembered = EntityView { pose_start: 0, pose_len: 0, sighting: Sighting::Remembered, ..*v };
                 fog.memory.insert(v.id, (remembered, now));
@@ -239,6 +239,7 @@ fn filter_entities(world: &EntityWorld, grids: &IntelGrids, army: u32, side: &(d
         // A contact seen before keeps its identity (probe_intel_icons: its
         // full icon in army colour); one never seen is a plain blip.
         if d.any() && v.kind != ViewKind::Dying {
+            // (Under omni it's eyes: shown as seen above.)
             let sighting = if grids.ever_seen(army, v.id) { Sighting::Identified } else { Sighting::Blip };
             *v = EntityView { pose_start: 0, pose_len: 0, sighting, ..*v };
             return true;

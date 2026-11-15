@@ -435,7 +435,8 @@ snapshot is cut down at publish time (`engine/snapshot/fog.rs`, read-only
 over the sim's intel grids) to what that army's side knows:
 
 - own and allied entities as they are; props always;
-- enemy units seen now (vision, water vision, omni, through cloak rules) as
+- enemy units seen now (vision, water vision, or omni: omni isn't "seen"
+  for scripts but is eyes here, unverified; through cloak rules) as
   they are; radar / sonar contacts it doesn't see as **blips**
   (`Sighting::Blip`): no mesh, never handed to the interface (no
   `GetUnitById`, selection data, rollover, range rings, health bar), drawn

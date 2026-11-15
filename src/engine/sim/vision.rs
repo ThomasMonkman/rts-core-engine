@@ -15,7 +15,12 @@
 //! (including itself) does. Detection of a unit by an army
 //! ([`IntelGrids::detect`]):
 //! - seen: vision (above water) or water vision (in water layers), unless
-//!   the unit is cloaked; omni always sees;
+//!   the unit is cloaked. Omni is not seeing (probe_intel_jam: a unit under
+//!   omni only is `IsOnOmni`, never `IsSeenNow` / `LOSNow`), but the engine
+//!   treats it as eyes on the unit ([`Detection::eyes`]): it's shown as
+//!   seen, weapons may target it, it counts as sighted for structure memory;
+//!   only the script-facing seen state (`IsSeenNow`, `IsSeenEver`, `LOSNow`
+//!   changes) is optical;
 //! - on radar: radar, if the unit is above water and not radar-stealthed;
 //! - on sonar: sonar, if it's in water and not sonar-stealthed.
 //! A unit is cloaked / stealthed by its own `Cloak` / `RadarStealth` /
@@ -211,6 +216,7 @@ struct Stamp {
 /// What an army knows of a unit right now.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Detection {
+    /// Seen optically (vision / water vision, not cloaked): `IsSeenNow`.
     pub seen: bool,
     pub radar: bool,
     pub sonar: bool,
@@ -253,6 +259,13 @@ impl Detection {
     /// The army has any intel on the unit (a blip exists).
     pub fn any(self) -> bool {
         self.seen || self.radar || self.sonar || self.omni
+    }
+
+    /// Seen or under omni: what the engine treats as eyes on the unit
+    /// (shown identified, targetable, sighted), as distinct from the
+    /// optical `seen` scripts get.
+    pub fn eyes(self) -> bool {
+        self.seen || self.omni
     }
 }
 
@@ -448,9 +461,10 @@ pub struct IntelGrids {
     cover: [Vec<u64>; 8],
     /// Per army: the armies whose intel it gets (`allies` transposed).
     shared_by: Vec<u64>,
-    /// Units some enemy has seen (seen, not just radar): the armies that
-    /// have, as a mask. Lookups only.
-    seen_ever: BTreeMap<EntityId, u64>,
+    /// Units some enemy has had eyes on (seen or omni, not just radar):
+    /// the armies that have, as a mask; and those that have seen it
+    /// optically (`IsSeenEver`). Lookups only.
+    seen_ever: BTreeMap<EntityId, (u64, u64)>,
     /// Units with their own cloak / stealth on, sorted (refreshed per
     /// update, so detection needn't read cold entity data).
     own_flags: Vec<(EntityId, u8)>,
@@ -910,7 +924,7 @@ impl IntelGrids {
         let omni = s(IntelType::Omni);
         let optical = if under { s(IntelType::WaterVision) } else { s(IntelType::Vision) || (wet && s(IntelType::WaterVision)) };
         Detection {
-            seen: omni || (optical && hidden & CLOAK == 0),
+            seen: optical && hidden & CLOAK == 0,
             radar: !under && hidden & RADAR_STEALTH == 0 && s(IntelType::Radar),
             sonar: wet && hidden & SONAR_STEALTH == 0 && s(IntelType::Sonar),
             omni,
@@ -1015,9 +1029,14 @@ impl IntelGrids {
         }
     }
 
-    /// Whether `army` has ever seen `unit` (with vision or omni).
+    /// Whether `army` has ever had eyes on `unit` (vision or omni).
     pub fn ever_seen(&self, army: u32, unit: EntityId) -> bool {
-        self.seen_ever.get(&unit).is_some_and(|m| m & (1 << army.min(MAX_ARMIES)) != 0)
+        self.seen_ever.get(&unit).is_some_and(|m| m.0 & (1 << army.min(MAX_ARMIES)) != 0)
+    }
+
+    /// Whether `army` has ever seen `unit` optically (`IsSeenEver`).
+    pub fn ever_seen_optically(&self, army: u32, unit: EntityId) -> bool {
+        self.seen_ever.get(&unit).is_some_and(|m| m.1 & (1 << army.min(MAX_ARMIES)) != 0)
     }
 
     /// The armies detecting `e` now by each [`Recon`] (as `detect` would
@@ -1043,8 +1062,8 @@ impl IntelGrids {
         let sonar = if wet { at(IntelType::Sonar) } else { 0 };
         // Counter-intel only matters where some sensor could see it (it's
         // rare, so `hidden` only runs then).
-        let hidden = if (optical & !omni) | radar | sonar != 0 { self.hidden(e) } else { 0 };
-        let seen = omni | if hidden & CLOAK == 0 { optical } else { 0 };
+        let hidden = if optical | radar | sonar != 0 { self.hidden(e) } else { 0 };
+        let seen = if hidden & CLOAK == 0 { optical } else { 0 };
         let radar = if hidden & RADAR_STEALTH == 0 { radar } else { 0 };
         let sonar = if hidden & SONAR_STEALTH == 0 { sonar } else { 0 };
         // Every army sharing intel with one of those knows it too.
@@ -1152,10 +1171,12 @@ impl IntelGrids {
                     }
                 }
             }
-            if after[0] != 0 {
-                let ever = self.seen_ever.entry(id).or_insert(0);
-                let mut new = after[0] & !*ever;
-                *ever |= after[0];
+            let eyes = after[0] | after[3];
+            if eyes != 0 {
+                let (ever, optical) = self.seen_ever.entry(id).or_insert((0, 0));
+                *optical |= after[0];
+                let mut new = eyes & !*ever;
+                *ever |= eyes;
                 while new != 0 {
                     let b = new.trailing_zeros();
                     new &= new - 1;
@@ -1408,7 +1429,11 @@ mod tests {
         give(&mut w, eye, IntelType::Omni, 20.0);
         g.update(&w, |_| None);
         let d = g.detect(1, w.get(ghost).unwrap());
-        assert!(d.seen && d.omni, "omni counters cloak");
+        assert!(d.omni && d.eyes(), "omni counters cloak");
+        assert!(!d.seen, "but doesn't see it (probe_intel_jam: no IsSeenNow under omni)");
+        assert!(g.ever_seen(1, ghost) && !g.ever_seen_optically(1, ghost), "sighted, never seen");
+        assert!(g.changes.iter().any(|c| c.unit == ghost && c.recon == Recon::Omni && c.on), "Omni on");
+        assert!(!g.changes.iter().any(|c| c.unit == ghost && c.recon == Recon::LosNow), "no LOSNow under omni");
     }
 
     #[test]
