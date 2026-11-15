@@ -49,6 +49,7 @@ The interface is told every frame, the sim before each tick (but not in a networ
 | `a != b` | only `~=` | `!=` → `~=` (`neq.rs`; a plain text replace, so it would also change a `!=` inside a string. FAF has none) |
 | `{&N &M}` (table pre-size hints) | not valid | stripped to `{}` (`prealloc.rs`) |
 | `&`, `\|`, `~`, `<<`, `>>` | no bitwise operators | `bit32.band`, `bor`, `bxor`, `lshift`, `rshift` (`bitwise.rs`, parsed with `full_moon` as Lua 5.3 + Luau) |
+| `a ^ b` is XOR (moho's patch; power is `math.pow`). FAF's `x ^ 0` truncates | power | `bit32.bxor(a, b)` (`bitwise.rs`), keeping `^`'s precedence (above unary minus) |
 | implicit `arg` table in `function(...)` | no such local | `local arg = table.pack(...)`, only where `arg` is used (`vararg.rs`) |
 | `for k, v in t do` over a table (5.0) | calls the table if it has `__call` (FAF classes do) | `for k, v in __forin(t)`, which iterates tables with `next` (`forin.rs`) |
 | `continue` | native | unchanged |
