@@ -96,16 +96,37 @@ fn terrain(lua: &Lua) -> LuaResult<mlua::AppDataRef<'_, Terrain>> {
     lua.app_data_ref::<Terrain>().ok_or_else(|| LuaError::runtime("no map loaded"))
 }
 
+/// How far above the ground a `'none'` line in `CheckBlockingTerrain` has to
+/// be cut by the terrain to count as blocked, inferred: in the real game
+/// (dev/probes probe_ai_brain, ends at ground height on SCMP_009) a 20-unit
+/// flat line and a long one whose ground rises at most 0.37 over the chord
+/// are clear, lines with 0.99, 4.5, 8.9 and 12.8 blocked. Ours took any
+/// rise, so every line on real ground was blocked.
+const BLOCKING_LIFT: crate::engine::sim::math::Fx = crate::engine::sim::math::Fx::lit("0.5");
+
 fn register_blocking(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::AIBrain,
-        /// Whether terrain blocks a shot from `from` to `to` (positions);
-        /// `arc` is the fire arc (`"none"` by default).
+        /// Whether terrain blocks a shot from `from` to `to` (positions) with fire arc `arc`
+        /// (`'none'`, `'low'`, `'high'`, any case; none if missing). `'none'` is the straight
+        /// segment test (`Terrain::blocks_fire`) with both ends lifted by [`BLOCKING_LIFT`]; an
+        /// unknown arc never blocks (dev/probes probe_ai_brain: 'bogus' false on every line).
         CheckBlockingTerrain = |lua, (_brain, from, to, arc): (Obj<moho::AIBrain>, shapes::Vector, shapes::Vector, Option<String>)| {
+            use crate::engine::sim::terrain::FireArc;
             let v = |t: &LuaTable| -> LuaResult<crate::engine::sim::math::FxVec3> {
                 Ok(crate::engine::sim::math::FxVec3::from_f64(t.raw_get(1)?, t.raw_get(2)?, t.raw_get(3)?))
             };
-            let arc = crate::engine::sim::terrain::FireArc::parse(arc.as_deref().unwrap_or("none"));
-            Ok(terrain(lua)?.blocks(v(&from)?, v(&to)?, arc))
+            let (from, to) = (v(&from)?, v(&to)?);
+            let t = terrain(lua)?;
+            let lift = |mut p: crate::engine::sim::math::FxVec3| {
+                p.y += BLOCKING_LIFT;
+                p
+            };
+            Ok(match arc.as_deref().map(str::to_ascii_lowercase).as_deref() {
+                None | Some("none") => t.blocks_fire(lift(from), lift(to), FireArc::None),
+                Some("low") => t.blocks(from, to, FireArc::Low),
+                Some("high") => t.blocks(from, to, FireArc::High),
+                Some(_) => false,
+            })
         })
 }
 

@@ -179,6 +179,11 @@ fn max_health() {
 }
 
 #[test]
+fn blocking_terrain() {
+    scenario("blocking_terrain", 20);
+}
+
+#[test]
 fn platoon_find_intel() {
     scenario("platoon_find_intel", 60);
 }
