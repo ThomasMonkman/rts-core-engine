@@ -179,6 +179,11 @@ fn max_health() {
 }
 
 #[test]
+fn threat_external_factory() {
+    scenario("threat_external_factory", 60);
+}
+
+#[test]
 fn brain_factories() {
     scenario("brain_factories", 40);
 }

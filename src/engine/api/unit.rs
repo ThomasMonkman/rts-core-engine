@@ -310,6 +310,13 @@ fn unit_threat(lua: &Lua, bp: &LuaTable, category_index: Option<u32>) -> LuaResu
         (Some(i), Some(set)) => set.contains(i),
         _ => false,
     };
+    // An external factory (FAF's helper unit attached to a Fatboy, carrier
+    // or Atlantis, `<id>ef` with category EXTERNALFACTORYUNIT) adds nothing:
+    // in the real game the Fatboy's cell reads 993.36 Overall, without the
+    // helper's 2000 EconomyThreatLevel (dev/probes probe_ai_threat).
+    if is("EXTERNALFACTORYUNIT") {
+        return Ok([Fx::ZERO; crate::engine::sim::threat::THREAT_TYPES]);
+    }
     let kinds = ThreatKinds {
         structure: is("STRUCTURE"),
         mass_extraction: is("MASSEXTRACTION"),
