@@ -196,12 +196,23 @@ pub struct ProjectileState {
     pub reports_to: Option<u32>,
 }
 
-/// Seconds -> whole ticks (rounded up, so a lifetime never ends early).
+/// Seconds -> whole ticks (rounded up, so a wait never ends early).
 pub fn seconds_to_ticks(seconds: Fx) -> u32 {
     if seconds <= Fx::ZERO {
         return 0;
     }
     (seconds * Fx::from_num(TICKS_PER_SECOND)).ceil().saturating_to_num::<u32>()
+}
+
+/// Seconds -> ticks a projectile lifetime lasts: ceil(10 L + 0.5), so the expiry
+/// impact comes half a tick or more after the time is up (`probe_wpn_proj`,
+/// `probe_wpn_misc2`: `SetLifetime(1.0)` ends at tick 11, 2.5 s at 26, 0.25 s
+/// at 3, 0 at 1; a weapon shot of 0.854 s at 10).
+pub fn lifetime_to_ticks(seconds: Fx) -> u32 {
+    if seconds < Fx::ZERO {
+        return 0;
+    }
+    (seconds * Fx::from_num(TICKS_PER_SECOND) + Fx::from_num(0.5)).ceil().saturating_to_num::<u32>()
 }
 
 impl ProjectileState {
@@ -215,7 +226,7 @@ impl ProjectileState {
     }
 
     pub fn set_lifetime(&mut self, seconds: Option<Fx>) {
-        self.lifetime_ticks = seconds.map(seconds_to_ticks);
+        self.lifetime_ticks = seconds.map(lifetime_to_ticks);
     }
 
     pub fn new(id: EntityId, launcher: Option<EntityId>, t: &ProjectileTemplate, velocity: FxVec3) -> Self {
@@ -227,7 +238,7 @@ impl ProjectileState {
             acceleration: t.acceleration,
             ballistic_acceleration: if t.use_gravity { default_gravity() } else { Fx::ZERO },
             max_speed: t.max_speed,
-            lifetime_ticks: t.lifetime.map(seconds_to_ticks),
+            lifetime_ticks: t.lifetime.map(lifetime_to_ticks),
             collide_entity: t.collide_entity,
             collide_surface: t.collide_surface,
             destroy_on_water: t.destroy_on_water,
@@ -1203,6 +1214,9 @@ mod tests {
         // the mean (1.5 u/s), then 2 u/s for 3 ticks.
         let z = w.get(id).unwrap().position().z;
         assert!((z.to_num::<f64>() - 0.75).abs() < 1e-6, "{z}");
+        // 0.5 s lasts ceil(5 + 0.5) = 6 ticks: nothing on the 5th.
+        step(&mut ps, &mut w, Env::default(), &mut out);
+        assert!(out.is_empty());
         step(&mut ps, &mut w, Env::default(), &mut out);
         assert_eq!(out, vec![Impact { id, kind: ImpactKind::Air, target: None }]);
     }
@@ -1521,7 +1535,12 @@ mod tests {
     #[test]
     fn lifetime_rounds_up_to_whole_ticks() {
         assert_eq!(seconds_to_ticks(Fx::from_num(32)), 320);
-        assert_eq!(seconds_to_ticks(Fx::from_num(0.05)), 1);
         assert_eq!(seconds_to_ticks(Fx::ZERO), 0);
+        assert_eq!(lifetime_to_ticks(Fx::from_num(32)), 321);
+        assert_eq!(lifetime_to_ticks(Fx::from_num(1)), 11);
+        assert_eq!(lifetime_to_ticks(Fx::from_num(0.25)), 3);
+        assert_eq!(lifetime_to_ticks(Fx::from_num(0.854)), 10);
+        assert_eq!(lifetime_to_ticks(Fx::from_num(0.04)), 1);
+        assert_eq!(lifetime_to_ticks(Fx::ZERO), 1);
     }
 }

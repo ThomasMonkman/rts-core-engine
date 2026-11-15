@@ -66,7 +66,12 @@ fn parse_template(lua: &Lua, bp: &LuaTable) -> LuaResult<ProjectileTemplate> {
         rotational_velocity_range: num("RotationalVelocityRange")?,
         position: FxVec3 { x: num("PositionX")?, y: num("PositionY")?, z: num("PositionZ")? },
         position_range: FxVec3 { x: num("PositionXRange")?, y: num("PositionYRange")?, z: num("PositionZRange")? },
-        lifetime: positive(num("Lifetime")?),
+        // No `Lifetime`: moho fills in 15 s (`probe_wpn_misc2`: `life bp
+        // Lifetime 15`, `life.default OnImpact(Air) tick+151`).
+        lifetime: match p.get::<Option<f64>>("Lifetime")? {
+            None => Some(Fx::from_num(15)),
+            Some(_) => positive(num("Lifetime")?),
+        },
         collide_entity: default_on("CollideEntity")?,
         collide_surface: default_on("CollideSurface")?,
         destroy_on_water: flag("DestroyOnWater")?,

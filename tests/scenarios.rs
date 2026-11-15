@@ -1443,3 +1443,8 @@ fn damage_area_self() {
 fn ground_contact() {
     scenario("ground_contact", 40);
 }
+
+#[test]
+fn projectile_lifetime() {
+    scenario("projectile_lifetime", 200);
+}
