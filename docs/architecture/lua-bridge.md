@@ -21,7 +21,7 @@ VFS file ──▶ hooks appended ──▶ translated ──▶ compiled ──
 3. **Compile** (`ScriptCache`, `src/engine/lua/script_cache.rs`): Luau bytecode per path. At startup a background thread translates and compiles every `.lua` / `.bp` in parallel on rayon, in the order Lua will ask for them. On a miss, the VM compiles inline. Compiling is deterministic, so if both race they produce the same bytes.
 4. **Load**: `lua.load(bytecode)`, bound to `env` if one is given. The chunk then runs from a tiny Luau wrapper, not from Rust, so script errors stay plain Lua values, and nested `doscript`s don't stack Rust frames or hold the VFS lock.
 
-A file that's missing does nothing. One that doesn't compile is skipped with a warning, as moho's `SCR_LuaDoFileConcat` does: FAF's map scan relies on that.
+A file that's missing raises `Unable to find file <path>`, as the real `doscript` does (so FAF's `import` of a missing module raises `Error importing`). One that doesn't compile is skipped with a warning, as moho's `SCR_LuaDoFileConcat` does: FAF's map scan relies on that.
 
 **The rule: never `lua.load` game source yourself.** Go through `doscript` (or `ScriptCache`), or the script misses the translation, the hooks, the mod hooks and the cache. Lua that isn't in the VFS translates itself before loading: the init file and the init VM's `dofile` (real files), `Game.prefs` (`ui/prefs.rs`), and the console's `ui_lua` and `--ui-lua` (`ui::run_source`). Engine-written Lua (the chunks in `src/`, `--script` files) is plain Luau and isn't translated.
 
