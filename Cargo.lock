@@ -5037,6 +5037,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "skrifa",
  "socket2",
  "sysinfo",
  "texpresso",

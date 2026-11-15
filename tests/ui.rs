@@ -2702,3 +2702,49 @@ fn bitmaps_leave_out_the_texture_border() {
     assert_eq!(rect, [10.0, 20.0, 72.0, 82.0]);
     assert_eq!(uv, [1.0 / 64.0, 1.0 / 64.0, 63.0 / 64.0, 63.0 / 64.0], "its inner 62 x 62 pixels");
 }
+
+/// Text measures in whole pixels as moho does (`probe_ui_controls` text):
+/// the `hdmx` / `VDMX` tables where the font has them, full-hinted advances
+/// where it doesn't (Arial 14, 18), no kerning, control characters take no
+/// room, "Arial Gras" is plain Arial and size 0 is a 20-pixel em.
+#[test]
+fn text_measures_like_moho() {
+    let Some(vm) = vm() else { return };
+    let got: Vec<String> = vm
+        .lua()
+        .load(
+            r#"
+            local Text = import('/lua/maui/text.lua').Text
+            local t = Text(GetFrame(0))
+            local out = {}
+            local function m(family, size)
+                t:SetFont(family, size)
+                t:SetText('Hello World')
+                table.insert(out, string.format('%s %g: %d %d %d M%d AV%d long%d', family, size, t.FontAscent(), t.FontDescent(), t.TextAdvance(),
+                    t:GetStringAdvance('M'), t:GetStringAdvance('AV'), t:GetStringAdvance('The quick brown fox jumps over the lazy dog')))
+            end
+            m('Arial', 12) m('Arial', 14)
+            table.insert(out, string.format('%d %d %d', t:GetStringAdvance('a\nb'), t:GetStringAdvance('a\tb'), t:GetStringAdvance('ab')))
+            m('Arial', 18) m('Arial', 24) m('Arial Bold', 14) m('Arial Gras', 14) m('Butterbelly', 14)
+            t:SetFont('Arial', 0)
+            table.insert(out, string.format('size 0: %d %d', t.FontAscent(), t.TextAdvance()))
+            return out
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(
+        got,
+        [
+            "Arial 12: 12 3 64 M9 AV14 long239",
+            "Arial 14: 13 3 72 M11 AV18 long279",
+            "16 16 16",
+            "Arial 18: 17 4 93 M15 AV22 long354",
+            "Arial 24: 21 6 126 M19 AV30 long480",
+            "Arial Bold 14: 13 3 81 M13 AV18 long313",
+            "Arial Gras 14: 13 3 72 M11 AV18 long279",
+            "Butterbelly 14: 11 3 68 M10 AV12 long243",
+            "size 0: 19 101",
+        ]
+    );
+}

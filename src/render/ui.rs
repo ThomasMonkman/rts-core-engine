@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use ab_glyph::{Font, ScaleFont};
+use ab_glyph::Font;
 use rts_core_engine::engine::vfs::Vfs;
 use rts_core_engine::ui::controls::{ControlId, DrawItem};
 use rts_core_engine::ui::movie::VideoFrame;
@@ -593,22 +593,18 @@ impl UiRenderer {
                 }
                 DrawItem::Text { rect, text, family, size, color, shadow, vertical } => {
                     let file = fonts::file_for(family);
-                    let Some(font) = self.fonts.as_mut().and_then(|f| f.font(family)) else { continue };
-                    let px = fonts::px(*size);
-                    let scaled = font.as_scaled(px);
-                    let baseline = rect[1] + scaled.ascent();
-                    let size4 = (px.y * 4.0).round() as u32;
+                    // Laid out as moho measures: whole-pixel advances, no
+                    // kerning, the baseline a whole-pixel ascent down.
+                    let Some(fonts) = self.fonts.as_mut() else { continue };
+                    let Some(line) = fonts.line(family, *size) else { continue };
+                    let baseline = rect[1] + line.ascent;
+                    let size4 = (line.scale.y * 4.0).round() as u32;
                     let mut pen = rect[0];
-                    let mut prev = None;
                     let mut glyphs = Vec::new();
-                    for ch in text.chars() {
-                        let g = scaled.glyph_id(ch);
-                        if let Some(p) = prev {
-                            pen += scaled.kern(p, g);
-                        }
+                    for ch in text.chars().filter(|c| !c.is_control()) {
+                        let g = line.font.glyph_id(ch);
                         glyphs.push((g, pen));
-                        pen += scaled.h_advance(g);
-                        prev = Some(g);
+                        pen += fonts.advance(family, line.ppem, g);
                     }
                     let pen_end = (pen - rect[0]).round();
                     for pass in [true, false] {

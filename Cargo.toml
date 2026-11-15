@@ -112,6 +112,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 postcard = { version = "1", features = ["alloc"] }
 ab_glyph = "0.2"
+skrifa = "0.40"
 mlua = { version = "0.10", features = ["luau"] }
 # The typed Lua API's macros (src/lua_api).
 lua-api-macros = { path = "crates/lua-api-macros" }
