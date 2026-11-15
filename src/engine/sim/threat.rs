@@ -5,17 +5,26 @@
 //! Cell size follows the map like moho's (FAF's `IMAPConfiguration` mirrors
 //! it): 32 world units up to 10 km maps, 64 at 20 km, 128 at 40 km, 256
 //! beyond. Each unit carries a threat value per [`ThreatType`], computed once
-//! at spawn from its blueprint (`Defense.*ThreatLevel`) and categories. The
-//! grid is rebuilt lazily, at most once per tick, the first time a query
-//! needs it (units move; queries in the same tick share the snapshot).
+//! at spawn from its blueprint (`Defense.*ThreatLevel`) and categories.
 //!
-//! Each brain sees other armies' threat only as far as it knows their units
-//! (`knows` in [`ThreatMap::refresh`]: detected now, or structures it has
-//! seen); its own army's threat is exact.
+//! The map changes only on moho's 30-tick update grid ([`UPDATE_TICKS`],
+//! `api::threat::tick`); queries in between read the last update. Each brain
+//! sees other armies' threat only as far as it knows their units (`knows` in
+//! [`ThreatMap::update`]): allies exactly, enemies detected now, structures
+//! it has seen, and what it remembers of units it has lost sight of
+//! (moho's recon blips outlive sight): a mobile unit's threat where it was
+//! last detected, whole for [`MEMORY_HOLD_TICKS`] then fading over 50
+//! updates; a structure's for good, also once destroyed out of sight. Its
+//! own army's threat is exact.
 //!
-//! Inferred, not verified against the binary: which categories feed each
-//! type, that `restriction` doesn't change the intel rule (it's ignored), and
-//! assigned threat decays linearly per second.
+//! Script-assigned threat (`AssignThreatAtPosition`) counts from the next
+//! update and loses `decay` x its amount per update while positive;
+//! negative amounts never fade and subtract from the cell's unit threat.
+//!
+//! From dev/probes `probe_ai_threat` / `probe_ai_find` (FAF's game), not the
+//! binary: the update grid, memory timings and assigned decay. Inferred:
+//! which categories feed each type and that `restriction` doesn't change the
+//! intel rule (it's ignored).
 
 use crate::engine::sim::entity::{EntityKind, EntityWorld};
 use crate::engine::sim::math::{Fx, FxVec3};
@@ -135,14 +144,89 @@ pub fn unit_threat(air: Fx, surface: Fx, sub: Fx, economy: Fx, k: ThreatKinds) -
     t
 }
 
-/// Threat a brain placed by script (`AssignThreatAtPosition`).
+/// Threat a brain placed by script (`AssignThreatAtPosition`), one entry
+/// per (cell, type): a second assignment there adds to `value` and keeps the
+/// first one's `step` (dev/probes probe_ai_threat: 70 + 30 at 0.1 went on
+/// losing 10 per update).
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Assigned {
     cell: u32,
     ty: ThreatType,
     value: Fx,
-    /// Lost per second.
-    decay: Fx,
+    /// Lost per map update while the value is positive: the first
+    /// assignment's amount x its decay fraction.
+    step: Fx,
+}
+
+/// What a brain knows of one unit of another army at a map update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Knowledge {
+    /// An allied unit: its threat counts exactly, never remembered.
+    Exact,
+    /// Detected now (any intel).
+    Detected,
+    /// A structure seen before, not detected now.
+    SeenStructure,
+    /// Neither: only what the brain remembers of it counts.
+    Unknown,
+}
+
+/// A brain's memory of an enemy unit (moho keeps the unit's recon blip after
+/// sight is lost): its threat where it was last known.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Memory {
+    army: u32,
+    cell: u32,
+    threat: ThreatLevels,
+    /// The last map update that detected it (none: a structure seen only
+    /// between updates).
+    seen: Option<u64>,
+    /// Structures are remembered undecayed.
+    structure: bool,
+}
+
+/// Ticks between threat map updates: moho's map changes only on a 30-tick
+/// grid (dev/probes probe_ai_threat: a unit placed at +45 counts from +60,
+/// an assignment at +305 from +330).
+pub const UPDATE_TICKS: u64 = 30;
+/// A mobile unit's remembered threat stays whole for this long after the
+/// last update that detected it, then loses a fiftieth of itself per update
+/// (probe_ai_threat / probe_ai_find: sight lost at +85 and at +75, last
+/// detected at the +60 update both times, first loss at +360; the ACU's 45
+/// then reads 44.1, 43.2 ... 36.9 at +600, the Fatboy's 993.36 973.49,
+/// 953.62). Structures seen keep their threat until seen gone.
+pub const MEMORY_HOLD_TICKS: u64 = 300;
+pub const MEMORY_DECAY_STEPS: u64 = 50;
+
+impl Memory {
+    /// Fiftieths of its threat still remembered at update `now`; none once
+    /// it has all decayed.
+    fn left(&self, now: u64) -> Option<Fx> {
+        let steps = match self.seen {
+            Some(seen) if !self.structure && now >= seen + MEMORY_HOLD_TICKS => (now - seen - MEMORY_HOLD_TICKS) / UPDATE_TICKS + 1,
+            _ => 0,
+        };
+        (steps < MEMORY_DECAY_STEPS).then(|| Fx::from_num(MEMORY_DECAY_STEPS - steps))
+    }
+}
+
+/// `grids[army]`, made (zeroed, `n` cells) if missing.
+fn grid_of(grids: &mut Vec<Vec<ThreatLevels>>, army: u32, n: usize) -> &mut Vec<ThreatLevels> {
+    let army = army as usize;
+    if grids.len() <= army {
+        grids.resize_with(army + 1, Vec::new);
+    }
+    let grid = &mut grids[army];
+    if grid.len() != n {
+        grid.resize(n, [Fx::ZERO; THREAT_TYPES]);
+    }
+    grid
+}
+
+fn add(grid: &mut [ThreatLevels], index: usize, threat: &ThreatLevels) {
+    for (acc, v) in grid[index].iter_mut().zip(threat.iter()) {
+        *acc = acc.saturating_add(*v);
+    }
 }
 
 /// Cell edge (world units) for a map of the given size.
@@ -162,14 +246,18 @@ pub struct ThreatMap {
     rows: u32,
     /// `cells[army][cell]`, army = moho army index (1-based; 0 unused).
     cells: Vec<Vec<ThreatLevels>>,
-    /// `known[brain][army][cell]`: the part of `cells[army]` that `brain`
-    /// knows about; valid while `known_fresh[brain]`.
+    /// `known[brain][army][cell]`: what `brain` knows of `cells[army]` (its
+    /// allies exactly, enemies detected or remembered), as of the last
+    /// update.
     known: Vec<Vec<Vec<ThreatLevels>>>,
-    known_fresh: Vec<bool>,
-    /// Rebuild before the next query.
-    dirty: bool,
-    /// Script-assigned threat per brain (army index).
+    /// Built at least once (queries before the first update build it).
+    built: bool,
+    /// Per brain: what it remembers of other armies' units, by unit id.
+    memory: Vec<std::collections::BTreeMap<u32, Memory>>,
+    /// Script-assigned threat per brain (army index), as of the last update.
     assigned: Vec<Vec<Assigned>>,
+    /// Assignments made since the last update: they count from the next.
+    pending: Vec<(u32, Assigned)>,
 }
 
 impl ThreatMap {
@@ -177,16 +265,16 @@ impl ThreatMap {
         let cell = cell_size(width, height);
         let cols = width.div_ceil(cell).max(1);
         let rows = height.div_ceil(cell).max(1);
-        Self { cell, cols, rows, cells: Vec::new(), known: Vec::new(), known_fresh: Vec::new(), dirty: true, assigned: Vec::new() }
+        Self { cell, cols, rows, ..Default::default() }
     }
 
     pub fn cell_size(&self) -> u32 {
         self.cell
     }
 
-    /// Marks the snapshot stale (called once per tick).
-    pub fn invalidate(&mut self) {
-        self.dirty = true;
+    /// Whether an update has run yet.
+    pub fn is_built(&self) -> bool {
+        self.built
     }
 
     fn axis(&self, v: Fx, n: u32) -> u32 {
@@ -199,6 +287,11 @@ impl ThreatMap {
         (self.axis(p.x, self.cols), self.axis(p.z, self.rows))
     }
 
+    fn index_of(&self, p: FxVec3) -> u32 {
+        let (c, r) = self.cell_of(p);
+        r * self.cols + c
+    }
+
     /// World centre of a cell (y = 0).
     pub fn center(&self, col: u32, row: u32) -> FxVec3 {
         let half = Fx::from_num(self.cell) / 2;
@@ -209,106 +302,127 @@ impl ThreatMap {
         }
     }
 
-    /// Rebuilds the per-army sums if stale. Units are visited in id order,
-    /// so the (exact, fixed-point) sums are the same on every machine. With
-    /// `knows = (brain, f)` (intel), also builds what `brain` knows of other
-    /// armies (`f(unit)`), once per tick per brain, only for brains that ask.
-    pub fn refresh(&mut self, world: &EntityWorld, knows: Option<(u32, &dyn Fn(&crate::engine::sim::entity::Entity) -> bool)>) {
+    /// The map update at tick `now`: rebuilds the per-army sums, then for each
+    /// of `brains` what it knows of other armies (`knows(brain, unit)`),
+    /// updating and ageing its memory; then ages assigned threat and adds
+    /// the assignments made since the last update. Units are visited in id
+    /// order and memories in id order, so the (exact, fixed-point) sums are
+    /// the same on every machine.
+    pub fn update(&mut self, world: &EntityWorld, now: u64, brains: &[u32], knows: &dyn Fn(u32, &crate::engine::sim::entity::Entity) -> Knowledge) {
         let n = (self.cols * self.rows) as usize;
-        if self.dirty {
-            self.dirty = false;
-            self.known_fresh.iter_mut().for_each(|f| *f = false);
-            for grid in self.cells.iter_mut() {
-                grid.iter_mut().for_each(|c| *c = [Fx::ZERO; THREAT_TYPES]);
-            }
-            for e in world.iter() {
-                if e.kind != EntityKind::Unit || e.destroyed {
-                    continue;
-                }
-                let (Some(army), Some(data)) = (e.army, e.unit.as_deref()) else { continue };
-                let army = army as usize;
-                let (c, r) = self.cell_of(e.position());
-                let index = (r * self.cols + c) as usize;
-                if self.cells.len() <= army {
-                    self.cells.resize_with(army + 1, Vec::new);
-                }
-                let grid = &mut self.cells[army];
-                if grid.len() != n {
-                    grid.resize(n, [Fx::ZERO; THREAT_TYPES]);
-                }
-                for (acc, v) in grid[index].iter_mut().zip(data.threat.iter()) {
-                    *acc = acc.saturating_add(*v);
-                }
-            }
-        }
-        let Some((brain, knows)) = knows else { return };
-        let b = brain as usize;
-        if self.known_fresh.len() <= b {
-            self.known_fresh.resize(b + 1, false);
-            self.known.resize_with(b + 1, Vec::new);
-        }
-        if self.known_fresh[b] {
-            return;
-        }
-        self.known_fresh[b] = true;
-        for grid in self.known[b].iter_mut() {
+        self.built = true;
+        for grid in self.cells.iter_mut() {
             grid.iter_mut().for_each(|c| *c = [Fx::ZERO; THREAT_TYPES]);
         }
-        for e in world.iter() {
-            if e.kind != EntityKind::Unit || e.destroyed {
-                continue;
-            }
+        let live = |e: &&crate::engine::sim::entity::Entity| e.kind == EntityKind::Unit && !e.destroyed && e.army.is_some() && e.unit.is_some();
+        for e in world.iter().filter(live) {
             let (Some(army), Some(data)) = (e.army, e.unit.as_deref()) else { continue };
-            if army == brain || !knows(e) {
-                continue;
-            }
-            let army = army as usize;
-            let (c, r) = self.cell_of(e.position());
-            let index = (r * self.cols + c) as usize;
-            let per_brain = &mut self.known[b];
-            if per_brain.len() <= army {
-                per_brain.resize_with(army + 1, Vec::new);
-            }
-            let grid = &mut per_brain[army];
-            if grid.len() != n {
-                grid.resize(n, [Fx::ZERO; THREAT_TYPES]);
-            }
-            for (acc, v) in grid[index].iter_mut().zip(data.threat.iter()) {
-                *acc = acc.saturating_add(*v);
-            }
+            let index = self.index_of(e.position()) as usize;
+            add(grid_of(&mut self.cells, army, n), index, &data.threat);
         }
+        for &brain in brains {
+            let b = brain as usize;
+            if self.known.len() <= b {
+                self.known.resize_with(b + 1, Vec::new);
+                self.memory.resize_with(b + 1, Default::default);
+            }
+            for grid in self.known[b].iter_mut() {
+                grid.iter_mut().for_each(|c| *c = [Fx::ZERO; THREAT_TYPES]);
+            }
+            let mut memory = std::mem::take(&mut self.memory[b]);
+            // Ids counted live this update (ascending: the world is in id order).
+            let mut counted: Vec<u32> = Vec::new();
+            for e in world.iter().filter(live) {
+                let (Some(army), Some(data)) = (e.army, e.unit.as_deref()) else { continue };
+                if army == brain {
+                    continue;
+                }
+                let index = self.index_of(e.position());
+                let structure = data.threat[ThreatType::Structures as usize] > Fx::ZERO;
+                match knows(brain, e) {
+                    Knowledge::Exact => {
+                        memory.remove(&e.id);
+                    }
+                    Knowledge::Detected => {
+                        memory.insert(e.id, Memory { army, cell: index, threat: data.threat, seen: Some(now), structure });
+                    }
+                    Knowledge::SeenStructure => {
+                        let seen = memory.get(&e.id).and_then(|m| m.seen);
+                        memory.insert(e.id, Memory { army, cell: index, threat: data.threat, seen, structure: true });
+                    }
+                    Knowledge::Unknown => continue,
+                }
+                counted.push(e.id);
+                add(grid_of(&mut self.known[b], army, n), index as usize, &data.threat);
+            }
+            // Units out of intel, and gone ones: one that died in sight
+            // (detected at the last update) is forgotten, one destroyed out
+            // of sight stays remembered (probe_ai_threat: the tank and point
+            // defence destroyed unseen at +165 still count).
+            memory.retain(|&id, m| {
+                if counted.binary_search(&id).is_ok() {
+                    return true;
+                }
+                let alive = world.get(id).is_some_and(|e| !e.destroyed && e.kind == EntityKind::Unit);
+                if !alive && m.seen.is_some_and(|s| s + UPDATE_TICKS >= now) {
+                    return false;
+                }
+                let Some(left) = m.left(now) else { return false };
+                let grid = grid_of(&mut self.known[b], m.army, n);
+                for (acc, v) in grid[m.cell as usize].iter_mut().zip(m.threat.iter()) {
+                    *acc = acc.saturating_add(v.saturating_mul(left) / Fx::from_num(MEMORY_DECAY_STEPS));
+                }
+                true
+            });
+            self.memory[b] = memory;
+        }
+        self.age_assigned();
     }
 
-    /// Ages assigned threat by one tick, dropping what has decayed away.
-    pub fn decay_assigned(&mut self) {
-        let dt = Fx::ONE / Fx::from_num(10);
+    /// Ages assigned threat by one update (a positive value loses its step
+    /// and goes when it reaches 0; a negative one stays as it is), then adds
+    /// the assignments made since the last update, which take their first
+    /// step at once (100 at 0.1 placed at +305 reads 90 from +330).
+    fn age_assigned(&mut self) {
+        for (brain, a) in std::mem::take(&mut self.pending) {
+            let brain = brain as usize;
+            if self.assigned.len() <= brain {
+                self.assigned.resize_with(brain + 1, Vec::new);
+            }
+            let list = &mut self.assigned[brain];
+            match list.iter_mut().find(|x| x.cell == a.cell && x.ty == a.ty) {
+                Some(x) => x.value = x.value.saturating_add(a.value),
+                None => list.push(a),
+            }
+        }
         for list in self.assigned.iter_mut() {
-            for a in list.iter_mut() {
-                a.value = (a.value - a.decay * dt).max(Fx::ZERO);
-            }
-            list.retain(|a| a.value > Fx::ZERO);
+            list.retain_mut(|a| {
+                if a.value <= Fx::ZERO {
+                    return a.value != Fx::ZERO;
+                }
+                a.value = a.value.saturating_sub(a.step);
+                a.value > Fx::ZERO
+            });
         }
     }
 
-    /// `AssignThreatAtPosition`: extra threat `brain` believes is at `p`.
+    /// `AssignThreatAtPosition`: `value` more threat `brain` believes is at
+    /// `p`, losing `decay` x `value` per update while positive; it counts
+    /// from the next update.
     pub fn assign(&mut self, brain: u32, p: FxVec3, value: Fx, decay: Fx, ty: ThreatType) {
-        let (c, r) = self.cell_of(p);
-        let brain = brain as usize;
-        if self.assigned.len() <= brain {
-            self.assigned.resize_with(brain + 1, Vec::new);
-        }
-        self.assigned[brain].push(Assigned { cell: r * self.cols + c, ty, value, decay });
+        let cell = self.index_of(p);
+        self.pending.push((brain, Assigned { cell, ty, value, step: value.saturating_mul(decay.max(Fx::ZERO)) }));
+    }
+
+    /// `brain`'s knowledge tables, once built.
+    fn known_for(&self, brain: u32) -> Option<&[Vec<ThreatLevels>]> {
+        let b = brain as usize;
+        (self.built && b < self.known.len()).then(|| self.known[b].as_slice())
     }
 
     /// Threat of type `ty` in cell `index` from armies passing `counts`,
     /// plus what `brain` assigned there (assigned threat feeds its own type
     /// and `Overall`, never `OverallNotAssigned`).
-    /// `brain`'s knowledge tables, if built this tick.
-    fn known_for(&self, brain: u32) -> Option<&[Vec<ThreatLevels>]> {
-        let b = brain as usize;
-        (self.known_fresh.get(b).copied() == Some(true)).then(|| self.known[b].as_slice())
-    }
-
     fn cell_threat(&self, index: u32, ty: ThreatType, brain: u32, counts: &dyn Fn(u32) -> bool) -> Fx {
         self.cell_threat_with(self.known_for(brain), index, ty, brain, counts)
     }
@@ -319,12 +433,14 @@ impl ThreatMap {
         match known {
             // Other armies through what this brain knows (intel on).
             Some(k) => {
-                for (army, grid) in self.cells.iter().enumerate() {
-                    if grid.is_empty() || !counts(army as u32) {
+                for army in 0..self.cells.len().max(k.len()) {
+                    if !counts(army as u32) {
                         continue;
                     }
-                    let grid = if army as u32 == brain { grid } else { match k.get(army) { Some(g) if !g.is_empty() => g, _ => continue } };
-                    sum = sum.saturating_add(grid[i][t]);
+                    let grid = if army as u32 == brain { self.cells.get(army) } else { k.get(army) };
+                    if let Some(g) = grid.filter(|g| !g.is_empty()) {
+                        sum = sum.saturating_add(g[i][t]);
+                    }
                 }
             }
             None => {
@@ -428,12 +544,18 @@ impl ThreatMap {
 mod tests {
     use super::*;
     use crate::engine::api::blueprints::BlueprintKind;
+    use crate::engine::sim::entity::{Entity, EntityId};
     use crate::engine::sim::math::FxQuat;
 
-    fn unit(w: &mut EntityWorld, army: u32, x: f64, z: f64, surface: i32, kinds: ThreatKinds) {
+    fn unit(w: &mut EntityWorld, army: u32, x: f64, z: f64, surface: i32, kinds: ThreatKinds) -> EntityId {
         let id = w.spawn(EntityKind::Unit, BlueprintKind::Unit, String::new(), Some(army), FxVec3::from_f64(x, 0.0, z), FxQuat::IDENTITY);
         let t = unit_threat(Fx::ZERO, Fx::from_num(surface), Fx::ZERO, Fx::ZERO, kinds);
         w.get_mut(id).unwrap().unit.as_mut().unwrap().threat = t;
+        id
+    }
+
+    fn exact(_: u32, _: &Entity) -> Knowledge {
+        Knowledge::Exact
     }
 
     #[test]
@@ -453,7 +575,7 @@ mod tests {
         unit(&mut w, 3, 200.0, 200.0, 12, land); // cell (6,6)
         unit(&mut w, 1, 210.0, 210.0, 99, land); // own army: never counted
         let mut map = ThreatMap::new(256, 256);
-        map.refresh(&w, None);
+        map.update(&w, 0, &[], &exact);
         let enemies = |a: u32| a != 1;
         let (pos, t) = map.highest(0, ThreatType::Overall, 1, &enemies);
         assert_eq!((pos, t), (FxVec3::from_f64(48.0, 0.0, 48.0), Fx::from_num(15)));
@@ -475,9 +597,9 @@ mod tests {
         unit(&mut w, 2, 40.0, 40.0, 10, land);
         unit(&mut w, 2, 200.0, 200.0, 12, land);
         let mut map = ThreatMap::new(256, 256);
-        // Brain 1 knows only units west of x = 100; brain 2 owns them all.
-        let knows = |e: &crate::engine::sim::entity::Entity| e.position().x < Fx::from_num(100);
-        map.refresh(&w, Some((1, &knows)));
+        // Brain 1 detects only units west of x = 100; brain 2 owns them all.
+        let knows = |_: u32, e: &Entity| if e.position().x < Fx::from_num(100) { Knowledge::Detected } else { Knowledge::Unknown };
+        map.update(&w, 0, &[1, 2], &knows);
         let enemies = |a: u32| a == 2;
         assert_eq!(map.highest(0, ThreatType::Overall, 1, &enemies).1, Fx::from_num(10), "the unknown 12 doesn't count");
         assert_eq!(map.threat_at(FxVec3::from_f64(200.0, 0.0, 200.0), 0, ThreatType::Overall, 1, &enemies), Fx::ZERO);
@@ -485,24 +607,99 @@ mod tests {
         assert_eq!(map.highest(0, ThreatType::Overall, 2, &own).1, Fx::from_num(12), "own threat is exact");
     }
 
+    /// dev/probes probe_ai_threat / probe_ai_find: a mobile unit out of sight
+    /// keeps its threat where it was last detected for 300 ticks after that
+    /// update, then loses 2% of it per 30-tick update; a structure seen stays
+    /// whole, also when destroyed out of sight; a unit that dies in sight is
+    /// forgotten.
     #[test]
-    fn assigned_threat_decays() {
+    fn lost_units_are_remembered_then_fade() {
+        let mut w = EntityWorld::default();
+        let land = ThreatKinds { land: true, ..Default::default() };
+        let structure = ThreatKinds { structure: true, ..Default::default() };
+        let acu = unit(&mut w, 2, 40.0, 40.0, 45, land);
+        let pd = unit(&mut w, 2, 200.0, 40.0, 16, structure);
+        let tank = unit(&mut w, 2, 40.0, 200.0, 2, land);
+        let seen = std::cell::Cell::new(true);
+        let knows = |_: u32, _: &Entity| if seen.get() { Knowledge::Detected } else { Knowledge::Unknown };
+        let enemies = |a: u32| a == 2;
+        let at = |m: &ThreatMap, x: f64, z: f64| m.threat_at(FxVec3::from_f64(x, 0.0, z), 0, ThreatType::Overall, 1, &enemies).to_num::<f64>();
         let mut map = ThreatMap::new(256, 256);
-        map.refresh(&EntityWorld::default(), None);
-        map.assign(1, FxVec3::from_f64(100.0, 0.0, 100.0), Fx::from_num(10), Fx::from_num(5), ThreatType::Land);
-        let none = |_: u32| false;
+        map.update(&w, 60, &[1], &knows);
+        assert_eq!(at(&map, 40.0, 40.0), 45.0);
+        // Sight lost; the ACU walks off unseen, the point defence dies unseen
+        // (after the update that last saw it: one destroyed before the next
+        // update counts as dying in sight).
+        seen.set(false);
+        w.set_position(acu, FxVec3::from_f64(200.0, 0.0, 200.0));
+        for now in (90..=330).step_by(30) {
+            if now == 120 {
+                w.get_mut(pd).unwrap().destroyed = true;
+            }
+            map.update(&w, now, &[1], &knows);
+            assert_eq!(at(&map, 40.0, 40.0), 45.0, "held at {now}");
+        }
+        assert_eq!(at(&map, 200.0, 200.0), 0.0, "where it went is unknown");
+        map.update(&w, 360, &[1], &knows);
+        assert!((at(&map, 40.0, 40.0) - 44.1).abs() < 1e-6);
+        assert_eq!(at(&map, 200.0, 40.0), 16.0, "a structure doesn't fade");
+        map.update(&w, 390, &[1], &knows);
+        assert!((at(&map, 40.0, 40.0) - 43.2).abs() < 1e-6);
+        for now in (420..=330 + 50 * 30).step_by(30) {
+            map.update(&w, now, &[1], &knows);
+        }
+        assert_eq!(at(&map, 40.0, 40.0), 0.0, "gone after 50 updates");
+        assert_eq!(at(&map, 200.0, 40.0), 16.0);
+
+        // Dies in sight: forgotten at the next update.
+        seen.set(true);
+        map.update(&w, 2000, &[1], &knows);
+        assert_eq!(at(&map, 40.0, 200.0), 2.0);
+        w.get_mut(tank).unwrap().destroyed = true;
+        map.update(&w, 2030, &[1], &knows);
+        assert_eq!(at(&map, 40.0, 200.0), 0.0);
+    }
+
+    /// dev/probes probe_ai_threat: `decay` is the fraction of the amount lost
+    /// per update; an assignment counts (after its first step) from the next
+    /// update; a second one in the cell adds and keeps the first's step;
+    /// negative amounts stay and subtract from unit threat.
+    #[test]
+    fn assigned_threat_steps_per_update() {
+        let mut w = EntityWorld::default();
+        unit(&mut w, 2, 100.0, 200.0, 45, ThreatKinds::default());
+        let mut map = ThreatMap::new(256, 256);
+        map.update(&w, 0, &[], &exact);
         let p = FxVec3::from_f64(100.0, 0.0, 100.0);
-        assert_eq!(map.threat_at(p, 0, ThreatType::Overall, 1, &none), Fx::from_num(10));
-        assert_eq!(map.threat_at(p, 0, ThreatType::OverallNotAssigned, 1, &none), Fx::ZERO);
+        let q = FxVec3::from_f64(200.0, 0.0, 100.0);
+        let r = FxVec3::from_f64(100.0, 0.0, 200.0);
+        let none = |_: u32| false;
+        let enemies = |a: u32| a == 2;
+        // To the probe's two decimals (0.1 isn't exact in fixed point).
+        let get = |m: &ThreatMap, p: FxVec3, ty: ThreatType| (m.threat_at(p, 0, ty, 1, &enemies).to_num::<f64>() * 100.0).round() / 100.0;
+        map.assign(1, p, Fx::from_num(100), Fx::from_num(0.1), ThreatType::Land);
+        map.assign(1, q, Fx::from_num(-50), Fx::from_num(0.1), ThreatType::Overall);
+        map.assign(1, r, Fx::from_num(-20), Fx::from_num(0.1), ThreatType::AntiSurface);
+        assert_eq!(get(&map, p, ThreatType::Land), 0.0, "not before the next update");
+        map.update(&w, 30, &[], &exact);
+        assert_eq!(get(&map, p, ThreatType::Land), 90.0);
+        assert_eq!(get(&map, p, ThreatType::Overall), 90.0);
+        assert_eq!(get(&map, p, ThreatType::OverallNotAssigned), 0.0);
         assert_eq!(map.threat_at(p, 0, ThreatType::Land, 2, &none), Fx::ZERO, "only the assigning brain sees it");
-        for _ in 0..10 {
-            map.decay_assigned();
+        assert_eq!(get(&map, q, ThreatType::Overall), -50.0);
+        assert_eq!(get(&map, r, ThreatType::Overall), 25.0, "45 - 20");
+        map.update(&w, 60, &[], &exact);
+        assert_eq!(get(&map, p, ThreatType::Land), 80.0);
+        map.assign(1, p, Fx::from_num(30), Fx::from_num(0.1), ThreatType::Land);
+        map.update(&w, 90, &[], &exact);
+        assert_eq!(get(&map, p, ThreatType::Land), 100.0, "80 + 30, less the first step of 10");
+        for now in (120..=390).step_by(30) {
+            map.update(&w, now, &[], &exact);
         }
-        let left = map.threat_at(p, 0, ThreatType::Land, 1, &none).to_num::<f64>();
-        assert!((left - 5.0).abs() < 1e-6, "{left}");
-        for _ in 0..11 {
-            map.decay_assigned();
-        }
-        assert_eq!(map.threat_at(p, 0, ThreatType::Land, 1, &none), Fx::ZERO);
+        assert_eq!(get(&map, p, ThreatType::Land), 0.0);
+        assert_eq!(get(&map, q, ThreatType::Overall), -50.0, "negative amounts never fade");
+        map.assign(1, p, Fx::from_num(100), Fx::ONE, ThreatType::Land);
+        map.update(&w, 420, &[], &exact);
+        assert_eq!(get(&map, p, ThreatType::Land), 0.0, "decay 1: gone at the first update");
     }
 }

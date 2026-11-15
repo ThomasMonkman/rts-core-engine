@@ -462,7 +462,7 @@ fn find_place_to_build(
             Some(m) => m,
             None => return Ok(true),
         };
-        crate::engine::api::threat::refresh(lua, &mut map, army);
+        crate::engine::api::threat::refresh(lua, &mut map);
         let armies = lua.app_data_ref::<crate::engine::sim::army::Armies>().expect("Armies");
         let enemy = |a: u32| armies.alliance(army, a) == crate::engine::sim::army::Alliance::Enemy;
         let t = map.threat_at(p, 0, crate::engine::sim::threat::ThreatType::AntiSurface, army, &enemy);

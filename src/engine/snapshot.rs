@@ -2383,7 +2383,7 @@ fn debug_data(lua: &mlua::Lua, req: &DebugRequest, sink: &mut SnapshotSink) -> D
             Some((_, army, version)) => {
                 let armies = lua.app_data_ref::<crate::engine::sim::army::Armies>();
                 lua.app_data_mut::<crate::engine::sim::threat::ThreatMap>().and_then(|mut m| {
-                    crate::engine::api::threat::refresh(lua, &mut m, army);
+                    crate::engine::api::threat::refresh(lua, &mut m);
                     let armies = armies?;
                     let enemy = |a: u32| armies.alliance(army, a) == crate::engine::sim::army::Alliance::Enemy;
                     let (cols, rows, cell, values) = m.grid_values(crate::engine::sim::threat::ThreatType::Overall, army, &enemy);
