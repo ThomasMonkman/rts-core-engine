@@ -1106,6 +1106,11 @@ fn engineer_attack_move() {
 }
 
 #[test]
+fn capture_shared() {
+    scenario("capture_shared", 900);
+}
+
+#[test]
 fn initial_rally() {
     scenario("initial_rally", 1700);
 }
