@@ -1299,15 +1299,34 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::Unit,
         /// Per-tick displacement (moho reports velocity per tick: x10 = per second).
         /// A dead aircraft reports its fall (FAF's ShieldCollider follows it).
+        /// On the ground x / z carry the whole ground speed and y the climb
+        /// on top (the slope under it along the way it's going, the water's
+        /// surface for hover units): the real game's T1 tank on a ramp reads
+        /// 3.40 along and 1.45 up a second, a hover unit's y follows the
+        /// ground too (dev/probes probe_mov_api S*; ours held the 3D length
+        /// at the speed, 3.12 along, and hover units read y 0).
         GetVelocity = |lua, this: Obj<moho::Unit>| {
+        use crate::engine::sim::movement::MotionKind;
         let id = entity_id(&this)?;
         if let Some(v) = crate::engine::api::movement::Falling::velocity(lua, id) {
             return Ok(v.to_f64());
         }
         let w = world(lua);
         let Some(e) = w.get(id) else { return Ok((0.0, 0.0, 0.0)) };
-        let f = crate::engine::sim::movement::velocity(e) * (Fx::ONE / Fx::from_num(10));
-        Ok(f.to_f64())
+        let mut v = crate::engine::sim::movement::velocity(e);
+        let surface = e.unit.as_deref().filter(|u| u.on_ground && e.attachment.is_none()).map(|u| (u.motion_params.kind, u.motion_state.speed.abs()));
+        if let (Some((kind, speed)), Some(t)) = (surface.filter(|&(k, _)| matches!(k, MotionKind::Land | MotionKind::Hover | MotionKind::Amphibious)), lua.app_data_ref::<crate::engine::sim::terrain::Terrain>()) {
+            let flat = crate::engine::sim::math::sqrt(v.x.saturating_mul(v.x).saturating_add(v.z.saturating_mul(v.z)));
+            if flat > Fx::ZERO {
+                let (dx, dz) = (v.x / flat, v.z / flat);
+                let p = e.position();
+                let half = Fx::from_num(0.5);
+                let at = |x: Fx, z: Fx| if kind == MotionKind::Hover { t.surface_at(x, z) } else { t.height_at(x, z) };
+                let rise = at(p.x + dx * half, p.z + dz * half) - at(p.x - dx * half, p.z - dz * half);
+                v = FxVec3 { x: dx * speed, y: rise.saturating_mul(speed), z: dz * speed };
+            }
+        }
+        Ok((v * (Fx::ONE / Fx::from_num(10))).to_f64())
     })?;
     lua_method!(lua, moho::Unit,
         /// The unit's target: what its attack order is on, else the first of its

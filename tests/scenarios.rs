@@ -1503,3 +1503,8 @@ fn staging_lands() {
 fn formation_facing() {
     scenario("formation_facing", 440);
 }
+
+#[test]
+fn slope_velocity() {
+    scenario("slope_velocity", 90);
+}
