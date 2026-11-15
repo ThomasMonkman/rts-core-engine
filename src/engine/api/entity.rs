@@ -1339,7 +1339,21 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// calls `Destroy`. Later calls are no-ops. A `Destroy` earlier in the
         /// beat doesn't stop it (moho's `Unit::Kill`, 0x102878b0, only tests
         /// the dead flag).
+        ///
+        /// First the engine asks the script `CheckCanBeKilled(instigator)`
+        /// when it has one: false makes the kill a no-op (FAF's
+        /// `SetCanBeKilled(false)`: build drones, external factories,
+        /// campaign units). Lethal damage reaches here through FAF's
+        /// `DoTakeDamage`, so it leaves such a unit alive at 0 health, and the
+        /// next kill after `SetCanBeKilled(true)` goes through
+        /// (`probe_wpn_misc2` `kill cantkill*`, `probe_wpn_damage` `kill nokill*`).
         Kill = |lua, (this, instigator, kind, excess): (Obj<moho::Entity>, shapes::Instigator, Option<shapes::DamageType>, Option<f64>)| {
+            let alive = world(lua).get(entity_id(&this)?).is_some_and(|e| !e.cold.killed && !e.gone);
+            if alive
+                && let Ok(LuaValue::Function(check)) = this.table().get::<LuaValue>("CheckCanBeKilled")
+                && matches!(check.call::<LuaValue>((this.table().clone(), (*instigator).clone()))?, LuaValue::Nil | LuaValue::Boolean(false)) {
+                return Ok(());
+            }
             let first = with_entity_mut(lua, &this, |e| {
                 let first = !e.cold.killed && !e.gone;
                 if first {

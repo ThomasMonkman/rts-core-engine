@@ -1418,3 +1418,8 @@ fn mobile_placement() {
 fn dispatch_hold() {
     scenario("dispatch_hold", 1200);
 }
+
+#[test]
+fn cant_be_killed() {
+    scenario("cant_be_killed", 60);
+}
