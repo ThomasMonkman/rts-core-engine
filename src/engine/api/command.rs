@@ -758,17 +758,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(CommandHandle(commands(lua).issue(&[], CommandKind::Stop, CommandTarget::None, None, 0)))
         })?;
     lua_fn!(lua, global,
-        /// Replaces the units' queues with a Stop order (moho issues a real
-        /// command, type 1); its dispatch next tick stops their weapons
-        /// (`api::orders`).
+        /// Appends a Stop order (a real command, type 1) behind the units'
+        /// queues, clearing nothing: what's queued carries on (moves, factory
+        /// builds, upgrades, repairs) and the Stop's dispatch, once it's
+        /// reached, stops their weapons (`api::orders`). As in the real game
+        /// (dev/probes probe_mov_misc ST, probe_unit_orders Q, probe_unit_build
+        /// G2-G4): FAF's own scripts pair it with `IssueClearCommands`. The
+        /// player's stop key doesn't come here (`api::player_input` clears).
         IssueStop = |lua, units: shapes::Units| {
             let units = units_of(lua, &units)?;
-            {
-                let mut c = commands(lua);
-                for &u in &units {
-                    c.clear(u);
-                }
-            }
             Ok(issue(lua, &units, CommandKind::Stop, CommandTarget::None, None, 0))
         })?;
     lua_fn!(lua, global,

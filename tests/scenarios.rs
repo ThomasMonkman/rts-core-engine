@@ -1086,6 +1086,11 @@ fn bad_orders() {
 }
 
 #[test]
+fn issue_stop() {
+    scenario("issue_stop", 500);
+}
+
+#[test]
 fn initial_rally() {
     scenario("initial_rally", 1700);
 }
