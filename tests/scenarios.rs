@@ -1488,3 +1488,8 @@ fn speed_mult_law() {
 fn warp_move() {
     scenario("warp_move", 80);
 }
+
+#[test]
+fn plane_move_end() {
+    scenario("plane_move_end", 520);
+}

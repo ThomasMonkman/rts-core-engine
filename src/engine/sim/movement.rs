@@ -1591,14 +1591,28 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     if let Some((g, radius, completes)) = goal {
         let (dx, dz) = (g.x - pos.x, g.z - pos.z);
         let dist = sqrt(dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)));
-        // A winged aircraft can't stop on a point: a move is done once it's
-        // within its turning radius.
+        // A winged aircraft's last move is done only once it's over the
+        // point: it overshoots, circles back and slows onto it (D is capped
+        // at the distance) until it's within a quarter of a unit. The real
+        // game's interceptors went idle 0.11..0.24 from the goal, some
+        // circling in for 17 s after first passing it at speed (`I2` at
+        // 30 a second: idle 0.24 away at v 0.26), one flying straight
+        // through it at 6.2 (dev/probes probe_mov_mult I0.5, I0.75, I2,
+        // Ia0.25; ours ended the order a turning radius out at speed).
+        // Other orders (patrols, aggressive moves) still end a turning
+        // radius out.
         let radius = if winged && completes && turn > Fx::ZERO {
-            // (Flying through: a second of flight at top speed out. The real
-            // game's planes start each queued corner about that far out: the
-            // spy planes ~25 at 27, the T3 fighters ~22 at 22
-            // (dev/probes probe_air_all). Fitted.)
-            radius.max(if through { max_speed } else { state.speed.max(p.min_speed) / turn })
+            if through {
+                // (Flying through: a second of flight at top speed out. The
+                // real game's planes start each queued corner about that
+                // far out: the spy planes ~25 at 27, the T3 fighters ~22 at
+                // 22 (dev/probes probe_air_all). Fitted.)
+                radius.max(max_speed)
+            } else if cmd.is_some_and(|c| matches!(c.kind, CommandKind::Move | CommandKind::FormMove)) {
+                Fx::from_num(0.25)
+            } else {
+                radius.max(state.speed.max(p.min_speed) / turn)
+            }
         } else {
             radius
         };
