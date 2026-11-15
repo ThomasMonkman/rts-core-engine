@@ -1498,3 +1498,8 @@ fn plane_move_end() {
 fn staging_lands() {
     scenario("staging_lands", 440);
 }
+
+#[test]
+fn formation_facing() {
+    scenario("formation_facing", 440);
+}

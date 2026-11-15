@@ -1563,6 +1563,9 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
         }
         return moved.map(|m| Moved { ordered: cmd.is_some(), patrolling: cmd.is_some_and(|c| matches!(c.kind, CommandKind::Patrol | CommandKind::FormPatrol)), ..m });
     }
+    // (A formation member at its slot may still turn to the layout's
+    // facing, below.)
+    let mut face = face;
     // Hover units wobble even at rest, and a lean eases back after a stop.
     let wobbles = p.kind == MotionKind::Hover && p.ground.wobble_factor > Fx::ZERO && terrain.is_some();
     let settling = wobbles || (p.kind == MotionKind::Hover && terrain.is_some() && leaning(state.bank));
@@ -1713,7 +1716,21 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
         let parked = !completes && !chasing && pace.is_none() && state.speed == Fx::ZERO && cmd.is_some_and(|c| is_work(c.kind)) && dist <= radius + work_slack();
         if dist <= radius || parked || (completes && crowded()) {
             arrived = completes;
-            if arrived && eases {
+            // A formation move ends with each member turned on the spot to
+            // the layout's facing: the real game's six tanks all finished
+            // facing the order's heading, ours kept the headings they
+            // arrived with (dev/probes probe_mov_misc FM1..6).
+            let mut turning = false;
+            if arrived && eases
+                && let Some(h) = cmd.filter(|c| c.kind == CommandKind::FormMove).and_then(|c| c.slot(unit).and_then(|s| c.travel.get(s.group as usize)).map(|t| t.final_heading)) {
+                let err = wrap(h - facing(e));
+                if err.abs() > Fx::from_num(0.01) && turn > Fx::ZERO {
+                    arrived = false;
+                    turning = true;
+                    face = Some(err);
+                }
+            }
+            if (arrived || turning) && eases {
                 arrival = Arrival::Coasting;
             }
             if data.path.is_some() {
