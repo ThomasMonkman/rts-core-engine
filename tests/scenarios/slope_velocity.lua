@@ -2,7 +2,8 @@
 -- slope gives the whole ground speed along x / z and the climb in y on top;
 -- a hover unit's y follows the ground too. The real game's T1 tank on
 -- Seton's 5.3-high ramp reads 3.40 along and up to 1.45-1.49 up a second,
--- the Riptide 3.70 along and its climb (dev/probes probe_mov_api S*).
+-- the Riptide 3.70 along and its climb. `GetHeading` is the yaw of
+-- `GetOrientation` there, tilt and all (dev/probes probe_mov_api S*).
 rawset(_G, "ScenarioResult", { done = false, failures = {}, notes = {} })
 local function check(ok, msg) if not ok then table.insert(ScenarioResult.failures, msg) end end
 local function note(msg) table.insert(ScenarioResult.notes, msg) end
@@ -21,11 +22,15 @@ ForkThread(function()
             local vx, vy, vz = m.u:GetVelocity()
             if vy > m.top then m.top = vy m.along = math.sqrt(vx * vx + vz * vz) end
         end
+        local q = tank.u:GetOrientation()
+        local yaw = math.atan2(2 * (q[1] * q[3] + q[4] * q[2]), 1 - 2 * (q[1] * q[1] + q[2] * q[2]))
+        if math.abs(tank.u:GetHeading() - yaw) > 1e-3 then tank.bad = string.format('%.3f vs %.3f', tank.u:GetHeading(), yaw) end
     end
     check(math.abs(10 * tank.along - 3.40) < 0.03, string.format('the tank keeps 3.40 along the ground on the ramp: %.2f', 10 * tank.along))
     check(10 * tank.top > 1.3, string.format('the tank reports its climb in y: %.2f', 10 * tank.top))
     check(math.abs(10 * hover.along - 3.70) < 0.03, string.format('the hover tank keeps 3.70 along: %.2f', 10 * hover.along))
     check(10 * hover.top > 1.0, string.format('the hover tank reports its climb in y: %.2f', 10 * hover.top))
+    check(tank.bad == nil, 'GetHeading is the orientation yaw on the ramp: ' .. tostring(tank.bad))
     note(string.format('tank %.2f up %.2f, hover %.2f up %.2f', 10 * tank.along, 10 * tank.top, 10 * hover.along, 10 * hover.top))
     ScenarioResult.done = true
 end)

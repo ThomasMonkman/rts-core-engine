@@ -1001,10 +1001,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             quaternion(lua, q)
         })?;
     lua_method!(lua, moho::Entity,
-        /// The entity heading (yaw).
+        /// The entity heading: the yaw of its orientation (`GetOrientation`),
+        /// tilt and all. The real game's tank on a ramp reads the same
+        /// heading from both, drifting 0.02 with the tilt; ours gave the
+        /// course it was steering (dev/probes probe_mov_api S*).
         GetHeading = |lua, this: Obj<moho::Entity>| {
             let id = entity_id(&this)?;
-            Ok(world(lua).get(id).map_or(0.0, |e| crate::engine::sim::movement::facing(e).to_num::<f64>()))
+            Ok(world(lua).get(id).map_or(0.0, |e| e.orientation.heading().to_num::<f64>()))
         })?;
     lua_method!(lua, moho::Entity,
         /// The position (of `bone`, if given) as a vector.
