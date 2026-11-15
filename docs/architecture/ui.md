@@ -71,7 +71,9 @@ over any other control the world never sees it. Every press first goes to FAF's
 
 1. an `Edit` with the focus (typed text, editing keys, Enter / Esc callbacks);
 2. the newest input capture (`AddInputCapture`: FAF's modal dialogs);
-3. controls holding the keyboard focus (`AcquireKeyboardFocus`), newest first;
+3. the control holding the keyboard focus (`AcquireKeyboardFocus`). There is one holder, as in
+   moho: a new taker replaces it, and when the holder abandons the focus nobody has it (the focus
+   doesn't return to the previous holder);
 4. the key map: the player's bindings (FAF's preset, or their own from `Game.prefs`), looked up by
    FAF's key names and run as console commands (`UserVm::console`). Most run in the interface's Lua;
    a few (`UI_SelectByCategory`, `UI_TrackUnit`, ...) run in the engine (`render/console.rs`).
