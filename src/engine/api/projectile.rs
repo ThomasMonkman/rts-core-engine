@@ -749,7 +749,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         use crate::engine::sim::projectile::ProjectileTarget;
         Ok(match with_projectile(lua, this, |p| p.target)? {
             Some(ProjectileTarget::Ground(p)) => Some(p),
-            Some(ProjectileTarget::Entity(id)) => world(lua).get(id).map(|e| e.position()),
+            Some(ProjectileTarget::Entity(id)) => world(lua).get(id).map(crate::engine::sim::weapon::aim_point),
             None => None,
         })
     }

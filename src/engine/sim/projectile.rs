@@ -1016,7 +1016,10 @@ fn tracking_aim(p: &ProjectileState, position: FxVec3, world: &EntityWorld, env:
     let terrain = env.terrain;
     let aim = match p.target {
         Some(ProjectileTarget::Entity(id)) => world.get(id).filter(|e| !e.destroyed).map(|e| {
-            let at = e.position();
+            // The centre of its collision volume, not its origin
+            // (`probe_wpn_proj` `trk.*`: a wall's target position is 0.25
+            // above its origin and the hits land there).
+            let at = crate::engine::sim::weapon::aim_point(e);
             let v = match (p.lead_target, e.kind) {
                 (false, _) => FxVec3::default(),
                 (true, crate::engine::sim::entity::EntityKind::Projectile) => {

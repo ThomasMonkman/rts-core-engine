@@ -1463,3 +1463,8 @@ fn salvo_busy() {
 fn child_projectile() {
     scenario("child_projectile", 30);
 }
+
+#[test]
+fn homing_centre() {
+    scenario("homing_centre", 50);
+}
