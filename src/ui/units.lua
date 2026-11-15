@@ -310,7 +310,23 @@ end
 
 -- Toggles as the selected units have them (the first unit's state).
 local function first(units) local u = units and units[1] return u and data[u._id] end
-function GetFireState(units) local u = first(units) return u and u.fireState or 0 end
+-- The units' shared fire state; -1 if any unit has no retaliate toggle or
+-- they differ (`probe_ui_units` A: engineer, radar, transport and
+-- `{tank, factory}` give -1; the sim still has a state for the radar).
+function GetFireState(units)
+    local state
+    for _, unit in units or {} do
+        local u = data[unit._id]
+        local bp = u and __blueprints[u.bp]
+        -- (Registration leaves `CommandCaps` as text; FAF keeps the table.)
+        local caps = bp and bp.General and bp.General.CommandCapsHash
+        if not (caps and caps.RULEUCC_RetaliateToggle) then return -1 end
+        local s = u.fireState or 0
+        if state and s ~= state then return -1 end
+        state = s
+    end
+    return state or -1
+end
 function GetScriptBit(units, bit)
     local u = first(units)
     if not (u and u.scriptBits) then return false end

@@ -2809,3 +2809,27 @@ fn edit_set_text_calls_on_text_changed() {
         .unwrap();
     assert_eq!(log, ">abcdef;abcdef>123;123>;");
 }
+
+/// `GetFireState(units)` is the units' shared state, or -1 when one has no
+/// retaliate toggle or they differ (`probe_ui_units` A: engineer, radar,
+/// transport and `{tank, factory}` give -1).
+#[test]
+fn fire_state_of_units_without_the_toggle_is_minus_one() {
+    use rts_core_engine::engine::snapshot::UnitDetail;
+    use rts_core_engine::ui::UnitInfo;
+    let Some(vm) = vm() else { return };
+    let info = |id, bp: &str, fire_state| UnitInfo { id, blueprint: bp.into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: Some(UnitDetail { id, fire_state, ..Default::default() }) };
+    vm.update_units(&[info(1, "uel0201", 1), info(2, "uel0105", 0), info(3, "ueb0101", 2), info(4, "ueb3101", 2), info(5, "uea0107", 0), info(6, "uel0201", 1)]).unwrap();
+    let got: Vec<i32> = vm
+        .lua()
+        .load(
+            r#"
+            local u = __engine_unit
+            return { GetFireState({ u(1) }), GetFireState({ u(2) }), GetFireState({ u(3) }), GetFireState({ u(4) }), GetFireState({ u(5) }),
+                GetFireState({ u(1), u(3) }), GetFireState({ u(1), u(6) }), GetFireState({}) }
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(got, [1, -1, 2, -1, -1, -1, 1, -1]);
+}
