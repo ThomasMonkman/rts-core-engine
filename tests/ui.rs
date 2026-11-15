@@ -2557,3 +2557,25 @@ fn selecting_from_lua_is_synchronous() {
     let cleared: bool = vm.lua().load("SelectUnits(nil) return GetSelectedUnits() == nil").eval().unwrap();
     assert!(cleared, "SelectUnits(nil): nil at once");
 }
+
+/// `UISelectionByCategory('ALLUNITS')` takes a structure still being built
+/// and leaves out cargo in a transport, as the real game does
+/// (`probe_ui_units` A, B).
+#[test]
+fn select_by_category_takes_construction_sites_not_cargo() {
+    use rts_core_engine::ui::UnitInfo;
+    let Some(vm) = vm() else { return };
+    vm.set_focus_army(1).unwrap();
+    vm.start_hud().expect("game interface");
+    vm.frame(1.0 / 60.0).unwrap();
+    let unit = |id, blueprint: &str, army, build| UnitInfo { id, blueprint: blueprint.into(), army, health: 1.0, max_health: 100.0, build_rate: 0.0, build, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None };
+    // A tank, a factory half built, cargo (id 9) and an enemy tank.
+    vm.set_world(vec![unit(3, "uel0201", 1, 1.0), unit(5, "ueb0101", 1, 0.5), unit(9, "uel0106", 1, 1.0), unit(11, "uel0201", 2, 1.0)]);
+    vm.set_unselectable(vec![9]);
+    let ids: String = vm
+        .lua()
+        .load("UISelectionByCategory('ALLUNITS', false, false, false, false) local out = {} for _, u in GetSelectedUnits() do table.insert(out, u:GetEntityId()) end return table.concat(out, ',')")
+        .eval()
+        .unwrap();
+    assert_eq!(ids, "3,5");
+}
