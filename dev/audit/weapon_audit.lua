@@ -1513,10 +1513,12 @@ ForkThread(function()
                 elseif okT and tu then
                     -- An idle plane slows onto its point and lands (as in
                     -- the real game): keep winged targets flying a short
-                    -- beat round where they spawned.
+                    -- beat round where they spawned (two points: a
+                    -- script's single patrol point is a one-way trip).
                     local tbp = __blueprints[c.target]
                     if wantMed == 'any' and tbp.Air and tbp.Air.Winged then
                         IssuePatrol({ tu }, { tx + 12, y, tz })
+                        IssuePatrol({ tu }, { tx, y, tz })
                     end
                     tu:SetFireState(1)
                     tu:SetMaxHealth(1e7)

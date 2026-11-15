@@ -221,7 +221,12 @@ pub fn apply(lua: &Lua, c: &PlayerCommand) -> LuaResult<()> {
                 units.iter().copied().partition(|&u| w.get(u).and_then(|e| e.unit.as_deref()).is_some_and(|d| d.motion_params.kind == crate::engine::sim::movement::MotionKind::None))
             };
             if !structures.is_empty() {
-                lua.app_data_mut::<Commands>().expect("Commands not in app_data").issue_factory(&structures, c.kind, target, !c.queue);
+                let mut q = lua.app_data_mut::<Commands>().expect("Commands not in app_data");
+                let id = q.issue_factory(&structures, c.kind, target, !c.queue);
+                if c.kind == CommandKind::Patrol
+                    && let Some(cmd) = q.get_mut(id) {
+                    cmd.patrol_home = true;
+                }
             }
             movers
         } else {
@@ -245,7 +250,12 @@ pub fn apply(lua: &Lua, c: &PlayerCommand) -> LuaResult<()> {
                 units.into_iter().partition(|&u| w.get(u).and_then(|e| e.unit.as_deref()).is_some_and(|d| d.motion_params.kind == crate::engine::sim::movement::MotionKind::None))
             };
             if !structures.is_empty() {
-                lua.app_data_mut::<Commands>().expect("Commands not in app_data").issue_factory(&structures, c.kind, target, !c.queue);
+                let mut q = lua.app_data_mut::<Commands>().expect("Commands not in app_data");
+                let id = q.issue_factory(&structures, c.kind, target, !c.queue);
+                if c.kind == CommandKind::Patrol
+                    && let Some(cmd) = q.get_mut(id) {
+                    cmd.patrol_home = true;
+                }
             }
             movers
         }
@@ -323,7 +333,12 @@ fn finish(lua: &Lua, c: &PlayerCommand, units: &[EntityId], target: CommandTarge
             }
         }
         kind => {
-            issue(lua, units, kind, target, None, 0);
+            let handle = issue(lua, units, kind, target, None, 0);
+            // The interface's patrol loops home (`Command::patrol_home`).
+            if kind == CommandKind::Patrol
+                && let Some(cmd) = lua.app_data_mut::<Commands>().expect("Commands not in app_data").get_mut(handle.0) {
+                cmd.patrol_home = true;
+            }
         }
     }
     Ok(())

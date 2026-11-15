@@ -119,6 +119,34 @@ fn plain_move_from_the_command_stream_arrives() {
     }
 }
 
+/// The player's patrol to one point loops: the interface's leg back to
+/// where the unit started follows it (`Command::patrol_home`), where a
+/// script's single `IssuePatrol` point just ends (tests/scenarios
+/// patrol_single).
+#[test]
+fn players_single_point_patrol_loops_back() {
+    if !have_data() {
+        return;
+    }
+    let (mut engine, tanks, _) = setup(None);
+    let t = tick_now(&engine) + 1;
+    let start = position(&engine, tanks[0]);
+    send(&engine, t, 0, PlayerCommand { kind: CommandKind::Patrol, ..move_to(1, &tanks[..1], 405.0, 580.0) });
+    let (mut back, mut given) = (false, false);
+    for _ in 0..400 {
+        engine.tick().unwrap();
+        let c = engine.sim_lua().app_data_ref::<Commands>().unwrap();
+        let q: Vec<_> = c.queue(tanks[0]).map(|x| (x.kind, x.target)).collect();
+        given |= !q.is_empty();
+        assert!(!given || !q.is_empty(), "the patrol never ends");
+        if let [(CommandKind::Patrol, CommandTarget::Ground(p))] = q[..] {
+            let (x, _, z) = p.to_f64();
+            back |= (x - start.0).abs() < 1.0 && (z - start.1).abs() < 1.0;
+        }
+    }
+    assert!(given && back, "a leg back to the start followed the first");
+}
+
 #[test]
 fn commands_only_move_the_senders_units() {
     if !have_data() {

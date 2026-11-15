@@ -132,6 +132,14 @@ pub struct Command {
     /// at +0xe4): [`Commands::repeat_to_back`].
     #[serde(default)]
     pub repeat_count: u32,
+    /// A patrol the player gave (`api::player_input`): left alone in the
+    /// queue, it's followed by a leg back to where the unit started, so
+    /// one point patrols between there and here. Moho's interface adds that
+    /// leg; a script's lone `IssuePatrol` point just ends on arrival
+    /// (dev/probes probe_unit_orders O3). Copied to units joining a
+    /// factory's patrol rally.
+    #[serde(default)]
+    pub patrol_home: bool,
 }
 
 /// A unit's place in a formation order: its goal is the target plus
@@ -288,7 +296,7 @@ impl Commands {
         }
         // A command nobody received is done at once.
         if !members.is_empty() {
-            self.map.insert(id, Command { id, kind, target, blueprint, count, issued: members.len() as u32, units: members.clone(), formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count });
+            self.map.insert(id, Command { id, kind, target, blueprint, count, issued: members.len() as u32, units: members.clone(), formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count, patrol_home: false });
         }
         for u in members {
             self.sync(u);
@@ -457,7 +465,7 @@ impl Commands {
         let id = self.next_id;
         self.next_id += 1;
         self.queues.entry(unit).or_default().push_front(id);
-        self.map.insert(id, Command { id, kind, target, blueprint, count, issued: 1, units: vec![unit], formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count });
+        self.map.insert(id, Command { id, kind, target, blueprint, count, issued: 1, units: vec![unit], formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count, patrol_home: false });
         self.sync(unit);
         id
     }
@@ -658,7 +666,7 @@ impl Commands {
             }
             self.factory_queues.entry(f).or_default().push(id);
         }
-        self.map.insert(id, Command { id, kind, target, blueprint: None, count: 0, issued: 1, units: members, formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: 0 });
+        self.map.insert(id, Command { id, kind, target, blueprint: None, count: 0, issued: 1, units: members, formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: 0, patrol_home: false });
         id
     }
 

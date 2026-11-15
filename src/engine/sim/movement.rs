@@ -3462,22 +3462,28 @@ pub fn apply(world: &mut EntityWorld, commands: &mut Commands, moved: &[Moved], 
         }
         if m.arrived && commands.dispatched(m.unit).is_some() {
             use crate::engine::sim::command::CommandKind as K;
-            let patrol = commands.current(m.unit).filter(|c| matches!(c.kind, K::Patrol | K::FormPatrol)).map(|c| (c.kind, c.target));
+            let patrol = commands.current(m.unit).filter(|c| matches!(c.kind, K::Patrol | K::FormPatrol)).map(|c| (c.kind, c.target, c.patrol_home));
             match patrol {
-                Some((kind, target)) => {
+                Some((kind, target, home)) => {
                     // Patrols loop: with anything queued after it, this one
                     // goes to the back (moho's dispatcher, MohoEngine.dll
                     // 0x101893d7..0x1018952b: any next command, of any
-                    // kind); alone, it's followed by a leg back to where the
-                    // unit started.
+                    // kind). Alone, it ends (a script's single
+                    // `IssuePatrol` point, dev/probes probe_unit_orders O3),
+                    // unless the player gave it: then a leg back to where
+                    // the unit started follows (`Command::patrol_home`).
                     let others = commands.queue(m.unit).nth(1).is_some();
                     let origin = world.get(m.unit).and_then(|e| e.unit.as_deref()).and_then(|u| u.patrol_origin);
                     if others {
                         commands.requeue_front(m.unit);
                     } else {
                         commands.pop_front(m.unit);
-                        if let Some(o) = origin {
-                            commands.issue(&[m.unit], kind, CommandTarget::Ground(o), None, 0);
+                        if home
+                            && let Some(o) = origin {
+                            let id = commands.issue(&[m.unit], kind, CommandTarget::Ground(o), None, 0);
+                            if let Some(c) = commands.get_mut(id) {
+                                c.patrol_home = true;
+                            }
                         }
                     }
                     if let (Some(u), CommandTarget::Ground(p)) = (world.get_mut(m.unit).and_then(|e| e.unit.as_deref_mut()), target) {
@@ -3812,11 +3818,12 @@ mod tests {
     }
 
     #[test]
-    fn patrol_loops_between_start_and_point() {
+    fn players_patrol_loops_between_start_and_point() {
         let mut w = EntityWorld::default();
         let mut c = Commands::default();
         let t = tank(&mut w, 0.0, 0.0);
-        c.issue(&[t], CommandKind::Patrol, CommandTarget::Ground(FxVec3::from_f64(20.0, 0.0, 0.0)), None, 0);
+        let id = c.issue(&[t], CommandKind::Patrol, CommandTarget::Ground(FxVec3::from_f64(20.0, 0.0, 0.0)), None, 0);
+        c.get_mut(id).unwrap().patrol_home = true;
         let (mut cands, mut moved, mut events) = (Vec::new(), Vec::new(), Vec::new());
         let (mut reached_far, mut back_home) = (0, 0);
         let mut near_far = false;
@@ -3835,6 +3842,23 @@ mod tests {
         }
         assert!(reached_far >= 2 && back_home >= 2, "loops: {reached_far} out, {back_home} back");
         assert!(!c.is_idle(t), "a patrol never ends by itself");
+    }
+
+    /// A script's single patrol point (no `patrol_home`) ends on arrival.
+    #[test]
+    fn scripts_single_patrol_point_ends() {
+        let mut w = EntityWorld::default();
+        let mut c = Commands::default();
+        let t = tank(&mut w, 0.0, 0.0);
+        c.issue(&[t], CommandKind::Patrol, CommandTarget::Ground(FxVec3::from_f64(20.0, 0.0, 0.0)), None, 0);
+        let (mut cands, mut moved, mut events) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..400 {
+            candidates(&w, &c, &mut cands);
+            step(&w, &c, Env::default(), &cands, usize::MAX, &mut moved);
+            apply(&mut w, &mut c, &moved, &mut events);
+        }
+        assert!(c.is_idle(t), "the order ended");
+        assert!(w.get(t).unwrap().position().x > Fx::from_num(19), "at the point");
     }
 
     #[test]

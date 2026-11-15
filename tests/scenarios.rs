@@ -1096,6 +1096,11 @@ fn build_cancel() {
 }
 
 #[test]
+fn patrol_single() {
+    scenario("patrol_single", 400);
+}
+
+#[test]
 fn initial_rally() {
     scenario("initial_rally", 1700);
 }
