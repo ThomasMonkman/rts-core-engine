@@ -675,7 +675,12 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         };
         let (position, direction, distance) = {
             let w = entity::world(lua);
-            let Some(u) = w.get(h.unit).filter(|u| !u.destroyed) else { return Ok(None) };
+            // A unit destroyed this beat still fires: it exists until the
+            // destroy queue drains, and its weapons' `OnDestroy` (FAF's
+            // `DeadState`) is what ends a salvo. A script that destroyed a
+            // unit mid-salvo otherwise left its salvo thread a nil
+            // projectile (FAF's `weapon.lua:551` raised on it).
+            let Some(u) = w.get(h.unit) else { return Ok(None) };
             // From the muzzle as posed now (recoil, walk cycle); flying
             // along the weapon's aim. Silo missiles never aim, nor do homing
             // missiles from fixed tubes: they leave along the muzzle bone

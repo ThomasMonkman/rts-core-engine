@@ -1473,3 +1473,8 @@ fn homing_centre() {
 fn weapon_api_returns() {
     scenario("weapon_api_returns", 20);
 }
+
+#[test]
+fn destroyed_salvo() {
+    scenario("destroyed_salvo", 20);
+}
