@@ -1584,7 +1584,8 @@ fn second_quick_press_is_a_double_click() {
 
 /// The control with the keyboard focus gets key presses as `KeyDown`
 /// (moho's `KeyCode`, Windows' `RawKeyCode`); one that blocks keeps them
-/// from the key map, one that doesn't shares them.
+/// from the key map. There is one holder: when the blocker abandons the
+/// focus, the earlier taker doesn't get it back (`probe_ui_controls` focus).
 #[test]
 fn keyboard_focus_gets_key_downs() {
     let Some(vm) = vm() else { return };
@@ -1616,7 +1617,7 @@ fn keyboard_focus_gets_key_downs() {
     vm.lua().load("Sharing:Destroy()").exec().unwrap();
     vm.key("Esc", false, false, false).unwrap();
     let keys: Vec<String> = vm.lua().load("return Keys").eval().unwrap();
-    assert_eq!(keys, ["342/112/true", "83/83/false"], "F1 to the blocker, S to the next; nothing once it's gone");
+    assert_eq!(keys, ["342/112/true"], "F1 to the blocker; S to nobody once it abandons");
 }
 
 /// FAF's `Edit`: a click focuses it, typed characters go in at the caret,
@@ -1873,7 +1874,7 @@ fn range_styles_from_faf() {
 }
 
 /// PNG interface textures (FAF's hotbuild key label background) decode and
-/// size their bitmaps, as DDS ones do.
+/// size their bitmaps, as DDS ones do (less the 1-pixel border).
 #[test]
 fn png_ui_textures_load() {
     let Some(vm) = vm() else { return };
@@ -1882,8 +1883,8 @@ fn png_ui_textures_load() {
     let vfs = vm.lua().app_data_ref::<Arc<std::sync::RwLock<rts_core_engine::engine::vfs::Vfs>>>().unwrap().clone();
     let bytes = vfs.read().unwrap().read("/textures/ui/bg.png").unwrap();
     let t = rts_core_engine::engine::assets::dds::read_image(&bytes).expect("decodes");
-    assert_eq!((t.width, t.height), (w, h));
-    assert_eq!(t.levels[0].len(), (w * h * 4) as usize, "one RGBA level");
+    assert_eq!((t.width - 2, t.height - 2), (w, h));
+    assert_eq!(t.levels[0].len(), (t.width * t.height * 4) as usize, "one RGBA level");
 }
 
 /// Moho's `OnHide`: returning true keeps it from that control's own
