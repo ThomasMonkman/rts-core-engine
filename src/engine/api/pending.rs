@@ -181,9 +181,11 @@ mod tests {
     #[test]
     fn calling_pending_method_errors_with_its_name() {
         let lua = crate::lua_api::dump::sim_vm().unwrap();
-        let (class, names) = super::TO_REVIEW[0];
-        let err = lua.load(format!("moho.{class}.{}({{}})", names[0])).exec().unwrap_err();
-        assert!(err.to_string().contains(&format!("'{class}:{}' is not implemented yet", names[0])), "{err}");
+        // (Empty while nothing waits on other work.)
+        if let Some(&(class, names)) = super::TO_REVIEW.first() {
+            let err = lua.load(format!("moho.{class}.{}({{}})", names[0])).exec().unwrap_err();
+            assert!(err.to_string().contains(&format!("'{class}:{}' is not implemented yet", names[0])), "{err}");
+        }
         let (class, names, _) = super::UNUSED[0];
         let err = lua.load(format!("moho.{class}.{}({{}})", names[0])).exec().unwrap_err();
         assert!(err.to_string().contains("no FAF script uses it"), "{err}");

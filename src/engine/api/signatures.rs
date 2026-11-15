@@ -207,10 +207,7 @@ signatures! {
         GetFactionIndex() -> f64;
         GetFerryBeacons() -> LuaTable;
         GetPersonality() -> LuaValue;
-        LoadUnits(category: EntityCategory) -> LuaTable;
         SwitchAIPlan(plan: LuaValue);
-        UnloadAllAtLocation(position: Vector) -> LuaTable;
-        UnloadUnitsAtLocation(category: EntityCategory, position: Vector) -> LuaTable;
         UseTeleporter(teleporter: Obj<moho::Unit>, squad: Option<String>) -> LuaTable;
     }
     moho::CollisionBeamEntity {
