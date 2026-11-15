@@ -1433,3 +1433,8 @@ fn shield_inside_out() {
 fn shield_centre() {
     scenario("shield_centre", 200);
 }
+
+#[test]
+fn damage_area_self() {
+    scenario("damage_area_self", 30);
+}

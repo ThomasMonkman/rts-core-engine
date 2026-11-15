@@ -134,8 +134,11 @@ fn damage_shell(
             .into_iter()
             .chain(shield_targets)
             .filter(|&id| {
+                // The instigator is one of its own friends: `damageSelf`
+                // counts only when `damageFriendly` is set (probe_wpn_damage,
+                // probe_wpn_misc2 `self friendly=f self=t: me 0`).
                 if Some(id) == source {
-                    return damage_self;
+                    return damage_self && friendly;
                 }
                 let army = w.get(id).and_then(|e| e.army);
                 match (friendly, source_army, army, &armies) {
