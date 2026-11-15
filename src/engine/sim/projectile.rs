@@ -514,6 +514,8 @@ pub struct ShieldSphere {
     /// another's shape, not one inside it when it appears: FAF's flares make
     /// three sizes for that).
     pub moved: Option<FxVec3>,
+    /// The bubble's army: an enemy bubble also stops shots leaving it.
+    pub army: Option<u32>,
 }
 
 /// Where (fraction 0..1) the segment `from -> to` enters the sphere from
@@ -538,9 +540,33 @@ pub fn segment_enters_sphere(from: FxVec3, to: FxVec3, center: FxVec3, radius: F
     (Fx::ZERO..=Fx::ONE).contains(&t).then_some(t)
 }
 
-/// The earliest shield bubble the segment `from -> to` enters from outside
-/// (shots fired from inside get out): fraction along it (0 at the latest)
-/// and shield id; ties go to the lowest id.
+/// Where (fraction 0..1) the segment `from -> to` leaves the sphere from
+/// inside; `None` if it starts outside or stays in.
+fn segment_leaves_sphere(from: FxVec3, to: FxVec3, center: FxVec3, radius: Fx) -> Option<Fx> {
+    let sq = |v: FxVec3| v.x.saturating_mul(v.x).saturating_add(v.y.saturating_mul(v.y)).saturating_add(v.z.saturating_mul(v.z));
+    let r2 = radius.saturating_mul(radius);
+    let (d, f) = (to - from, from - center);
+    let c = sq(f) - r2;
+    if c > Fx::ZERO || sq(to - center) <= r2 {
+        return None;
+    }
+    let a = sq(d);
+    let b = (f.x.saturating_mul(d.x).saturating_add(f.y.saturating_mul(d.y)).saturating_add(f.z.saturating_mul(d.z))).saturating_mul(Fx::from_num(2));
+    let disc = (b.saturating_mul(b) - a.saturating_mul(c).saturating_mul(Fx::from_num(4))).max(Fx::ZERO);
+    let t = (-b + crate::engine::sim::math::sqrt(disc)) / (a * Fx::from_num(2));
+    Some(t.clamp(Fx::ZERO, Fx::ONE))
+}
+
+/// The earliest shield bubble the segment `from -> to` enters from outside,
+/// or leaves from inside when the bubble is an enemy's (`exits`: the
+/// projectile's army and the alliances; `None` for script spheres): fraction
+/// along it (0 at the latest) and shield id; ties go to the lowest id.
+///
+/// A shot launched inside an enemy bubble hits it from the inside on its
+/// way out (`probe_wpn_shield` `geo.insideout`: `type Shield ... dist
+/// 12.84`). Friendly bubbles let it out without asking: FAF's
+/// `Shield:OnCollisionCheck` refuses any shot that isn't an enemy's, and a
+/// refusal would hold the shot a tick.
 ///
 /// The test line starts 1% of the step behind the projectile: moho's
 /// collision line for entities starts behind it by a share of its velocity
@@ -550,7 +576,21 @@ pub fn segment_enters_sphere(from: FxVec3, to: FxVec3, center: FxVec3, radius: F
 /// the bubble hit it, not what's under it (FAF probe probe_splashwater:
 /// three Lobos took a mobile shield's bubble from 3000 to 1500 in one
 /// volley, the tank and the carrier under it untouched).
-fn first_shield_hit(p: &ProjectileState, from: FxVec3, to: FxVec3, shields: &[ShieldSphere]) -> Option<(Fx, EntityId)> {
+fn first_shield_hit(
+    p: &ProjectileState,
+    from: FxVec3,
+    to: FxVec3,
+    shields: &[ShieldSphere],
+    exits: Option<(Option<u32>, Option<&crate::engine::sim::army::Armies>)>,
+) -> Option<(Fx, EntityId)> {
+    use crate::engine::sim::army::Alliance;
+    let enemy = |other: Option<u32>| match exits {
+        Some((Some(a), armies)) => other.is_some_and(|b| match armies {
+            Some(armies) => armies.alliance(a, b) == Alliance::Enemy,
+            None => a != b,
+        }),
+        _ => false,
+    };
     let back = (to - from) * (Fx::ONE / Fx::from_num(100));
     let from = from - back;
     let d = to - from;
@@ -571,7 +611,11 @@ fn first_shield_hit(p: &ProjectileState, from: FxVec3, to: FxVec3, shields: &[Sh
         if f.x.abs() > s.radius + seg || f.y.abs() > s.radius + seg || f.z.abs() > s.radius + seg {
             continue;
         }
-        let Some(t) = segment_enters_sphere(from, to, s.center, s.radius) else { continue };
+        let Some(t) = segment_enters_sphere(from, to, s.center, s.radius)
+            .or_else(|| if enemy(s.army) { segment_leaves_sphere(from, to, s.center, s.radius) } else { None })
+        else {
+            continue;
+        };
         // Back to a fraction of the real step (the line is 1.01 steps).
         let t = (t * Fx::from_num(101) / Fx::from_num(100) - Fx::ONE / Fx::from_num(100)).max(Fx::ZERO);
         if best.is_none_or(|(bt, bid)| (t, s.id) < (bt, bid)) {
@@ -815,7 +859,7 @@ fn advance(
     // earliest wins.
     if p.collide_entity {
         let unit = first_unit_hit(p, position, next, army, world, env, buf);
-        let shield = first_shield_hit(p, position, next, env.shields);
+        let shield = first_shield_hit(p, position, next, env.shields, Some((army, env.armies)));
         let under_water = |t: Fx| terrain.and_then(|tr| tr.water_surface).is_some_and(|w| (position + (next - position) * t).y < w);
         let mut hit = match (unit, shield) {
             (Some((tu, u, layer)), Some((ts, s))) => Some(if ts < tu { (ts, s, ImpactKind::Shield) } else { (tu, u, ImpactKind::for_unit(layer, under_water(tu))) }),
@@ -876,7 +920,7 @@ fn advance(
         };
         (w > t.height_at(next.x, next.z)).then_some(crossed)
     });
-    let entered = if p.collide_entity && !env.script_spheres.is_empty() { first_shield_hit(p, position, next, env.script_spheres).map(|(_, id)| id) } else { None };
+    let entered = if p.collide_entity && !env.script_spheres.is_empty() { first_shield_hit(p, position, next, env.script_spheres, None).map(|(_, id)| id) } else { None };
     Motion { live: true, turned, position: next, orientation: q, impact, target: None, water, entered }
 }
 

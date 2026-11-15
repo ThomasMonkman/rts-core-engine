@@ -1423,3 +1423,8 @@ fn dispatch_hold() {
 fn cant_be_killed() {
     scenario("cant_be_killed", 60);
 }
+
+#[test]
+fn shield_inside_out() {
+    scenario("shield_inside_out", 200);
+}

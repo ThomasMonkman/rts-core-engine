@@ -421,10 +421,10 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                 && radius > crate::engine::sim::math::Fx::ZERO {
                 let center = e.position() + e.orientation.rotate(center);
                 if e.kind == EntityKind::Shield {
-                    shields.push(projectile::ShieldSphere { id: e.id, center, radius, moved: Some(Default::default()) });
+                    shields.push(projectile::ShieldSphere { id: e.id, center, radius, moved: Some(Default::default()), army: e.army });
                 } else {
                     let moved = last.binary_search_by_key(&e.id, |c| c.0).ok().map(|i| center - last[i].1);
-                    script_spheres.push(projectile::ShieldSphere { id: e.id, center, radius, moved });
+                    script_spheres.push(projectile::ShieldSphere { id: e.id, center, radius, moved, army: e.army });
                 }
             }
         }
