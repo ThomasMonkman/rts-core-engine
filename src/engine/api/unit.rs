@@ -1155,15 +1155,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             spawn_unit(lua, &bp, index, FxVec3::from_f64(x, y, z), q)
         })?;
     lua_fn!(lua, global,
-        /// `ChangeUnitArmy(unit, army, allowCommanders)`: a copy of the unit in
-        /// `army` (same blueprint, transform, health, build progress), then the
-        /// old one is destroyed. nil for dead units, a move to the same army, or
-        /// COMMAND units without `allowCommanders` (FAF's engine patch). Nor
-        /// past the receiving army's unit cap: the giving army's brain hears
-        /// `OnFailedUnitTransfer` and the unit stays (inferred: which brain, and
-        /// that `allowCommanders` doesn't lift the cap; FAF's army merge raises
-        /// the cap first).
-        ChangeUnitArmy = |lua, (unit, army, allow_commanders): (Obj<moho::Unit>, shapes::Army, Option<bool>)| {
+        /// `ChangeUnitArmy(unit, army)`: a copy of the unit in `army` (same
+        /// blueprint, transform, health, build progress), then the old one is
+        /// destroyed. nil for dead units or a move to the same army. Commanders
+        /// transfer too: refusing them is FAF's `SimHooks.lua` wrapper (which
+        /// passes only two arguments when its `noRestrictions` flag is set), as
+        /// in the real game (dev/probes probe_unit_api `givecdr`). Not past the
+        /// receiving army's unit cap: the receiving army's brain hears
+        /// `OnFailedUnitTransfer` and the unit stays (probe_unit_api `army`).
+        ChangeUnitArmy = |lua, (unit, army, _no_restrictions): (Obj<moho::Unit>, shapes::Army, Option<bool>)| {
             let id = crate::engine::api::entity::entity_id(&unit)?;
             let to = resolve_army(lua, &army)?;
             let Some((bp, pos, rot, health, max_health, fraction, from)) = world(lua)
@@ -1176,15 +1176,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             if from == Some(to) {
                 return Ok(None);
             }
-            if !allow_commanders.unwrap_or(false) {
-                let domain = crate::engine::api::categories::domain(lua)?;
-                let commander = domain.named.get("COMMAND").zip(domain.index_of(&bp)).is_some_and(|(set, i)| set.contains(i));
-                if commander {
-                    return Ok(None);
-                }
-            }
             if over_cap(lua, id, to) {
-                if let Some(LuaValue::Table(brain)) = from.map(|a| crate::engine::api::army::brain(lua, a)).transpose()? {
+                if let LuaValue::Table(brain) = crate::engine::api::army::brain(lua, to)? {
                     AIBrainCallbacks::on_failed_unit_transfer(lua, &brain, "brain")?;
                 }
                 return Ok(None);

@@ -599,8 +599,8 @@ fn decay() {
     scenario("decay", 400);
 }
 
-/// `ChangeUnitArmy` past the receiver's unit cap: refused, the giver hears
-/// `OnFailedUnitTransfer`.
+/// `ChangeUnitArmy` past the receiver's unit cap: refused, the receiver
+/// hears `OnFailedUnitTransfer`; commanders with `noRestrictions`.
 #[test]
 fn failed_transfer() {
     scenario("failed_transfer", 60);
