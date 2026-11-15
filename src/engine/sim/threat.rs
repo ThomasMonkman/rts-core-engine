@@ -17,6 +17,11 @@
 //! updates; a structure's for good, also once destroyed out of sight. Its
 //! own army's threat is exact.
 //!
+//! Each jammer fake a brain believes in (on its radar, not known fake:
+//! `sim::vision::Fake`) adds its jammer's whole threat at the fake's spot
+//! (probe_intel_jam). Not modelled: the probe's previous generation of
+//! fakes still counting after a jammer reset.
+//!
 //! Script-assigned threat (`AssignThreatAtPosition`) counts from the next
 //! update and loses `decay` x its amount per update while positive;
 //! negative amounts never fade and subtract from the cell's unit threat.
@@ -309,6 +314,15 @@ impl ThreatMap {
     /// order and memories in id order, so the (exact, fixed-point) sums are
     /// the same on every machine.
     pub fn update(&mut self, world: &EntityWorld, now: u64, brains: &[u32], knows: &dyn Fn(u32, &crate::engine::sim::entity::Entity) -> Knowledge) {
+        self.update_with_fakes(world, now, brains, knows, &[]);
+    }
+
+    /// [`ThreatMap::update`] plus jammer fakes: each `(brain, jammer, at)`
+    /// adds the jammer's whole threat at `at` to what `brain` knows of the
+    /// jammer's army (probe_intel_jam: every fake on the brain's radar and
+    /// not known fake counts the jammer's full threat at its own spot; not
+    /// remembered once it goes). In the order given.
+    pub fn update_with_fakes(&mut self, world: &EntityWorld, now: u64, brains: &[u32], knows: &dyn Fn(u32, &crate::engine::sim::entity::Entity) -> Knowledge, fakes: &[(u32, crate::engine::sim::entity::EntityId, FxVec3)]) {
         let n = (self.cols * self.rows) as usize;
         self.built = true;
         for grid in self.cells.iter_mut() {
@@ -375,6 +389,11 @@ impl ThreatMap {
                 true
             });
             self.memory[b] = memory;
+            for &(_, jammer, at) in fakes.iter().filter(|f| f.0 == brain) {
+                let Some((army, data)) = world.get(jammer).and_then(|e| Some((e.army?, e.unit.as_deref()?))) else { continue };
+                let index = self.index_of(at) as usize;
+                add(grid_of(&mut self.known[b], army, n), index, &data.threat);
+            }
         }
         self.age_assigned();
     }

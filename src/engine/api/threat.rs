@@ -55,7 +55,8 @@ fn update(lua: &Lua, map: &mut ThreatMap) {
         let structure = structures.as_ref().zip(e.category_index).is_some_and(|(s, i)| s.contains(i));
         if structure && grids.ever_seen(brain, e.id) { Knowledge::SeenStructure } else { Knowledge::Unknown }
     };
-    map.update(&world, now, &brains, &knows);
+    let fakes: Vec<_> = grids.fakes().iter().flat_map(|f| brains.iter().filter(|&&b| f.believed_by(b)).map(move |&b| (b, f.jammer, f.position))).collect();
+    map.update_with_fakes(&world, now, &brains, &knows, &fakes);
 }
 
 /// Makes sure the map has had an update (queries before the first one).

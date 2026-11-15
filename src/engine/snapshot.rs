@@ -135,6 +135,15 @@ impl EntityView {
     }
 }
 
+/// A jammer's fake radar contact as the view army sees it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FakeBlip {
+    pub position: [f32; 3],
+    /// The jammer's blueprint index (as [`EntityView::blueprint`]): fakes
+    /// show the jammer's own contact shape.
+    pub blueprint: u32,
+}
+
 /// How the viewing army knows an entity it is shown (fog of war; see
 /// [`DebugRequest::view_army`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -846,8 +855,9 @@ pub struct Snapshot {
     /// The fog of war texture's changes since the last delivered snapshot
     /// (`None`: unchanged).
     pub fog: Option<FogUpdate>,
-    /// Fake radar contacts (enemy jammers) the view army sees now.
-    pub fake_blips: Vec<[f32; 3]>,
+    /// Fake radar contacts (enemy jammers) the view army believes in now:
+    /// on its radar, not known fakes.
+    pub fake_blips: Vec<FakeBlip>,
     /// While fog of war is on: the view army's side's vision sources, in
     /// entity order. The renderer draws the clear ground as their circles,
     /// blended between snapshots as the units are (moho's vision pass), while

@@ -25,10 +25,16 @@
 //! them (FAF wiki: "Countered by omni sensors").
 //!
 //! Jammers (`Jammer` intel with blueprint `JammerBlips` / `JamRadius`) put
-//! that many fake radar contacts around themselves, re-placed every
-//! [`JAM_PERIOD`] ticks from a hash of (unit, period, blip), so they're
-//! the same on every machine; an enemy sees a fake on its radar unless omni
-//! covers it.
+//! that many fake contacts ([`Fake`]) around themselves when the intel comes
+//! on, each at a fixed offset that moves with the jammer (`Warp` too), from
+//! a hash of (unit, tick made, blip), so they're the same on every machine.
+//! Each is a recon blip of its own (an id from [`FAKE_ID_BASE`] up), detected
+//! by enemy radar / vision / omni at its own position like a unit, with
+//! `OnIntelChange` for it (FAF's jammer reset listens). Seen or under omni,
+//! it becomes a known fake for that side until it goes; the set goes all at
+//! once when the jammer's intel goes off (or it dies), and a new layout comes
+//! only with the next switch-on (FAF's Lua does that 15 s after a fake or the
+//! jammer was last seen). From FAF probe `dev/probes/maps/probe_intel_jam`.
 //!
 //! Inferred, not verified: that unfinished units have no intel.
 
@@ -113,8 +119,57 @@ impl FogMode {
     }
 }
 
-/// Ticks between jammer blip re-placements (inferred).
-pub const JAM_PERIOD: u64 = 50;
+/// The first jammer fake's blip id: moho's blips have an id range of their
+/// own (`0x30100000` up, probe_intel_jam), clear of every entity id.
+pub const FAKE_ID_BASE: EntityId = 0x3010_0000;
+
+/// One jammer fake contact (moho's fake `ReconBlip`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Fake {
+    /// Its blip id (from [`FAKE_ID_BASE`]).
+    pub id: EntityId,
+    /// The jammer it stands for (its blueprint, its source).
+    pub jammer: EntityId,
+    /// The jammer's army.
+    pub owner: u32,
+    /// Offset from the jammer, fixed for the fake's life.
+    dx: Fx,
+    dz: Fx,
+    /// Where it is now (the jammer's position plus the offset).
+    pub position: FxVec3,
+    /// Armies that know it's a fake (seen it, or had it under omni): kept
+    /// until it goes.
+    known: u64,
+    /// Armies that have seen it.
+    ever: u64,
+    /// Armies detecting it now, by [`Recon`].
+    now: [u64; 4],
+}
+
+impl Fake {
+    fn bit(army: u32) -> u64 {
+        1u64 << army.min(MAX_ARMIES)
+    }
+
+    /// What `army` knows of it now (it is never on sonar), and whether it
+    /// has seen it.
+    pub fn knowledge(&self, army: u32) -> (Detection, bool) {
+        let b = Self::bit(army);
+        let d = Detection { seen: self.now[0] & b != 0, radar: self.now[1] & b != 0, sonar: false, omni: self.now[3] & b != 0 };
+        (d, self.ever & b != 0)
+    }
+
+    /// `army` knows it's a fake (`IsKnownFake`).
+    pub fn known_by(&self, army: u32) -> bool {
+        self.known & Self::bit(army) != 0
+    }
+
+    /// On `army`'s radar and not known to it as a fake: a contact it
+    /// believes in (drawn, and counted in its threat map).
+    pub fn believed_by(&self, army: u32) -> bool {
+        self.now[1] & Self::bit(army) != 0 && !self.known_by(army)
+    }
+}
 
 /// A unit's own counter-intel (`Cloak`, `RadarStealth`, `SonarStealth`).
 const CLOAK: u8 = 1;
@@ -401,6 +456,13 @@ pub struct IntelGrids {
     own_flags: Vec<(EntityId, u8)>,
     /// Active jammers: (unit, army, position, spec), id order.
     jammers: Vec<(EntityId, u32, FxVec3, JammerSpec)>,
+    /// Live jammer fakes, id order (ids only grow, so new sets go last).
+    fakes: Vec<Fake>,
+    /// Fakes that went this update (their jammer stopped jamming): still
+    /// answered for this update's callbacks, then dropped.
+    fakes_gone: Vec<Fake>,
+    /// The next fake's id.
+    next_fake: EntityId,
     tick: u64,
     /// Stamps per (army, sensor), and per sensor the armies with any: lets
     /// coverage checks skip sensors nobody on a side has (most of them).
@@ -646,6 +708,129 @@ impl IntelGrids {
         self.stamps = wanted;
         self.wanted = old;
         self.record_intel(world, min.scan);
+        self.update_fakes();
+    }
+
+    /// Jammer fakes, after the units' intel: sets of jammers that stopped
+    /// jamming go (every army that had intel on one loses it), jammers that
+    /// started get a new set, the rest follow their jammer; then each enemy
+    /// army's intel on each is diffed into `changes` (after the units':
+    /// fake ids are above every unit's). Serial: a few per jammer.
+    fn update_fakes(&mut self) {
+        self.fakes_gone.clear();
+        if self.fakes.is_empty() && self.jammers.is_empty() {
+            return;
+        }
+        let jammers = std::mem::take(&mut self.jammers);
+        let at = |id: EntityId| jammers.binary_search_by_key(&id, |j| j.0).ok().map(|i| &jammers[i]);
+        let mut gone = std::mem::take(&mut self.fakes_gone);
+        self.fakes.retain(|f| {
+            let live = at(f.jammer).is_some_and(|j| j.1 == f.owner);
+            if !live {
+                gone.push(*f);
+            }
+            live
+        });
+        for f in &gone {
+            self.push_changes(f.id, f.now, [0; 4]);
+        }
+        self.fakes_gone = gone;
+        // New sets, in jammer id order.
+        let mut have: Vec<EntityId> = self.fakes.iter().map(|f| f.jammer).collect();
+        have.sort_unstable();
+        have.dedup();
+        for &(id, owner, p, spec) in &jammers {
+            if have.binary_search(&id).is_ok() {
+                continue;
+            }
+            for k in 0..spec.blips {
+                let h = mix(mix(mix(id as u64) ^ self.tick) ^ k as u64);
+                // Angle from the low 16 bits (a turn in 2^16 steps), then
+                // the blip's radius in [Min, Max] and its distance, uniform
+                // in [0, radius] (probe_intel_jam: 0 up to the radius, Min
+                // no minimum), all exact fixed point.
+                let unit = |bits: u64| Fx::from_num((bits & 0xFFFF) as u32) / Fx::from_num(0x10000);
+                let angle = unit(h) * (Fx::PI * 2);
+                let radius = spec.min + (spec.max - spec.min).saturating_mul(unit(h >> 16));
+                let d = radius.saturating_mul(unit(h >> 32));
+                let (s, c) = crate::engine::sim::math::sin_cos(angle);
+                let (dx, dz) = (s.saturating_mul(d), c.saturating_mul(d));
+                self.fakes.push(Fake { id: self.next_fake.max(FAKE_ID_BASE), jammer: id, owner, dx, dz, position: p, known: 0, ever: 0, now: [0; 4] });
+                self.next_fake = self.next_fake.max(FAKE_ID_BASE).wrapping_add(1).max(FAKE_ID_BASE);
+            }
+        }
+        let radar = sensor_index(IntelType::Radar).expect("radar");
+        let omni = sensor_index(IntelType::Omni).expect("omni");
+        let mut fakes = std::mem::take(&mut self.fakes);
+        for f in &mut fakes {
+            let Some(&(_, _, p, _)) = at(f.jammer) else { continue };
+            f.position = FxVec3 { x: p.x + f.dx, y: p.y, z: p.z + f.dz };
+            let (Some(fine), Some(coarse)) = (self.cell_index(VISION_SHIFT, f.position), self.cell_index(CELL_SHIFT, f.position)) else {
+                let now = std::mem::take(&mut f.now);
+                self.push_changes(f.id, now, [0; 4]);
+                continue;
+            };
+            let own = self.shared_by.get(f.owner as usize).copied().unwrap_or(1 << f.owner.min(MAX_ARMIES));
+            let seen = self.share(self.cover_at(VISION, fine)) & !own;
+            let on_radar = self.share(self.cover_at(radar, coarse)) & !own;
+            let on_omni = self.share(self.cover_at(omni, coarse)) & !own;
+            let next = [seen, on_radar, 0, on_omni];
+            f.known |= seen | on_omni;
+            f.ever |= seen;
+            let before = std::mem::replace(&mut f.now, next);
+            self.push_changes(f.id, before, next);
+        }
+        self.fakes = fakes;
+        self.jammers = jammers;
+    }
+
+    /// Every army sharing intel with one in `raw` (as a mask).
+    fn share(&self, mut raw: u64) -> u64 {
+        let mut out = 0u64;
+        while raw != 0 {
+            let b = raw.trailing_zeros() as usize;
+            raw &= raw - 1;
+            out |= self.shared_by.get(b).copied().unwrap_or(1 << b);
+        }
+        out
+    }
+
+    /// `changes` for one blip going from `before` to `after` ([`Recon`]
+    /// masks), in (army, recon) order.
+    fn push_changes(&mut self, id: EntityId, before: [u64; 4], after: [u64; 4]) {
+        let mut armies = (0..4).fold(0u64, |a, k| a | (before[k] ^ after[k]));
+        while armies != 0 {
+            let b = armies.trailing_zeros();
+            armies &= armies - 1;
+            for (k, recon) in Recon::ALL.into_iter().enumerate() {
+                if (before[k] ^ after[k]) & (1 << b) != 0 {
+                    self.changes.push(IntelChange { unit: id, army: b, recon, on: after[k] & (1 << b) != 0 });
+                }
+            }
+        }
+    }
+
+    /// Live jammer fakes, id order.
+    pub fn fakes(&self) -> &[Fake] {
+        &self.fakes
+    }
+
+    /// The fake with blip id `id`: live, or gone this update.
+    pub fn fake(&self, id: EntityId) -> Option<&Fake> {
+        match self.fakes.binary_search_by_key(&id, |f| f.id) {
+            Ok(i) => Some(&self.fakes[i]),
+            Err(_) => self.fakes_gone.iter().find(|f| f.id == id),
+        }
+    }
+
+    /// Whether `id` is a live fake.
+    pub fn fake_alive(&self, id: EntityId) -> bool {
+        self.fakes.binary_search_by_key(&id, |f| f.id).is_ok()
+    }
+
+    /// The fakes that went this update.
+    pub fn fakes_gone(&self) -> &[Fake] {
+        &self.fakes_gone
     }
 
     /// Merges `out.wanted` (in (entity, sensor) order, as `stamps`) with
@@ -747,32 +932,10 @@ impl IntelGrids {
         self.detection_with(army, e.position(), layer, self.hidden(e))
     }
 
-    /// Fake radar contacts `army` sees from enemy jammers this period:
-    /// positions in jammer id order, then blip order.
-    pub fn fake_blips(&self, army: u32) -> Vec<FxVec3> {
-        let period = self.tick / JAM_PERIOD;
-        let mut out = Vec::new();
-        for &(id, owner, at, spec) in &self.jammers {
-            if self.allies.get(army as usize).is_some_and(|m| m & (1 << owner.min(MAX_ARMIES)) != 0) {
-                continue;
-            }
-            for k in 0..spec.blips {
-                let h = mix(mix(mix(id as u64) ^ period) ^ k as u64);
-                // Angle from the low bits (a turn in 2^16 steps), distance
-                // from the next ones, both exact fixed point.
-                let angle = Fx::from_num((h & 0xFFFF) as u32) / Fx::from_num(0x10000) * (Fx::PI * 2);
-                let t = Fx::from_num(((h >> 16) & 0xFFFF) as u32) / Fx::from_num(0x10000);
-                let d = spec.min + (spec.max - spec.min).saturating_mul(t);
-                let (s, c) = crate::engine::sim::math::sin_cos(angle);
-                let p = FxVec3 { x: at.x + s.saturating_mul(d), y: at.y, z: at.z + c.saturating_mul(d) };
-                let radar = sensor_index(IntelType::Radar).expect("radar");
-                let omni = sensor_index(IntelType::Omni).expect("omni");
-                if self.covered(army, radar, p) && !self.covered(army, omni, p) {
-                    out.push(p);
-                }
-            }
-        }
-        out
+    /// The jammer fakes `army` believes in now ([`Fake::believed_by`]: on
+    /// its radar, not known fake), id order.
+    pub fn fake_blips(&self, army: u32) -> impl Iterator<Item = &Fake> + '_ {
+        self.fakes.iter().filter(move |f| f.believed_by(army))
     }
 
     /// The fog view's cells across and down (the vision grid's, the
@@ -1268,34 +1431,71 @@ mod tests {
         assert!(g2.detect(1, w2.get(hidden).unwrap()).seen, "stealth doesn't stop vision");
     }
 
+    /// probe_intel_jam: a jammer's `JammerBlips` fakes sit 0..radius from
+    /// it at fixed offsets that follow it, the same every run; the owner
+    /// has none; vision or omni makes them known fakes without removing
+    /// them; switching the jammer off destroys the set (intel lost on each)
+    /// and switching it on makes a new layout.
     #[test]
-    fn jammer_fakes_show_on_enemy_radar_deterministically() {
+    fn jammer_fakes_follow_the_jammer_until_it_stops() {
         let mut w = EntityWorld::default();
         w.set_bounds(256, 256);
         let radar = unit(&mut w, 1, 100.0, 100.0, 0.0);
         give(&mut w, radar, IntelType::Radar, 150.0);
         let jam = unit(&mut w, 2, 130.0, 130.0, 0.0);
         give(&mut w, jam, IntelType::Jammer, 0.0);
-        let spec = JammerSpec { blips: 6, min: Fx::from_num(5), max: Fx::from_num(15) };
-        let run = |w: &EntityWorld| {
+        let spec = JammerSpec { blips: 6, min: Fx::from_num(15), max: Fx::from_num(15) };
+        let jammer = move |e: &Entity| (e.id == jam).then_some(spec);
+        let new = |w: &EntityWorld| {
             let mut g = IntelGrids::new(256, 256);
             g.set_alliances(2, |_, _| false);
-            g.update(w, |e| (e.id == jam).then_some(spec));
+            g.update(w, jammer);
             g
         };
-        let g = run(&w);
-        let fakes = g.fake_blips(1);
-        assert_eq!(fakes.len(), 6);
-        assert_eq!(fakes, run(&w).fake_blips(1), "same every run");
-        let jp = w.get(jam).unwrap().position();
-        for f in &fakes {
-            let (dx, dz) = ((f.x - jp.x).to_num::<f64>(), (f.z - jp.z).to_num::<f64>());
-            let d = (dx * dx + dz * dz).sqrt();
-            assert!((4.99..=15.01).contains(&d), "within JamRadius: {d}");
+        let offsets = |g: &IntelGrids, w: &EntityWorld| {
+            let jp = w.get(jam).unwrap().position();
+            g.fake_blips(1).map(|f| (f.position.x - jp.x, f.position.z - jp.z)).collect::<Vec<_>>()
+        };
+        let mut g = new(&w);
+        let first = offsets(&g, &w);
+        assert_eq!(first.len(), 6);
+        assert_eq!(first, offsets(&new(&w), &w), "same every run");
+        assert!(g.changes.iter().filter(|c| c.unit >= FAKE_ID_BASE && c.recon == Recon::Radar && c.on && c.army == 1).count() == 6, "Radar on for each fake");
+        for &(dx, dz) in &first {
+            let d = (dx.to_num::<f64>().powi(2) + dz.to_num::<f64>().powi(2)).sqrt();
+            assert!(d <= 15.01, "within JamRadius: {d}");
         }
-        assert!(g.fake_blips(2).is_empty(), "owner sees no fakes");
+        assert!(first.iter().any(|&(dx, dz)| dx.to_num::<f64>().hypot(dz.to_num::<f64>()) < 14.0), "not all on the ring");
+        assert_eq!(g.fake_blips(2).count(), 0, "owner sees no fakes");
+        // Moves (and many ticks): same offsets, same ids.
+        let ids: Vec<EntityId> = g.fakes().iter().map(|f| f.id).collect();
+        w.set_position(jam, FxVec3::from_f64(140.0, 0.0, 125.0));
+        for _ in 0..120 {
+            g.update(&w, jammer);
+        }
+        assert_eq!(offsets(&g, &w), first, "fixed offsets, no re-placement");
+        assert_eq!(g.fakes().iter().map(|f| f.id).collect::<Vec<_>>(), ids);
+        // Omni: known fakes, still alive and on radar.
         give(&mut w, radar, IntelType::Omni, 150.0);
-        assert!(run(&w).fake_blips(1).is_empty(), "omni exposes them");
+        g.update(&w, jammer);
+        assert_eq!(g.fakes().len(), 6);
+        assert_eq!(g.fake_blips(1).count(), 0, "known fakes aren't believed");
+        assert!(g.fakes().iter().all(|f| f.known_by(1) && f.knowledge(1).0.radar && f.knowledge(1).0.omni && !f.knowledge(1).0.seen));
+        w.get_mut(radar).unwrap().cold.intel.remove(&IntelType::Omni);
+        g.update(&w, jammer);
+        assert!(g.fakes().iter().all(|f| f.known_by(1)), "known until it goes");
+        // Jammer off: all gone at once, Radar lost on each; on: a new layout.
+        w.get_mut(jam).unwrap().cold.intel.get_mut(&IntelType::Jammer).unwrap().enabled = false;
+        g.update(&w, jammer);
+        assert!(g.fakes().is_empty());
+        assert_eq!(g.fakes_gone().len(), 6);
+        assert_eq!(g.changes.iter().filter(|c| c.unit >= FAKE_ID_BASE && c.recon == Recon::Radar && !c.on).count(), 6);
+        assert!(g.fake(ids[0]).is_some(), "answered for this update's callbacks");
+        w.get_mut(jam).unwrap().cold.intel.get_mut(&IntelType::Jammer).unwrap().enabled = true;
+        g.update(&w, jammer);
+        assert_eq!(g.fake_blips(1).count(), 6, "a fresh set, believed again");
+        assert!(g.fakes().iter().all(|f| f.id > ids[5]), "new ids");
+        assert_ne!(offsets(&g, &w), first, "a new layout");
     }
 
     /// The parallel gather / merge (fixed entity chunks) and blip scan give
@@ -1354,7 +1554,7 @@ mod tests {
                 changes += g.changes.len();
                 states.push(postcard::to_allocvec(&g).unwrap());
             }
-            assert!(changes > 1000 && !g.jammers.is_empty() && !g.own_flags.is_empty(), "the scene exercises it: {changes} changes");
+            assert!(changes > 1000 && !g.jammers.is_empty() && !g.fakes.is_empty() && !g.own_flags.is_empty(), "the scene exercises it: {changes} changes");
             states
         };
         let serial = run(ParallelMin { update: usize::MAX, scan: usize::MAX });

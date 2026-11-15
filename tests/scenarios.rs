@@ -169,6 +169,11 @@ fn blip_identity() {
 }
 
 #[test]
+fn jammer_fakes() {
+    scenario("jammer_fakes", 500);
+}
+
+#[test]
 fn blueprint_regen() {
     scenario("blueprint_regen", 60);
 }

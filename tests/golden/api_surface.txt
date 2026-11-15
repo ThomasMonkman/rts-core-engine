@@ -524,6 +524,9 @@ sim  moho.aipersonality_methods.GetTargetSpread native
 sim  moho.aipersonality_methods.GetTeamSupport native
 sim  moho.aipersonality_methods.GetTechAdvancement native
 sim  moho.aipersonality_methods.GetUpgradesDriven native
+sim  moho.blip_methods.BeenDestroyed native
+sim  moho.blip_methods.GetEntityId native
+sim  moho.blip_methods.GetPosition native
 sim  moho.blip_methods.GetSource native
 sim  moho.blip_methods.IsKnownFake native
 sim  moho.blip_methods.IsMaybeDead native

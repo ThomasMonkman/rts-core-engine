@@ -417,7 +417,7 @@ pub fn icon_items(scene: &Sources, cache: &mut IconCache) -> (Vec<rts_core_engin
                 super::scene::IconKind::Full => (id, pos, Some(army), name.as_str(), alpha, layer_of(bp)),
             })
         });
-        let fake = fakes.iter().map(|&pos| (u32::MAX, pos, None, FAKE_BLIP_ICON, 1.0, 0));
+        let fake = fakes.iter().map(|f| (u32::MAX, f.position, None, FAKE_BLIP_ICON, 1.0, 0));
         let [l, t, r, b] = view.rect;
         for (id, pos, army, name, alpha, layer) in shown.chain(fake) {
             let Some([x, y]) = view.project(cam, glam::Vec3::from_array(pos)) else { continue };

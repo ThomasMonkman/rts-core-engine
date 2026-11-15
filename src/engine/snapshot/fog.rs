@@ -138,7 +138,9 @@ pub(super) fn apply(lua: &mlua::Lua, fog: &mut FogSink, view: Option<(u32, FogMo
     let mut k = keep.into_iter();
     snap.effects.retain(|_| k.next().unwrap_or(false));
     snap.splats.retain(|s: &GroundSplat| theirs(s.army.unwrap_or(0), s.centre));
-    snap.fake_blips = grids.fake_blips(army).into_iter().map(super::f3).collect();
+    // The jammer fakes it believes in (known fakes aren't drawn), with
+    // their jammer's blueprint for the contact's shape.
+    snap.fake_blips = grids.fake_blips(army).map(|f| super::FakeBlip { position: super::f3(f.position), blueprint: world.get(f.jammer).and_then(|e| e.category_index).unwrap_or(u32::MAX) }).collect();
 }
 
 /// `army`'s side's vision sources at their positions this tick (the
