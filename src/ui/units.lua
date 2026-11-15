@@ -58,10 +58,13 @@ methods.GetCommandQueue = function(self)
     return out
 end
 methods.GetWorkProgress = function(self) local u = d(self) return u and u.work or 0 end
+-- The unit it works on: the one an engineer or factory builds, the
+-- structure an upgrade becomes. Those are usually not units the interface
+-- has data for yet (not selected, still being built), so it is looked up in
+-- the latest frame like `GetUnitById`.
 methods.GetFocus = function(self)
     local u = d(self)
-    if u and u.focus and data[u.focus] then return __engine_unit(u.focus) end
-    return nil
+    return u and u.focus and GetUnitById(u.focus) or nil
 end
 -- The unit its current Guard order guards (from its details).
 methods.GetGuardedEntity = function(self) local g = (d(self) or {}).guarding return g and GetUnitById(g) end

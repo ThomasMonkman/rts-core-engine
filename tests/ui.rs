@@ -2586,3 +2586,37 @@ fn select_by_category_takes_construction_sites_not_cargo() {
         .unwrap();
     assert_eq!(ids, "3,5");
 }
+
+/// `UserUnit:GetFocus()` is the unit a builder works on although the
+/// interface has no data for it yet (a structure still being built), and an
+/// upgrading structure's rollover has `focusUpgrade` (`probe_ui_units` A,
+/// `probe_ui_hover` orders).
+#[test]
+fn builders_focus_the_unit_they_build() {
+    use rts_core_engine::engine::sim::command::CommandKind;
+    use rts_core_engine::engine::snapshot::UnitDetail;
+    use rts_core_engine::ui::UnitInfo;
+    let Some(vm) = vm() else { return };
+    vm.start_hud().expect("game interface");
+    let unit = |id, blueprint: &str, build, detail| UnitInfo { id, blueprint: blueprint.into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail };
+    let engineer = unit(7, "uel0105", 1.0, Some(UnitDetail { id: 7, commands: vec![(CommandKind::BuildMobile as u8, Some("ueb0101".into()), 1, [410.0, 20.0, 600.0])], focus: Some(9), ..Default::default() }));
+    let radar = unit(8, "ueb3101", 1.0, Some(UnitDetail { id: 8, commands: vec![(CommandKind::Upgrade as u8, Some("ueb3201".into()), 1, [400.0, 20.0, 600.0])], focus: Some(10), ..Default::default() }));
+    // The sites: only in the frame's units.
+    vm.set_world(vec![unit(9, "ueb0101", 0.2, None), unit(10, "ueb3201", 0.1, None)]);
+    vm.update_units(&[engineer, radar]).unwrap();
+    let got: (String, String, String) = vm
+        .lua()
+        .load(
+            r#"
+            local f = __engine_unit(7):GetFocus()
+            rawset(_G, '__engine_rollover', 7)
+            local eng = GetRolloverInfo()
+            rawset(_G, '__engine_rollover', 8)
+            local radar = GetRolloverInfo()
+            return f and f:GetUnitId() or 'nil', eng.focus and eng.focus.blueprintId or 'nil', radar.focusUpgrade and radar.focusUpgrade.blueprintId or 'nil'
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(got, ("ueb0101".into(), "ueb0101".into(), "ueb3201".into()));
+}
