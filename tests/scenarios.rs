@@ -1508,3 +1508,8 @@ fn formation_facing() {
 fn slope_velocity() {
     scenario("slope_velocity", 90);
 }
+
+#[test]
+fn immobile_halt() {
+    scenario("immobile_halt", 60);
+}

@@ -1321,6 +1321,15 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     if p.kind == MotionKind::None || (immobile && state.speed == Fx::ZERO) {
         return None;
     }
+    // Made immobile at speed, a surface unit halts on the spot: the real
+    // game's tank stood where it was from the next tick, ours braked 2.2 on
+    // over 8 ticks (dev/probes probe_mov_api I2).
+    if immobile && p.kind != MotionKind::Air {
+        let mut m = still(unit, e, MotionState { speed: Fx::ZERO, horz: HorzState::Stopped, arrival: Arrival::Cruising, ..state });
+        m.event = (state.horz != HorzState::Stopped).then_some((HorzState::Stopped, state.horz));
+        m.on_ground = data.on_ground;
+        return Some(m);
+    }
     let mult = data.motion;
     let mut max_speed = p.max_speed.saturating_mul(p.kind.speed_mult(mult.speed));
     if let Some(t) = env.terrain.filter(|_| p.shallows_depth < Fx::ZERO) {
