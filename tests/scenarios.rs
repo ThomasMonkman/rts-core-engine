@@ -251,6 +251,11 @@ fn spawn_height() {
 }
 
 #[test]
+fn order_states() {
+    scenario("order_states", 40);
+}
+
+#[test]
 fn reclaim_unit() {
     scenario("reclaim_unit", 1200);
 }

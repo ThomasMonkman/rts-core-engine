@@ -1008,21 +1008,17 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     })?;
     lua_method!(lua, moho::Unit,
         /// Unknown state names read as false (moho doesn't validate either).
-        /// `Attacking` is also on while the unit's current order is an
-        /// attack (FAF's Fire Beetle enables its kamikaze weapon only then:
-        /// the real game's fires on `IssueAttack` and never on a target it
-        /// merely sees, dev/probes/maps/probe_auditgaps g5).
+        /// The states an order gives (`Attacking`, `Guarding`, `Patrolling`)
+        /// and a killed unit's `NoCost` are read off the current order and
+        /// the kill when asked ([`crate::engine::api::command::order_state`]),
+        /// so nothing has to set them on every unit each tick.
         IsUnitState = |lua, (this, state): (Obj<moho::Unit>, String)| {
         let Some(index) = crate::engine::sim::unit_state::UnitStates::index(&state) else { return Ok(false) };
         if with_unit(lua, &this, |u| u.states.contains(index))? {
             return Ok(true);
         }
-        static ATTACKING: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("Attacking").expect("unit state"));
-        if index != *ATTACKING {
-            return Ok(false);
-        }
         let id = crate::engine::api::entity::entity_id(&this)?;
-        Ok(crate::engine::api::command::is_attacking(lua, id))
+        Ok(crate::engine::api::command::order_state(lua, id, index))
     })?;
     lua_method!(lua, moho::Unit, SetConsumptionActive = |lua, (this, on): (Obj<moho::Unit>, bool)| {
         if with_unit(lua, &this, |u| std::mem::replace(&mut u.consumption_active, on) != on)? {

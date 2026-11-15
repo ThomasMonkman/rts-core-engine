@@ -619,10 +619,33 @@ fn formation(lua: &Lua, name: &'static str, kind: CommandKind) -> LuaResult<()> 
     )
 }
 
-/// Whether `unit`'s current order is an attack (`Attack` / `FormAttack`):
-/// moho's `Attacking` unit state while its attack task runs.
-pub fn is_attacking(lua: &Lua, unit: EntityId) -> bool {
-    lua.app_data_ref::<Commands>().and_then(|c| c.current(unit).map(|c| matches!(c.kind, CommandKind::Attack | CommandKind::FormAttack))).unwrap_or(false)
+/// The unit states an order or a kill gives, by state index: `Attacking`
+/// while the current order is an attack (FAF's Fire Beetle enables its
+/// kamikaze weapon only then: the real game's fires on `IssueAttack` and
+/// never on a target it merely sees, dev/probes/maps/probe_auditgaps g5);
+/// `Guarding` under a guard order and `Patrolling` under a patrol or an
+/// aggressive move, as the real game reports them (dev/probes
+/// probe_unit_orders O3-O9; FAF's EngineerManager reads `Guarding`, its
+/// SimCallbacks `Patrolling`); `NoCost` on a killed unit through its death
+/// interval (probe_unit_build G9). Read when asked, never stored.
+pub fn order_state(lua: &Lua, unit: EntityId, state: u32) -> bool {
+    use crate::engine::sim::unit_state::UnitStates;
+    static STATES: std::sync::LazyLock<[u32; 4]> = std::sync::LazyLock::new(|| ["Attacking", "Guarding", "Patrolling", "NoCost"].map(|s| UnitStates::index(s).expect("unit state")));
+    let [attacking, guarding, patrolling, no_cost] = *STATES;
+    if state == no_cost {
+        return entity::world(lua).get(unit).is_some_and(|e| e.cold.killed);
+    }
+    if state != attacking && state != guarding && state != patrolling {
+        return false;
+    }
+    let Some(kind) = lua.app_data_ref::<Commands>().and_then(|c| c.current(unit).map(|c| c.kind)) else { return false };
+    use CommandKind as K;
+    match kind {
+        K::Attack | K::FormAttack => state == attacking,
+        K::Guard => state == guarding,
+        K::Patrol | K::FormPatrol | K::AggressiveMove | K::FormAggressiveMove => state == patrolling,
+        _ => false,
+    }
 }
 
 /// Drops all of a unit's orders (used when it's destroyed, too).
