@@ -648,12 +648,14 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             Ok(Some(Shaped::<ArmyStat>::new(t)))
         })?;
     lua_method!(lua, moho::AIBrain,
-        /// Live units of this army in `category` (finished or not).
+        /// Live, finished units of this army in `category` (a unit under
+        /// construction counts once it's done: dev/probes probe_unit_build G3).
         GetCurrentUnits = |lua, (brain, category): (Obj<moho::AIBrain>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>)| {
             let ArmyHandle(index) = script_object::handle(&brain)?;
             let w = crate::engine::api::entity::world(lua);
             Ok(w.iter()
                 .filter(|e| e.kind == crate::engine::sim::entity::EntityKind::Unit && !e.destroyed && e.army == Some(index))
+                .filter(|e| e.fraction_complete >= crate::engine::sim::math::Fx::ONE)
                 .filter(|e| e.category_index.is_some_and(|c| category.0.contains(c)))
                 .count())
         })?;

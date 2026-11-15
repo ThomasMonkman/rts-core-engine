@@ -1111,6 +1111,11 @@ fn capture_shared() {
 }
 
 #[test]
+fn unit_counts() {
+    scenario("unit_counts", 700);
+}
+
+#[test]
 fn initial_rally() {
     scenario("initial_rally", 1700);
 }

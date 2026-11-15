@@ -928,8 +928,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         let now = crate::engine::api::sim_time::current_tick(lua);
         with_unit(lua, &this, |u| u.stunned_until > now)
     })?;
-    lua_method!(lua, moho::Unit, GetResourceConsumed = |lua, this: Obj<moho::Unit>| {
-        with_unit(lua, &this, |u| u.resource_consumed.to_num::<f64>())
+    lua_method!(lua, moho::Unit,
+        /// The share of its consumption the economy served last tick; 0 for
+        /// a unit consuming nothing (idle, a producer, consumption off), as
+        /// in the real game (dev/probes probe_unit_econ D).
+        GetResourceConsumed = |lua, this: Obj<moho::Unit>| {
+        with_unit(lua, &this, |u| {
+            let consuming = u.consumption_active && (u.consumption_mass > Fx::ZERO || u.consumption_energy > Fx::ZERO);
+            if consuming { u.resource_consumed.to_num::<f64>() } else { 0.0 }
+        })
     })?;
     state_setter(lua, "SetBusy", "Busy")?;
     state_setter(lua, "SetUnSelectable", "UnSelectable")?;
