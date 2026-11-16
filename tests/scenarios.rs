@@ -1563,3 +1563,8 @@ fn slope_velocity() {
 fn immobile_halt() {
     scenario("immobile_halt", 60);
 }
+
+#[test]
+fn brain_queries() {
+    scenario("brain_queries", 40);
+}

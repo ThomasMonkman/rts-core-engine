@@ -504,7 +504,7 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             Ok(units_around(lua, &brain, &category.0, &position, radius, alliance)?.len())
         })?;
     /// Units around a point for `GetUnitsAroundPoint` / `GetNumUnitsAroundPoint`:
-    /// within an XZ circle, matching `category`, optionally only those with
+    /// strictly within an XZ circle, matching `category`, optionally only those with
     /// the given alliance to this brain; in entity id order. Takes intel into
     /// account (FAF's docs): units of other non-allied armies count only
     /// while this brain detects them (seen or on radar / sonar / omni), and
@@ -524,10 +524,19 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
         let remembered = |g: &crate::engine::sim::vision::IntelGrids, e: &crate::engine::sim::entity::Entity| {
             structures.as_ref().zip(e.category_index).is_some_and(|(s, i)| s.contains(i)) && g.ever_seen(index, e.id)
         };
+        // Strictly inside: a unit exactly `radius` away is out, and r = 0
+        // finds nothing (dev/probes probe_ai_brain).
+        let r2 = r.saturating_mul(r);
+        let inside = |e: &crate::engine::sim::entity::Entity| {
+            let p = e.position();
+            let (dx, dz) = (p.x - cx, p.z - cz);
+            dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)) < r2
+        };
         Ok(world
             .units_in_circle(cx, cz, r)
             .into_iter()
             .filter_map(|id| world.get(id))
+            .filter(|e| inside(e))
             .filter(|e| e.category_index.is_some_and(|i| category.contains(i)))
             .filter(|e| match (alliance, e.army) {
                 (None, _) => true,
