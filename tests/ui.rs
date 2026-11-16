@@ -2922,3 +2922,12 @@ fn apply_function_goes_one_level_down() {
         .unwrap();
     assert_eq!(got, "g;child;");
 }
+
+/// A game being played is recorded and observing reads false, as in the
+/// real game's single-player session (`probe_api_spot` ui.session3).
+#[test]
+fn a_played_session_is_recorded() {
+    let Some(vm) = vm() else { return };
+    let got: (bool, bool) = vm.lua().load("return SessionIsBeingRecorded(), SessionIsObservingAllowed()").eval().unwrap();
+    assert_eq!(got, (true, false));
+}

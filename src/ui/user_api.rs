@@ -1221,8 +1221,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         end
         function SessionRequestPause() rawset(_G, '__engine_pause_request', true) end
         function SessionResume() rawset(_G, '__engine_pause_request', false) end
-        function SessionIsBeingRecorded() return false end
-        function SessionIsObservingAllowed() return true end
+        -- Every game played in the window is recorded (a replay being
+        -- watched isn't); observing reads false, as in the real game's
+        -- single-player session (`probe_api_spot` ui.session3).
+        function SessionIsBeingRecorded() return not SessionIsReplay() end
+        function SessionIsObservingAllowed() return false end
         -- In-game chat (`net::core`): `SessionSendChatMessage([clients,]
         -- message)`; received messages go to FAF's gamemain.ReceiveChat.
         -- FAF's disconnect dialog's Eject button (a vote; `net::lockstep`).
