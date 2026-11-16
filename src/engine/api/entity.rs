@@ -633,13 +633,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_fn!(lua, global,
-        /// Creates a prop from the blueprint `bp` at (x, y, z), turned by heading, pitch and roll.
+        /// Creates a prop from the blueprint `bp` at (x, y, z), turned by
+        /// heading, pitch and roll in degrees: heading 1 gives quaternion y
+        /// 0.009 in the real game (dev/probes probe_unit_misc R), and FAF
+        /// passes `Random(0, 360)` and the cheat menu's yaw. (Pitch and roll
+        /// in degrees too: inferred.)
         CreatePropHPR = |lua, (bp, x, y, z, h, p, r): (String, f64, f64, f64, f64, f64, f64)| {
-            let q = FxQuat::from_hpr(
-                crate::engine::sim::math::from_lua(h),
-                crate::engine::sim::math::from_lua(p),
-                crate::engine::sim::math::from_lua(r),
-            );
+            let rad = |deg: f64| crate::engine::sim::math::from_lua(deg).saturating_mul(Fx::PI) / Fx::from_num(180);
+            let q = FxQuat::from_hpr(rad(h), rad(p), rad(r));
             spawn_prop(lua, &bp, FxVec3::from_f64(x, y, z), q)
         })?;
 

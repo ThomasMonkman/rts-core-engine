@@ -730,6 +730,11 @@ fn placement() {
 }
 
 #[test]
+fn prop_hpr() {
+    scenario("prop_hpr", 20);
+}
+
+#[test]
 fn build_platoon() {
     scenario("build_platoon", 20);
 }
