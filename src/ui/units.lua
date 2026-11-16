@@ -86,10 +86,12 @@ end
 methods.GetStat = function(self, name, default)
     local u = d(self)
     local v = u and u.stats and u.stats[name]
-    -- moho fills a missing stat with the default (sim `GetStat` creates
-    -- it); the UI side only reads, so it returns the default instead.
-    if v == nil then v = default or 0 end
-    return { Value = v }
+    -- Moho's interface reads a missing stat as 0 whatever the default
+    -- (`probe_ui_units` A: `GetStat('NOPE', 7)` is `{ Name = 'NOPE', Type =
+    -- 'Integer', Value = 0 }`). Every measured stat was an `Integer`; a
+    -- fractional one as `Float` is a guess.
+    if v == nil then v = 0 end
+    return { Name = name, Type = math.floor(v) == v and 'Integer' or 'Float', Value = v }
 end
 -- A name given here (FAF's rename dialog) wins over the sim's
 -- (`SetCustomName`: AI and campaign commanders).

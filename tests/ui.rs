@@ -752,7 +752,10 @@ fn unit_stats_read_back_through_get_stat() {
         .load("local u = __engine_unit(3) return u:GetStat('VetLevel', 0).Value, u:GetStat('VetExperience', 0).Value, u:GetStat('Nope', 42).Value")
         .eval()
         .unwrap();
-    assert_eq!((level, exp, missing), (1.0, 112.0, 42.0));
+    // A missing stat is 0 whatever the default, as moho's (`probe_ui_units` A).
+    assert_eq!((level, exp, missing), (1.0, 112.0, 0.0));
+    let shape: String = vm.lua().load("local s = __engine_unit(3):GetStat('VetLevel') return s.Name .. ' ' .. s.Type").eval().unwrap();
+    assert_eq!(shape, "VetLevel Integer");
 }
 
 /// The sim's Sync reaches FAF's OnSync: a `PrintText` entry is printed on
