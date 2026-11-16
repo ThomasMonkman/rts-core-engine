@@ -449,7 +449,10 @@ impl ImpactKind {
     /// A unit hit, by where: under the water surface `UnitUnderwater`
     /// (whatever the unit's layer: a torpedo hitting a surfaced sub),
     /// else `UnitAir` for a unit in the air, else `Unit` (moho's
-    /// `ENT_GetImpactType`, MohoEngine.dll 0x1025f9c0).
+    /// `ENT_GetImpactType`, MohoEngine.dll 0x1025f9c0). An aircraft counts
+    /// as in the air when landed too ([`first_unit_hit`] passes `Air` for
+    /// it; FAF probe `probe_re_wpn` `air.wpn`: a gunship landed on its own,
+    /// layer `Land`, is hit as `UnitAir`).
     fn for_unit(layer: crate::engine::sim::layer::Layer, under_water: bool) -> Self {
         use crate::engine::sim::layer::Layer;
         match layer {
@@ -877,10 +880,15 @@ fn advance(
     let q = if spinning { spin(p, q, dt) } else { q };
 
     // Detonation heights: crossing them is an `Air` impact where the path
-    // crosses (moho checks after collisions and overrides them).
+    // crosses (moho checks after collisions and overrides them). A unit the
+    // step also hits stays the impact's entity (FAF probe `probe_re_wpn`
+    // `air.wpn`: the delk002's flak, bursting at its target's height, hits
+    // a patrolling gunship as `Air` with the gunship 17 times of 17; a
+    // burst with no unit on its step carries none).
     if (p.detonate_below > Fx::ZERO || p.detonate_above > Fx::ZERO)
         && let Some(at) = terrain.and_then(|t| detonation(p, position, next, t)) {
-        return Motion { live: true, turned, position: at, orientation: q, impact: Some(ImpactKind::Air), target: None, water: None, entered: None };
+        let unit = if p.collide_entity { first_unit_hit(p, position, next, army, world, env, buf).map(|(_, u, _)| u) } else { None };
+        return Motion { live: true, turned, position: at, orientation: q, impact: Some(ImpactKind::Air), target: unit, water: None, entered: None };
     }
 
     // The surface first: where along this tick's path the projectile meets
@@ -1194,7 +1202,8 @@ fn first_unit_hit(
         }
         let shape = e.collision_shape();
         let Some(t) = crate::engine::sim::collision::segment_hit(from, to, e.position(), e.orientation, &shape) else { continue };
-        let layer = e.unit.as_deref().map(|u| u.layer).unwrap_or_default();
+        // The layer the impact type goes by: an aircraft's is `Air`, landed or not.
+        let layer = e.unit.as_deref().map(|u| if u.motion_params.kind == crate::engine::sim::movement::MotionKind::Air { crate::engine::sim::layer::Layer::Air } else { u.layer }).unwrap_or_default();
         if best.is_none_or(|(bt, bid, _)| (t, id) < (bt, bid)) {
             best = Some((t, id, layer));
         }
@@ -1550,6 +1559,56 @@ mod tests {
         let fast = ProjectileTemplate { use_gravity: false, collide_surface: true, detonate_below: Fx::from_num(3), ..Default::default() };
         let (_, y) = fire(&ground, fast, FxVec3::from_f64(0.0, -100.0, 0.0));
         assert!((y - 4.0).abs() < 1e-6, "{y}");
+    }
+
+    /// A detonation on a step that also hits a unit is `Air` with that unit
+    /// (FAF probe `probe_re_wpn` `air.wpn`); an aircraft is hit as
+    /// `UnitAir` even landed.
+    #[test]
+    fn detonation_keeps_the_unit_hit_and_aircraft_are_air() {
+        use crate::engine::sim::entity::CollisionShape;
+        use crate::engine::sim::layer::Layer;
+        let ground = flat(128, None); // 1 world unit high
+        let plane = |w: &mut EntityWorld, y: f64, layer: Layer| {
+            let id = w.spawn(EntityKind::Unit, BlueprintKind::Unit, String::new(), Some(2), FxVec3::from_f64(4.0, y, 8.0), FxQuat::IDENTITY);
+            let u = w.get_mut(id).unwrap().unit.as_mut().unwrap();
+            u.layer = layer;
+            u.motion_params.kind = crate::engine::sim::movement::MotionKind::Air;
+            w.set_base_collision(id, CollisionShape::Box { center: FxVec3::from_f64(0.0, 0.0, 0.0), half: FxVec3::from_f64(0.5, 0.5, 0.5) });
+            id
+        };
+        let fire = |w: &mut EntityWorld, t: ProjectileTemplate, from: FxVec3| {
+            let mut ps = Projectiles::default();
+            let mut out = Vec::new();
+            launch(w, &mut ps, &t, from, FxVec3::from_f64(0.0, 0.0, 10.0));
+            for _ in 0..20 {
+                step(&mut ps, w, Env { terrain: Some(&ground), ..Default::default() }, &mut out);
+                if !out.is_empty() {
+                    break;
+                }
+            }
+            out.first().map(|i| (i.kind, i.target))
+        };
+        // Level at 11 (10 above the ground), bursting at 10 above it: the
+        // burst's step runs through the plane.
+        let mut w = EntityWorld::default();
+        let gs = plane(&mut w, 11.0, Layer::Air);
+        let burst = ProjectileTemplate { collide_entity: true, collide_surface: true, detonate_above: Fx::from_num(10), ..Default::default() };
+        let rising = |w: &mut EntityWorld| {
+            let mut ps = Projectiles::default();
+            let mut out = Vec::new();
+            launch(w, &mut ps, &burst, FxVec3::from_f64(4.0, 10.5, 7.6), FxVec3::from_f64(0.0, 10.0, 1.0));
+            step(&mut ps, w, Env { terrain: Some(&ground), ..Default::default() }, &mut out);
+            out.first().map(|i| (i.kind, i.target))
+        };
+        assert_eq!(rising(&mut w), Some((ImpactKind::Air, Some(gs))), "burst through the plane: Air with it");
+        let mut empty = EntityWorld::default();
+        assert_eq!(rising(&mut empty), Some((ImpactKind::Air, None)), "burst with nothing near: no entity");
+        // A landed aircraft is still hit as `UnitAir`.
+        let mut w = EntityWorld::default();
+        let landed = plane(&mut w, 1.5, Layer::Land);
+        let shell = ProjectileTemplate { collide_entity: true, ..Default::default() };
+        assert_eq!(fire(&mut w, shell, FxVec3::from_f64(4.0, 1.5, 0.0)), Some((ImpactKind::UnitAir, Some(landed))));
     }
 
     #[test]
