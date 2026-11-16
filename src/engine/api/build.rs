@@ -233,7 +233,9 @@ impl Placement {
     /// `RULEUMT_None`): only whether its footprint, from cell
     /// round(pos - size / 2), can stand there on a layer of its own
     /// (`OCCUPY_MobileCheck`): a ship on water, a tank on land, an aircraft
-    /// anywhere; no flatness, deposit or skirt check.
+    /// anywhere; no flatness or deposit check. Nor on a structure: a tank
+    /// blueprint over a generator is refused, a generator over a tank is not
+    /// (dev/probes probe_ai_build).
     ///
     /// `reserved`: sites of queued build orders ([`reserved_sites`]),
     /// blocked as a structure there would block.
@@ -247,8 +249,16 @@ impl Placement {
             }
             if let Some((spec, size_x, size_z)) = &self.mobile {
                 let cell = |v: Fx, size: u32| crate::engine::sim::nav::round_half_even(v - Fx::from_num(size) / 2);
-                return Ok(crate::engine::sim::nav::mobile_layers(t, spec, cell(pos.x, *size_x), cell(pos.z, *size_z), *size_x, *size_z) != 0);
+                if crate::engine::sim::nav::mobile_layers(t, spec, cell(pos.x, *size_x), cell(pos.z, *size_z), *size_x, *size_z) == 0 {
+                    return Ok(false);
+                }
             }
+        }
+        if self.mobile.is_some() {
+            drop(terrain);
+            return self.clear_of_structures(lua, pos, reserved);
+        }
+        if let Some(t) = &terrain {
             let wet = t.water_surface.is_some_and(|w| t.height_at(pos.x, pos.z) < w);
             if let Some((land, water)) = self.layers
                 && !(if wet { water } else { land }) {

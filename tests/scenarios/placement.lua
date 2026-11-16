@@ -24,6 +24,11 @@ ForkThread(function()
     local function at(bp, px, pz) return brain:CanBuildStructureAt(bp, {px, GetTerrainHeight(px, pz), pz}) end
     check(not at('ueb0101', gx + 5, gz), 'a factory 5 east of a generator (unsnapped) overlaps')
     check(at('ueb0101', gx + 6, gz), 'a factory 6 east of a generator fits')
+    -- A mobile blueprint can't be placed on a structure; a structure can go
+    -- over a mobile unit.
+    check(not at('uel0201', gx, gz), 'a tank blueprint on a generator is refused')
+    CreateUnitHPR('uel0201', 'ARMY_1', gx, GetTerrainHeight(gx, gz + 20), gz + 20, 0, 0, 0)
+    check(at('ueb1101', gx, gz + 20), 'a generator over a tank is allowed')
     -- A queued build order reserves its site, before the builder gets there.
     local sx, sz = 440, 600
     check(at('ueb1101', sx, sz), 'the site is free before the order')
