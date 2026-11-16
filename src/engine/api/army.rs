@@ -507,7 +507,9 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
     /// within an XZ circle, matching `category`, optionally only those with
     /// the given alliance to this brain; in entity id order. Takes intel into
     /// account (FAF's docs): units of other non-allied armies count only
-    /// while this brain detects them (seen or on radar / sonar / omni).
+    /// while this brain detects them (seen or on radar / sonar / omni), and
+    /// structures it has ever seen, which keep a blip once sight is lost
+    /// (dev/probes probe_unit_intel observer-gone; the threat map's rule).
     fn units_around(lua: &Lua, brain: &LuaTable, category: &crate::engine::sim::category::CategorySet, position: &LuaTable, radius: f64, alliance: Option<String>) -> LuaResult<Vec<u32>> {
         let ArmyHandle(index) = script_object::handle(brain)?;
         let alliance = alliance
@@ -518,6 +520,10 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
         let world = crate::engine::api::entity::world(lua);
         let armies = lua.app_data_ref::<Armies>().expect("Armies");
         let intel = lua.app_data_ref::<crate::engine::sim::vision::IntelGrids>();
+        let structures = crate::engine::api::categories::domain(lua)?.named.get("STRUCTURE").cloned();
+        let remembered = |g: &crate::engine::sim::vision::IntelGrids, e: &crate::engine::sim::entity::Entity| {
+            structures.as_ref().zip(e.category_index).is_some_and(|(s, i)| s.contains(i)) && g.ever_seen(index, e.id)
+        };
         Ok(world
             .units_in_circle(cx, cz, r)
             .into_iter()
@@ -529,7 +535,7 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
                 (Some(_), None) => false,
             })
             .filter(|e| match (e.army, &intel) {
-                (Some(army), Some(g)) if e.unit.is_some() && army != index && armies.alliance(index, army) != Alliance::Ally => g.detect(index, e).any(),
+                (Some(army), Some(g)) if e.unit.is_some() && army != index && armies.alliance(index, army) != Alliance::Ally => g.detect(index, e).any() || remembered(g, e),
                 _ => true,
             })
             .map(|e| e.id)
@@ -539,7 +545,8 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
         /// Units around `position` (within `radius` on the XZ plane) matching
         /// `category`, optionally only those with the given alliance to this
         /// brain; in entity id order. Units of other non-allied armies are
-        /// listed only while this brain detects them.
+        /// listed only while this brain detects them, or, for structures,
+        /// once it has seen them.
         GetUnitsAroundPoint = |lua,
          (brain, category, position, radius, alliance): (Obj<moho::AIBrain>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>, shapes::Vector, f64, Option<String>)| {
             let ids = units_around(lua, &brain, &category.0, &position, radius, alliance)?;

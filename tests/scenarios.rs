@@ -730,6 +730,11 @@ fn placement() {
 }
 
 #[test]
+fn remembered_structures() {
+    scenario("remembered_structures", 100);
+}
+
+#[test]
 fn do_not_target() {
     scenario("do_not_target", 200);
 }
