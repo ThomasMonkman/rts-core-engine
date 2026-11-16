@@ -433,11 +433,24 @@ fn special_file_info(lua: &Lua, profile: &str, name: &str, kind: &str) -> LuaRes
     Ok(Some(Shaped::new(t)))
 }
 
+/// Moho's front-end data (`GetFrontEndData` / `SetFrontEndData`): kept by
+/// the engine, not a Lua state, so it outlives the interface that set it
+/// (FAF's campaign briefing, the replay a game restarts from). Interface
+/// only: the sim never sees it.
+static FRONT_END_DATA: std::sync::Mutex<BTreeMap<String, crate::engine::sim::lua_data::LuaData>> = std::sync::Mutex::new(BTreeMap::new());
+
+fn front_end_data() -> std::sync::MutexGuard<'static, BTreeMap<String, crate::engine::sim::lua_data::LuaData>> {
+    FRONT_END_DATA.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// moho `LaunchReplaySession(filename)`: from the main menu, leaves the
 /// recording for the renderer to start (`__engine_launch_replay`, taken by
 /// `UserVm::take_replay_request`) and returns true; false (FAF says it
 /// can't launch it) for a file that isn't one of our recordings with a
 /// header, or during a game (a session can't be swapped for another yet).
+/// Moho keeps the recording it launched as front-end data
+/// `replay_filename`, which FAF's restart reads (`tabs.lua`
+/// `RestartReplay`, `misckeyactions.lua` `RestartSessionOrReplay`).
 fn launch_replay_session(lua: &Lua, filename: &str) -> LuaResult<bool> {
     if lua.globals().raw_get::<Option<String>>("__engine_ui_state")?.as_deref() != Some("frontend") {
         tracing::warn!(target: "lua", filename, "LaunchReplaySession: only from the main menu for now");
@@ -461,6 +474,7 @@ fn launch_replay_session(lua: &Lua, filename: &str) -> LuaResult<bool> {
         return Ok(false);
     }
     lua.globals().raw_set("__engine_launch_replay", path.to_string_lossy())?;
+    front_end_data().insert("replay_filename".into(), crate::engine::sim::lua_data::LuaData::string(filename));
     Ok(true)
 }
 
@@ -746,6 +760,23 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_fn!(lua, global, LaunchReplaySession = |lua, filename: String| launch_replay_session(lua, &filename))?;
+    lua_fn!(lua, global,
+        /// A copy of what `SetFrontEndData` kept under `key` (nil if nothing).
+        GetFrontEndData = |lua, key: String| match front_end_data().get(&key) {
+            Some(data) => data.to_lua(lua),
+            None => Ok(LuaNil),
+        })?;
+    lua_fn!(lua, global,
+        /// Keeps a copy of `data` under `key` for the rest of the program,
+        /// across the front end's and each game's interface (nil forgets it).
+        SetFrontEndData = |_, (key, data): (String, LuaValue)| {
+            let mut all = front_end_data();
+            match data {
+                LuaNil => all.remove(&key),
+                data => all.insert(key, crate::engine::sim::lua_data::LuaData::from_lua(&data)),
+            };
+            Ok(())
+        })?;
     lua_fn!(lua, global,
         /// Saved games aren't supported: every load fails as moho's does for a
         /// file it can't open, which FAF reports in its own dialog.
@@ -1254,8 +1285,6 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             if on == nil then return true end
             return on
         end
-        function GetFrontEndData(key) return nil end
-        function SetFrontEndData(key, data) end
         -- Unit toggles as the panels query them (defaults until they're
         -- bridged to the sim: return fire, not paused, script bits off).
         -- Unit toggles and lists over the units' details (selected units).

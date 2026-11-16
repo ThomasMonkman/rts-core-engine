@@ -2863,3 +2863,19 @@ fn an_empty_factory_queue_is_nil() {
     let got: (bool, bool) = vm.lua().load("return SetCurrentFactoryForQueueDisplay(__engine_unit(1)) == nil, SetCurrentFactoryForQueueDisplay(__engine_unit(2)) == nil").eval().unwrap();
     assert_eq!(got, (true, true));
 }
+
+/// Front-end data round-trips as a copy and outlives the interface that set
+/// it (moho keeps it in the engine: FAF's campaign briefing and replay
+/// restart read it from the next Lua state; `probe_ui_globals` prefs).
+#[test]
+fn front_end_data_outlives_the_interface() {
+    let Some(first) = vm() else { return };
+    let same: String = first.lua().load("local t = { a = 1 } SetFrontEndData('test_k', t) t.a = 2 return GetFrontEndData('test_k').a .. tostring(GetFrontEndData('test_none'))").eval().unwrap();
+    assert_eq!(same, "1nil");
+    drop(first);
+    let Some(next) = vm() else { return };
+    let got: f64 = next.lua().load("return GetFrontEndData('test_k').a").eval().unwrap();
+    assert_eq!(got, 1.0);
+    let gone: bool = next.lua().load("SetFrontEndData('test_k', nil) return GetFrontEndData('test_k') == nil").eval().unwrap();
+    assert!(gone);
+}
