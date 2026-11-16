@@ -28,7 +28,11 @@ ForkThread(function()
     end
     spark = CreateUnitHPR('xel0209', 'ARMY_1', 430, GetTerrainHeight(430, 600), 600, 0, 0, 0)
     local radar = CreateUnitHPR('ueb3201', 'ARMY_2', 380, GetTerrainHeight(380, 640), 640, 0, 0, 0)
-    for _, u in { spark, radar } do u:SetFireState(1) end
+    -- A second Sparky with its jammer off from the start: the jammer's
+    -- threat alone (the first one's old fakes stay remembered while it lives).
+    local plain = CreateUnitHPR('xel0209', 'ARMY_1', 300, GetTerrainHeight(300, 760), 760, 0, 0, 0)
+    plain:DisableIntel('Jammer')
+    for _, u in { spark, radar, plain } do u:SetFireState(1) end
     spark:EnableIntel('Jammer')
     local radius = spark:GetBlueprint().Intel.JamRadius.Max
     local count = spark:GetBlueprint().Intel.JammerBlips
@@ -108,7 +112,7 @@ ForkThread(function()
     -- (probe_intel_jam: Sparky 51.93 alone, 467.37 with its 8 fakes).
     spark:DisableIntel('Jammer')
     WaitTicks(31)
-    local single = brain:GetThreatAtPosition(spark:GetPosition(), 1, true, 'Overall', 1)
+    local single = brain:GetThreatAtPosition(plain:GetPosition(), 1, true, 'Overall', 1)
     check(single > 0 and math.abs(withFakes - single * (count + 1)) < 0.01 * single, 'each fake adds the jammer threat: ' .. withFakes .. ' vs ' .. single)
     ScenarioResult.done = true
 end)

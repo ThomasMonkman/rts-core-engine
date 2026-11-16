@@ -282,15 +282,25 @@ struct ArmyStat {
     value: LuaValue,
 }
 
+/// The first tick stat triggers are checked on. The real game's first
+/// check is at tick 11 and then every tick: FAF's `EnergyDepleted` trigger
+/// (set in `CreateBrainShared`) first fires at 11 on an army whose radar
+/// had nothing stored from tick 2, and a `GiveResource` at tick 2 or 3 is
+/// in time (dev/probes probe_re2_misc E). Why 11 isn't known.
+pub const FIRST_STAT_TRIGGER_TICK: u64 = 11;
+
 fn brains(lua: &Lua) -> LuaResult<LuaTable> {
     crate::engine::api::script_object::registry_table(lua, BRAINS_KEY)
 }
 
-/// The brain script object of army `index` (nil if none).
-/// Once a tick after the economy: each army's stat triggers whose condition
-/// holds fire once (`brain:OnStatsTrigger(name)`, army then (stat, name)
-/// order) and are removed.
+/// Once a tick after the economy, from tick [`FIRST_STAT_TRIGGER_TICK`]:
+/// each army's stat triggers whose condition holds fire once
+/// (`brain:OnStatsTrigger(name)`, army then (stat, name) order) and are
+/// removed.
 pub fn stat_triggers_tick(lua: &Lua) -> LuaResult<()> {
+    if crate::engine::api::sim_time::current_tick(lua) < FIRST_STAT_TRIGGER_TICK {
+        return Ok(());
+    }
     let fired: Vec<(u32, Vec<String>)> = {
         let Some(mut armies) = lua.app_data_mut::<Armies>() else { return Ok(()) };
         armies.list.iter_mut().filter(|a| !a.stat_triggers.is_empty()).map(|a| (a.index, a.fire_stat_triggers())).filter(|(_, f)| !f.is_empty()).collect()
@@ -304,6 +314,7 @@ pub fn stat_triggers_tick(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
+/// The brain script object of army `index` (nil if none).
 pub fn brain(lua: &Lua, index: u32) -> LuaResult<LuaValue> {
     brains(lua)?.raw_get(index)
 }
