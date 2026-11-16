@@ -112,7 +112,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         },
     )?;
     lua_method!(lua, moho::AIBrain,
-        /// `{ {x, z, threat}, ... }` for cells with threat, row-major.
+        /// `{ {x, z, threat}, ... }` for cells with threat, highest threat first.
         GetThreatsAroundPosition = |lua, (brain, pos, radius, _restriction, ty, army): (Obj<moho::AIBrain>, shapes::Vector, f64, Option<bool>, Option<String>, Option<u32>)| {
             let (ty, p) = (threat_type(ty)?, position(&pos)?);
             let cells = query(lua, &brain, army, |m, me, counts| m.around(p, rings(radius), ty, me, counts))?;

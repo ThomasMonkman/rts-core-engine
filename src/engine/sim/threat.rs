@@ -579,10 +579,12 @@ impl ThreatMap {
     }
 
     /// Cells around `p` (within `rings`) holding threat: (centre x, z, value),
-    /// row-major.
+    /// highest threat first, ties row-major (the real game sorts by threat:
+    /// dev/probes probe_ai_threat; FAF code takes `[1]` as the worst cell).
     pub fn around(&self, p: FxVec3, rings: u32, ty: ThreatType, brain: u32, counts: &dyn Fn(u32) -> bool) -> Vec<(Fx, Fx, Fx)> {
         let (c, r) = self.cell_of(p);
-        self.ring(c, r, rings)
+        let mut cells: Vec<_> = self
+            .ring(c, r, rings)
             .filter_map(|(c, r)| {
                 let t = self.cell_threat(r * self.cols + c, ty, brain, counts);
                 (t > Fx::ZERO).then(|| {
@@ -590,7 +592,9 @@ impl ThreatMap {
                     (m.x, m.z, t)
                 })
             })
-            .collect()
+            .collect();
+        cells.sort_by_key(|a| std::cmp::Reverse(a.2));
+        cells
     }
 
     /// Threat summed over the distinct cells the segment `a -> b` crosses
@@ -661,6 +665,10 @@ mod tests {
         let only3 = |a: u32| a == 3;
         assert_eq!(map.highest(0, ThreatType::Overall, 1, &only3, Default::default()).1, Fx::from_num(12));
         assert_eq!(map.around(FxVec3::from_f64(40.0, 0.0, 40.0), 1, ThreatType::Structures, 1, &enemies), vec![(Fx::from_num(48), Fx::from_num(48), Fx::from_num(5))]);
+        let all = map.around(FxVec3::from_f64(128.0, 0.0, 128.0), 8, ThreatType::Overall, 1, &enemies);
+        assert_eq!(all, vec![(Fx::from_num(48), Fx::from_num(48), Fx::from_num(15)), (Fx::from_num(208), Fx::from_num(208), Fx::from_num(12))]);
+        let land = map.around(FxVec3::from_f64(128.0, 0.0, 128.0), 8, ThreatType::Land, 1, &enemies);
+        assert_eq!(land, vec![(Fx::from_num(208), Fx::from_num(208), Fx::from_num(12)), (Fx::from_num(48), Fx::from_num(48), Fx::from_num(10))], "highest first");
         let line = map.between(FxVec3::from_f64(10.0, 0.0, 10.0), FxVec3::from_f64(250.0, 0.0, 250.0), ThreatType::Overall, 1, &enemies);
         assert_eq!(line, Fx::from_num(27));
     }
