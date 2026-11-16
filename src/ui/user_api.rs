@@ -1179,8 +1179,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         function ExitApplication() rawset(_G, '__engine_exit_request', true) end
         -- Session control: the engine keeps `__engine_paused` current; pause
         -- requests are taken by the renderer (`UserVm::take_pause_request`).
+        -- A request not yet taken shows in `SessionIsPaused` at once, as the
+        -- real game's does in the same frame (dev/probes probe_ui_globals,
+        -- probe_re2_ui).
         rawset(_G, '__engine_paused', false)
-        function SessionIsPaused() return rawget(_G, '__engine_paused') end
+        function SessionIsPaused()
+            local asked = rawget(_G, '__engine_pause_request')
+            if asked ~= nil then return asked end
+            return rawget(_G, '__engine_paused')
+        end
         function SessionRequestPause() rawset(_G, '__engine_pause_request', true) end
         function SessionResume() rawset(_G, '__engine_pause_request', false) end
         function SessionIsBeingRecorded() return false end

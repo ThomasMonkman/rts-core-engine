@@ -339,6 +339,7 @@ fn pause_reaches_both_sides() {
     vm.set_screen(1280.0, 720.0).unwrap();
     vm.start_hud().expect("game interface");
     vm.lua().load("SessionRequestPause()").exec().unwrap();
+    assert!(vm.lua().load("return SessionIsPaused()").eval::<bool>().unwrap(), "the request shows at once");
     assert_eq!(vm.take_pause_request().unwrap(), Some(true));
     assert_eq!(vm.take_pause_request().unwrap(), None, "taken once");
     vm.set_paused(true).expect("FAF's OnPause / OnUserPause run");
