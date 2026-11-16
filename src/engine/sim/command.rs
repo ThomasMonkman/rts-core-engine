@@ -358,6 +358,12 @@ impl Commands {
         std::mem::take(&mut self.dropped_focus)
     }
 
+    /// Live `BuildMobile` commands (queued on some unit, current or not),
+    /// in id order.
+    pub fn pending_builds(&self) -> impl Iterator<Item = &Command> {
+        self.map.values().filter(|c| c.kind == CommandKind::BuildMobile)
+    }
+
     /// Done once no unit has it queued (or it never existed).
     pub fn is_done(&self, id: CommandId) -> bool {
         !self.map.contains_key(&id)

@@ -24,5 +24,14 @@ ForkThread(function()
     local function at(bp, px, pz) return brain:CanBuildStructureAt(bp, {px, GetTerrainHeight(px, pz), pz}) end
     check(not at('ueb0101', gx + 5, gz), 'a factory 5 east of a generator (unsnapped) overlaps')
     check(at('ueb0101', gx + 6, gz), 'a factory 6 east of a generator fits')
+    -- A queued build order reserves its site, before the builder gets there.
+    local sx, sz = 440, 600
+    check(at('ueb1101', sx, sz), 'the site is free before the order')
+    local eng = CreateUnitHPR('uel0105', 'ARMY_1', sx - 30, GetTerrainHeight(sx - 30, sz), sz, 0, 0, 0)
+    IssueBuildMobile({eng}, {sx, GetTerrainHeight(sx, sz), sz}, 'ueb1101', {})
+    IssueBuildMobile({eng}, {sx, GetTerrainHeight(sx, sz + 6), sz + 6}, 'ueb1101', {})
+    check(not at('ueb1101', sx, sz), 'the first queued build reserves its site')
+    check(not at('ueb1101', sx + 1, sz + 6), 'and so does the second')
+    check(at('ueb1101', sx + 2, sz), 'skirts beside the site stay free')
     ScenarioResult.done = true
 end)

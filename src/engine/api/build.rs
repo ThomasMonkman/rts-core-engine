@@ -234,7 +234,10 @@ impl Placement {
     /// round(pos - size / 2), can stand there on a layer of its own
     /// (`OCCUPY_MobileCheck`): a ship on water, a tank on land, an aircraft
     /// anywhere; no flatness, deposit or skirt check.
-    pub fn allows(&self, lua: &Lua, pos: FxVec3) -> LuaResult<bool> {
+    ///
+    /// `reserved`: sites of queued build orders ([`reserved_sites`]),
+    /// blocked as a structure there would block.
+    pub fn allows(&self, lua: &Lua, pos: FxVec3, reserved: &[(FxVec3, Skirt)]) -> LuaResult<bool> {
         let (hx, hz) = self.half;
         let terrain = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>();
         if let Some(t) = &terrain {
@@ -296,6 +299,16 @@ impl Placement {
                 return Ok(false);
             }
         }
+        drop(terrain);
+        self.clear_of_structures(lua, pos, reserved)
+    }
+
+    /// Whether the skirt at `pos` overlaps no live structure's skirt and no
+    /// site in `reserved`.
+    fn clear_of_structures(&self, lua: &Lua, pos: FxVec3, reserved: &[(FxVec3, Skirt)]) -> LuaResult<bool> {
+        if reserved.iter().any(|(at, other)| self.skirt.overlaps(pos, other, *at)) {
+            return Ok(false);
+        }
         let structure = crate::engine::api::categories::domain(lua)?.named.get("STRUCTURE").cloned();
         let blocked = with_skirts(lua, |skirts| {
             let w = entity::world(lua);
@@ -320,9 +333,46 @@ impl Placement {
     }
 }
 
-/// Could `bp_id` be built at `pos`? See [`Placement::allows`].
+/// Could `bp_id` be built at `pos`, by structures alone (a builder starting
+/// its own order)? See [`Placement::allows`].
 pub fn can_build_at(lua: &Lua, bp_id: &str, pos: FxVec3) -> LuaResult<bool> {
-    Placement::of(lua, bp_id)?.allows(lua, pos)
+    Placement::of(lua, bp_id)?.allows(lua, pos, &[])
+}
+
+/// Could `army` place `bp_id` at `pos`, its own queued build orders' sites
+/// counting as taken ([`reserved_sites`])? What the brain's
+/// `CanBuildStructureAt` asks (the build preview doesn't: what the real
+/// interface shows over a queued build isn't probed).
+pub fn can_place_at(lua: &Lua, army: Option<u32>, bp_id: &str, pos: FxVec3) -> LuaResult<bool> {
+    let placement = Placement::of(lua, bp_id)?;
+    let reserved = reserved_sites(lua, army)?;
+    placement.allows(lua, pos, &reserved)
+}
+
+/// The sites of `army`'s queued build orders (`BuildMobile`, current or
+/// further back), each with its blueprint's skirt: moho reserves them, so
+/// `CanBuildStructureAt` is false on the site of an engineer's first (not
+/// yet reached) and second (queued) build (dev/probes probe_ai_build), and
+/// the AI doesn't queue the same extractor twice. Which armies' orders
+/// count beyond the asker's own isn't probed; ours counts only its own.
+pub fn reserved_sites(lua: &Lua, army: Option<u32>) -> LuaResult<Vec<(FxVec3, Skirt)>> {
+    let Some(army) = army else { return Ok(Vec::new()) };
+    let sites: Vec<(FxVec3, String)> = {
+        let Some(commands) = lua.app_data_ref::<crate::engine::sim::command::Commands>() else { return Ok(Vec::new()) };
+        let w = entity::world(lua);
+        commands
+            .pending_builds()
+            .filter(|c| c.units.first().and_then(|&u| w.get(u)).is_some_and(|e| e.army == Some(army)))
+            .filter_map(|c| match (c.target, &c.blueprint) {
+                (crate::engine::sim::command::CommandTarget::Ground(p), Some(bp)) => Some((p, bp.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    if sites.is_empty() {
+        return Ok(Vec::new());
+    }
+    with_skirts(lua, |skirts| sites.into_iter().filter_map(|(p, bp)| skirts.by_id.get(&bp).map(|s| (p, *s))).collect())
 }
 
 impl Skirt {
@@ -471,6 +521,9 @@ fn find_place_to_build(
         (None, None) => start,
     };
     let placement = Placement::of(lua, structure)?;
+    // (Sites of the army's queued builds count as taken, as for
+    // `CanBuildStructureAt`; inferred for this call.)
+    let reserved = reserved_sites(lua, Some(army))?;
     let threat_ok = |p: FxVec3| -> LuaResult<bool> {
         if ignore_threat_over <= 0.0 {
             return Ok(true);
@@ -504,7 +557,7 @@ fn find_place_to_build(
             .unwrap_or_default();
         spots.sort_by_key(|&(d, i, _)| (d, i));
         for (d, _, p) in spots {
-            if placement.allows(lua, p)? && threat_ok(p)? {
+            if placement.allows(lua, p, &reserved)? && threat_ok(p)? {
                 let (x, z) = if relative { (p.x - start.x, p.z - start.z) } else { (p.x, p.z) };
                 return location(lua, x, z, d).map(|t| Some(shapes::List::new(t)));
             }
@@ -536,7 +589,7 @@ fn find_place_to_build(
     }
     spots.sort_by_key(|&(d, i, ..)| (d, i));
     for (d, _, (px, pz), p) in spots {
-        if placement.allows(lua, p)? && threat_ok(p)? {
+        if placement.allows(lua, p, &reserved)? && threat_ok(p)? {
             // Template coordinates: relative to the start when `relative`.
             return location(lua, crate::engine::sim::math::from_lua(px), crate::engine::sim::math::from_lua(pz), d).map(|t| Some(shapes::List::new(t)));
         }
@@ -589,7 +642,7 @@ fn create_resource_building_nearest(lua: &Lua, army: u32, bp: &str, x: Fx, z: Fx
         .unwrap_or_default();
     spots.sort_by_key(|&(d, i, _)| (d, i));
     for (_, _, p) in spots {
-        if placement.allows(lua, p)? {
+        if placement.allows(lua, p, &[])? {
             return spawn_at(lua, bp, army, p.x, p.z).map(Some);
         }
     }
@@ -625,7 +678,7 @@ fn create_unit_near_spot(lua: &Lua, army: u32, bp: &str, x: Fx, z: Fx) -> LuaRes
     for (_, dz, dx) in spots {
         let (cx, cz) = (bx + Fx::from_num(dx) + hx, bz + Fx::from_num(dz) + hz);
         let p = FxVec3 { x: cx, y: Fx::ZERO, z: cz };
-        if !placement.allows(lua, p)? {
+        if !placement.allows(lua, p, &[])? {
             continue;
         }
         let occupied = {
@@ -768,10 +821,12 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         },
     )?;
     lua_method!(lua, moho::AIBrain,
-        /// Whether blueprint `bp` can be placed at `pos`.
-        CanBuildStructureAt = |lua, (_brain, bp, pos): (Obj<moho::AIBrain>, String, shapes::Vector)| {
+        /// Whether blueprint `bp` can be placed at `pos`; the sites of the
+        /// army's queued builds count as taken.
+        CanBuildStructureAt = |lua, (brain, bp, pos): (Obj<moho::AIBrain>, String, shapes::Vector)| {
+            let crate::engine::api::army::ArmyHandle(army) = crate::engine::api::script_object::handle(&brain)?;
             let p = FxVec3::from_f64(pos.raw_get(1)?, pos.raw_get::<Option<f64>>(2)?.unwrap_or(0.0), pos.raw_get(3)?);
-            can_build_at(lua, &bp, p)
+            can_place_at(lua, Some(army), &bp, p)
         },
     )
 }
