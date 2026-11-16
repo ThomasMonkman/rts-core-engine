@@ -18,6 +18,14 @@ ForkThread(function()
     check(n(0) == 0, 'r=0 finds nothing: ' .. n(0))
     check(table.getn(brain:GetUnitsAroundPoint(categories.MOBILE, c, 0)) == 0, 'GetUnitsAroundPoint r=0 is empty')
 
+    -- GetPlatoonsList leaves out platoons with no units.
+    local empty = brain:MakePlatoon('empty', 'none')
+    local listed = function(x) for _, q in brain:GetPlatoonsList() do if q == x then return true end end return false end
+    check(not listed(empty), 'an empty platoon is not listed')
+    brain:AssignUnitsToPlatoon(empty, {b}, 'Attack', 'None')
+    check(listed(empty), 'listed once it holds a unit')
+    brain:AssignUnitsToPlatoon('ArmyPool', {b}, 'Unassigned', 'None')
+
     -- Squad names: moho's enum, any case; others raise.
     local p = brain:MakePlatoon('q', 'none')
     brain:AssignUnitsToPlatoon(p, {a}, 'attack', 'None')

@@ -619,10 +619,12 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(platoons(lua).of_army(army).filter(|p| p.plan.eq_ignore_ascii_case(&plan)).count() as f64)
         })?;
     lua_method!(lua, moho::AIBrain,
-        /// The army's platoons in creation order, without its ArmyPool (inferred).
+        /// The army's platoons holding units, in creation order, without its ArmyPool: the real
+        /// game leaves out platoons with no units (`{}` right after `MakePlatoon`; dev/probes
+        /// probe_ai_platoon).
         GetPlatoonsList = |lua, brain: Obj<moho::AIBrain>| {
             let ArmyHandle(army) = script_object::handle(&brain)?;
-            let ids: Vec<PlatoonId> = platoons(lua).of_army(army).filter(|p| p.unique_name.as_deref() != Some("ArmyPool")).map(|p| p.id).collect();
+            let ids: Vec<PlatoonId> = platoons(lua).of_army(army).filter(|p| p.unique_name.as_deref() != Some("ArmyPool") && !p.units.is_empty()).map(|p| p.id).collect();
             let reg = objects(lua)?;
             let out = lua.create_table_with_capacity(ids.len(), 0)?;
             let mut n = 0;
