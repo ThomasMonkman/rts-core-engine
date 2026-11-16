@@ -97,6 +97,7 @@ sim  GetSystemTimeSecondsOnlyForProfileUse native
 sim  GetTerrainHeight native
 sim  GetTerrainType native
 sim  GetTerrainTypeOffset native
+sim  GetTimeForProfile native
 sim  GetUnitBlueprintByName native
 sim  GetUnitById native
 sim  GetUnitsInRect native
@@ -243,6 +244,7 @@ sim  _ALERT native
 sim  _TRACEBACK luau
 sim  __engine_IssueTransportReverseLoad native
 sim  __forin luau
+sim  __pow luau
 sim  _c_CreateEntity native
 sim  _c_CreateShield native
 sim  assert native
@@ -888,7 +890,7 @@ sim  string.find native
 sim  string.format native
 sim  string.gfind native
 sim  string.gmatch native
-sim  string.gsub native
+sim  string.gsub luau
 sim  string.len native
 sim  string.lower native
 sim  string.match native
@@ -908,13 +910,13 @@ sim  table.find native
 sim  table.foreach native
 sim  table.foreachi native
 sim  table.freeze native
-sim  table.getn native
-sim  table.insert native
+sim  table.getn luau
+sim  table.insert luau
 sim  table.isfrozen native
 sim  table.maxn native
 sim  table.move native
 sim  table.pack native
-sim  table.remove native
+sim  table.remove luau
 sim  table.setn luau
 sim  table.sort native
 sim  table.unpack native
@@ -1050,6 +1052,7 @@ user GetSpecialFolder native
 user GetSystemTime native
 user GetSystemTimeSeconds native
 user GetTextureDimensions native
+user GetTimeForProfile native
 user GetUIControlsAlpha native
 user GetUnitBlueprintByName native
 user GetUnitById luau
@@ -1278,6 +1281,7 @@ user __net_poll native
 user __net_port native
 user __net_send native
 user __net_session_clients native
+user __pow luau
 user _c_CreateCursor native
 user _c_CreateDecal luau
 user _c_CreatePathDebugger native
@@ -1345,6 +1349,7 @@ user gcinfo native
 user getfenv native
 user getmetatable native
 user ipairs native
+user loadstring native
 user math.abs native
 user math.acos native
 user math.asin native
@@ -1643,7 +1648,7 @@ user string.find native
 user string.format native
 user string.gfind native
 user string.gmatch native
-user string.gsub native
+user string.gsub luau
 user string.len native
 user string.lower native
 user string.match native
@@ -1663,13 +1668,13 @@ user table.find native
 user table.foreach native
 user table.foreachi native
 user table.freeze native
-user table.getn native
-user table.insert native
+user table.getn luau
+user table.insert luau
 user table.isfrozen native
 user table.maxn native
 user table.move native
 user table.pack native
-user table.remove native
+user table.remove luau
 user table.setn luau
 user table.sort native
 user table.unpack native
