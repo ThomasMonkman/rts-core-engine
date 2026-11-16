@@ -938,8 +938,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// probe_ai_build: `{4, 6, 0}` queued at the start + (4, 6), not
         /// beside the builder). An unknown blueprint queues
         /// nothing and returns false, as in the real game (dev/probes
-        /// probe_ai_misc); otherwise nothing is returned (what the real one
-        /// returns then is not settled).
+        /// probe_ai_misc). The site goes to `2 * floor(v / 2) + 0.5` on
+        /// each axis; one where the structure can't be built (another
+        /// structure's skirt: a unit doesn't count) moves to the first
+        /// free spot of the near-spot search in steps of 8, whatever the
+        /// blueprint (the real game queues a generator asked on another at
+        /// -8, -8 from the snapped site, and at -8, +8 with the north-west
+        /// taken too: dev/probes probe_re2_build BS). It returns false for
+        /// an absolute site, built or moved alike; true for a relative one
+        /// (probe_ai_build): what the value means isn't known.
         BuildStructure = |lua, (_brain, builder, bp, loc, relative): (Obj<moho::AIBrain>, Obj<moho::Unit>, String, shapes::Vector, Option<bool>)| {
             let builder = entity::entity_id(&builder)?;
             let bp = bp.to_lowercase();
@@ -956,12 +963,23 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                     z += start.z.to_num::<f64>();
                 }
             }
-            let y = lua
-                .app_data_ref::<crate::engine::sim::terrain::Terrain>()
-                .map_or(0.0, |t| t.height_at(crate::engine::sim::math::from_lua(x), crate::engine::sim::math::from_lua(z)).to_num::<f64>());
-            let target = CommandTarget::Ground(FxVec3::from_f64(x, y, z));
-            issue(lua, &[builder], K::BuildMobile, target, Some(bp), 1);
-            Ok(None)
+            use crate::engine::api::build::{can_build_at, near_spot_first, near_spot_offsets, NEAR_SPOT_RINGS};
+            use crate::engine::sim::math::{from_lua, Fx};
+            let (fx, fz) = (near_spot_first(from_lua(x)), near_spot_first(from_lua(z)));
+            let mut site = FxVec3 { x: fx, y: Fx::ZERO, z: fz };
+            if !can_build_at(lua, &bp, site)? {
+                let step = Fx::from_num(8);
+                for (dx, dz) in near_spot_offsets(NEAR_SPOT_RINGS).into_iter().skip(1) {
+                    let p = FxVec3 { x: fx + step * Fx::from_num(dx), y: Fx::ZERO, z: fz + step * Fx::from_num(dz) };
+                    if can_build_at(lua, &bp, p)? {
+                        site = p;
+                        break;
+                    }
+                }
+            }
+            site.y = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>().map_or(Fx::ZERO, |t| t.height_at(site.x, site.z));
+            issue(lua, &[builder], K::BuildMobile, CommandTarget::Ground(site), Some(bp), 1);
+            Ok(Some(relative.unwrap_or(false)))
         })?;
     lua_fn!(lua, global,
         /// Whether the command is finished (true for nil).

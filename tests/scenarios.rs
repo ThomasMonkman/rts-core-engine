@@ -561,6 +561,11 @@ fn unit_states_by_task() {
 }
 
 #[test]
+fn build_structure_blocked() {
+    scenario("build_structure_blocked", 50);
+}
+
+#[test]
 fn orders_refused_at_issue() {
     scenario("orders_refused_at_issue", 200);
 }
