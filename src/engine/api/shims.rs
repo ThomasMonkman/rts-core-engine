@@ -114,11 +114,11 @@ mod tests {
     }
 
     #[test]
-    fn str_itox_is_unsigned_hex() {
+    fn str_itox_is_unsigned_upper_case_hex() {
         let lua = mlua::Lua::new();
         super::register(&lua).unwrap();
         let r: String = lua.load("return table.concat({ STR_itox(0), STR_itox(255), STR_itox(-1) }, '|')").eval().unwrap();
-        assert_eq!(r, "0|ff|ffffffff");
+        assert_eq!(r, "0|FF|FFFFFFFF");
     }
 
     #[test]
@@ -127,6 +127,8 @@ mod tests {
         super::register(&lua).unwrap();
         let r: (i64, i64, i64, i64) = lua.load("return STR_xtoi('ff'), STR_xtoi('1A'), STR_xtoi('7fz'), STR_xtoi('zz')").eval().unwrap();
         assert_eq!(r, (255, 26, 127, 0));
+        let r: (i64, i64) = lua.load("return STR_xtoi('ffffffff'), STR_xtoi(' 1f')").eval().unwrap();
+        assert_eq!(r, (-1, 0));
     }
 
     #[test]
