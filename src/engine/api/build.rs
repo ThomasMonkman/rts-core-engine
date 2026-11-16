@@ -632,11 +632,62 @@ fn location(lua: &Lua, x: Fx, z: Fx) -> LuaResult<LuaTable> {
     Ok(t)
 }
 
-/// Cells searched each way from the spot by [`create_unit_near_spot`].
-const NEAR_SPOT_REACH: i32 = 40;
+/// Growths of the square [`near_spot_offsets`] searches by default (to
+/// 20 steps each way).
+pub(crate) const NEAR_SPOT_RINGS: i32 = 20;
 /// Gap [`create_unit_near_spot`] keeps between a new structure's footprint
 /// and any unit's (inferred).
 const NEAR_SPOT_CLEARANCE: i32 = 2;
+
+/// Where moho's near-spot searches (`CreateUnitNearSpot`, a blocked
+/// `BuildStructure`) start: `2 * floor(v / 2) + 0.5` on each axis (the real
+/// game queues a generator asked at 0, 0.3 or 0.7 at 0.5, at 3 at 2.5, at -5
+/// at -5.5, and makes one there: dev/probes probe_re2_build BS, NEAR).
+pub(crate) fn near_spot_first(v: Fx) -> Fx {
+    (v / 2).floor() * 2 + Fx::ONE / 2
+}
+
+/// The order moho's near-spot searches try spots in, as (x, z) steps from
+/// the first: (0, 0), then a square grown a side at a time, the negative
+/// side first ({-1, 0}, {-1..1}, {-2..1}, {-2..2}, ...), each growth's new
+/// cells x-major (x ascending, then z). Fitted to the real game's choices
+/// (dev/probes probe_re2_build NEAR, BS: the generators' -1,-1, -1,0, 0,-1,
+/// -1,1, 0,1, 1,-1 ...; a blocked north-west goes to -1,1).
+pub(crate) fn near_spot_offsets(rings: i32) -> Vec<(i32, i32)> {
+    let side = (2 * rings + 1).max(1) as usize;
+    let mut out = Vec::with_capacity(side * side);
+    out.push((0, 0));
+    let (mut lo, mut hi) = (0, 0);
+    for g in 0..2 * rings {
+        let (plo, phi) = (lo, hi);
+        if g % 2 == 0 {
+            lo -= 1;
+        } else {
+            hi += 1;
+        }
+        for x in lo..=hi {
+            for z in lo..=hi {
+                if !(plo..=phi).contains(&x) || !(plo..=phi).contains(&z) {
+                    out.push((x, z));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `CreateUnitNearSpot`'s step between spots: 2 for a mobile unit; for a
+/// structure its skirt plus 2, rounded down to even, at most 8 (the real
+/// game's steps: wall 2, T1 generator 4, land factory 8, tank 2; dev/probes
+/// probe_re2_build NEAR). Fitted to those four: a request off the 2-grid
+/// (a generator at +0.3, +0.7) stepped 3 there, which this doesn't explain.
+fn near_spot_step(placement: &Placement) -> Fx {
+    if placement.mobile.is_some() {
+        return Fx::from_num(2);
+    }
+    let size = (placement.skirt.x1 - placement.skirt.x0).max(placement.skirt.z1 - placement.skirt.z0);
+    (((size + Fx::from_num(2)) / 2).floor() * 2).clamp(Fx::from_num(2), Fx::from_num(8))
+}
 
 /// Spawns `bp` finished for `army` at `pos`, ground height, facing north.
 fn spawn_at(lua: &Lua, bp: &str, army: u32, x: Fx, z: Fx) -> LuaResult<Obj<moho::Unit>> {
@@ -680,28 +731,19 @@ fn is_structure(lua: &Lua, e: &crate::engine::sim::entity::Entity) -> bool {
 }
 
 /// `CAiBrain:CreateUnitNearSpot(bp, x, z)` (the prebuilt base's factory and
-/// generators): `bp` finished at the nearest footprint-aligned spot (within
-/// [`NEAR_SPOT_REACH`] cells, nearest first, ties north then west) where it
-/// can be built and no unit stands within [`NEAR_SPOT_CLEARANCE`] of its
+/// generators): `bp` finished at the first spot of moho's near-spot search
+/// ([`near_spot_first`], [`near_spot_offsets`], [`near_spot_step`]) where
+/// it can be built and no unit stands within [`NEAR_SPOT_CLEARANCE`] of its
 /// footprint (so the commander isn't walled in at the start spot); nil if
 /// none.
 fn create_unit_near_spot(lua: &Lua, army: u32, bp: &str, x: Fx, z: Fx) -> LuaResult<Option<Obj<moho::Unit>>> {
     let placement = Placement::of(lua, bp)?;
     let (hx, hz) = placement.half;
-    // Footprint-aligned centres: cell corners plus the half footprint.
-    let (bx, bz) = ((x - hx).floor(), (z - hz).floor());
-    let mut spots: Vec<(Fx, i32, i32)> = Vec::with_capacity(((2 * NEAR_SPOT_REACH + 1) * (2 * NEAR_SPOT_REACH + 1)) as usize);
-    for dz in -NEAR_SPOT_REACH..=NEAR_SPOT_REACH {
-        for dx in -NEAR_SPOT_REACH..=NEAR_SPOT_REACH {
-            let (cx, cz) = (bx + Fx::from_num(dx) + hx, bz + Fx::from_num(dz) + hz);
-            let (ex, ez) = (cx - x, cz - z);
-            spots.push((ex.saturating_mul(ex).saturating_add(ez.saturating_mul(ez)), dz, dx));
-        }
-    }
-    spots.sort_unstable();
+    let (fx, fz) = (near_spot_first(x), near_spot_first(z));
+    let step = near_spot_step(&placement);
     let mut ids = Vec::new();
-    for (_, dz, dx) in spots {
-        let (cx, cz) = (bx + Fx::from_num(dx) + hx, bz + Fx::from_num(dz) + hz);
+    for (dx, dz) in near_spot_offsets(NEAR_SPOT_RINGS) {
+        let (cx, cz) = (fx + step * Fx::from_num(dx), fz + step * Fx::from_num(dz));
         let p = FxVec3 { x: cx, y: Fx::ZERO, z: cz };
         if !placement.allows(lua, p, &[])? {
             continue;
@@ -713,8 +755,19 @@ fn create_unit_near_spot(lua: &Lua, army: u32, bp: &str, x: Fx, z: Fx) -> LuaRes
             ids.iter().filter_map(|&id| w.get(id)).any(|e| {
                 let r = e.unit.as_deref().map_or(Fx::ZERO, |u| u.radius);
                 let q = e.position();
+                if e.destroyed || e.kind != EntityKind::Unit || is_structure(lua, e) {
+                    return false;
+                }
+                // A mobile unit only keeps off another's centre: the real
+                // tanks skip the spots 2 from one and take the diagonals,
+                // 2.8 away (dev/probes probe_re2_build NEAR; the threshold
+                // between is inferred).
+                if placement.mobile.is_some() {
+                    let (ex, ez) = (q.x - cx, q.z - cz);
+                    return ex.saturating_mul(ex).saturating_add(ez.saturating_mul(ez)) < Fx::from_num(5);
+                }
                 let gap = r + Fx::from_num(NEAR_SPOT_CLEARANCE);
-                !e.destroyed && e.kind == EntityKind::Unit && !is_structure(lua, e) && (q.x - cx).abs() < hx + gap && (q.z - cz).abs() < hz + gap
+                (q.x - cx).abs() < hx + gap && (q.z - cz).abs() < hz + gap
             })
         };
         if !occupied {
@@ -856,4 +909,23 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             can_place_at(lua, Some(army), &bp, p)
         },
     )
+}
+
+#[cfg(test)]
+mod near_spot_tests {
+    use super::*;
+
+    #[test]
+    fn the_search_grows_negative_side_first_x_major() {
+        let o = near_spot_offsets(2);
+        assert_eq!(&o[..9], &[(0, 0), (-1, -1), (-1, 0), (0, -1), (-1, 1), (0, 1), (1, -1), (1, 0), (1, 1)]);
+        assert_eq!(&o[9..14], &[(-2, -2), (-2, -1), (-2, 0), (-2, 1), (-1, -2)]);
+        assert_eq!(o.len(), 25);
+    }
+
+    #[test]
+    fn the_first_spot_is_on_the_two_grid_plus_a_half() {
+        let f = |v: f64| near_spot_first(Fx::from_num(v)).to_num::<f64>();
+        assert_eq!((f(0.0), f(0.3), f(0.7), f(3.0), f(-5.0), f(657.0)), (0.5, 0.5, 0.5, 2.5, -5.5, 656.5));
+    }
 }
