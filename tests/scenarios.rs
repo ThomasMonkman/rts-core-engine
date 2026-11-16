@@ -556,6 +556,11 @@ fn silo() {
 }
 
 #[test]
+fn unit_states_by_task() {
+    scenario("unit_states_by_task", 400);
+}
+
+#[test]
 fn orders_refused_at_issue() {
     scenario("orders_refused_at_issue", 200);
 }

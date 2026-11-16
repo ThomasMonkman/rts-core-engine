@@ -807,8 +807,12 @@ fn goal(cmd: Option<&crate::engine::sim::command::Command>, world: &EntityWorld,
         // sacrifice passes do the work).
         // Guarding a builder that is building: its construction instead (the
         // assist pass works on it from build range of it, not of the builder).
+        // A unit that can't build (a tank) guards the unit, never its work
+        // (the real tank guarding a building engineer stays put: dev/probes
+        // probe_re2_orders ST).
         K::Guard => {
-            let building = me.and_then(|me| match cmd.target {
+            let builder = world.get(unit).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.build_rate > Fx::ZERO);
+            let building = me.filter(|_| builder).and_then(|me| match cmd.target {
                 CommandTarget::Entity(id) => world
                     .get(id)
                     .and_then(|e| e.unit.as_deref()?.focus)
@@ -3563,7 +3567,19 @@ pub fn apply(world: &mut EntityWorld, commands: &mut Commands, moved: &[Moved], 
             }
             static MOVING: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("Moving").expect("state"));
             let moving = *MOVING;
-            u.states.set(moving, m.state.speed != Fx::ZERO);
+            // Only under move-like tasks: a unit closing on its attack
+            // target, patrolling, or following the unit it guards reads
+            // `Moving` false while it drives; a builder walking to help
+            // what it guards reads true (dev/probes probe_re2_orders ST).
+            // FAF's scripts read it that way (`DefaultProjectileWeapon`'s
+            // unpack lock, the Notha's `OnGotTarget`).
+            use crate::engine::sim::command::CommandKind as K;
+            let shows = match commands.current(m.unit).map(|c| c.kind) {
+                Some(K::Attack | K::FormAttack | K::Patrol | K::FormPatrol | K::AggressiveMove | K::FormAggressiveMove) => false,
+                Some(K::Guard) => u.build_rate > Fx::ZERO,
+                _ => true,
+            };
+            u.states.set(moving, m.state.speed != Fx::ZERO && shows);
             // In an attack run, tail chase or break-off (moho's
             // `ComputeAirCombatTactics` sets it in states 1 and 2,
             // 0x1029bd5f, and in 6, 0x1029bf13; `CalcMoveAir` clears it
@@ -3760,6 +3776,8 @@ mod tests {
         let site = tank(&mut w, 12.0, 0.0);
         w.get_mut(site).unwrap().fraction_complete = Fx::from_num(0.1);
         w.get_mut(helper).unwrap().unit.as_mut().unwrap().build_range = Fx::from_num(5);
+        // (A builder: one that can't build guards the unit, not its work.)
+        w.get_mut(helper).unwrap().unit.as_mut().unwrap().build_rate = Fx::from_num(5);
         w.get_mut(builder).unwrap().unit.as_mut().unwrap().focus = Some(site);
         c.issue(&[helper], CommandKind::Guard, CommandTarget::Entity(builder), None, 0);
         run(&mut w, &mut c, 100, usize::MAX);
@@ -3780,6 +3798,8 @@ mod tests {
         w.get_mut(site).unwrap().fraction_complete = Fx::from_num(0.1);
         w.get_mut(site).unwrap().unit.as_mut().unwrap().build_skirt = (Fx::from_num(-18), Fx::from_num(-6), Fx::from_num(18), Fx::from_num(6));
         w.get_mut(helper).unwrap().unit.as_mut().unwrap().build_range = Fx::from_num(5);
+        // (A builder: one that can't build guards the unit, not its work.)
+        w.get_mut(helper).unwrap().unit.as_mut().unwrap().build_rate = Fx::from_num(5);
         w.get_mut(builder).unwrap().unit.as_mut().unwrap().focus = Some(site);
         c.issue(&[helper], CommandKind::Guard, CommandTarget::Entity(builder), None, 0);
         run(&mut w, &mut c, 100, usize::MAX);

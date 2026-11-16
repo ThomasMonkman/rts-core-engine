@@ -1695,9 +1695,14 @@ fn assists(lua: &Lua) -> LuaResult<()> {
     }
     // Guard tasks: those whose order is gone end; a new one decides whether
     // it ends with its target going idle.
-    {
+    let ended: Vec<EntityId> = {
         let mut guards = lua.app_data_mut::<GuardTasks>().expect("GuardTasks");
+        let ended = guards.0.iter().filter(|(a, (c, _))| !orders.iter().any(|o| o.0 == **a && o.3 == *c)).map(|(a, _)| *a).collect();
         guards.0.retain(|a, (c, _)| orders.iter().any(|o| o.0 == *a && o.3 == *c));
+        ended
+    };
+    for a in ended {
+        set_state(lua, a, "GuardBusy", false);
     }
     for &(assister, kind, target, command) in &orders {
         let known = lua.app_data_ref::<GuardTasks>().is_some_and(|t| t.0.get(&assister).is_some_and(|&(c, _)| c == command));
@@ -1719,7 +1724,10 @@ fn assists(lua: &Lua) -> LuaResult<()> {
     for (assister, kind, target, command) in orders {
         // A factory under a Guard never works on its target (no repair, no
         // assist beam): it builds ([`factory_guards`]).
+        // (It reads `GuardBusy` throughout, idle target or not: dev/probes
+        // probe_re2_orders FA.)
         if kind == CommandKind::Guard && factories.binary_search(&assister).is_ok() {
+            set_state(lua, assister, "GuardBusy", true);
             continue;
         }
         // A new repair task: on a unit that is enhancing, it inherits the
@@ -1759,7 +1767,11 @@ fn assists(lua: &Lua) -> LuaResult<()> {
             }
             continue;
         }
-        let work = work_target(lua, kind, target);
+        // A unit that can't build (a tank) guards without working: the real
+        // tank guarding a building engineer never helps (dev/probes
+        // probe_re2_orders ST).
+        let builder = entity::world(lua).get(assister).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.build_rate > Fx::ZERO);
+        let work = work_target(lua, kind, target).filter(|_| builder);
         // An engineer's guard with nothing to work on ends when an order is
         // queued behind it (or its guarded unit, once built, went idle).
         if kind == CommandKind::Guard && work.is_none() && guard_ends(lua, assister, target, command)? {
@@ -1787,6 +1799,18 @@ fn assists(lua: &Lua) -> LuaResult<()> {
                 _ => false,
             }
         });
+        // `GuardBusy` while a guard has work: from the order on when it
+        // helps a builder (it walks to the site busy), once in range of a
+        // factory it helps (the real engineer guarding a factory reads it
+        // from its arrival, and not between two units: dev/probes
+        // probe_re2_orders FA ref-guard, ST engguard-engbuild).
+        if kind == CommandKind::Guard {
+            let factory_target = has_category(lua, target, "FACTORY")?;
+            let to_build = builder
+                && !factory_target
+                && lua.app_data_ref::<Commands>().is_some_and(|c| c.current(target).is_some_and(|t| matches!(t.kind, CommandKind::BuildMobile)));
+            set_state(lua, assister, "GuardBusy", to_build || (work.is_some() && (in_range || !factory_target)));
+        }
         let current = lua.app_data_ref::<Assists>().and_then(|a| a.0.get(&assister).copied());
         let Some(work) = work.filter(|_| in_range) else {
             if current.is_some() {
@@ -1824,10 +1848,24 @@ fn assists(lua: &Lua) -> LuaResult<()> {
             }
             lua.app_data_mut::<Assists>().expect("Assists").0.insert(assister, work);
             let finished = entity::world(lua).get(work).is_some_and(|e| e.fraction_complete >= Fx::ONE);
+            // A guard's help with a construction: `Building` only when it's
+            // a builder's structure, `Repairing` only (FAF's `OnStartRepair`
+            // sets it) when it's a factory's unit (the real engineers read
+            // `Guarding+Building+GuardBusy` and `Guarding+Repairing+GuardBusy`:
+            // dev/probes probe_re2_orders ST, FA). Moho's start for the
+            // former isn't FAF's 'Repair' start; ours still calls it so and
+            // drops the state it sets.
+            let factory_unit = kind == CommandKind::Guard && !finished && work != target && has_category(lua, target, "FACTORY")?;
+            let builders_structure = kind == CommandKind::Guard && !finished && !factory_unit;
             crate::engine::api::unit::set_focus(lua, assister, Some(work))?;
-            set_state(lua, assister, if finished { "Repairing" } else { "Building" }, true);
+            if !factory_unit {
+                set_state(lua, assister, if finished { "Repairing" } else { "Building" }, true);
+            }
             prepare_arm(lua, &a_obj)?;
             UnitCallbacks::on_start_build(lua, &a_obj, "unit", Obj::new(w_obj.clone()), "Repair")?;
+            if builders_structure {
+                set_state(lua, assister, "Repairing", false);
+            }
         }
         if entity::world(lua).get(assister).and_then(|e| e.unit.as_deref().map(|u| u.paused)).unwrap_or(false) {
             // Paused, it still shows the work's fraction complete (FAF's

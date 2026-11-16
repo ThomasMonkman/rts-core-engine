@@ -652,23 +652,33 @@ fn formation(lua: &Lua, name: &'static str, kind: CommandKind) -> LuaResult<()> 
 /// aggressive move, as the real game reports them (dev/probes
 /// probe_unit_orders O3-O9; FAF's EngineerManager reads `Guarding`, its
 /// SimCallbacks `Patrolling`); `NoCost` on a killed unit through its death
-/// interval (probe_unit_build G9). Read when asked, never stored.
+/// interval (probe_unit_build G9); `TransportLoading` and
+/// `WaitingForTransport` on a unit ordered aboard a transport until it's
+/// attached, and `TransportUnloading` on a transport under an unload order
+/// (dev/probes probe_re2_orders ST: the real cargo reads both from its
+/// order until it attaches, the transport the latter from the unload order
+/// until it's done). Read when asked, never stored.
 pub fn order_state(lua: &Lua, unit: EntityId, state: u32) -> bool {
     use crate::engine::sim::unit_state::UnitStates;
-    static STATES: std::sync::LazyLock<[u32; 4]> = std::sync::LazyLock::new(|| ["Attacking", "Guarding", "Patrolling", "NoCost"].map(|s| UnitStates::index(s).expect("unit state")));
-    let [attacking, guarding, patrolling, no_cost] = *STATES;
+    static STATES: std::sync::LazyLock<[u32; 7]> = std::sync::LazyLock::new(|| {
+        ["Attacking", "Guarding", "Patrolling", "NoCost", "TransportLoading", "WaitingForTransport", "TransportUnloading"].map(|s| UnitStates::index(s).expect("unit state"))
+    });
+    let [attacking, guarding, patrolling, no_cost, loading, waiting, unloading] = *STATES;
     if state == no_cost {
         return entity::world(lua).get(unit).is_some_and(|e| e.cold.killed);
     }
-    if state != attacking && state != guarding && state != patrolling {
+    if ![attacking, guarding, patrolling, loading, waiting, unloading].contains(&state) {
         return false;
     }
-    let Some(kind) = lua.app_data_ref::<Commands>().and_then(|c| c.current(unit).map(|c| c.kind)) else { return false };
+    let Some((kind, target)) = lua.app_data_ref::<Commands>().and_then(|c| c.current(unit).map(|c| (c.kind, c.target))) else { return false };
     use CommandKind as K;
     match kind {
         K::Attack | K::FormAttack => state == attacking,
         K::Guard => state == guarding,
         K::Patrol | K::FormPatrol | K::AggressiveMove | K::FormAggressiveMove => state == patrolling,
+        // (A transport's own pick-up order names itself.)
+        K::TransportLoadUnits => (state == loading || state == waiting) && target != CommandTarget::Entity(unit),
+        K::TransportUnloadUnits | K::TransportUnloadSpecificUnits => state == unloading,
         _ => false,
     }
 }
