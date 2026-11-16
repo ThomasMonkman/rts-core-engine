@@ -42,6 +42,17 @@ pub(crate) fn live_members(lua: &Lua, this: &LuaTable, squad: impl Fn(&str) -> b
     Ok(members.into_iter().filter(|u| world.get(*u).is_some_and(|e| !e.destroyed)).collect())
 }
 
+/// Moho's squad enum, matched case-insensitively ('attack' is `Attack`).
+const SQUADS: [&str; 7] = ["Attack", "Artillery", "Guard", "None", "Scout", "Support", "Unassigned"];
+
+/// A squad name as moho's enum spells it; any other name raises as in the
+/// real game (`GetSquadUnits('Bogus')` and `AssignUnitsToPlatoon(..., 'Bogus')`
+/// raise `Invalid enum value Bogus`: dev/probes probe_ai_platoon,
+/// probe_ai_transport).
+pub(crate) fn squad_name(s: &str) -> LuaResult<&'static str> {
+    SQUADS.iter().copied().find(|q| q.eq_ignore_ascii_case(s)).ok_or_else(|| LuaError::runtime(format!("Invalid enum value {s}")))
+}
+
 pub fn platoon_id(obj: &LuaTable) -> LuaResult<PlatoonId> {
     Ok(script_object::handle::<PlatoonHandle>(obj)?.0)
 }
@@ -241,7 +252,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// empty squad, as in the real game (dev/probes probe_ai_platoon), which FAF's
         /// `if squadUnits then` guards rely on.
         GetSquadUnits = |lua, (this, squad): (Obj<moho::Platoon>, String)| {
-            let ids = live_members(lua, &this, |s| s.eq_ignore_ascii_case(&squad))?;
+            let squad = squad_name(&squad)?;
+            let ids = live_members(lua, &this, |s| s.eq_ignore_ascii_case(squad))?;
             if ids.is_empty() {
                 return Ok(None);
             }
@@ -309,7 +321,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// Average position of the squad's live units (nil if none).
         GetSquadPosition = |lua, (this, squad): (Obj<moho::Platoon>, String)| {
             use crate::engine::sim::math::{Fx, FxVec3};
-            let members = live_members(lua, &this, |s| s == squad)?;
+            let squad = squad_name(&squad)?;
+            let members = live_members(lua, &this, |s| s.eq_ignore_ascii_case(squad))?;
             if members.is_empty() {
                 return Ok(None);
             }
@@ -463,7 +476,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     )?;
     lua_method!(lua, moho::AIBrain,
         /// `platoon` is a platoon object or the unique name of one; `units` a list
-        /// of units (or one unit). Units leave their previous platoon.
+        /// of units (or one unit). Units leave their previous platoon. A squad name
+        /// outside moho's enum raises.
         AssignUnitsToPlatoon = |lua, (brain, platoon, units, squad, formation): (Obj<moho::AIBrain>, shapes::PlatoonRef, shapes::Units, Option<String>, Option<String>)| {
             let ArmyHandle(army) = script_object::handle(&brain)?;
             let target = match &*platoon {
@@ -483,11 +497,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 LuaValue::Table(u) => vec![crate::engine::api::entity::entity_id(u)?],
                 _ => Vec::new(),
             };
-            let squad = squad.unwrap_or_else(|| "Unassigned".into());
+            let squad = squad.as_deref().map_or(Ok("Unassigned"), squad_name)?;
             {
                 let mut p = platoons(lua);
                 for id in ids {
-                    p.assign(id, target, &squad);
+                    p.assign(id, target, squad);
                 }
                 // The platoon moves in the last formation it was given
                 // (inferred: moho keeps one per squad).

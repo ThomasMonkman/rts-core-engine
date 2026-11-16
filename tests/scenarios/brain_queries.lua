@@ -18,5 +18,15 @@ ForkThread(function()
     check(n(0) == 0, 'r=0 finds nothing: ' .. n(0))
     check(table.getn(brain:GetUnitsAroundPoint(categories.MOBILE, c, 0)) == 0, 'GetUnitsAroundPoint r=0 is empty')
 
+    -- Squad names: moho's enum, any case; others raise.
+    local p = brain:MakePlatoon('q', 'none')
+    brain:AssignUnitsToPlatoon(p, {a}, 'attack', 'None')
+    check(table.getn(p:GetSquadUnits('Attack') or {}) == 1, 'a lower-case squad name is the enum value')
+    check(p:GetSquadPosition('ATTACK') ~= nil, 'GetSquadPosition ignores case')
+    local ok, err = pcall(function() return p:GetSquadUnits('Bogus') end)
+    check(not ok and string.find(tostring(err), 'Invalid enum value Bogus'), 'GetSquadUnits with a bad squad raises: ' .. tostring(err))
+    ok = pcall(function() brain:AssignUnitsToPlatoon(p, {b}, 'Bogus', 'None') end)
+    check(not ok, 'AssignUnitsToPlatoon with a bad squad raises')
+
     ScenarioResult.done = true
 end)
