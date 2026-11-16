@@ -41,15 +41,20 @@ impl Terrain {
         self
     }
 
-    /// Terrain type code of the cell containing `(x, z)` (clamped); 1 =
-    /// `Default` when the map has no type data.
+    /// Terrain type code of the cell containing `(x, z)`; 1 = `Default`
+    /// off the map (the real game's `GetTerrainType(-1, -1)` and
+    /// `(1024, 1024)` on a 1024 map are `Default`, not the edge cell's type:
+    /// dev/probes probe_api_spot, probe_ai_brain) or when the map has no type
+    /// data.
     pub fn type_at(&self, x: Fx, z: Fx) -> u8 {
-        if self.types.is_empty() {
+        if self.types.is_empty() || x < Fx::ZERO || z < Fx::ZERO {
             return 1;
         }
-        let cell = |v: Fx, max: u32| v.max(Fx::ZERO).int().to_num::<u32>().min(max - 1);
-        let (ix, iz) = (cell(x, self.width), cell(z, self.height));
-        self.types[(iz * self.width + ix) as usize]
+        let (ix, iz) = (x.int().to_num::<u64>(), z.int().to_num::<u64>());
+        if ix >= u64::from(self.width) || iz >= u64::from(self.height) {
+            return 1;
+        }
+        self.types[(iz as u32 * self.width + ix as u32) as usize]
     }
 
     pub fn with_water(mut self, surface: Option<f32>) -> Self {
@@ -257,6 +262,18 @@ impl Terrain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terrain_type_off_the_map_is_default() {
+        let t = Terrain::from_heightmap(&Heightmap { width: 4, height: 4, scale: 1.0 / 128.0, samples: vec![0u16; 25] }).with_types(vec![9; 16]);
+        let f = |v: f64| Fx::from_num(v);
+        assert_eq!(t.type_at(f(0.0), f(0.0)), 9);
+        assert_eq!(t.type_at(f(3.9), f(3.9)), 9);
+        assert_eq!(t.type_at(f(-1.0), f(-1.0)), 1);
+        assert_eq!(t.type_at(f(-0.5), f(2.0)), 1);
+        assert_eq!(t.type_at(f(4.0), f(4.0)), 1);
+        assert_eq!(t.type_at(f(2.0), f(100.0)), 1);
+    }
 
     #[test]
     fn hill_blocks_direct_fire_but_not_high_arcs() {
