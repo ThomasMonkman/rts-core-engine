@@ -60,5 +60,19 @@ ForkThread(function()
     check(pers:GetPersonalityName() == 'AverageJoe' and pers:GetChatPersonality() == 'None', 'personality name and chat')
     check(pers:GetDifficulty() == 0.5 and pers:GetArmySize() == 75 and pers:GetPlatoonSize() == 1, 'personality difficulty and sizes')
 
+    -- FindUnit: the first unit of the category; with needIdle only an idle one.
+    check(brain:FindUnit(categories.DIRECTFIRE, false) == a, 'FindUnit finds the first tank')
+    check(brain:FindUnit(categories.NAVAL, false) == nil, 'FindUnit is nil with no match')
+    IssueMove({a}, {440, 0, 620})
+    check(brain:FindUnit(categories.DIRECTFIRE, true) == b, 'FindUnit with needIdle skips a busy unit')
+    IssueClearCommands({a})
+
+    -- SetGreaterOf raises a stat, never lowers it.
+    brain:SetArmyStat('Probe_Foo', 5)
+    brain:SetGreaterOf('Probe_Foo', 3)
+    check(brain:GetArmyStat('Probe_Foo', 0).Value == 5, 'SetGreaterOf keeps a higher value')
+    brain:SetGreaterOf('Probe_Foo', 9)
+    check(brain:GetArmyStat('Probe_Foo', 0).Value == 9, 'SetGreaterOf raises a lower value')
+
     ScenarioResult.done = true
 end)

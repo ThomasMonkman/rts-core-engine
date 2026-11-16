@@ -685,6 +685,45 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             Ok(Some(Shaped::<ArmyStat>::new(t)))
         })?;
     lua_method!(lua, moho::AIBrain,
+        /// The army's first live unit (lowest id) in `category`, only an idle one (nothing queued)
+        /// with `needIdle`; nil when none. The real game answers so (dev/probes probe_ai_brain: a
+        /// busy engineer is not found with `needIdle`). FAF's `AIGetBuilder` asks.
+        FindUnit = |lua, (brain, category, need_idle): (Obj<moho::AIBrain>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>, Option<bool>)| {
+            let ArmyHandle(index) = script_object::handle(&brain)?;
+            let found = {
+                let w = crate::engine::api::entity::world(lua);
+                let commands = lua.app_data_ref::<crate::engine::sim::command::Commands>();
+                let need_idle = need_idle.unwrap_or(false);
+                w.iter()
+                    .filter(|e| e.kind == crate::engine::sim::entity::EntityKind::Unit && !e.destroyed && e.army == Some(index))
+                    .filter(|e| e.category_index.is_some_and(|c| category.0.contains(c)))
+                    .filter(|e| !need_idle || commands.as_ref().is_none_or(|c| c.is_idle(e.id)))
+                    .map(|e| e.id)
+                    .min()
+            };
+            match found {
+                Some(id) => crate::engine::api::entity::object_as::<moho::Unit>(lua, id),
+                None => Ok(None),
+            }
+        })?;
+    lua_method!(lua, moho::AIBrain,
+        /// Raises a script-kept army stat to `value` if it is lower (or unset): 5 stays 5 for 3,
+        /// becomes 9 for 9 (dev/probes probe_ai_brain).
+        SetGreaterOf = |lua, (brain, name, value): (Obj<moho::AIBrain>, String, f64)| {
+            let ArmyHandle(index) = script_object::handle(&brain)?;
+            if let Some(a) = lua.app_data_mut::<Armies>().expect("Armies").get_mut(index) {
+                let raise = match a.stats.get(&name) {
+                    Some(StatValue::Number(n)) => *n < value,
+                    Some(StatValue::Text(_)) => false,
+                    None => true,
+                };
+                if raise {
+                    a.stats.insert(name, StatValue::Number(value));
+                }
+            }
+            Ok(())
+        })?;
+    lua_method!(lua, moho::AIBrain,
         /// Live, finished units of this army in `category` (a unit under
         /// construction counts once it's done: dev/probes probe_unit_build G3).
         GetCurrentUnits = |lua, (brain, category): (Obj<moho::AIBrain>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>)| {

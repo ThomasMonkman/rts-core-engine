@@ -87,17 +87,15 @@ signatures! {
         STR_xtoi(str: String) -> i64;
         WARN(out: LuaValue, rest: mlua::Variadic<LuaValue>);
     }
-    // `FindClosestArmyWithBase`..`SetGreaterOf` are stubs, from moho's
+    // `FindClosestArmyWithBase`..`SetCurrentPlan` are stubs, from moho's
     // bindings (MohoEngine.dll 0x101781d0..0x1017fc70; the two
     // `GetNumPlatoons*` from SupremeCommander.exe 0x593970, 0x5937e0).
     moho::AIBrain {
         FindClosestArmyWithBase(alliance: String) -> Option<Obj<moho::AIBrain>>;
-        FindUnit(category: EntityCategory, need_to_be_idle: bool) -> Option<Obj<moho::Unit>>;
         /// A unit and its upgrade blueprint.
         FindUnitToUpgrade(upgrade_list: LuaTable) -> (LuaValue, LuaValue);
         /// The plan's conversion isn't identified (passed on as is).
         SetCurrentPlan(plan: LuaValue);
-        SetGreaterOf(stat_name: String, value: f64);
         /// `category` and `compare_type` may come in either order; the 8-argument
         /// form adds a filter function, `module`'s export `filter`.
         PickBestAttackVector(platoon: Obj<moho::Platoon>, squad: String, alliance: String, category: EntityCategory, compare_type: String) -> Vector;
