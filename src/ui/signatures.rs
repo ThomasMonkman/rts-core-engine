@@ -217,8 +217,8 @@ signatures! {
         SetActiveBuildTemplate(template: Vec<LuaValue>);
         SetAutoMode(units: Vec<Obj<moho::UserUnit>>, mode: bool);
         SetAutoSurfaceMode(units: Vec<Obj<moho::UserUnit>>, mode: bool);
-        /// The factory's queue, front first.
-        SetCurrentFactoryForQueueDisplay(unit: Obj<moho::UserUnit>) -> Vec<Shaped<QueueEntry>>;
+        /// The factory's queue, front first; nil when it's empty.
+        SetCurrentFactoryForQueueDisplay(unit: Obj<moho::UserUnit>) -> Option<Vec<Shaped<QueueEntry>>>;
         SetCursor(cursor: Obj<moho::Cursor>);
         SetFireState(units: Vec<Obj<moho::UserUnit>>, fire_state: FireState);
         SetFrontEndData(key: String, data: LuaValue);

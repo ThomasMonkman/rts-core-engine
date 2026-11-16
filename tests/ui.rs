@@ -2849,3 +2849,17 @@ fn toggle_fire_state_moves_on_to_the_next_state() {
     let want: Vec<_> = [1, 2, 0, 0, 2].into_iter().map(|v| Some(Toggle::FireState(v))).collect();
     assert_eq!(got, want);
 }
+
+/// `SetCurrentFactoryForQueueDisplay` of an idle factory or of a unit that
+/// isn't one is nil, as moho's (`probe_ui_units` Q): FAF's
+/// `ResetOrderQueue` tests `if queue`.
+#[test]
+fn an_empty_factory_queue_is_nil() {
+    use rts_core_engine::engine::snapshot::UnitDetail;
+    use rts_core_engine::ui::UnitInfo;
+    let Some(vm) = vm() else { return };
+    let info = |id, bp: &str| UnitInfo { id, blueprint: bp.into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: Some(UnitDetail { id, ..Default::default() }) };
+    vm.update_units(&[info(1, "ueb0101"), info(2, "uel0201")]).unwrap();
+    let got: (bool, bool) = vm.lua().load("return SetCurrentFactoryForQueueDisplay(__engine_unit(1)) == nil, SetCurrentFactoryForQueueDisplay(__engine_unit(2)) == nil").eval().unwrap();
+    assert_eq!(got, (true, true));
+}

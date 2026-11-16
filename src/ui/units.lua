@@ -253,12 +253,15 @@ local function shapeOf(q)
 end
 -- The engine reads `__engine_queue_factory` to send the shown factory's
 -- queue when it isn't selected (a mobile factory's external factory:
--- FAF's construction.lua shows `selection[1]:GetCreator()`'s queue).
+-- FAF's construction.lua shows `selection[1]:GetCreator()`'s queue). An
+-- empty queue (an idle factory, a unit that isn't one) is nil, as moho's
+-- (`probe_ui_units` Q): FAF's `ResetOrderQueue` tests `if queue`.
 function SetCurrentFactoryForQueueDisplay(unit)
     queueFactory = unit and unit._id
     rawset(_G, '__engine_queue_factory', queueFactory)
     local q = factoryQueue(queueFactory)
     queueShape = shapeOf(q)
+    if q[1] == nil then return nil end
     return q
 end
 function ClearCurrentFactoryForQueueDisplay()
