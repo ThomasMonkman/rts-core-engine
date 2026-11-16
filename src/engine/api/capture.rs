@@ -16,8 +16,10 @@
 //!    with `ChangeUnitArmy`), and the order pops.
 //! A captor whose order changed, or that left range, fails:
 //! `OnFailedBeingCaptured(captor)` on the target, then `OnFailedCapture
-//! (target)`, progress lost; `IssueClearCommands` fails it inside the call. Uncapturable targets (`SetCapturable(false)`) and targets with no
-//! capture time (`GetCaptureCosts` 0: unfinished units) end the order.
+//! (target)`, progress lost; `IssueClearCommands` fails it inside the call.
+//! Uncapturable targets (`SetCapturable(false)`) and targets with no
+//! capture time (`GetCaptureCosts` 0: unfinished units) end the order; a
+//! capture under way then first gives the captor `OnStopCapture(captor)`.
 //! Captors are kept by id, so callbacks run in a fixed order.
 //!
 //! Captors of one target share its capture (`shared`): their progress adds
@@ -185,6 +187,14 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
     for (captor, target, command) in orders {
         let capturable = entity::world(lua).get(target).is_some_and(|t| t.unit.as_deref().is_some_and(|u| u.capturable));
         if !capturable {
+            // A capture under way first hears `OnStopCapture` with the
+            // captor itself as the argument, then fails (dev/probes
+            // probe_unit_capture2 CU); FAF's `OnStopCapture` ends the
+            // capture effects and tells the brain.
+            if lua.app_data_ref::<Captures>().is_some_and(|c| c.0.contains_key(&captor))
+                && let Some(c_obj) = entity::object(lua, captor)? {
+                UnitCallbacks::on_stop_capture(lua, &c_obj, "unit", Obj::new(c_obj.clone()))?;
+            }
             end(lua, captor, false)?;
             pop_order(lua, captor, command);
             continue;
