@@ -1,18 +1,26 @@
 -- Moho string helpers (Luau: small leaf functions are cheaper than native
 -- callbacks; see CLAUDE.md).
-local gmatch, gsub, insert = string.gmatch, string.gsub, table.insert
+local gmatch, gsub = string.gmatch, string.gsub
 local patternCache = {}
 
--- Splits on any character in `delimiter` (strtok semantics: empty tokens skipped).
+-- Splits on any character in `delimiter` (strtok semantics: empty tokens
+-- skipped), into a 0-based table, as moho: STR_GetTokens('a b c', ' ') =
+-- {[0]='a', [1]='b', [2]='c'}, and an empty delimiter gives the whole string
+-- (dev/probes probe_api_spot). FAF walks the result with `for k, v in`, which
+-- visits [0] last, in the real game as in ours.
 function STR_GetTokens(str, delimiter)
+    if delimiter == "" then
+        return str ~= "" and { [0] = str } or {}
+    end
     local pattern = patternCache[delimiter]
     if not pattern then
         pattern = "[^" .. gsub(delimiter, "(%W)", "%%%1") .. "]+"
         patternCache[delimiter] = pattern
     end
-    local out = {}
+    local out, n = {}, 0
     for token in gmatch(str, pattern) do
-        insert(out, token)
+        out[n] = token
+        n = n + 1
     end
     return out
 end

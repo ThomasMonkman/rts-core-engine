@@ -19,10 +19,13 @@ mod tests {
         let lua = mlua::Lua::new();
         super::register(&lua).unwrap();
         let r: String = lua
-            .load("return table.concat(STR_GetTokens('  ARMY_9 NEUTRAL_CIVILIAN ', ' '), '|') .. ';' .. table.concat(STR_GetTokens('a.b%c', '.%'), '|')")
+            .load(
+                "local function join(t) local s, i = {}, 0 while t[i] ~= nil do table.insert(s, t[i]) i = i + 1 end return table.concat(s, '|') end
+                 return join(STR_GetTokens('  ARMY_9 NEUTRAL_CIVILIAN ', ' ')) .. ';' .. join(STR_GetTokens('a.b%c', '.%')) .. ';' .. join(STR_GetTokens('a b', ''))",
+            )
             .eval()
             .unwrap();
-        assert_eq!(r, "ARMY_9|NEUTRAL_CIVILIAN;a|b|c");
+        assert_eq!(r, "ARMY_9|NEUTRAL_CIVILIAN;a|b|c;a b", "0-based; an empty delimiter gives the whole string");
     }
 
     /// `_TRACEBACK` exists (FAF calls it on two warning paths) and returns
