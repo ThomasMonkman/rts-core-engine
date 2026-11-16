@@ -55,5 +55,10 @@ ForkThread(function()
     for _, u in brain:GetPlatoonUniquelyNamed('ArmyPool'):GetPlatoonUnits() do if u == b then inPool = true end end
     check(inPool, 'the unit stays in the army pool')
 
+    -- The default personality's values.
+    local pers = brain:GetPersonality()
+    check(pers:GetPersonalityName() == 'AverageJoe' and pers:GetChatPersonality() == 'None', 'personality name and chat')
+    check(pers:GetDifficulty() == 0.5 and pers:GetArmySize() == 75 and pers:GetPlatoonSize() == 1, 'personality difficulty and sizes')
+
     ScenarioResult.done = true
 end)
