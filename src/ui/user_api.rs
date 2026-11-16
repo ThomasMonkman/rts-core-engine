@@ -645,6 +645,23 @@ fn unit_command_data(lua: &Lua, units: &[Obj<moho::UserUnit>]) -> LuaResult<(Vec
     Ok((orders.into_iter().collect(), toggles.into_iter().collect(), EntityCategory(buildable.unwrap_or(empty))))
 }
 
+/// `loadstring`, on its own so it can be tested without the whole layer.
+fn register_loadstring(lua: &Lua) -> LuaResult<()> {
+    lua_fn!(lua, global,
+        /// Compiles `code` (SupCom Lua, translated as every game script is)
+        /// into a function, or returns nil and the compile error. Text only:
+        /// moho also loads its own bytecode, which Luau can't. FAF removes
+        /// it from the sim (`SimHooks.lua`); interface mods use it.
+        loadstring = |lua, (code, name): (LuaString, Option<String>)| {
+            let code = code.to_string_lossy();
+            let translated = crate::engine::lua_translation::translate(&code);
+            match lua.load(translated).set_name(name.unwrap_or(code)).set_mode(mlua::ChunkMode::Text).into_function() {
+                Ok(f) => Ok((Some(f), None)),
+                Err(e) => Ok((None, Some(e.to_string()))),
+            }
+        })
+}
+
 pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
         /// The selection's orders, toggles and buildable categories
@@ -665,6 +682,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
         /// Same clock as `CurrentTime`.
         GetSystemTimeSeconds = |lua, ()| Ok(lua.named_registry_value::<Option<f64>>("user.time")?.unwrap_or(0.0)))?;
+    register_loadstring(lua)?;
     lua_fn!(lua, global,
         /// Seconds of the `CurrentTime` clock since `origin` (FAF's binary
         /// patch, for timings that would lose precision as one big float).
@@ -1522,5 +1540,23 @@ mod special_file_tests {
         assert!(launch_replay_session(&lua, &ours).unwrap());
         assert_eq!(lua.globals().raw_get::<String>("__engine_launch_replay").unwrap(), ours);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod loadstring_tests {
+    use super::*;
+
+    /// The interface's `loadstring` takes SupCom Lua and returns nil and
+    /// the message for code that doesn't compile, as in the real game.
+    #[test]
+    fn compiles_supcom_lua() {
+        let lua = Lua::new();
+        register_loadstring(&lua).unwrap();
+        let r: (i64, bool, bool, i64) = lua
+            .load("local f = loadstring('return probe_x, 1 != 2') setfenv(f, { probe_x = 7 }) local x, ne = f() local bad, err = loadstring('return +') return x, ne, bad == nil and type(err) == 'string', loadstring(5) == nil and 1 or 0")
+            .eval()
+            .unwrap();
+        assert_eq!(r, (7, true, true, 1));
     }
 }
