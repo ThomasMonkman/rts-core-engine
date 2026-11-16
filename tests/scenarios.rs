@@ -730,6 +730,11 @@ fn placement() {
 }
 
 #[test]
+fn do_not_target() {
+    scenario("do_not_target", 200);
+}
+
+#[test]
 fn capture_interrupt() {
     scenario("capture_interrupt", 200);
 }

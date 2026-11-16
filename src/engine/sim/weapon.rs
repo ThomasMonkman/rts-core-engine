@@ -1240,7 +1240,10 @@ fn advance_target(
     // Blueprint target restrictions.
     let allowed = |cat: Option<u32>| restrictions_allow(&w.only_allow, &w.disallow, cat);
     let water_targets = (w.above_water_targets_only, w.below_water_targets_only);
-    let targetable = |e: &crate::engine::sim::entity::Entity| {
+    // `ordered`: a target an attack order names. `SetDoNotTarget` keeps a
+    // unit out of target searches only: an attack order on it keeps firing
+    // (dev/probes probe_unit_orders O5).
+    let targetable_as = |e: &crate::engine::sim::entity::Entity, ordered: bool| {
         e.kind == EntityKind::Unit
             && !w.targets_projectiles
             && !e.destroyed
@@ -1250,7 +1253,7 @@ fn advance_target(
             && hostile(e.army)
             && allowed(e.category_index)
             && e.unit.as_deref().is_some_and(|d| {
-                !d.do_not_target
+                (ordered || !d.do_not_target)
                     && w.fire_target_layers.contains(d.layer.mask())
                     && seabed_target_ok(water_targets, e, d, water)
                     && match (intel, army) {
@@ -1259,6 +1262,7 @@ fn advance_target(
                     }
             })
     };
+    let targetable = |e: &crate::engine::sim::entity::Entity| targetable_as(e, false);
 
     // The turret's turning limits (whether it turns all the way round).
     let test = match w.arc {
@@ -1393,7 +1397,7 @@ fn advance_target(
         } else {
             world.get(t).is_some_and(|e| {
                 let d = dist2_xz(e.position(), at);
-                targetable(e) && d <= reach.saturating_mul(reach) && (w.target_from_order || accepts(range_at(e.position(), d)))
+                targetable_as(e, w.target_from_order) && d <= reach.saturating_mul(reach) && (w.target_from_order || accepts(range_at(e.position(), d)))
             })
         };
         if !keep {
@@ -1410,7 +1414,7 @@ fn advance_target(
     let order = ordered.get(&w.unit);
     let overcharging = order.is_some_and(|o| o.overcharge == Some(w.index));
     let forced = order.filter(|o| enabled && !order_reset && o.overcharge.map_or(o.silo == w.silo, |i| i == w.index) && from_primary.is_none()).map(|o| o.target).filter(|t| match *t {
-        WeaponTarget::Entity(id) => world.get(id).is_some_and(|e| targetable(e) && dist2_xz(e.position(), at) <= reach.saturating_mul(reach)),
+        WeaponTarget::Entity(id) => world.get(id).is_some_and(|e| targetable_as(e, true) && dist2_xz(e.position(), at) <= reach.saturating_mul(reach)),
         WeaponTarget::Ground(p) => !w.cannot_attack_ground && dist2_xz(p, at) <= reach.saturating_mul(reach),
     });
     if enabled && w.target_from_order && w.target.is_some() && forced != w.target && from_primary.is_none() {

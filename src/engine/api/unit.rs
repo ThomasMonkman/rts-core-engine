@@ -1404,7 +1404,17 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::Unit, SetBreakOffDistanceMult = |lua, (this, m): (Obj<moho::Unit>, f64)| {
         with_unit(lua, &this, |u| u.break_off_distance = Some(crate::engine::sim::math::from_lua(m)))
     })?;
-    lua_method!(lua, moho::Unit, SetDoNotTarget = |lua, (this, on): (Obj<moho::Unit>, bool)| with_unit(lua, &this, |u| u.do_not_target = on))?;
+    lua_method!(lua, moho::Unit,
+        /// Keeps the unit out of enemy target searches (an attack order on
+        /// it still fires) and sets its `DoNotTarget` state (dev/probes
+        /// probe_unit_orders O5, probe_unit_api).
+        SetDoNotTarget = |lua, (this, on): (Obj<moho::Unit>, bool)| {
+            let index = crate::engine::sim::unit_state::UnitStates::index("DoNotTarget").expect("unit state");
+            with_unit(lua, &this, |u| {
+                u.do_not_target = on;
+                u.states.set(index, on);
+            })
+        })?;
     lua_method!(lua, moho::Unit, SetCreator = |lua, (this, creator): (Obj<moho::Unit>, Option<Obj<moho::Entity>>)| {
         let creator = creator.map(|c| entity_id(&c)).transpose()?;
         with_unit(lua, &this, |u| u.creator = creator)
