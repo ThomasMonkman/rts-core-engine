@@ -63,6 +63,7 @@ Open work is tracked in GitHub issues labelled `tracking`, not in the docs:
 |---|---|
 | [verifying-against-the-binary.md](research/verifying-against-the-binary.md) | How to check behaviour against the real game (static disassembly, probes), and everything confirmed so far |
 | [weapon-aim-model.md](research/weapon-aim-model.md) | How moho aims and fires turreted weapons, read from the retail binary |
+| [probe-sweep-2026-11/](research/probe-sweep-2026-11/README.md) | Differences found by running 41 probes in the real game and in ours (API, weapons, movement, units, AI, interface, intel), as a work list in fix batches |
 
 ## Archive
 
