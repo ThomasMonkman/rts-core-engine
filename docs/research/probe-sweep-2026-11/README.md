@@ -17,10 +17,10 @@ Items are counted as bullets of the batches below. A bullet that was half fixed 
 | 5. Movement and transports | 14 | 8 | 0 | 3 | 3 | 28 |
 | 6. AI brain, platoons, threat | 26 | 12 | 0 | 3 | 1 | 42 |
 | 7. Blueprint defaults | 1 | 3 | 0 | 0 | 0 | 4 |
-| 8. Interface | 12 | 46 | 0 | 0 | 1 | 59 |
-| 9. API surface and arity | 2 | 26 | 0 | 0 | 0 | 28 |
+| 8. Interface | 25 | 33 | 0 | 0 | 1 | 59 |
+| 9. API surface and arity | 10 | 18 | 0 | 0 | 0 | 28 |
 | 10. Intel: jamming and contact icons | 7 | 3 | 0 | 2 | 0 | 12 |
-| **Total** | 132 | 136 | 0 | 8 | 12 | 288 |
+| **Total** | 153 | 115 | 0 | 8 | 12 | 288 |
 
 ### Decisions made (2026-11-16)
 
