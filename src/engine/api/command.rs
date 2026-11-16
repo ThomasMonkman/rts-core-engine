@@ -1140,16 +1140,23 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     })?;
     lua_method!(lua, moho::AIBrain,
         /// Queues the template's units (`{ name, plan, { unitId, min, max,
-        /// squad, formation }, ... }`) on the first factory: `max * count` of
-        /// each line. Inferred: moho may split the order across the given
-        /// factories.
+        /// squad, formation }, ... }`): `max * count` of line i on factory i
+        /// (dev/probes probe_ai_build: tanks on the first factory, scouts on
+        /// the second). With fewer factories than lines, the list wraps
+        /// round (inferred). Campaign AI passes `CanBuildPlatoon`'s answer,
+        /// one factory per line.
         BuildPlatoon = |lua, (_brain, template, factories, count): (Obj<moho::AIBrain>, shapes::PlatoonTemplate, shapes::List<Obj<moho::Unit>>, Option<f64>)| {
             let factories = units_of(lua, &LuaValue::Table(factories.into_inner()))?;
-            let Some(&factory) = factories.first() else { return Ok(()) };
+            if factories.is_empty() {
+                return Ok(());
+            }
             let count = count.unwrap_or(1.0).max(1.0);
+            let mut line_index = 0;
             for line in template.into_inner().sequence_values::<LuaValue>().skip(2) {
                 let LuaValue::Table(line) = line? else { continue };
                 let Some(id) = line.raw_get::<Option<String>>(1)? else { continue };
+                let factory = factories[line_index % factories.len()];
+                line_index += 1;
                 let n = (line.raw_get::<Option<f64>>(3)?.unwrap_or(1.0).max(1.0) * count) as u32;
                 issue(lua, &[factory], K::BuildFactory, CommandTarget::None, Some(id.to_lowercase()), n);
             }

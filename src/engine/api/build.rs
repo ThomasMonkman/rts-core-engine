@@ -767,39 +767,41 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         },
     )?;
     lua_method!(lua, moho::AIBrain,
-        /// Factories (from `factories`) that can build every unit id in the
-        /// template's squads (`{ name, plan, { unitId, min, max, squad, formation }, ... }`);
-        /// nil if none can. A template that isn't a table gives nil (LOUD
-        /// passes `false` for a faction's empty template), as moho's
-        /// (MohoEngine.dll 0x1017d514: not `IsTable`, `PushNil`). `factories`
-        /// is optional, as in the real game's binding (2..3 arguments,
-        /// dev/probes probe_api_arity); without it, nil (inferred).
+        /// For each line of the template's squads (`{ name, plan, { unitId,
+        /// min, max, squad, formation }, ... }`), the first factory of
+        /// `factories` that can build its unit: one factory per line
+        /// (dev/probes probe_ai_build: `{fac1, fac1}` for a two-line
+        /// template both factories can build); nil if any line has none.
+        /// A template that isn't a table gives nil (LOUD passes `false` for
+        /// a faction's empty template), as moho's (MohoEngine.dll
+        /// 0x1017d514: not `IsTable`, `PushNil`). `factories` is optional,
+        /// as in the real game's binding (2..3 arguments, dev/probes
+        /// probe_api_arity); without it, nil (inferred).
         CanBuildPlatoon = |lua, (_brain, template, factories): (Obj<moho::AIBrain>, shapes::Loose<shapes::PlatoonTemplate>, Option<shapes::List<Obj<moho::Unit>>>)| {
             let LuaValue::Table(template) = template.into_inner() else { return Ok(None) };
             let Some(factories) = factories else { return Ok(None) };
-            let mut ids = Vec::new();
-            for line in template.sequence_values::<LuaValue>().skip(2) {
-                if let LuaValue::Table(line) = line?
-                    && let Some(id) = line.raw_get::<Option<String>>(1)? {
-                    ids.push(id);
+            let mut candidates = Vec::new();
+            for f in factories.into_inner().sequence_values::<LuaTable>() {
+                let f = f?;
+                if let Ok(fid) = entity::entity_id(&f) {
+                    candidates.push((fid, f));
                 }
             }
             let out = lua.create_table()?;
             let mut n = 0;
-            for f in factories.into_inner().sequence_values::<LuaTable>() {
-                let f = f?;
-                let Ok(fid) = entity::entity_id(&f) else { continue };
-                let mut all = true;
-                for id in &ids {
-                    if !can_build(lua, fid, id)? {
-                        all = false;
+            for line in template.sequence_values::<LuaValue>().skip(2) {
+                let LuaValue::Table(line) = line? else { continue };
+                let Some(id) = line.raw_get::<Option<String>>(1)? else { continue };
+                let mut chosen = None;
+                for (fid, f) in &candidates {
+                    if can_build(lua, *fid, &id)? {
+                        chosen = Some(f.clone());
                         break;
                     }
                 }
-                if all {
-                    n += 1;
-                    out.raw_set(n, f)?;
-                }
+                let Some(f) = chosen else { return Ok(None) };
+                n += 1;
+                out.raw_set(n, f)?;
             }
             Ok(if n == 0 { None } else { Some(shapes::List::<Obj<moho::Unit>>::new(out)) })
         },

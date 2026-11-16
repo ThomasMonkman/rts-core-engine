@@ -730,6 +730,11 @@ fn placement() {
 }
 
 #[test]
+fn build_platoon() {
+    scenario("build_platoon", 20);
+}
+
+#[test]
 fn deposit_placement() {
     scenario("deposit_placement", 20);
 }
