@@ -47,8 +47,10 @@ function VDot(a, b)
     return a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
 end
 
+-- a.x * b.z - a.z * b.x (the real game: VPerpDot((1,2,3), (4,5,6)) = -6,
+-- dev/probes probe_api_spot).
 function VPerpDot(a, b)
-    return a[3] * b[1] - a[1] * b[3]
+    return a[1] * b[3] - a[3] * b[1]
 end
 
 -- Operators of moho's `Vector` / `Quaternion` (`/engine/Core.lua`). A table
