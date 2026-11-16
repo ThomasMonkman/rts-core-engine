@@ -539,7 +539,15 @@ fn create(lua: &Lua, obj: &LuaTable, parent: Option<&LuaTable>, kind: Kind) -> L
         let id = c.next;
         c.next += 1;
         let key = lua.create_registry_value(obj.clone())?;
-        c.map.insert(id, Control { parent, children: Vec::new(), kind, hidden: false, alpha: 1.0, hit_test: true, name: String::new(), needs_frame: false, render_pass: 0, layout: None, obj: key });
+        // Moho's defaults (`probe_ui_controls` ctl, `probe_api_spot`): a
+        // group is named `group`, a bitmap `Bitmap` (others not measured),
+        // and every control draws in `UIRP_PostGlow` (8).
+        let name = match &kind {
+            Kind::Group => "group",
+            Kind::Bitmap(_) => "Bitmap",
+            _ => "",
+        };
+        c.map.insert(id, Control { parent, children: Vec::new(), kind, hidden: false, alpha: 1.0, hit_test: true, name: name.to_owned(), needs_frame: false, render_pass: UIRP_POST_GLOW, layout: None, obj: key });
         if let Some(p) = parent.and_then(|p| c.map.get_mut(&p)) {
             p.children.push(id);
         }
@@ -1959,6 +1967,7 @@ pub fn draw_list(lua: &Lua, head: usize) -> LuaResult<Vec<DrawItem>> {
 /// `UIRP_UnderWorld` (FAF's `UIUtil`): a control drawn in the world views'
 /// pass rather than over them.
 const UIRP_UNDER_WORLD: i32 = 1;
+const UIRP_POST_GLOW: i32 = 8;
 
 /// Moho's under-world pass: world views and the controls marked
 /// `UIRP_UnderWorld` draw together by depth, the rest of the interface over

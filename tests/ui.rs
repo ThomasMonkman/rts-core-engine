@@ -2879,3 +2879,23 @@ fn front_end_data_outlives_the_interface() {
     let gone: bool = next.lua().load("SetFrontEndData('test_k', nil) return GetFrontEndData('test_k') == nil").eval().unwrap();
     assert!(gone);
 }
+
+/// New controls take moho's defaults: a group is named `group`, a bitmap
+/// `Bitmap`, and both draw in render pass 8 (`probe_ui_controls` ctl,
+/// `probe_api_spot` ui.control).
+#[test]
+fn new_controls_take_mohos_name_and_render_pass() {
+    let Some(vm) = vm() else { return };
+    let got: (String, String, i32, i32) = vm
+        .lua()
+        .load(
+            r#"
+            local g = import('/lua/maui/group.lua').Group(GetFrame(0))
+            local b = import('/lua/maui/bitmap.lua').Bitmap(g)
+            return g:GetName(), b:GetName(), g:GetRenderPass(), b:GetRenderPass()
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(got, ("group".into(), "Bitmap".into(), 8, 8));
+}
