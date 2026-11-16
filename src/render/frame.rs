@@ -1013,13 +1013,14 @@ fn update_ui(s: &mut RenderState, dt: f32) {
                 cam.revert_rotation();
             }
             if r.reset {
-                // The default view faces north at the zoom's pitch.
+                // The default view faces north over the map's middle from
+                // this camera's farthest zoom (its `SetMaxZoomMult` applied,
+                // so straight down), as moho's (`probe_ui_controls` cam:
+                // zoom = `GetMaxZoom()`, pitch 1.57).
                 cam.clear_rotation();
                 if let Some((w, h)) = s.world.map_size {
-                    let mut fresh = crate::render::camera::Camera::new(w, h);
-                    fresh.aspect = cam.aspect;
-                    fresh.fit_map(w, h);
-                    (x, z, zoom) = (fresh.target.x, fresh.target.z, fresh.max_zoom);
+                    let fresh = crate::render::camera::Camera::new(w, h);
+                    (x, z, zoom) = (fresh.target.x, fresh.target.z, cam.max_zoom);
                 }
             }
             if let Some(f) = r.focus {
