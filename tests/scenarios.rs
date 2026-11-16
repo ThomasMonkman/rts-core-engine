@@ -566,6 +566,11 @@ fn build_structure_blocked() {
 }
 
 #[test]
+fn attack_stop_distance() {
+    scenario("attack_stop_distance", 200);
+}
+
+#[test]
 fn orders_refused_at_issue() {
     scenario("orders_refused_at_issue", 200);
 }

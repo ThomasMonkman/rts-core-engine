@@ -640,9 +640,12 @@ pub enum LandEvent {
 
 /// Where the unit's current order wants it, and how close counts as there.
 /// Distance an attacker closes to: 90% of its reach (so slight target
-/// movement doesn't take it straight back out of range).
+/// movement doesn't take it straight back out of range), or its reach less
+/// 1.8 if that's further. The real game's stop about 1.7..1.9 inside range
+/// whatever the target (range 18: 16.05, 22: 20.28, 30: 28.2; dev/probes
+/// probe_re2_orders ATK); 90% stays for short ranges (not measured).
 fn attack_reach(range: Fx) -> Fx {
-    if range > Fx::ZERO { range * Fx::from_num(0.9) } else { Fx::from_num(2) }
+    if range > Fx::ZERO { (range * Fx::from_num(0.9)).max(range - Fx::from_num(1.8)) } else { Fx::from_num(2) }
 }
 
 /// Plain orders to a point given to at least this many units follow a
@@ -1956,7 +1959,12 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
                 // path; at least the straight line), not just to the next
                 // waypoint - else every short leg is "within BackUpDistance"
                 // and a unit that starts reversing reverses the whole way.
-                let remaining = if end_short { leg } else if final_leg { dist - radius } else { leg.saturating_add(rest).max(dist - radius) };
+                // (A path that ends short of a goal inside a structure, an
+                // attack target's: still no further than the edge of range,
+                // else it braked for the path's end and rolled on past the
+                // range a braking distance closer than to a unit: dev/probes
+                // probe_re2_orders ATK.)
+                let remaining = if end_short { leg.min((dist - radius).max(Fx::ZERO)) } else if final_leg { dist - radius } else { leg.saturating_add(rest).max(dist - radius) };
                 // TurnRadius / the turn multiplier (moho's motion setup,
                 // 0x1027acbd); no multiplier, no turning.
                 let turn_radius = if mult.turn == Fx::ONE || p.turn_radius == Fx::ZERO {
