@@ -901,7 +901,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::AIBrain,
         /// Queues a BuildMobile order. AI locations are `{x, z, ...}` (FAF
         /// converts them the same way for `IssueBuildMobile`); `relative`
-        /// ones are offsets from the builder. An unknown blueprint queues
+        /// ones are offsets from the army's start position, as
+        /// `FindPlaceToBuild`'s relative results are (dev/probes
+        /// probe_ai_build: `{4, 6, 0}` queued at the start + (4, 6), not
+        /// beside the builder). An unknown blueprint queues
         /// nothing and returns false, as in the real game (dev/probes
         /// probe_ai_misc); otherwise nothing is returned (what the real one
         /// returns then is not settled).
@@ -913,11 +916,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             }
             let num = |i: usize| -> LuaResult<f64> { Ok(loc.raw_get::<Option<f64>>(i)?.unwrap_or(0.0)) };
             let (mut x, mut z) = (num(1)?, num(2)?);
-            if relative.unwrap_or(false)
-                && let Some(e) = entity::world(lua).get(builder) {
-                let (bx, _, bz) = e.position().to_f64();
-                x += bx;
-                z += bz;
+            if relative.unwrap_or(false) {
+                let army = entity::world(lua).get(builder).and_then(|e| e.army);
+                let start = army.and_then(|a| lua.app_data_ref::<crate::engine::sim::army::Armies>().and_then(|armies| armies.get(a).and_then(|a| a.start)));
+                if let Some(start) = start {
+                    x += start.x.to_num::<f64>();
+                    z += start.z.to_num::<f64>();
+                }
             }
             let y = lua
                 .app_data_ref::<crate::engine::sim::terrain::Terrain>()
