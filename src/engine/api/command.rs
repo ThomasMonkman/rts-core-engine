@@ -774,7 +774,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
         /// Clears the units' queues and stops their weapons now (moho's
         /// `ClearCommandQueue` + `AttackerStop`, MohoEngine.dll
-        /// 0x102cc457 / 0x102cc466); the returned command is already done.
+        /// 0x102cc457 / 0x102cc466). Returns nothing, as the real game's
+        /// (dev/probes probe_api_spot).
         IssueClearCommands = |lua, units: shapes::Units| {
             let units = units_of(lua, &units)?;
             {
@@ -786,7 +787,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             for &u in &units {
                 crate::engine::api::orders::attacker_stop(lua, u);
             }
-            Ok(CommandHandle(commands(lua).issue(&[], CommandKind::Stop, CommandTarget::None, None, 0)))
+            Ok(())
         })?;
     lua_fn!(lua, global,
         /// Appends a Stop order (a real command, type 1) behind the units'
