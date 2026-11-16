@@ -50,6 +50,29 @@ mod tests {
         assert_eq!(r, "5,x;3");
     }
 
+    /// Lua 5.0 table sizes as probed in the real game: `n` and `setn` win
+    /// over the array length, and insert / remove keep them up to date.
+    #[test]
+    fn table_sizes_honour_n_and_setn() {
+        let lua = mlua::Lua::new();
+        super::register(&lua).unwrap();
+        let r: String = lua
+            .load(
+                "local out = {}
+                 local function add(...) for i = 1, select('#', ...) do table.insert(out, tostring((select(i, ...)))) end end
+                 add(table.getn({ n = 5 }), table.getn({}), table.getn({ 1, 2, 3 }))
+                 local t = {} table.setn(t, 3) add(table.getn(t))
+                 t = { 1, 2, 3, 4 } table.setn(t, 2) table.insert(t, 'x') add(table.getn(t), t[3], t[4], t[5])
+                 t = { n = 0 } table.insert(t, 'a') add(t.n, t[1])
+                 t = { 'a', 'b', 'c', n = 3 } add(table.remove(t, 1), t.n, t[1], t[3])
+                 t = { 'a', 'b' } table.insert(t, 1, 'x') add(table.concat(t, ','), table.remove(t), table.getn(t))
+                 return table.concat(out, ' ')",
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(r, "5 0 3 3 3 x 4 nil 1 a a 2 b nil x,a,b b 2");
+    }
+
     #[test]
     fn str_utf8_len_counts_characters() {
         let lua = mlua::Lua::new();

@@ -1898,6 +1898,25 @@ fn lua_call_overhead(c: &mut Criterion) {
     g.finish();
 }
 
+/// The Lua 5.0 table-size shims (`lua/shims/table_getn.lua`) against
+/// Luau's own `table.insert` / `table.getn`, on a plain table (no `n` field
+/// or `setn` size: the common case, which the shims pass straight through).
+fn lua_table_shims(c: &mut Criterion) {
+    let mut g = c.benchmark_group("lua_call/table insert+getn x1000");
+    for shimmed in [false, true] {
+        let lua = Lua::new();
+        if shimmed {
+            api::shims::register(&lua).unwrap();
+        }
+        let chunk = lua
+            .load("local insert, getn = table.insert, table.getn return function() local t = {} for i = 1, 1000 do insert(t, i) end local s = 0 for i = 1, 1000 do s = s + getn(t) end return s end")
+            .eval::<LuaFunction>()
+            .unwrap();
+        g.bench_function(if shimmed { "shim" } else { "luau" }, |b| b.iter(|| chunk.call::<f64>(()).unwrap()));
+    }
+    g.finish();
+}
+
 /// The Rust <-> Lua boundary as the typed-API layer (`lua_api`) touches it,
 /// measured from the Lua side so the same bench runs before and after a
 /// conversion:
@@ -2353,5 +2372,5 @@ fn audio(c: &mut Criterion) {
     eprintln!("audio bench: {} cues active", e.active());
 }
 
-criterion_group!(benches, scripts, blueprints, mods, categories, rng, bounded_props, terrain, trig, scheduler, sim_tick, entities, spatial, economy, checksum, unit_stats, projectiles, projectile_collision, weapons, threat, movement, avoidance, effects, attachments, intel, nav, snapshot, poses, models, map_render, manipulators, transport, construction, lua_call_overhead, lua_api, lua_interrupt, interface, movies, audio);
+criterion_group!(benches, scripts, blueprints, mods, categories, rng, bounded_props, terrain, trig, scheduler, sim_tick, entities, spatial, economy, checksum, unit_stats, projectiles, projectile_collision, weapons, threat, movement, avoidance, effects, attachments, intel, nav, snapshot, poses, models, map_render, manipulators, transport, construction, lua_call_overhead, lua_table_shims, lua_api, lua_interrupt, interface, movies, audio);
 criterion_main!(benches);
