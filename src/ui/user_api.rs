@@ -1321,7 +1321,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         -- Unit settings (the order panel's toggles), sent like orders.
         local fireStates = { ReturnFire = 0, HoldFire = 1, HoldGround = 2 }
         function SetFireState(units, state) table.insert(orders, { units = units, toggle = 'fire', value = fireStates[state] or tonumber(state) or 0 }) end
-        ToggleFireState = SetFireState
+        -- `state` is the units' current fire state (FAF's cycle hotkey passes
+        -- `GetFireState`, -1 for a mix): they move on to the next of the
+        -- three, as the sim's `Unit:ToggleFireState` (probe_ui_units C).
+        function ToggleFireState(units, state)
+            local current = fireStates[state] or tonumber(state) or -1
+            table.insert(orders, { units = units, toggle = 'fire', value = math.mod(current + 1, 3) })
+        end
         function SetPaused(units, paused) table.insert(orders, { units = units, toggle = 'pause', value = paused and 1 or 0 }) end
         function SetPausedOfUnit(unit, paused) SetPaused({ unit }, paused) end
         -- `state` is the bit's current state: it flips.

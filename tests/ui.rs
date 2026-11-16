@@ -2835,3 +2835,17 @@ fn fire_state_of_units_without_the_toggle_is_minus_one() {
         .unwrap();
     assert_eq!(got, [1, -1, 2, -1, -1, -1, 1, -1]);
 }
+
+/// `ToggleFireState(units, state)` moves the units on from `state` to the
+/// next fire state, as FAF's cycle hotkey expects (`probe_ui_units` C: 0
+/// ends at 1); a mix (-1) starts the cycle at 0.
+#[test]
+fn toggle_fire_state_moves_on_to_the_next_state() {
+    use rts_core_engine::engine::sim::input::Toggle;
+    let Some(vm) = vm() else { return };
+    vm.take_orders().unwrap();
+    vm.lua().load("for _, s in { 0, 1, 2, -1, 'HoldFire' } do ToggleFireState({}, s) end").exec().unwrap();
+    let got: Vec<_> = vm.take_orders().unwrap().into_iter().map(|o| o.toggle).collect();
+    let want: Vec<_> = [1, 2, 0, 0, 2].into_iter().map(|v| Some(Toggle::FireState(v))).collect();
+    assert_eq!(got, want);
+}
