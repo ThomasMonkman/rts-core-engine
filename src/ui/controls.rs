@@ -1079,9 +1079,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             frame(lua, head)
         })?;
     lua_method!(lua, moho::Control,
-        /// Calls `f(control)` on the control and each descendant, parents first.
+        /// Calls `f(control)` on the control, then on each of its children
+        /// (not deeper, as moho's: `probe_ui_controls` ctl).
         ApplyFunction = |lua, (this, f): (Obj<moho::Control>, LuaFunction)| {
-            let ids = subtree(&controls(lua), id_of(&this)?);
+            let id = id_of(&this)?;
+            let ids: Vec<ControlId> = {
+                let c = controls(lua);
+                std::iter::once(id).chain(c.map.get(&id).map(|ctl| ctl.children.clone()).unwrap_or_default()).collect()
+            };
             for id in ids {
                 if let Some(obj) = object(lua, id)? {
                     f.call::<()>(obj)?;

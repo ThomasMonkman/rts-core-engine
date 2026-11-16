@@ -2899,3 +2899,26 @@ fn new_controls_take_mohos_name_and_render_pass() {
         .unwrap();
     assert_eq!(got, ("group".into(), "Bitmap".into(), 8, 8));
 }
+
+/// `ApplyFunction` visits the control and its direct children only
+/// (`probe_ui_controls` ctl: `renamed;probe_child;`).
+#[test]
+fn apply_function_goes_one_level_down() {
+    let Some(vm) = vm() else { return };
+    let got: String = vm
+        .lua()
+        .load(
+            r#"
+            local Group = import('/lua/maui/group.lua').Group
+            local g = Group(GetFrame(0), 'g')
+            local child = Group(g, 'child')
+            Group(child, 'grand')
+            local out = ''
+            g:ApplyFunction(function(c) out = out .. c:GetName() .. ';' end)
+            return out
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(got, "g;child;");
+}
