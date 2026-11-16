@@ -625,9 +625,10 @@ pub struct UnitDetail {
     pub paused: bool,
     /// Overcharge auto-fire paused (`SetOverchargePaused`).
     pub overcharge_paused: bool,
-    /// Silo missiles (`UserUnit:GetMissileInfo`): nuke building (the
-    /// missile in progress as a fraction, FA-Binary-Patches#14), nuke max
-    /// storage, nukes stored, then the same for tactical missiles.
+    /// Silo missiles (`UserUnit:GetMissileInfo`): nukes being built (a
+    /// count: 1 while one is in progress, as moho's integer field; the
+    /// progress is `GetWorkProgress`), nuke max storage, nukes stored, then
+    /// the same for tactical missiles.
     pub missiles: [f32; 6],
     /// The unit that made it (a pod's carrier, an external factory's
     /// unit): `UserUnit:GetCreator`.
@@ -2304,8 +2305,19 @@ fn debug_data(lua: &mlua::Lua, req: &DebugRequest, sink: &mut SnapshotSink) -> D
                         (cmd.kind as u8, at)
                     })
                     .collect();
+                let building_silo = u.states.contains(crate::engine::sim::unit_state::UnitStates::index("SiloBuildingAmmo").expect("unit state"));
                 let served = f(u.resource_consumed);
-                let (cm, ce) = if u.consumption_active { (f(u.consumption_mass), f(u.consumption_energy)) } else { (0.0, 0.0) };
+                let (mut cm, mut ce) = if u.consumption_active { (f(u.consumption_mass), f(u.consumption_energy)) } else { (0.0, 0.0) };
+                // A missile in progress (its fractional economy event) shows
+                // as the unit's drain, as moho's silo build sets the unit's
+                // maintenance cost (`probe_ui_units` A: a tactical launcher
+                // reads 120 energy, 8.33 mass a second).
+                if building_silo && let Some(ev) = lua.app_data_ref::<crate::engine::sim::economy::EconomyEvents>() {
+                    for e in ev.map.values().filter(|e| e.unit == id && !e.whole_steps && !e.held && !e.done()) {
+                        cm += f(e.mass) * 10.0;
+                        ce += f(e.energy) * 10.0;
+                    }
+                }
                 let (pm, pe) = if u.production_active { (f(u.production_mass), f(u.production_energy)) } else { (0.0, 0.0) };
                 Some(UnitDetail {
                     id,
@@ -2322,11 +2334,10 @@ fn debug_data(lua: &mlua::Lua, req: &DebugRequest, sink: &mut SnapshotSink) -> D
                         use crate::engine::sim::weapon::SiloKind;
                         let weapons = lua.app_data_ref::<crate::engine::sim::weapon::Weapons>();
                         let max = |kind: SiloKind| weapons.as_ref().map_or(0, |w| w.of(id).iter().filter(|s| s.silo == Some(kind)).map(|s| s.max_storage).max().unwrap_or(0)) as f32;
-                        let building = u.states.contains(crate::engine::sim::unit_state::UnitStates::index("SiloBuildingAmmo").expect("unit state"));
                         let (nuke_max, tac_max) = (max(SiloKind::Nuke), max(SiloKind::Tactical));
-                        let progress = if building { f(u.work_progress) } else { 0.0 };
-                        let nuke_building = if nuke_max > 0.0 && (u.nuke_ammo as f32) < nuke_max { progress } else { 0.0 };
-                        let tac_building = if nuke_max == 0.0 && tac_max > 0.0 { progress } else { 0.0 };
+                        let building = if building_silo { 1.0 } else { 0.0 };
+                        let nuke_building = if nuke_max > 0.0 && (u.nuke_ammo as f32) < nuke_max { building } else { 0.0 };
+                        let tac_building = if nuke_max == 0.0 && tac_max > 0.0 { building } else { 0.0 };
                         [nuke_building, nuke_max, u.nuke_ammo as f32, tac_building, tac_max, u.tactical_ammo as f32]
                     },
                     creator: u.creator,

@@ -1365,6 +1365,53 @@ fn engineer_assisting_a_silo_shows_the_missiles_progress() {
     assert_eq!(unit(&engine, eng).0, 0.0, "the engineer keeps no progress once the missile is built");
 }
 
+/// A tactical launcher building a missile shows the missile's drain as its
+/// economy and one missile in progress in its details (`GetEconData`,
+/// `GetMissileInfo`: `probe_ui_units` A reads 120 energy, 8.33 mass a
+/// second and `tacticalSiloBuildCount` 1).
+#[test]
+fn a_silo_building_a_missile_shows_its_drain() {
+    if !have_data() {
+        return;
+    }
+    let (mut engine, _tanks, _) = setup(None);
+    let silo: u32 = engine
+        .sim_lua()
+        .load(
+            r#"
+            local b = ArmyBrains[1]
+            b:__engine_SetStorage('MASS', 50000) b:__engine_SetStorage('ENERGY', 500000)
+            b:GiveResource('MASS', 50000) b:GiveResource('ENERGY', 500000)
+            local silo = CreateUnitHPR('ueb2108', 'ARMY_1', 426, GetTerrainHeight(426, 620), 620, 0, 0, 0)
+            IssueSiloBuildTactical({silo}, 1)
+            return tonumber(silo:GetEntityId())
+            "#,
+        )
+        .eval()
+        .unwrap();
+    let (sink, rx, request) = engine::snapshot::channel();
+    engine.set_snapshot_sink(sink);
+    {
+        let mut r = request.lock().unwrap();
+        r.view_army = Some(1);
+        r.selection = vec![silo];
+    }
+    let mut last = None;
+    for _ in 0..20 {
+        engine.tick().unwrap();
+        while let Ok(mut s) = rx.try_recv() {
+            drop(s.ticket.take());
+            if let Some(d) = s.debug.units.iter().find(|d| d.id == silo) {
+                last = Some(d.clone());
+            }
+        }
+    }
+    let d = last.expect("its details");
+    assert_eq!(d.missiles[3], 1.0, "one tactical missile in progress");
+    assert!((d.econ[4] - 8.33).abs() < 0.01 && (d.econ[5] - 120.0).abs() < 0.01, "the missile's drain: {:?}", d.econ);
+    assert_eq!(d.econ[0], d.econ[4], "fully served");
+}
+
 /// A Kennel's drone assists and repairs by itself: it repairs a
 /// damaged structure in the Kennel's radius, then flies home and goes idle.
 #[test]
