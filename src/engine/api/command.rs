@@ -786,6 +786,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             }
             for &u in &units {
                 crate::engine::api::orders::attacker_stop(lua, u);
+                crate::engine::api::capture::orders_cleared(lua, u)?;
             }
             Ok(())
         })?;

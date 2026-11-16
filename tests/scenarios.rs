@@ -730,6 +730,11 @@ fn placement() {
 }
 
 #[test]
+fn capture_interrupt() {
+    scenario("capture_interrupt", 200);
+}
+
+#[test]
 fn prop_hpr() {
     scenario("prop_hpr", 20);
 }
