@@ -995,6 +995,12 @@ impl EntityWorld {
         true
     }
 
+    /// Destroyed entities whose `OnDestroy` is still due, first destroyed
+    /// first.
+    pub fn queued_destroys(&self) -> impl Iterator<Item = EntityId> + '_ {
+        self.destroy_queue.iter().copied()
+    }
+
     /// The next destroyed entity whose `OnDestroy` is due (first destroyed
     /// first), taken off the queue.
     pub fn next_destroyed(&mut self) -> Option<EntityId> {

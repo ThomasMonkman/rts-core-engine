@@ -399,29 +399,41 @@ impl Skirt {
     }
 }
 
-/// Live structures of `id`'s army whose build skirts touch `id`'s (moho's
-/// adjacency: storages ring an extractor two cells out and still count), in
-/// id order.
-pub fn adjacent_structures(lua: &Lua, id: crate::engine::sim::entity::EntityId) -> LuaResult<Vec<crate::engine::sim::entity::EntityId>> {
+/// Finished structures of `id`'s army whose build skirts touch `id`'s
+/// (moho's adjacency: storages ring an extractor two cells out and still
+/// count), in id order; none while `id` itself is unfinished (an unfinished
+/// structure never hears `OnAdjacentTo`, so destroying one parts from
+/// nothing: dev/probes probe_unit_build G4).
+///
+/// `dying`: `id` is being destroyed, and structures destroyed with it whose
+/// turn hasn't come yet still count (two made structures destroyed together
+/// part from each other once, probe_unit_build G1).
+pub fn adjacent_structures(lua: &Lua, id: crate::engine::sim::entity::EntityId, dying: bool) -> LuaResult<Vec<crate::engine::sim::entity::EntityId>> {
     let structure = crate::engine::api::categories::domain(lua)?.named.get("STRUCTURE").cloned();
-    let is_structure = |e: &crate::engine::sim::entity::Entity| match (&structure, e.category_index) {
-        (Some(s), Some(c)) => e.kind == EntityKind::Unit && s.contains(c),
-        _ => false,
+    let being_built = crate::engine::sim::unit_state::UnitStates::index("BeingBuilt").expect("unit state");
+    let is_finished_structure = |e: &crate::engine::sim::entity::Entity| {
+        let structure = match (&structure, e.category_index) {
+            (Some(s), Some(c)) => e.kind == EntityKind::Unit && s.contains(c),
+            _ => false,
+        };
+        structure && e.fraction_complete >= Fx::ONE && e.unit.as_deref().is_some_and(|u| !u.states.contains(being_built))
     };
     with_skirts(lua, |skirts| {
         let w = entity::world(lua);
-        let Some(me) = w.get(id).filter(|e| is_structure(e)) else { return Vec::new() };
+        let Some(me) = w.get(id).filter(|e| is_finished_structure(e)) else { return Vec::new() };
         let Some(mine) = skirts.by_id.get(&me.cold.blueprint_id) else { return Vec::new() };
         let (pos, army) = (me.position(), me.army);
         let r = mine.reach() + skirts.reach;
         let mut ids = Vec::new();
         w.unit_candidates(pos.x - r, pos.z - r, pos.x + r, pos.z + r, &mut ids);
+        let queued: Vec<crate::engine::sim::entity::EntityId> = if dying { w.queued_destroys().collect() } else { Vec::new() };
+        ids.extend(queued.iter().copied());
         ids.sort_unstable();
         ids.dedup();
         ids.into_iter()
             .filter(|&o| o != id)
             .filter(|&o| {
-                w.get(o).filter(|e| !e.destroyed && e.army == army && is_structure(e)).is_some_and(|e| {
+                w.get(o).filter(|e| (!e.destroyed || queued.contains(&o)) && e.army == army && is_finished_structure(e)).is_some_and(|e| {
                     skirts.by_id.get(&e.cold.blueprint_id).is_some_and(|theirs| mine.touches(pos, theirs, e.position()))
                 })
             })

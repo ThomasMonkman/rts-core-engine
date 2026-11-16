@@ -701,8 +701,10 @@ pub fn spawn_unit_built_by(
     match builder {
         Some(b) => UnitCallbacks::on_start_being_built(lua, &obj, &bp_id, Obj::new(b.clone()), layer)?,
         None => {
-            UnitCallbacks::on_stop_being_built(lua, &obj, &bp_id, None, layer)?;
+            // Made finished: its adjacency comes before its
+            // `OnStopBeingBuilt` (dev/probes probe_unit_build G1).
             crate::engine::api::adjacency::on_finished(lua, id)?;
+            UnitCallbacks::on_stop_being_built(lua, &obj, &bp_id, None, layer)?;
         }
     }
     Ok(Obj::new(obj))
