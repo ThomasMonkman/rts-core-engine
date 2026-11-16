@@ -37,6 +37,9 @@ pub struct Skirt {
     pub z0: Fx,
     pub x1: Fx,
     pub z1: Fx,
+    /// Half the footprint (x, z): placement snaps a position so the
+    /// footprint starts on a whole cell ([`Skirt::snapped`]).
+    pub half: (Fx, Fx),
 }
 
 impl Skirt {
@@ -50,7 +53,18 @@ impl Skirt {
             })
         };
         let (x0, z0) = (get("SkirtOffsetX", Fx::ZERO)? - hx, get("SkirtOffsetZ", Fx::ZERO)? - hz);
-        Ok(Self { x0, z0, x1: x0 + get("SkirtSizeX", hx * 2)?, z1: z0 + get("SkirtSizeZ", hz * 2)? })
+        Ok(Self { x0, z0, x1: x0 + get("SkirtSizeX", hx * 2)?, z1: z0 + get("SkirtSizeZ", hz * 2)?, half: (hx, hz) })
+    }
+
+    /// `at` moved so the footprint starts on a whole cell (its corner
+    /// rounded half to even, as moho's occupancy rounds): a 5x5 factory
+    /// at x 626 sits as if at 626.5, one at 671 as if at 670.5.
+    /// This is why a factory 5 east of a 2x2 generator is refused and one
+    /// 6 east is fine (dev/probes probe_ai_build: factory / generator pairs
+    /// 4..12 apart all agree).
+    fn snapped(&self, at: FxVec3) -> FxVec3 {
+        let snap = |v: Fx, half: Fx| Fx::from_num(crate::engine::sim::nav::round_half_even(v - half)) + half;
+        FxVec3 { x: snap(at.x, self.half.0), y: at.y, z: snap(at.z, self.half.1) }
     }
 
     /// Farthest any edge lies from the position.
@@ -58,7 +72,10 @@ impl Skirt {
         self.x0.abs().max(self.z0.abs()).max(self.x1.abs()).max(self.z1.abs())
     }
 
+    /// Whether the skirts, each at its snapped position, overlap (touching
+    /// edges don't).
     fn overlaps(&self, at: FxVec3, other: &Skirt, other_at: FxVec3) -> bool {
+        let (at, other_at) = (self.snapped(at), other.snapped(other_at));
         at.x + self.x0 < other_at.x + other.x1
             && other_at.x + other.x0 < at.x + self.x1
             && at.z + self.z0 < other_at.z + other.z1
