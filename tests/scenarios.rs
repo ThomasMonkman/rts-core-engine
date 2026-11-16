@@ -598,6 +598,11 @@ fn collision_check() {
 }
 
 #[test]
+fn collision_check_timing() {
+    scenario("collision_check_timing", 50);
+}
+
+#[test]
 fn shield() {
     scenario("shield", 300);
 }

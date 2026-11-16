@@ -364,6 +364,12 @@ pub struct Projectiles {
     /// step of the target's velocity on.
     #[serde(default)]
     pub pending_impacts: Vec<Impact>,
+    /// Impacts on entities found this step, id order: the caller asks each
+    /// entity's `OnCollisionCheck` in the same tick and, if it refuses,
+    /// sweeps the step again past it ([`resweep`]). Filled and emptied
+    /// within the tick, so never saved.
+    #[serde(skip)]
+    pub checks: Vec<Check>,
 }
 
 impl Projectiles {
@@ -485,6 +491,20 @@ struct Motion {
     water: Option<bool>,
     /// Entered a script entity's collision sphere this tick (the first).
     entered: Option<EntityId>,
+    /// For an impact on a unit, shield or projectile: the step's start and
+    /// full end, to sweep on from if its collision check refuses it
+    /// ([`Projectiles::checks`]).
+    #[serde(default)]
+    sweep: Option<(FxVec3, FxVec3)>,
+}
+
+/// An impact on an entity found this step whose `OnCollisionCheck` is
+/// still to be asked, with the step to sweep again if it refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Check {
+    pub id: EntityId,
+    pub from: FxVec3,
+    pub to: FxVec3,
 }
 
 /// Work units (1 per projectile, +9 per re-aligning one, +7 per one testing
@@ -527,6 +547,9 @@ pub struct Env<'a> {
     /// Alliances for friendly-fire filtering (`None`: only the own army is
     /// friendly).
     pub armies: Option<&'a crate::engine::sim::army::Armies>,
+    /// Entities whose collision check refused the projectile earlier in
+    /// this step ([`resweep`]): passed through. Empty in the main pass.
+    pub skip: &'a [EntityId],
 }
 
 /// A shield entity's collision sphere, gathered once per tick.
@@ -590,9 +613,8 @@ fn segment_leaves_sphere(from: FxVec3, to: FxVec3, center: FxVec3, radius: Fx) -
 ///
 /// A shot launched inside an enemy bubble hits it from the inside on its
 /// way out (`probe_wpn_shield` `geo.insideout`: `type Shield ... dist
-/// 12.84`). Friendly bubbles let it out without asking: FAF's
-/// `Shield:OnCollisionCheck` refuses any shot that isn't an enemy's, and a
-/// refusal would hold the shot a tick.
+/// 12.84`). Friendly bubbles let it out without asking (FAF's
+/// `Shield:OnCollisionCheck` refuses any shot that isn't an enemy's).
 ///
 /// The test line starts 1% of the step behind the projectile: moho's
 /// collision line for entities starts behind it by a share of its velocity
@@ -608,6 +630,7 @@ fn first_shield_hit(
     to: FxVec3,
     shields: &[ShieldSphere],
     exits: Option<(Option<u32>, Option<&crate::engine::sim::army::Armies>)>,
+    skip: &[EntityId],
 ) -> Option<(Fx, EntityId)> {
     use crate::engine::sim::army::Alliance;
     let enemy = |other: Option<u32>| match exits {
@@ -623,7 +646,7 @@ fn first_shield_hit(
     let seg = d.x.abs() + d.y.abs() + d.z.abs();
     let mut best: Option<(Fx, EntityId)> = None;
     for s in shields {
-        if Some(s.id) == p.last_hit {
+        if Some(s.id) == p.last_hit || skip.contains(&s.id) {
             continue;
         }
         // The path relative to the sphere: one moving toward the projectile
@@ -661,10 +684,11 @@ pub fn step_with(
     parallel_min: usize,
 ) {
     use rayon::prelude::*;
-    let Projectiles { list, scratch, turned_last_tick, colliding_last_tick, water_crossings, water_crossing_from, script_crossings, .. } = projectiles;
+    let Projectiles { list, scratch, turned_last_tick, colliding_last_tick, water_crossings, water_crossing_from, script_crossings, checks, .. } = projectiles;
     water_crossings.clear();
     water_crossing_from.clear();
     script_crossings.clear();
+    checks.clear();
     scratch.clear();
     scratch.resize(list.len(), Motion::default());
     {
@@ -708,7 +732,37 @@ pub fn step_with(
         if let Some(kind) = m.impact {
             out.push(Impact { id: p.id, kind, target: m.target });
         }
+        if let Some((from, to)) = m.sweep {
+            checks.push(Check { id: p.id, from, to });
+        }
     }
+}
+
+/// Sweeps projectile `id`'s step `from -> to` again after the collision
+/// check of what it hit refused it, passing through `env.skip` (all it was
+/// refused by this step) and its `last_hit`: moho asks `OnCollisionCheck`
+/// while it sweeps the step, so a refusal costs no time and the shot goes
+/// on to what lies behind in the same tick (FAF probe `probe_wpn_proj2`
+/// `check.enemy-false` / `check.enemy-nil`: the unit behind the refusing
+/// one is hit at +5, as with nothing in the way). The projectile's state
+/// already holds this step's velocity and facing. Writes the transform
+/// and any water or script-sphere crossing; returns the impact, and the
+/// next check if it hit another entity.
+pub fn resweep(projectiles: &mut Projectiles, world: &mut EntityWorld, env: Env, id: EntityId, from: FxVec3, to: FxVec3) -> (Option<Impact>, Option<Check>) {
+    let Some(i) = projectiles.list.binary_search_by_key(&id, |p| p.id).ok() else { return (None, None) };
+    let Some((orientation, army)) = world.get(id).filter(|e| !e.destroyed).map(|e| (e.orientation, e.army)) else { return (None, None) };
+    let mut buf = Vec::new();
+    let p = &mut projectiles.list[i];
+    let m = sweep(p, from, to, orientation, false, army, world, env, &mut buf);
+    if let Some(entering) = m.water {
+        projectiles.water_crossings.push((id, entering));
+        projectiles.water_crossing_from.push(from);
+    }
+    world.set_transform(id, m.position, m.orientation);
+    if let Some(e) = m.entered {
+        projectiles.script_crossings.push((id, e));
+    }
+    (m.impact.map(|kind| Impact { id, kind, target: m.target }), m.sweep.map(|(from, to)| Check { id, from, to }))
 }
 
 /// A bounce off the ground on the way from `position` to `next`
@@ -728,7 +782,7 @@ fn bounce(p: &mut ProjectileState, position: FxVec3, next: FxVec3, terrain: &Ter
     let along = n.x * v.x + n.y * v.y + n.z * v.z;
     let back = p.velocity.normalized().map_or(FxVec3::default(), |d| d * Fx::from_num(-0.05));
     p.set_velocity(v - n * (along * 2));
-    Motion { live: true, turned, position: hit + back, orientation, impact: None, target: None, water: None, entered: None }
+    Motion { live: true, turned, position: hit + back, orientation, impact: None, target: None, water: None, entered: None, sweep: None }
 }
 
 /// `orientation` turned by a tick of spin (`Projectile::MotionTick`,
@@ -762,7 +816,7 @@ fn advance(
     // The tick after an impact it survived: no motion (see
     // [`ProjectileState::resting`]).
     if std::mem::take(&mut p.resting) {
-        return Motion { live: true, turned: false, position, orientation, impact: None, target: None, water: None, entered: None };
+        return Motion { live: true, turned: false, position, orientation, impact: None, target: None, water: None, entered: None, sweep: None };
     }
     let terrain = env.terrain;
     let dt = Fx::ONE / Fx::from_num(TICKS_PER_SECOND);
@@ -878,7 +932,25 @@ fn advance(
         false => orientation,
     };
     let q = if spinning { spin(p, q, dt) } else { q };
+    sweep(p, position, next, q, turned, army, world, env, buf)
+}
 
+/// The collisions of the step `position -> next` (velocity and facing `q`
+/// already this step's): detonation heights, the surface, units, shields,
+/// a targeted projectile, lifetime, water and script spheres.
+#[allow(clippy::too_many_arguments)]
+fn sweep(
+    p: &mut ProjectileState,
+    position: FxVec3,
+    next: FxVec3,
+    q: FxQuat,
+    turned: bool,
+    army: Option<u32>,
+    world: &EntityWorld,
+    env: Env,
+    buf: &mut Vec<EntityId>,
+) -> Motion {
+    let terrain = env.terrain;
     // Detonation heights: crossing them is an `Air` impact where the path
     // crosses (moho checks after collisions and overrides them). A unit the
     // step also hits stays the impact's entity (FAF probe `probe_re_wpn`
@@ -888,7 +960,7 @@ fn advance(
     if (p.detonate_below > Fx::ZERO || p.detonate_above > Fx::ZERO)
         && let Some(at) = terrain.and_then(|t| detonation(p, position, next, t)) {
         let unit = if p.collide_entity { first_unit_hit(p, position, next, army, world, env, buf).map(|(_, u, _)| u) } else { None };
-        return Motion { live: true, turned, position: at, orientation: q, impact: Some(ImpactKind::Air), target: unit, water: None, entered: None };
+        return Motion { live: true, turned, position: at, orientation: q, impact: Some(ImpactKind::Air), target: unit, water: None, entered: None, sweep: None };
     }
 
     // The surface first: where along this tick's path the projectile meets
@@ -905,7 +977,7 @@ fn advance(
     // the surface, earliest wins.
     if p.collide_entity {
         let unit = first_unit_hit(p, position, next, army, world, env, buf);
-        let shield = first_shield_hit(p, position, next, env.shields, Some((army, env.armies)));
+        let shield = first_shield_hit(p, position, next, env.shields, Some((army, env.armies)), env.skip);
         let under_water = |t: Fx| terrain.and_then(|tr| tr.water_surface).is_some_and(|w| (position + (next - position) * t).y < w);
         let mut hit = match (unit, shield) {
             (Some((tu, u, layer)), Some((ts, s))) => Some(if ts < tu { (ts, s, ImpactKind::Shield) } else { (tu, u, ImpactKind::for_unit(layer, under_water(tu))) }),
@@ -918,6 +990,7 @@ fn advance(
         // otherwise.)
         if let (Some(ProjectileTarget::Entity(target)), false) = (p.target, env.projectile_velocities.is_empty())
             && Some(target) != p.last_hit
+            && !env.skip.contains(&target)
             && let Some(tp) = projectile_hit(position, next, target, world, env)
             && hit.is_none_or(|(t, ..)| tp < t) {
             hit = Some((tp, target, ImpactKind::Projectile));
@@ -925,7 +998,7 @@ fn advance(
         if let Some((t, target, kind)) = hit
             && surface.is_none_or(|(ts, _)| t <= ts) {
             let at = position + (next - position) * t;
-            return Motion { live: true, turned, position: at, orientation: q, impact: Some(kind), target: Some(target), water: None, entered: None };
+            return Motion { live: true, turned, position: at, orientation: q, impact: Some(kind), target: Some(target), water: None, entered: None, sweep: Some((position, next)) };
         }
     }
 
@@ -956,8 +1029,8 @@ fn advance(
         };
         (w > t.height_at(next.x, next.z)).then_some(crossed)
     });
-    let entered = if p.collide_entity && !env.script_spheres.is_empty() { first_shield_hit(p, position, next, env.script_spheres, None).map(|(_, id)| id) } else { None };
-    Motion { live: true, turned, position: end, orientation: q, impact, target: None, water, entered }
+    let entered = if p.collide_entity && !env.script_spheres.is_empty() { first_shield_hit(p, position, next, env.script_spheres, None, &[]).map(|(_, id)| id) } else { None };
+    Motion { live: true, turned, position: end, orientation: q, impact, target: None, water, entered, sweep: None }
 }
 
 /// Where (fraction 0..1 of the step `from -> to`) the path first meets the
@@ -1193,7 +1266,7 @@ fn first_unit_hit(
     };
     let mut best: Option<(Fx, EntityId, crate::engine::sim::layer::Layer)> = None;
     for &id in buf.iter() {
-        if Some(id) == p.launcher || Some(id) == p.last_hit {
+        if Some(id) == p.launcher || Some(id) == p.last_hit || env.skip.contains(&id) {
             continue;
         }
         let Some(e) = world.get(id).filter(|e| !e.destroyed) else { continue };
