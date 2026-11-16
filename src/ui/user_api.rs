@@ -666,6 +666,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// Same clock as `CurrentTime`.
         GetSystemTimeSeconds = |lua, ()| Ok(lua.named_registry_value::<Option<f64>>("user.time")?.unwrap_or(0.0)))?;
     lua_fn!(lua, global,
+        /// Seconds of the `CurrentTime` clock since `origin` (FAF's binary
+        /// patch, for timings that would lose precision as one big float).
+        GetTimeForProfile = |lua, origin: Option<f64>| Ok(lua.named_registry_value::<Option<f64>>("user.time")?.unwrap_or(0.0) - origin.unwrap_or(0.0)))?;
+    lua_fn!(lua, global,
         /// Wall-clock seconds since the Unix epoch.
         GetSystemTime = |_, ()| Ok(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())))?;
     lua_fn!(lua, global,

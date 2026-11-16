@@ -85,6 +85,15 @@ mod tests {
         assert_eq!(r, "ac|ac|ac|abbc|ac");
     }
 
+    /// Moho's `__pow` is power (its `^` is XOR); `_LOADED` is a table.
+    #[test]
+    fn pow_and_loaded_globals() {
+        let lua = mlua::Lua::new();
+        super::register(&lua).unwrap();
+        let r: (f64, String) = lua.load("return __pow(2, 3), type(_LOADED)").eval().unwrap();
+        assert_eq!(r, (8.0, "table".into()));
+    }
+
     #[test]
     fn str_utf8_len_counts_characters() {
         let lua = mlua::Lua::new();

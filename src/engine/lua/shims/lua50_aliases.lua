@@ -2,6 +2,12 @@
 math.mod = math.mod or math.fmod
 math.pow = math.pow or function(a, b) return a ^ b end
 string.gfind = string.gfind or string.gmatch
+-- Moho's global power function (probed: `__pow(2, 3)` = 8); its `^` is XOR,
+-- see lua_translation/bitwise.rs. This file is plain Luau, so `^` is power.
+__pow = function(a, b) return a ^ b end
+-- Lua 5.0's table of loaded libraries (probed: a table in both VMs; its
+-- contents weren't).
+_LOADED = _LOADED or { _G = _G, string = string, table = table, math = math, coroutine = coroutine, debug = debug }
 
 -- `string.gsub` with a function: only a string result replaces the match;
 -- nil, false or a number deletes it (probed: `gsub('abc', 'b', f)` is "ac"
