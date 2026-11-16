@@ -1271,6 +1271,11 @@ fn build_target_destroyed() {
 /// not nested, still attached; `IsDestroyed` after it; the attachment
 /// notifications of `Destroy` and `Kill`.
 #[test]
+fn orient_from_dir() {
+    scenario("orient_from_dir", 10);
+}
+
+#[test]
 fn filter_down_destroyed() {
     scenario("filter_down_destroyed", 40);
 }

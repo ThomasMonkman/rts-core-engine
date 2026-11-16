@@ -1073,10 +1073,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_fn!(lua, global,
-        /// The rotation that turns +Z to face `dir` (`OrientFromDir`).
+        /// The rotation that turns +Z to face `dir` (`OrientFromDir`): yaw
+        /// then pitch, no roll; any length (dev/probes probe_api_spot
+        /// `core.OrientFromDir3`: `(1, 2, 3)` gives `{-0.275 0.154 0.045
+        /// 0.948}`); identity for a zero vector.
         OrientFromDir = |lua, v: shapes::Vector| {
             let num = |i: usize| -> LuaResult<f64> { Ok(v.raw_get::<Option<f64>>(i)?.unwrap_or(0.0)) };
-            quaternion(lua, FxQuat::look_along(FxVec3::from_f64(num(1)?, num(2)?, num(3)?)))
+            let dir = FxVec3::from_f64(num(1)?, num(2)?, num(3)?);
+            quaternion(lua, dir.normalized().map_or(FxQuat::IDENTITY, FxQuat::look_along))
         })?;
     lua_method!(lua, moho::Entity,
         /// Back to the blueprint's collision volume (FAF's upgrades turn the new
