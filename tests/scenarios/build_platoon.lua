@@ -16,5 +16,6 @@ ForkThread(function()
     b:BuildPlatoon(PT, { fac1, fac2 }, 2)
     local n1, n2 = table.getn(fac1:GetCommandQueue()), table.getn(fac2:GetCommandQueue())
     check(n1 == 4 and n2 == 2, string.format('line 1 (2 x 2) on factory 1, line 2 (1 x 2) on factory 2: %d, %d', n1, n2))
+    check(b:BuildUnit(fac2, 'uel0201', 3) == 3, 'BuildUnit returns the count')
     ScenarioResult.done = true
 end)

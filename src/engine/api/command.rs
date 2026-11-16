@@ -1163,11 +1163,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_method!(lua, moho::AIBrain,
-        /// Queues `count` (default 1, at least 1) of blueprint `bp` at the factory `builder`.
+        /// Queues `count` (default 1, at least 1) of blueprint `bp` at the
+        /// factory `builder`; returns the count (dev/probes probe_ai_build:
+        /// 3 for three, 1 for one).
         BuildUnit = |lua, (_brain, builder, bp, count): (Obj<moho::AIBrain>, Obj<moho::Unit>, String, Option<f64>)| {
             let builder = entity::entity_id(&builder)?;
-            issue(lua, &[builder], K::BuildFactory, CommandTarget::None, Some(bp.to_lowercase()), count.unwrap_or(1.0).max(1.0) as u32);
-            Ok(())
+            let count = count.unwrap_or(1.0).max(1.0) as u32;
+            issue(lua, &[builder], K::BuildFactory, CommandTarget::None, Some(bp.to_lowercase()), count);
+            Ok(count)
         })?;
     lua_method!(lua, moho::Unit,
         /// The unit's queued commands, as `UnitCommand` tables. A factory
