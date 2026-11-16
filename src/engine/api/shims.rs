@@ -73,6 +73,18 @@ mod tests {
         assert_eq!(r, "5 0 3 3 3 x 4 nil 1 a a 2 b nil x,a,b b 2");
     }
 
+    /// `gsub` with a function: only a string result replaces the match.
+    #[test]
+    fn gsub_function_non_string_deletes() {
+        let lua = mlua::Lua::new();
+        super::register(&lua).unwrap();
+        let r: String = lua
+            .load("local function g(f) return (string.gsub('abc', 'b', f)) end return table.concat({ g(function() return nil end), g(function() return false end), g(function() return 7 end), g(function(x) return x .. x end), (('abc'):gsub('b', function() end)) }, '|')")
+            .eval()
+            .unwrap();
+        assert_eq!(r, "ac|ac|ac|abbc|ac");
+    }
+
     #[test]
     fn str_utf8_len_counts_characters() {
         let lua = mlua::Lua::new();

@@ -2,8 +2,25 @@
 math.mod = math.mod or math.fmod
 math.pow = math.pow or function(a, b) return a ^ b end
 string.gfind = string.gfind or string.gmatch
--- Lua 5.0 explicit table size; Luau tracks sizes itself, so it's a no-op.
-table.setn = table.setn or function(t, n) end
+
+-- `string.gsub` with a function: only a string result replaces the match;
+-- nil, false or a number deletes it (probed: `gsub('abc', 'b', f)` is "ac"
+-- for f returning nil, false or 7). Luau keeps the match for nil / false
+-- and inserts a number.
+local sgsub, stype = string.gsub, type
+function string.gsub(s, pattern, repl, n)
+    if stype(repl) == "function" then
+        local f = repl
+        repl = function(...)
+            local r = f(...)
+            if stype(r) == "string" then
+                return r
+            end
+            return ""
+        end
+    end
+    return sgsub(s, pattern, repl, n)
+end
 
 -- Lua 5.0 generic-for over a table uses `next` (see lua_translation/forin.rs).
 local next, type = next, type
