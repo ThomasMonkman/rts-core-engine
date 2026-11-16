@@ -21,8 +21,9 @@
 //!   seen, weapons may target it, it counts as sighted for structure memory;
 //!   only the script-facing seen state (`IsSeenNow`, `IsSeenEver`, `LOSNow`
 //!   changes) is optical;
-//! - on radar: radar, if the unit is above water and not radar-stealthed;
-//! - on sonar: sonar, if it's in water and not sonar-stealthed.
+//! - on radar: radar, if the unit is above water and not radar-stealthed
+//!   (or is seen: stealth hides only a unit out of sight);
+//! - on sonar: sonar, if it's in water and not sonar-stealthed (or seen).
 //! A unit is cloaked / stealthed by its own `Cloak` / `RadarStealth` /
 //! `SonarStealth` intel, or by standing in an allied `CloakField` /
 //! `RadarStealthFieldRadius` / `SonarStealthFieldRadius` (the field grids
@@ -923,10 +924,16 @@ impl IntelGrids {
         let s = |t: IntelType| self.covered(army, sensor_index(t).expect("sensor"), p);
         let omni = s(IntelType::Omni);
         let optical = if under { s(IntelType::WaterVision) } else { s(IntelType::Vision) || (wet && s(IntelType::WaterVision)) };
+        let seen = optical && hidden & CLOAK == 0;
+        // Stealth hides only a unit that isn't seen: one in sight and in
+        // radar (sonar) range reads on radar (sonar) (dev/probes
+        // probe_re2_misc ST: a radar-stealthed unit 5 from a radar-24
+        // generator reads `SR`, 11 away `noblip`; a sonar-stealthed sub in
+        // sight and sonar `S.s`).
         Detection {
-            seen: optical && hidden & CLOAK == 0,
-            radar: !under && hidden & RADAR_STEALTH == 0 && s(IntelType::Radar),
-            sonar: wet && hidden & SONAR_STEALTH == 0 && s(IntelType::Sonar),
+            seen,
+            radar: !under && (hidden & RADAR_STEALTH == 0 || seen) && s(IntelType::Radar),
+            sonar: wet && (hidden & SONAR_STEALTH == 0 || seen) && s(IntelType::Sonar),
             omni,
         }
     }
@@ -1454,6 +1461,7 @@ mod tests {
         let _ = scout;
         let g2 = grids(&w2);
         assert!(g2.detect(1, w2.get(hidden).unwrap()).seen, "stealth doesn't stop vision");
+        assert!(g2.detect(1, w2.get(hidden).unwrap()).radar, "and a seen unit reads on radar (probe_re2_misc ST)");
     }
 
     /// probe_intel_jam: a jammer's `JammerBlips` fakes sit 0..radius from
