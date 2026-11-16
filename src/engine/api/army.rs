@@ -329,7 +329,7 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
         lua: &Lua,
         name: &'static str,
         doc: &'static str,
-        value: fn(&crate::engine::sim::economy::ResourceState) -> Fx,
+        value: fn(&crate::engine::sim::economy::Economy, Resource) -> Fx,
     ) -> LuaResult<()> {
         crate::lua_api::add_class_fn(
             lua,
@@ -342,16 +342,19 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
                 let ArmyHandle(index) = script_object::handle(&brain)?;
                 let r = parse_resource(&kind)?;
                 let armies = lua.app_data_ref::<Armies>().expect("Armies");
-                Ok(armies.get(index).map_or(0.0, |a| value(a.economy.get(r)).to_num::<f64>()))
+                Ok(armies.get(index).map_or(0.0, |a| value(&a.economy, r).to_num::<f64>()))
             },
         )
     }
-    econ_getter(lua, "GetEconomyStoredRatio", "Stored / capacity of `resource` (`'MASS'` or `'ENERGY'`), 0 without capacity.", |r| if r.capacity > Fx::ZERO { r.stored.saturating_div(r.capacity) } else { Fx::ZERO })?;
-    econ_getter(lua, "GetEconomyStored", "Stored amount of `resource` (`'MASS'` or `'ENERGY'`).", |r| r.stored)?;
-    econ_getter(lua, "GetEconomyIncome", "Income of `resource` (`'MASS'` or `'ENERGY'`) per tick.", |r| r.income)?;
-    econ_getter(lua, "GetEconomyRequested", "Requested amount of `resource` (`'MASS'` or `'ENERGY'`).", |r| r.requested)?;
-    econ_getter(lua, "GetEconomyUsage", "Expense of `resource` (`'MASS'` or `'ENERGY'`).", |r| r.expense)?;
-    econ_getter(lua, "GetEconomyTrend", "Income minus expense of `resource` (`'MASS'` or `'ENERGY'`).", |r| r.income - r.expense)?;
+    econ_getter(lua, "GetEconomyStoredRatio", "Stored / capacity of `resource` (`'MASS'` or `'ENERGY'`), 0 without capacity.", |e, r| {
+        let r = e.get(r);
+        if r.capacity > Fx::ZERO { r.stored.saturating_div(r.capacity) } else { Fx::ZERO }
+    })?;
+    econ_getter(lua, "GetEconomyStored", "Stored amount of `resource` (`'MASS'` or `'ENERGY'`).", |e, r| e.get(r).stored)?;
+    econ_getter(lua, "GetEconomyIncome", "Income of `resource` (`'MASS'` or `'ENERGY'`) per tick.", |e, r| e.get(r).income)?;
+    econ_getter(lua, "GetEconomyRequested", "Requested amount of `resource` (`'MASS'` or `'ENERGY'`).", |e, r| e.get(r).requested)?;
+    econ_getter(lua, "GetEconomyUsage", "Usage of `resource` (`'MASS'` or `'ENERGY'`): in a stall, consumers of it alone count in full.", |e, r| e.usage(r))?;
+    econ_getter(lua, "GetEconomyTrend", "Income minus usage of `resource` (`'MASS'` or `'ENERGY'`).", |e, r| e.get(r).income - e.usage(r))?;
     lua_method!(lua, moho::AIBrain,
         /// Gives `amount` (clamped to at least 0) of `kind`: it's stored on
         /// the army's next economy tick, up to its storage (what doesn't fit
