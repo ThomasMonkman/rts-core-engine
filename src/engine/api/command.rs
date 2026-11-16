@@ -65,8 +65,9 @@ fn units_of(lua: &Lua, v: &LuaValue) -> LuaResult<Vec<EntityId>> {
 /// `IssueAttack` 0x102ce172 with `RULEUCC_Attack`; `IssueFactoryRallyPoint`
 /// and `IssueFactoryAssist` through 0x102c9840, which skips the mobility
 /// test). `None`: the binding doesn't filter (or not yet checked).
-/// `IssueOverCharge` filters on `RULEUCC_Overcharge` (0x102cc8f8) but is
-/// left alone here while overcharge is reworked.
+/// `IssueOverCharge` filters on `RULEUCC_Overcharge` (0x102cc8f8), and
+/// `IssueDive` on `RULEUCC_Dive`: a tank given either gets nothing queued
+/// (dev/probes probe_unit_orders Q).
 fn required_cap(name: &str) -> Option<&'static str> {
     Some(match name {
         "IssueMove" | "IssueMoveOffFactory" | "IssueFormMove" | "IssueAggressiveMove" | "IssueFormAggressiveMove" => "RULEUCC_Move",
@@ -79,6 +80,8 @@ fn required_cap(name: &str) -> Option<&'static str> {
         "IssueFerry" => "RULEUCC_Ferry",
         "IssueRepair" => "RULEUCC_Repair",
         "IssueSacrifice" => "RULEUCC_Sacrifice",
+        "IssueOverCharge" => "RULEUCC_Overcharge",
+        "IssueDive" => "RULEUCC_Dive",
         "IssueReclaim" => "RULEUCC_Reclaim",
         "IssueCapture" => "RULEUCC_Capture",
         // (`IssueTeleportToBeacon` too, 0x102d2288.)
@@ -574,7 +577,7 @@ fn untargeted(lua: &Lua, name: &'static str, kind: CommandKind) -> LuaResult<()>
         Status::Implemented,
         false,
         move |lua, units: shapes::Units| {
-            let units = units_of(lua, &units)?;
+            let units = capable(lua, name, units_of(lua, &units)?);
             Ok(issue(lua, &units, kind, CommandTarget::None, None, 0))
         },
     )

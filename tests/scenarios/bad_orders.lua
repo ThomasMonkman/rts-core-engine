@@ -25,6 +25,12 @@ ForkThread(function()
     check(q[1] and math.abs(q[1].x - (sx + 4)) < 0.01 and math.abs(q[1].z - (sz + 6)) < 0.01,
         string.format('relative BuildStructure queues at the start + offset: %s,%s (start %s,%s)', tostring(q[1] and q[1].x), tostring(q[1] and q[1].z), sx, sz))
     IssueClearCommands({eng})
+    -- Orders the unit has no command cap for are refused at issue: a tank
+    -- can't dive or overcharge (dev/probes probe_unit_orders Q).
+    local tank = CreateUnitHPR('uel0201', 'ARMY_1', 430, GetTerrainHeight(430, 610), 610, 0, 0, 0)
+    IssueDive({tank})
+    IssueOverCharge({tank}, tank)
+    check(table.getn(tank:GetCommandQueue()) == 0, 'a tank takes no dive or overcharge order')
     IssueBuildMobile({eng}, { 424, GetTerrainHeight(424, 600), 600 }, 'zzz9999', {})
     check(table.getn(eng:GetCommandQueue()) == 0, 'IssueBuildMobile with an unknown blueprint queues nothing')
     IssueScript({eng}, { TaskName = 'NoSuchScenarioTask' })
