@@ -376,15 +376,18 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_method!(lua, moho::AIBrain,
-        /// Takes at most what is stored; returns the amount actually taken.
+        /// Takes at most what is stored; returns the amount actually taken. A negative amount
+        /// adds to the store and is returned as given (`TakeResource('MASS', -5)` returns -5 and
+        /// stores 5 more: dev/probes probe_ai_brain).
         TakeResource = |lua, (brain, kind, amount): (Obj<moho::AIBrain>, String, f64)| {
             let ArmyHandle(index) = script_object::handle(&brain)?;
             let r = parse_resource(&kind)?;
             let mut armies = lua.app_data_mut::<Armies>().expect("Armies");
             let Some(a) = armies.get_mut(index) else { return Ok(0.0) };
             let res = a.economy.get_mut(r);
-            let taken = crate::engine::sim::math::from_lua(amount.max(0.0)).min(res.stored);
-            res.stored -= taken;
+            let amount = crate::engine::sim::math::from_lua(amount);
+            let taken = amount.min(res.stored);
+            res.stored = res.stored.saturating_sub(taken);
             Ok(taken.to_num::<f64>())
         })?;
     lua_method!(lua, moho::AIBrain,

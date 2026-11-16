@@ -74,5 +74,11 @@ ForkThread(function()
     brain:SetGreaterOf('Probe_Foo', 9)
     check(brain:GetArmyStat('Probe_Foo', 0).Value == 9, 'SetGreaterOf raises a lower value')
 
+    -- TakeResource with a negative amount adds it.
+    brain:TakeResource('MASS', 1e7)
+    local back = brain:TakeResource('MASS', -5)
+    check(back == -5, 'TakeResource(-5) returns -5: ' .. tostring(back))
+    check(math.abs(brain:GetEconomyStored('MASS') - 5) < 0.01, 'and stores 5: ' .. brain:GetEconomyStored('MASS'))
+
     ScenarioResult.done = true
 end)
