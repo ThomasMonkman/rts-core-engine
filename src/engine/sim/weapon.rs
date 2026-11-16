@@ -1240,10 +1240,10 @@ fn advance_target(
     // Blueprint target restrictions.
     let allowed = |cat: Option<u32>| restrictions_allow(&w.only_allow, &w.disallow, cat);
     let water_targets = (w.above_water_targets_only, w.below_water_targets_only);
-    // `ordered`: a target an attack order names. `SetDoNotTarget` keeps a
-    // unit out of target searches only: an attack order on it keeps firing
-    // (dev/probes probe_unit_orders O5).
-    let targetable_as = |e: &crate::engine::sim::entity::Entity, ordered: bool| {
+    // A target it may take, leaving intel aside. `ordered`: a target an attack
+    // order names. `SetDoNotTarget` keeps a unit out of target searches only:
+    // an attack order on it keeps firing (dev/probes probe_unit_orders O5).
+    let takes_as = |e: &crate::engine::sim::entity::Entity, ordered: bool| {
         e.kind == EntityKind::Unit
             && !w.targets_projectiles
             && !e.destroyed
@@ -1256,13 +1256,22 @@ fn advance_target(
                 (ordered || !d.do_not_target)
                     && w.fire_target_layers.contains(d.layer.mask())
                     && seabed_target_ok(water_targets, e, d, water)
-                    && match (intel, army) {
-                        (Some(g), Some(a)) => g.detect(a, e).any(),
-                        _ => true,
-                    }
             })
     };
-    let targetable = |e: &crate::engine::sim::entity::Entity| targetable_as(e, false);
+    let takes = |e: &crate::engine::sim::entity::Entity| takes_as(e, true);
+    // One it may take from a search: its army must detect it too. An attack
+    // order's target needs no intel (`probe_firsttick`: a target ordered at
+    // tick 0 is taken at beat 2, before the army's first sighting at 11;
+    // `probe_re_wpn` `air.wpn`: a uel0205 ordered onto a gunship 24 away,
+    // beyond its vision of 20 and with nothing else of its army near, fires
+    // within a second).
+    let targetable = |e: &crate::engine::sim::entity::Entity| {
+        takes_as(e, false)
+            && match (intel, army) {
+                (Some(g), Some(a)) => g.detect(a, e).any(),
+                _ => true,
+            }
+    };
 
     // The turret's turning limits (whether it turns all the way round).
     let test = match w.arc {
@@ -1397,7 +1406,7 @@ fn advance_target(
         } else {
             world.get(t).is_some_and(|e| {
                 let d = dist2_xz(e.position(), at);
-                targetable_as(e, w.target_from_order) && d <= reach.saturating_mul(reach) && (w.target_from_order || accepts(range_at(e.position(), d)))
+                (if w.target_from_order { takes(e) } else { targetable(e) }) && d <= reach.saturating_mul(reach) && (w.target_from_order || accepts(range_at(e.position(), d)))
             })
         };
         if !keep {
@@ -1414,7 +1423,7 @@ fn advance_target(
     let order = ordered.get(&w.unit);
     let overcharging = order.is_some_and(|o| o.overcharge == Some(w.index));
     let forced = order.filter(|o| enabled && !order_reset && o.overcharge.map_or(o.silo == w.silo, |i| i == w.index) && from_primary.is_none()).map(|o| o.target).filter(|t| match *t {
-        WeaponTarget::Entity(id) => world.get(id).is_some_and(|e| targetable_as(e, true) && dist2_xz(e.position(), at) <= reach.saturating_mul(reach)),
+        WeaponTarget::Entity(id) => world.get(id).is_some_and(|e| takes(e) && dist2_xz(e.position(), at) <= reach.saturating_mul(reach)),
         WeaponTarget::Ground(p) => !w.cannot_attack_ground && dist2_xz(p, at) <= reach.saturating_mul(reach),
     });
     if enabled && w.target_from_order && w.target.is_some() && forced != w.target && from_primary.is_none() {
@@ -2218,6 +2227,31 @@ mod tests {
             step(&mut ws, &w, None, Some(&grids), &mut out);
         }
         assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "seen: targeted");
+    }
+
+    /// An attack order's target needs no intel (FAF probes `probe_firsttick`,
+    /// `probe_re_wpn` `air.wpn`).
+    #[test]
+    fn ordered_target_needs_no_intel() {
+        use crate::engine::sim::vision::IntelGrids;
+        let mut w = EntityWorld::default();
+        w.set_bounds(256, 256);
+        let me = unit(&mut w, 1, 100.0, 100.0);
+        let enemy = unit(&mut w, 2, 110.0, 100.0);
+        let mut ws = Weapons::default();
+        gun(&mut ws, me);
+        let mut grids = IntelGrids::new(256, 256);
+        grids.set_alliances(2, |_, _| false);
+        grids.update(&w, |_| None);
+        let mut out = Vec::new();
+        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(enemy), silo: None, overcharge: None });
+        step(&mut ws, &w, None, Some(&grids), &mut out);
+        assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "blind, ordered: taken");
+        step(&mut ws, &w, None, Some(&grids), &mut out);
+        assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "and kept");
+        ws.ordered.clear();
+        step(&mut ws, &w, None, Some(&grids), &mut out);
+        assert!(ws.get(me, 1).unwrap().target.is_none(), "the order gone, dropped");
     }
 
     /// On hold fire a weapon searches for nothing (real game: `probe_sight`
