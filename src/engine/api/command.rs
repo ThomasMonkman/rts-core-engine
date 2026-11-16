@@ -944,6 +944,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
 
     // Platoon orders: to the platoon's live units (of `squad`, if given).
     fn platoon_units(lua: &Lua, platoon: &LuaTable, squad: &Option<String>) -> LuaResult<Vec<EntityId>> {
+        crate::engine::api::platoon::live_id(lua, platoon)?;
         // (An empty squad's `GetSquadUnits` is nil.)
         let units: Option<LuaTable> = match squad {
             Some(s) => platoon.call_method("GetSquadUnits", s.as_str())?,
@@ -957,7 +958,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     // A platoon with a formation moves in it: `kind` becomes its `Form*`
     // variant (`formed`), laid out by `formations.lua`.
     fn platoon_issue(lua: &Lua, this: &Obj<moho::Platoon>, units: &[EntityId], kind: CommandKind, formed: Option<CommandKind>, target: CommandTarget) -> LuaResult<CommandHandle> {
-        let id = crate::engine::api::platoon::platoon_id(this)?;
+        let id = crate::engine::api::platoon::live_id(lua, this)?;
         let formation = lua.app_data_ref::<crate::engine::sim::platoon::Platoons>().and_then(|p| p.get(id).and_then(|p| p.formation.clone()));
         match (formed, formation) {
             (Some(f), Some(name)) => issue_formation(lua, units, f, target, Some(&name), None),

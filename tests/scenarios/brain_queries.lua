@@ -36,5 +36,24 @@ ForkThread(function()
     ok = pcall(function() brain:AssignUnitsToPlatoon(p, {b}, 'Bogus', 'None') end)
     check(not ok, 'AssignUnitsToPlatoon with a bad squad raises')
 
+    -- Calls on a disbanded platoon raise, except GetPlatoonUnits ({}).
+    local d = brain:MakePlatoon('d', 'none')
+    brain:AssignUnitsToPlatoon(d, {b}, 'Attack', 'None')
+    brain:DisbandPlatoon(d)
+    check(table.getn(d:GetPlatoonUnits()) == 0, 'GetPlatoonUnits of a disbanded platoon is {}')
+    for name, f in {
+        GetSquadUnits = function() return d:GetSquadUnits('Attack') end,
+        GetPlatoonPosition = function() return d:GetPlatoonPosition() end,
+        MoveToLocation = function() return d:MoveToLocation({430, 0, 610}, false) end,
+        AssignUnitsToPlatoon = function() brain:AssignUnitsToPlatoon(d, {b}, 'Attack', 'None') end,
+        DisbandPlatoon = function() brain:DisbandPlatoon(d) end,
+    } do
+        local ok2, e = pcall(f)
+        check(not ok2 and string.find(tostring(e), 'Game object has been destroyed'), name .. ' on a disbanded platoon raises: ' .. tostring(e))
+    end
+    local inPool = false
+    for _, u in brain:GetPlatoonUniquelyNamed('ArmyPool'):GetPlatoonUnits() do if u == b then inPool = true end end
+    check(inPool, 'the unit stays in the army pool')
+
     ScenarioResult.done = true
 end)
