@@ -1147,7 +1147,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             let mut w = entity::world(lua);
             let Some(t) = w.get_mut(job.target) else { continue };
             let old = t.fraction_complete;
-            let new = (old + delta).min(Fx::ONE);
+            let new = finish_rounding(old + delta, delta);
             t.fraction_complete = new;
             t.health = (t.health + t.max_health * (new - old)).min(t.max_health);
             new
@@ -1167,6 +1167,15 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
     factory_guards(lua, &guarding, &mut caps)?;
     assists(lua)?;
     decay(lua)
+}
+
+/// A build's fraction after a step of `delta` to `sum`, at most 1. A sum
+/// short of 1 by no more than the step's rounding (a 1/1024th of it) is 1:
+/// `dt / time` rounds down, so a radar upgrade's 78 steps of 1/78 fell a
+/// hair short and it paid a 79th tick (182.31 mass for a 180 upgrade; the
+/// real game's costs exactly 180: dev/probes probe_re2_upg).
+fn finish_rounding(sum: Fx, delta: Fx) -> Fx {
+    if delta > Fx::ZERO && Fx::ONE - sum <= delta / 1024 { Fx::ONE } else { sum.min(Fx::ONE) }
 }
 
 /// A factory whose current order is a Guard (`IssueFactoryAssist` issues
@@ -2065,4 +2074,22 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             })
         })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_build_of_78_steps_finishes_on_the_78th() {
+        let delta = Fx::ONE / Fx::from_num(10) / Fx::from_num(7.8);
+        let mut f = Fx::ZERO;
+        let mut steps = 0;
+        while f < Fx::ONE {
+            f = finish_rounding(f + delta, delta);
+            steps += 1;
+        }
+        assert_eq!(steps, 78);
+        assert_eq!(finish_rounding(Fx::from_num(0.5), delta), Fx::from_num(0.5));
+    }
 }
