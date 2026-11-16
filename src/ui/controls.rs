@@ -139,7 +139,7 @@ pub struct Edit {
 
 impl Default for Edit {
     fn default() -> Self {
-        Self { text: Text::default(), background: [0.0, 0.0, 0.0, 0.0], show_background: false, max_chars: 255, enabled: true, caret: 0, caret_color: [1.0; 4], caret_shown: true, caret_cycle: None }
+        Self { text: Text::default(), background: [0.0, 0.0, 0.0, 0.0], show_background: false, max_chars: 1024, enabled: true, caret: 0, caret_color: [1.0; 4], caret_shown: true, caret_cycle: None }
     }
 }
 
@@ -1622,7 +1622,20 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::Edit,
         IsBackgroundVisible = |lua, this: Obj<moho::Edit>| with_edit(lua, &this, |e| e.show_background).map(|v| v.unwrap_or(false)))?;
     lua_method!(lua, moho::Edit,
-        SetMaxChars = |lua, (this, n): (Obj<moho::Edit>, i64)| with_edit(lua, &this, |e| e.max_chars = n).map(|_| ()))?;
+        /// Sets the limit (moho's default 1024) and cuts the text to it
+        /// (`probe_ui_controls` edit: `abcdef` becomes `abc`); whether moho
+        /// calls `OnTextChanged` for the cut wasn't measured, so it doesn't.
+        SetMaxChars = |lua, (this, n): (Obj<moho::Edit>, i64)| {
+            with_edit(lua, &this, |e| {
+                e.max_chars = n;
+                let keep = n.max(0) as usize;
+                if e.text.text.chars().count() > keep {
+                    e.text.text = e.text.text.chars().take(keep).collect();
+                    e.caret = e.caret.min(keep as i64);
+                }
+            })
+            .map(|_| ())
+        })?;
     lua_method!(lua, moho::Edit,
         GetMaxChars = |lua, this: Obj<moho::Edit>| with_edit(lua, &this, |e| e.max_chars).map(|v| v.unwrap_or(0)))?;
     lua_method!(lua, moho::Edit,

@@ -2812,7 +2812,8 @@ fn edit_set_text_calls_on_text_changed() {
         )
         .eval()
         .unwrap();
-    assert_eq!(log, ">abcdef;abcdef>123;123>;");
+    // `SetMaxChars(3)` already cut the text to `abc` (`probe_ui_controls` edit).
+    assert_eq!(log, ">abcdef;abc>123;123>;");
 }
 
 /// `GetFireState(units)` is the units' shared state, or -1 when one has no
@@ -2933,4 +2934,25 @@ fn a_played_session_is_recorded() {
     let Some(vm) = vm() else { return };
     let got: (bool, bool) = vm.lua().load("return SessionIsBeingRecorded(), SessionIsObservingAllowed()").eval().unwrap();
     assert_eq!(got, (true, false));
+}
+
+/// An edit's limit is 1024 characters by default and `SetMaxChars` cuts
+/// the text to a new one (`probe_ui_controls` edit).
+#[test]
+fn set_max_chars_cuts_the_text() {
+    let Some(vm) = vm() else { return };
+    let got: (i64, String, i64) = vm
+        .lua()
+        .load(
+            r#"
+            local e = import('/lua/maui/edit.lua').Edit(GetFrame(0))
+            local default = e:GetMaxChars()
+            e:SetText('abcdef')
+            e:SetMaxChars(3)
+            return default, e:GetText(), e:GetCaretPosition()
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(got, (1024, "abc".into(), 3));
 }
