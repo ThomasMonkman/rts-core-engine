@@ -430,10 +430,12 @@ impl Vfs {
         self.index.sorted_paths
             .get(i)
             .filter(|p| p.starts_with(prefix.as_str()))
-            .map(|_| FileInfo {
+            .map(|first| FileInfo {
                 size: 0,
                 is_folder: true,
-                read_only: false,
+                // Inside an archive (judged by its first file): moho finds
+                // no such folder (`api::disk_get_file_info::lookup`).
+                read_only: self.index.file_system.get(first).is_some_and(|loc| matches!(loc, FileLocation::Archive { .. })),
             })
     }
 
