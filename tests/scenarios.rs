@@ -598,6 +598,11 @@ fn shield_fragments() {
 }
 
 #[test]
+fn projectile_survives_impact() {
+    scenario("projectile_survives_impact", 60);
+}
+
+#[test]
 fn health_changed() {
     scenario("health_changed", 60);
 }

@@ -540,25 +540,15 @@ fn run_impacts(lua: &Lua, impacts: Vec<crate::engine::sim::projectile::Impact>) 
         if !alive {
             continue;
         }
-        match impact.kind {
-            ImpactKind::Air | ImpactKind::Underwater => crate::engine::api::entity::destroy(lua, &Obj::new(obj.clone()))?,
-            // Still flying after hitting the ground: no more surface hits.
-            ImpactKind::Terrain => {
-                if let Some(p) = projectiles(lua).get_mut(impact.id) {
-                    p.collide_surface = false;
-                }
-            }
-            // Through the water surface (`DestroyOnWater = false`): it can
-            // still hit the seabed (FAF's sinker, which drags a hover unit
-            // dead over water down, destroys it there; the surface itself
-            // is only hit coming down through it, so not again).
-            ImpactKind::Water => {}
-            // Passed through (DestroyOnImpact off): don't hit that unit again.
-            ImpactKind::Unit | ImpactKind::UnitAir | ImpactKind::UnitUnderwater | ImpactKind::Shield | ImpactKind::Projectile => {
-                if let Some(p) = projectiles(lua).get_mut(impact.id) {
-                    p.last_hit = impact.target;
-                }
-            }
+        // Survived it: rests a tick, then the same impact comes again (see
+        // `ProjectileState::resting`). Through the water surface
+        // (`DestroyOnWater = false`) it goes on: it can still hit the
+        // seabed (FAF's sinker, which drags a hover unit dead over water
+        // down, destroys it there; the surface itself is only hit coming
+        // down through it, so not again).
+        if impact.kind != ImpactKind::Water
+            && let Some(p) = projectiles(lua).get_mut(impact.id) {
+            p.resting = true;
         }
     }
     Ok(())

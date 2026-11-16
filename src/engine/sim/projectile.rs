@@ -177,8 +177,19 @@ pub struct ProjectileState {
     pub target: Option<ProjectileTarget>,
     /// Hits units allied to its army (weapon `CollideFriendly`).
     pub collide_friendly: bool,
-    /// Unit it last hit and survived: not hit again.
+    /// Unit or shield whose collision check refused it: not hit again.
     pub last_hit: Option<EntityId>,
+    /// It survived an impact (its `OnImpact` didn't destroy it): its next
+    /// motion tick is skipped. Then it moves on from where it hit, so a
+    /// unit or the ground it hit is hit again at once, and an expired
+    /// lifetime ends again: the same impact every 2 ticks, at the contact
+    /// point, or (lifetime) a step further on each time (FAF probe
+    /// `probe_re_wpn` `keep.*`: a shell into a wall, into the ground, and
+    /// one whose lifetime ran out, kept alive by their `OnImpact`, are hit
+    /// at +4, +6, +8, ... for 130 ticks; the expired one rises a step every
+    /// 2 ticks).
+    #[serde(default)]
+    pub resting: bool,
     /// Ground bounces left before hitting the ground counts as an impact,
     /// and the velocity scale at each.
     pub bounces_left: u32,
@@ -257,6 +268,7 @@ impl ProjectileState {
             target: None,
             collide_friendly: false,
             last_hit: None,
+            resting: false,
             scale_velocity: None,
             reports_to: None,
             angular_velocity: FxVec3::default(),
@@ -744,6 +756,11 @@ fn advance(
     env: Env,
     buf: &mut Vec<EntityId>,
 ) -> Motion {
+    // The tick after an impact it survived: no motion (see
+    // [`ProjectileState::resting`]).
+    if std::mem::take(&mut p.resting) {
+        return Motion { live: true, turned: false, position, orientation, impact: None, target: None, water: None, entered: None };
+    }
     let terrain = env.terrain;
     let dt = Fx::ONE / Fx::from_num(TICKS_PER_SECOND);
     // Homing projectiles ignore their ballistic acceleration (moho).
