@@ -360,12 +360,15 @@ pub fn step(world: &mut EntityWorld, armies: &mut Armies, events: &mut EconomyEv
             // served (moho's node ratio, MohoEngine.dll 0x1028a194..0x1028a1ac:
             // a mex in an energy stall, a mass fabricator); natural producers
             // in full.
+            // Negative rates (`SetProductionPerSecondMass(-4)`) count as 0,
+            // as do negative consumption rates below (dev/probes
+            // probe_unit_econ C-neg, D-neg).
             let ratio = if u.natural_producer { Fx::ONE } else { u.resource_consumed };
-            econ.mass.income += per_tick(u.production_mass) * ratio;
-            econ.energy.income += per_tick(u.production_energy) * ratio;
+            econ.mass.income += per_tick(u.production_mass.max(Fx::ZERO)) * ratio;
+            econ.energy.income += per_tick(u.production_energy.max(Fx::ZERO)) * ratio;
         }
         if u.consumption_active {
-            econ.request(per_tick(u.consumption_mass), per_tick(u.consumption_energy));
+            econ.request(per_tick(u.consumption_mass.max(Fx::ZERO)), per_tick(u.consumption_energy.max(Fx::ZERO)));
         }
     }
 
@@ -399,7 +402,7 @@ pub fn step(world: &mut EntityWorld, armies: &mut Armies, events: &mut EconomyEv
         }
         let Some(a) = armies.get(army) else { return };
         u.resource_consumed = if u.consumption_active {
-            a.economy.served_fraction(per_tick(u.consumption_mass), per_tick(u.consumption_energy))
+            a.economy.served_fraction(per_tick(u.consumption_mass.max(Fx::ZERO)), per_tick(u.consumption_energy.max(Fx::ZERO)))
         } else {
             Fx::ONE
         };
@@ -525,6 +528,28 @@ mod tests {
         // As `spawn_unit` makes it.
         u.resource_consumed = Fx::ONE;
         f(u);
+    }
+
+    /// Negative production and consumption rates count as 0: they neither
+    /// drain nor add (dev/probes probe_unit_econ C-neg, D-neg).
+    #[test]
+    fn negative_rates_count_as_zero() {
+        let mut w = EntityWorld::default();
+        unit(&mut w, 1, |u| {
+            u.production_active = true;
+            u.production_mass = fx(-4.0);
+            u.consumption_active = true;
+            u.consumption_energy = fx(-20.0);
+        });
+        let mut a = armies(1);
+        a.list[0].economy.mass.granted_storage = fx(100.0);
+        a.list[0].economy.energy.granted_storage = fx(100.0);
+        a.list[0].economy.mass.stored = fx(50.0);
+        a.list[0].economy.energy.stored = fx(50.0);
+        step(&mut w, &mut a, &mut EconomyEvents::default());
+        let e = &a.list[0].economy;
+        assert_eq!((e.mass.income, e.energy.requested), (Fx::ZERO, Fx::ZERO));
+        assert_eq!((e.mass.stored, e.energy.stored), (fx(50.0), fx(50.0)));
     }
 
     /// A mex (mass out, energy upkeep) in an energy stall makes only the
