@@ -1018,7 +1018,7 @@ user GetEconomyTotals luau
 user GetFireState luau
 user GetFocusArmy native
 user GetFrame native
-user GetFrontEndData luau
+user GetFrontEndData native
 user GetGameSpeed luau
 user GetGameTime luau
 user GetGameTimeSeconds luau
@@ -1185,7 +1185,7 @@ user SetCurrentFactoryForQueueDisplay luau
 user SetCursor luau
 user SetFireState luau
 user SetFocusArmy native
-user SetFrontEndData luau
+user SetFrontEndData native
 user SetGameSpeed luau
 user SetInvertMidMouseButton native
 user SetMovieVolume native
