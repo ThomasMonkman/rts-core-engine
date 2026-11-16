@@ -1054,13 +1054,22 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         SetStrategicUnderlay = |lua, (this, icon): (Obj<moho::Unit>, String)| with_unit(lua, &this, |u| u.strategic_underlay = icon))?;
     lua_method!(lua, moho::Unit,
         /// FAF binary patch semantics: returns true (and sets nothing) when the stat
-        /// does not exist yet, so Lua can create it via GetStat first.
-        SetStat = |lua, (this, name, value): (Obj<moho::Unit>, String, Option<f64>)| {
+        /// does not exist yet, so Lua can create it via GetStat first. A
+        /// string value is accepted and not kept (FAF only sets numbers).
+        SetStat = |lua, (this, name, value): (Obj<moho::Unit>, String, LuaValue)| {
         // nil is accepted (FAF passes optional blueprint values) and stored as 0.
-        let value = value.unwrap_or(0.0);
+        let value = match value {
+            LuaValue::Nil => Some(0.0),
+            LuaValue::Integer(i) => Some(i as f64),
+            LuaValue::Number(n) => Some(n),
+            LuaValue::String(_) => None,
+            other => return Err(LuaError::runtime(format!("SetStat: value must be a number or string, got {}", other.type_name()))),
+        };
         with_unit(lua, &this, |u| match u.stats.get_mut(&name) {
             Some(v) => {
-                *v = value;
+                if let Some(value) = value {
+                    *v = value;
+                }
                 false
             }
             None => true,
@@ -1071,15 +1080,34 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     #[lua(name = "UnitStat", rename_all = "PascalCase", write_only)]
     #[allow(dead_code)]
     struct UnitStat {
-        value: f64,
+        name: String,
+        /// `"Integer"`, `"Float"` or `"String"`.
+        r#type: String,
+        /// Absent for a string stat.
+        value: Option<f64>,
     }
     lua_method!(lua, moho::Unit,
-        /// Returns `{ Value = v }`, creating the stat with `default` if missing.
-        GetStat = |lua, (this, name, default): (Obj<moho::Unit>, String, Option<f64>)| {
-        let value = with_unit(lua, &this, |u| *u.stats.entry(name).or_insert(default.unwrap_or(0.0)))?;
-        let t = lua.create_table_with_capacity(0, 1)?;
+        /// `{ Name, Type, Value }`. A missing stat is created by a `default`,
+        /// which only gives it its type: its value starts at 0
+        /// (`GetStat('X', 5).Value` is 0); without a default a missing stat
+        /// is nil. A string default answers `{ Name, Type = 'String' }`
+        /// (dev/probes probe_unit_api, probe_api_spot). Integer or Float by
+        /// the value (inferred).
+        GetStat = |lua, (this, name, default): (Obj<moho::Unit>, String, LuaValue)| {
+        let t = lua.create_table_with_capacity(0, 3)?;
+        if matches!(default, LuaValue::String(_)) && with_unit(lua, &this, |u| !u.stats.contains_key(&name))? {
+            t.raw_set("Name", name)?;
+            t.raw_set("Type", "String")?;
+            return Ok(Some(shapes::Shaped::<UnitStat>::new(t)));
+        }
+        let create = !default.is_nil();
+        let Some(value) = with_unit(lua, &this, |u| if create { Some(*u.stats.entry(name.clone()).or_insert(0.0)) } else { u.stats.get(&name).copied() })? else {
+            return Ok(None);
+        };
+        t.raw_set("Name", name)?;
+        t.raw_set("Type", if value.fract() == 0.0 { "Integer" } else { "Float" })?;
         t.raw_set("Value", value)?;
-        Ok(shapes::Shaped::<UnitStat>::new(t))
+        Ok(Some(shapes::Shaped::<UnitStat>::new(t)))
     })?;
     /// Registers `unit:<name>(bool)` writing a unit flag.
     fn bool_setter(

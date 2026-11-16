@@ -86,5 +86,16 @@ ForkThread(function()
     check(s[1].general.built.count == 4, 'score: army 1 built 4: ' .. tostring(s[1].general.built.count))
     check(s[1].general.kills.count == 2, 'score: army 1 killed 2')
     check(s[2].general.lost.count == 2, 'score: army 2 lost 2')
+
+    -- Script stats: a default only types a new stat, its value starts at 0;
+    -- a unit stat without a default is nil until made (dev/probes
+    -- probe_unit_api).
+    local bogus = b1:GetArmyStat('ScenarioBogus', 3)
+    check(bogus.Value == 0 and bogus.Name == 'ScenarioBogus' and bogus.Type == 'Integer', 'a new army stat starts at 0: ' .. repr(bogus))
+    local u = CreateUnitHPR('uel0201', 'ARMY_1', 400, GetTerrainHeight(400, 640), 640, 0, 0, 0)
+    check(u:GetStat('ScenarioStat') == nil, 'a missing unit stat without a default is nil')
+    check(u:GetStat('ScenarioStat', 5).Value == 0, 'a default only types it')
+    u:SetStat('ScenarioStat', 7)
+    check(u:GetStat('ScenarioStat', 1).Value == 7, 'SetStat then sets it')
     ScenarioResult.done = true
 end)

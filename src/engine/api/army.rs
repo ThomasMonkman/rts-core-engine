@@ -275,6 +275,9 @@ const BRAINS_KEY: &str = "engine.brains";
 #[lua(name = "ArmyStat", write_only, rename_all = "PascalCase")]
 #[allow(dead_code)]
 struct ArmyStat {
+    name: String,
+    /// `"Integer"`, `"Float"` or `"String"`.
+    r#type: String,
     /// A number or a string.
     value: LuaValue,
 }
@@ -620,14 +623,20 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
                 .sum::<f64>())
         })?;
     lua_method!(lua, moho::AIBrain,
-        /// Returns the stat as `{ Value = v }` (FAF reads `.Value`), creating
-        /// it with `default` (0 if absent) on first use. The stats moho keeps
-        /// itself (economy, unit cap) come from the army's live state.
+        /// Returns the stat as `{ Name, Type, Value }` (FAF reads `.Value`),
+        /// creating it on first use: a numeric `default` only types it, the
+        /// value starts at 0 (`GetArmyStat('X', 3).Value` is 0, dev/probes
+        /// probe_unit_api); a string default is kept as given (not probed).
+        /// The stats moho keeps itself (economy, unit cap) come from the
+        /// army's live state.
         GetArmyStat = |lua, (brain, name, default): (Obj<moho::AIBrain>, String, LuaValue)| {
             let ArmyHandle(index) = script_object::handle(&brain)?;
+            let number_type = |v: f64| if v.fract() == 0.0 { "Integer" } else { "Float" };
             let value = {
                 if let Some(v) = engine_army_stat(lua, index, &name) {
-                    let t = lua.create_table_with_capacity(0, 1)?;
+                    let t = lua.create_table_with_capacity(0, 3)?;
+                    t.raw_set("Name", name)?;
+                    t.raw_set("Type", number_type(v))?;
                     t.raw_set("Value", v)?;
                     return Ok(Some(Shaped::<ArmyStat>::new(t)));
                 }
@@ -636,16 +645,26 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
                 match a.stats.get(&name) {
                     Some(v) => v.clone(),
                     None => {
-                        let v = if default.is_nil() { StatValue::Number(0.0) } else { stat_value(&default)? };
-                        a.stats.insert(name, v.clone());
+                        let v = match &default {
+                            LuaValue::String(_) => stat_value(&default)?,
+                            _ => StatValue::Number(0.0),
+                        };
+                        a.stats.insert(name.clone(), v.clone());
                         v
                     }
                 }
             };
-            let t = lua.create_table_with_capacity(0, 1)?;
+            let t = lua.create_table_with_capacity(0, 3)?;
+            t.raw_set("Name", name)?;
             match value {
-                StatValue::Number(n) => t.raw_set("Value", n)?,
-                StatValue::Text(s) => t.raw_set("Value", s)?,
+                StatValue::Number(n) => {
+                    t.raw_set("Type", number_type(n))?;
+                    t.raw_set("Value", n)?;
+                }
+                StatValue::Text(s) => {
+                    t.raw_set("Type", "String")?;
+                    t.raw_set("Value", s)?;
+                }
             }
             Ok(Some(Shaped::<ArmyStat>::new(t)))
         })?;
