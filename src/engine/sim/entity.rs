@@ -88,6 +88,40 @@ pub enum CollisionShape {
     Box { center: FxVec3, half: FxVec3 },
 }
 
+/// The edge of moho's rect-query cells (`GetUnitsInRect`,
+/// `GetReclaimablesInRect`).
+const QUERY_CELL: i32 = 4;
+/// How far past a query's cells a box centre may lie and still reach them.
+const CELL_QUERY_MARGIN: Fx = Fx::const_from_int(16);
+
+fn query_cell(v: Fx) -> i32 {
+    (v / Fx::from_num(QUERY_CELL)).floor().to_num::<i32>()
+}
+
+/// The world bounds of the query cells under a rectangle.
+fn cell_bounds(min_x: Fx, min_z: Fx, max_x: Fx, max_z: Fx) -> (Fx, Fx, Fx, Fx) {
+    let c = |v: Fx| Fx::from_num(query_cell(v) * QUERY_CELL);
+    (c(min_x), c(min_z), c(max_x) + Fx::from_num(QUERY_CELL), c(max_z) + Fx::from_num(QUERY_CELL))
+}
+
+/// Whether `e`'s box (its collision box or sphere, unrotated; a point
+/// without one) touches a query cell the rectangle overlaps, edges
+/// inclusive. The real game lists an object in every 4x4 cell its box
+/// touches and a rect returns everything in the cells it overlaps, with no
+/// exact test after: a tank half a unit long at z 336.5 shows in rects
+/// over z 332..340, a wall at 880 in 876..884 (dev/probes probe_re2_build
+/// RECT).
+fn touches_cells(e: &Entity, min_x: Fx, min_z: Fx, max_x: Fx, max_z: Fx) -> bool {
+    let p = e.position;
+    let (cx, cz, hx, hz) = match e.collision_shape() {
+        CollisionShape::Box { center, half } => (p.x + center.x, p.z + center.z, half.x, half.z),
+        CollisionShape::Sphere { center, radius } => (p.x + center.x, p.z + center.z, radius, radius),
+        CollisionShape::None => (p.x, p.z, Fx::ZERO, Fx::ZERO),
+    };
+    let overlaps = |lo: Fx, hi: Fx, qlo: Fx, qhi: Fx| query_cell(lo) <= query_cell(qhi) && query_cell(qlo) <= query_cell(hi);
+    overlaps(cx - hx, cx + hx, min_x, max_x) && overlaps(cz - hz, cz + hz, min_z, max_z)
+}
+
 /// When an army group sees an entity's mesh (`SetVizTo*`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VisionMode {
@@ -819,6 +853,31 @@ impl EntityWorld {
         ids.sort_unstable();
     }
 
+    /// Live units listed by moho's rect query for the XZ rectangle: those
+    /// whose box touches a 4x4 cell (aligned to multiples of 4) the
+    /// rectangle overlaps, box edges inclusive ([`touches_cells`]), in id
+    /// order.
+    pub fn units_in_cells(&self, min_x: Fx, min_z: Fx, max_x: Fx, max_z: Fx) -> Vec<EntityId> {
+        let mut ids = Vec::new();
+        let (x0, z0, x1, z1) = cell_bounds(min_x, min_z, max_x, max_z);
+        self.grid.candidates(x0 - CELL_QUERY_MARGIN, z0 - CELL_QUERY_MARGIN, x1 + CELL_QUERY_MARGIN, z1 + CELL_QUERY_MARGIN, &mut ids);
+        ids.retain(|&id| self.get(id).is_some_and(|e| touches_cells(e, min_x, min_z, max_x, max_z)));
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Live props listed by moho's rect query ([`EntityWorld::units_in_cells`]).
+    pub fn props_in_cells(&self, min_x: Fx, min_z: Fx, max_x: Fx, max_z: Fx) -> Vec<EntityId> {
+        let mut ids = Vec::new();
+        let (x0, z0, x1, z1) = cell_bounds(min_x, min_z, max_x, max_z);
+        self.prop_grid.candidates(x0 - CELL_QUERY_MARGIN, z0 - CELL_QUERY_MARGIN, x1 + CELL_QUERY_MARGIN, z1 + CELL_QUERY_MARGIN, &mut ids);
+        ids.retain(|&id| self.get(id).is_some_and(|e| !e.destroyed && touches_cells(e, min_x, min_z, max_x, max_z)));
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
     /// Live units inside the XZ rectangle (inclusive), in id order.
     pub fn units_in_rect(&self, min_x: Fx, min_z: Fx, max_x: Fx, max_z: Fx) -> Vec<EntityId> {
         let mut ids = Vec::new();
@@ -1256,6 +1315,19 @@ mod tests {
         let f = crate::engine::sim::math::from_lua;
         w.get_mut(id).unwrap().unit.as_mut().unwrap().build_skirt = (f(skirt.0), f(skirt.1), f(skirt.2), f(skirt.3));
         id
+    }
+
+    /// probe_re2_build RECT: a tank 0.55 long each way at z 336.5 shows in
+    /// thin rects anywhere over z 332..340, nowhere else.
+    #[test]
+    fn rect_queries_match_whole_four_unit_cells() {
+        let mut w = EntityWorld::default();
+        let id = w.spawn(EntityKind::Unit, BlueprintKind::Unit, String::new(), None, FxVec3::from_f64(800.5, 0.0, 336.5), FxQuat::IDENTITY);
+        w.get_mut(id).unwrap().cold.base_collision = CollisionShape::Box { center: FxVec3::default(), half: FxVec3::from_f64(0.4, 0.3, 0.55) };
+        let hits = |z: f64| !w.units_in_cells(Fx::from_num(799), Fx::from_num(z), Fx::from_num(802), Fx::from_num(z + 0.1)).is_empty();
+        assert!(!hits(331.5) && hits(332.0) && hits(339.5) && !hits(340.0));
+        let hx = |x: f64| !w.units_in_cells(Fx::from_num(x), Fx::from_num(336), Fx::from_num(x + 0.1), Fx::from_num(337)).is_empty();
+        assert!(!hx(799.5) && hx(800.0) && hx(803.5) && !hx(804.0));
     }
 
     #[test]

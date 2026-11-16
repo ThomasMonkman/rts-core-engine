@@ -500,8 +500,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua.set_app_data(crate::engine::sim::bounded_props::BoundedProps::default());
 
     lua_fn!(lua, global,
-        /// `GetUnitsInRect(rect)` or `(x0, z0, x1, z1)`: live units inside the XZ
-        /// rectangle (inclusive), in entity id order; nil when there are none.
+        /// `GetUnitsInRect(rect)` or `(x0, z0, x1, z1)`: live units in the 4x4
+        /// cells the XZ rectangle overlaps (`EntityWorld::units_in_cells`:
+        /// coarse, as the real game's), in entity id order; nil when there
+        /// are none.
         GetUnitsInRect = |lua, args: LuaMultiValue| {
             let num = |v: Option<&LuaValue>| -> LuaResult<Fx> {
                 match v {
@@ -520,7 +522,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 _ => (num(args.front())?, num(args.get(1))?, num(args.get(2))?, num(args.get(3))?),
             };
             let (minx, maxx, minz, maxz) = (x0.min(x1), x0.max(x1), z0.min(z1), z0.max(z1));
-            let ids = world(lua).units_in_rect(minx, minz, maxx, maxz);
+            let ids = world(lua).units_in_cells(minx, minz, maxx, maxz);
             if ids.is_empty() {
                 return Ok(None);
             }
@@ -560,8 +562,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
         IsProjectile = |lua, v: LuaValue| Ok(kind_of(lua, &v) == Some(EntityKind::Projectile)))?;
     lua_fn!(lua, global,
-        /// Props (incl. wrecks) and units in the rectangle, id order; nil if none.
-        /// TODO: moho tests collision/visual boxes, we test origins.
+        /// Props (incl. wrecks) and units in the 4x4 cells the rectangle
+        /// overlaps (coarse, as `GetUnitsInRect`), id order; nil if none. FAF's
+        /// AI leans on it: a point rect at an extractor site finds the rocks
+        /// in the way (`aiutilities.lua` `EngineerTryReclaimCaptureArea`).
         GetReclaimablesInRect = |lua, args: LuaMultiValue| {
             let num = |v: Option<&LuaValue>| -> LuaResult<Fx> {
                 match v {
@@ -582,8 +586,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             let (minx, maxx, minz, maxz) = (x0.min(x1), x0.max(x1), z0.min(z1), z0.max(z1));
             let mut ids = {
                 let w = world(lua);
-                let mut ids = w.props_in_rect(minx, minz, maxx, maxz);
-                ids.extend(w.units_in_rect(minx, minz, maxx, maxz));
+                let mut ids = w.props_in_cells(minx, minz, maxx, maxz);
+                ids.extend(w.units_in_cells(minx, minz, maxx, maxz));
                 ids
             };
             ids.sort_unstable();
