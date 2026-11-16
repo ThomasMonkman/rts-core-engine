@@ -37,6 +37,19 @@ Copy a folder (`maps/probe_fight` is the simplest) and rename it and its files. 
   numbers within a tolerance.
 - Log `PROBE done` at the end: the runner stops the game when it sees it.
 
+Gotchas:
+
+- In the real game the probe body runs at tick 0, while the armies' storage is still 0: a
+  `GiveResource` at the top of the file without a `GiveStorage` in the same tick is lost. FAF's own
+  `GiveStorage('Energy', 100)` (`CreateBrainShared`) shows from tick 2.
+- `GiveStorage` keeps one script storage pair: `GiveStorage('MASS', ...)` then
+  `GiveStorage('ENERGY', ...)` leaves no mass storage (in both engines). For mass storage, build a
+  storage structure (`ueb1106`).
+- A `ForkThread` with `WaitTicks(1)` started by the probe body resumes at tick 2 in the real game and
+  tick 1 in ours: compare ticks counted from a `t0` the probe takes itself.
+- In ours, a windowed run with `--ticks N` runs the sim back to back at 1x and ignores pause and game
+  speed from the interface. Probe those without `--ticks` (stop the run by hand).
+
 ## Running it
 
 ```powershell
