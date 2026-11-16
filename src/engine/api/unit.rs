@@ -1513,10 +1513,6 @@ fn health_band(health: Fx, max: Fx) -> u8 {
     band
 }
 
-/// Once a tick (after weapons and projectiles): living units whose health
-/// crossed a quarter step since the last check get `OnHealthChanged(new,
-/// old)` with the steps as fractions (FAF's damage smoke and fire, brain
-/// events). Dead units are left to `OnKilled`.
 /// Factory repeat build on / off; FAF hears `OnStartRepeatQueue` /
 /// `OnStopRepeatQueue` when it changes.
 pub(crate) fn set_repeat_queue(lua: &Lua, unit: u32, on: bool) -> LuaResult<()> {
@@ -1545,6 +1541,39 @@ pub(crate) fn set_focus(lua: &Lua, unit: u32, focus: Option<u32>) -> LuaResult<(
     Ok(())
 }
 
+/// `OnHealthChanged(new, old)` for unit `id` now, if its health crossed a
+/// quarter step since the last report. Moho calls it from inside the
+/// health change: `Damage` (through FAF's `AdjustHealth`), `SetHealth`,
+/// regeneration. So two hits in one tick that each cross a step are two
+/// calls (FAF probe `probe_re_wpn` `hc`: `d300a` then `d300b` in one tick,
+/// `0.500 / 1.000` then `0.250 / 0.500`, each between the `Damage` call
+/// and its return). A dead unit's is left to `OnKilled`.
+pub(crate) fn health_changed_now(lua: &Lua, id: u32) -> LuaResult<()> {
+    let change = {
+        let mut w = world(lua);
+        let Some(e) = w.get_mut(id) else { return Ok(()) };
+        if e.destroyed || e.health <= Fx::ZERO {
+            return Ok(());
+        }
+        let band = health_band(e.health, e.max_health);
+        let Some(u) = e.unit.as_deref_mut() else { return Ok(()) };
+        match u.health_band.replace(band) {
+            Some(old) if old != band => Some((band, old)),
+            _ => None,
+        }
+    };
+    if let Some((new, old)) = change
+        && let Some(obj) = crate::engine::api::entity::object(lua, id)? {
+        UnitCallbacks::on_health_changed(lua, &obj, "unit", new as f64 / 4.0, old as f64 / 4.0)?;
+    }
+    Ok(())
+}
+
+/// Once a tick (after weapons and projectiles), for health changed by other
+/// paths (construction, reclaim): living units whose health crossed a
+/// quarter step since their last report get `OnHealthChanged(new, old)`
+/// with the steps as fractions (FAF's damage smoke and fire, brain events).
+/// Dead units are left to `OnKilled`.
 pub fn health_changes_tick(lua: &Lua) -> LuaResult<()> {
     let changed: Vec<(u32, u8, u8)> = {
         let Some(mut w) = lua.app_data_mut::<crate::engine::sim::entity::EntityWorld>() else { return Ok(()) };

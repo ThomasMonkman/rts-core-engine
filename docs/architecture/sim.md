@@ -16,14 +16,14 @@ real game and what is inferred) are in the module comments of its file, listed b
 | Stage | What happens | Code |
 |---|---|---|
 | Input | player commands due this tick are applied as orders | `api/player_input.rs`, `sim/input.rs` |
-| Economy | production, consumption and stalls; economy events; regen | `sim/economy.rs`, `api/economy_event.rs` |
+| Economy | production, consumption and stalls; economy events | `sim/economy.rs`, `api/economy_event.rs` |
 | Threat | the AI threat map; animators (manipulators) step | `sim/threat.rs`, `sim/manipulator.rs` |
 | Orders | orders whose target is gone end | `api/orders.rs` |
 | Construction | building, upgrades, assisting; silos, teleport, script tasks, transports | `api/construction.rs`, `api/transport.rs`, ... |
 | Reclaim | reclaim, capture, sacrifice | `api/reclaim.rs`, `api/capture.rs` |
 | Weapons | targeting, aim and the fire clock; beams | `sim/weapon.rs`, `api/weapon.rs`, `api/beam.rs` |
 | LuaThreads | FAF's Lua threads due this tick | `sim/scheduler.rs`, `api/threads.rs` |
-| Movement | units move, air units fly, submarines dive; attached entities follow their parents | `sim/movement.rs`, `api/movement.rs` |
+| Movement | health regeneration; units move, air units fly, submarines dive; attached entities follow their parents | `sim/movement.rs`, `api/movement.rs` |
 | Projectiles | flight, collisions, `OnImpact` | `sim/projectile.rs`, `sim/collision.rs` |
 | Intel | vision, radar, sonar and the rest are re-stamped; who sees what | `sim/vision.rs` |
 | Destroy | the destroy queue: the `OnDestroy` of everything destroyed this tick, first destroyed first (moho's end-of-beat drain) | `api/entity.rs` (`run_destroy_queue`) |

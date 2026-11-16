@@ -91,7 +91,6 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
     economy(lua);
     contain(lua, tick, crate::engine::api::army::stat_triggers_tick(lua))?;
     contain(lua, tick, crate::engine::api::economy_event::tick(lua))?;
-    regen(lua);
     enter(Phase::Threat);
     crate::engine::api::threat::tick(lua);
     if let (Some(mut m), Some(w)) = (lua.app_data_mut::<crate::engine::sim::manipulator::Manipulators>(), lua.app_data_ref::<crate::engine::sim::entity::EntityWorld>()) {
@@ -128,6 +127,11 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
     // next tick. Then intel from where everything ended up (the recon
     // refresh, 0x1031913b).
     enter(Phase::Movement);
+    // Regeneration is in the motion stage too, after the scripts: a rate set
+    // from a thread first heals that same beat (FAF probe `probe_re_wpn`
+    // `hc [regen]`: 740 at 50 a second set at +9 reads 750 at +10 and 865
+    // at +34).
+    contain(lua, tick, regen(lua))?;
     crate::engine::api::orders::hold_new(lua);
     contain(lua, tick, crate::engine::api::movement::tick(lua))?;
     contain(lua, tick, crate::engine::api::movement::fuel_tick(lua))?;
@@ -195,18 +199,35 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
-/// Health regeneration (`SetRegenRate`) for finished, living units.
-fn regen(lua: &Lua) {
+/// Health regeneration (`SetRegenRate`) for finished, living units; a unit
+/// whose health crosses a quarter step hears `OnHealthChanged` at once
+/// (FAF probe `probe_re_wpn` `hc [regen]`: at the tick it crosses), in id
+/// order.
+fn regen(lua: &Lua) -> mlua::Result<()> {
     use crate::engine::sim::math::Fx;
-    let Some(mut world) = lua.app_data_mut::<crate::engine::sim::entity::EntityWorld>() else { return };
-    let dt = Fx::ONE / Fx::from_num(10);
-    world.for_each_unit_mut(|e| {
-        let Some(rate) = e.unit.as_deref().map(|u| u.regen).filter(|r| *r != Fx::ZERO) else { return };
-        if e.destroyed || e.fraction_complete < Fx::ONE || e.health <= Fx::ZERO {
-            return;
-        }
-        e.health = (e.health + rate * dt).clamp(Fx::ZERO, e.max_health);
-    });
+    let changed: Vec<u32> = {
+        let Some(mut world) = lua.app_data_mut::<crate::engine::sim::entity::EntityWorld>() else { return Ok(()) };
+        let mut changed = Vec::new();
+        world.for_each_unit_mut(|e| {
+            let Some(rate) = e.unit.as_deref().map(|u| u.regen).filter(|r| *r != Fx::ZERO) else { return };
+            if e.destroyed || e.fraction_complete < Fx::ONE || e.health <= Fx::ZERO {
+                return;
+            }
+            let before = e.health;
+            // A tenth of the rate a tick, divided rather than times 0.1 (not
+            // exact in fixed point): 50 a second is 5 a tick, so 740 reaches
+            // the 750 step in 2 ticks, as in the real game.
+            e.health = (e.health + rate / Fx::from_num(10)).clamp(Fx::ZERO, e.max_health);
+            if e.health != before {
+                changed.push(e.id);
+            }
+        });
+        changed
+    };
+    for id in changed {
+        crate::engine::api::unit::health_changed_now(lua, id)?;
+    }
+    Ok(())
 }
 
 /// Per-army intel coverage and what each army has seen (`sim::vision`).

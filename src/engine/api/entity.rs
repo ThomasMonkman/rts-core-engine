@@ -1340,19 +1340,26 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             })
         })?;
     lua_method!(lua, moho::Entity,
-        /// Sets health, clamped to [0, max]. The instigator is ignored.
+        /// Sets health, clamped to [0, max]. The instigator is ignored. A
+        /// unit hears `OnHealthChanged` from inside the call when a quarter
+        /// step is crossed.
         SetHealth = |lua, (this, _instigator, health): (Obj<moho::Entity>, shapes::Instigator, f64)| {
-            with_entity_mut(lua, &this, |e| {
+            let id = with_entity_mut(lua, &this, |e| {
                 e.health = crate::engine::sim::math::from_lua(health).clamp(Fx::ZERO, e.max_health);
-            })
+                Some(e.id)
+            })?;
+            id.map_or(Ok(()), |id| crate::engine::api::unit::health_changed_now(lua, id))
         })?;
     lua_method!(lua, moho::Entity,
         /// Health += delta, clamped to [0, max]. Kill credit (`instigator`) is a
-        /// TODO for veterancy.
+        /// TODO for veterancy. A unit hears `OnHealthChanged` from inside the
+        /// call when a quarter step is crossed (so from inside `Damage`).
         AdjustHealth = |lua, (this, _instigator, delta): (Obj<moho::Entity>, shapes::Instigator, f64)| {
-            with_entity_mut(lua, &this, |e| {
+            let id = with_entity_mut(lua, &this, |e| {
                 e.health = e.health.saturating_add(crate::engine::sim::math::from_lua(delta)).clamp(Fx::ZERO, e.max_health);
-            })
+                Some(e.id)
+            })?;
+            id.map_or(Ok(()), |id| crate::engine::api::unit::health_changed_now(lua, id))
         })?;
     lua_method!(lua, moho::Entity,
         /// Kills the entity once: health drops to 0 and `OnKilled(instigator,
