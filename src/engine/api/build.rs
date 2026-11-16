@@ -566,10 +566,10 @@ fn find_place_to_build(
             .map(|d| d.list.iter().enumerate().filter(|(_, dep)| dep.kind == kind).map(|(i, dep)| (dist2(dep.position.x, dep.position.z, start), i, dep.position)).collect())
             .unwrap_or_default();
         spots.sort_by_key(|&(d, i, _)| (d, i));
-        for (d, _, p) in spots {
+        for (_, _, p) in spots {
             if placement.allows(lua, p, &reserved)? && threat_ok(p)? {
                 let (x, z) = if relative { (p.x - start.x, p.z - start.z) } else { (p.x, p.z) };
-                return location(lua, x, z, d).map(|t| Some(shapes::List::new(t)));
+                return location(lua, x, z).map(|t| Some(shapes::List::new(t)));
             }
         }
         return Ok(None);
@@ -598,22 +598,25 @@ fn find_place_to_build(
         }
     }
     spots.sort_by_key(|&(d, i, ..)| (d, i));
-    for (d, _, (px, pz), p) in spots {
+    for (_, _, (px, pz), p) in spots {
         if placement.allows(lua, p, &reserved)? && threat_ok(p)? {
             // Template coordinates: relative to the start when `relative`.
-            return location(lua, crate::engine::sim::math::from_lua(px), crate::engine::sim::math::from_lua(pz), d).map(|t| Some(shapes::List::new(t)));
+            return location(lua, crate::engine::sim::math::from_lua(px), crate::engine::sim::math::from_lua(pz)).map(|t| Some(shapes::List::new(t)));
         }
     }
     Ok(None)
 }
 
-/// A `FindPlaceToBuild` result: `{x, z, dist}` (FAF's `BuildToNormalLocation`
-/// reads `[1]`/`[2]` and adds the reference point itself when `relative`).
-fn location(lua: &Lua, x: Fx, z: Fx, dist2: Fx) -> LuaResult<LuaTable> {
+/// A `FindPlaceToBuild` result: `{x, z, 0}`. The third element is always 0
+/// in the real game (dev/probes probe_ai_build, 17 positions), though
+/// `aibuildstructures.lua` calls it `{x, z, dist}`; FAF's
+/// `BuildToNormalLocation` reads `[1]`/`[2]` and adds the reference point
+/// itself when `relative`.
+fn location(lua: &Lua, x: Fx, z: Fx) -> LuaResult<LuaTable> {
     let t = lua.create_table_with_capacity(3, 0)?;
     t.raw_set(1, x.to_num::<f64>())?;
     t.raw_set(2, z.to_num::<f64>())?;
-    t.raw_set(3, crate::engine::sim::math::sqrt(dist2).to_num::<f64>())?;
+    t.raw_set(3, 0.0)?;
     Ok(t)
 }
 

@@ -38,5 +38,8 @@ ForkThread(function()
     check(not at('ueb1101', sx, sz), 'the first queued build reserves its site')
     check(not at('ueb1101', sx + 1, sz + 6), 'and so does the second')
     check(at('ueb1101', sx + 2, sz), 'skirts beside the site stay free')
+    -- FindPlaceToBuild answers {x, z, 0}: the third element is always 0.
+    local found = brain:FindPlaceToBuild('T1EnergyProduction', 'ueb1101', { { { 'T1EnergyProduction' }, { 380, 600, 0 }, { 400, 620, 0 }, { 420, 620, 0 }, { 400, 580, 0 } } }, false, eng)
+    check(found and found[1] and found[2] and found[3] == 0, 'FindPlaceToBuild gives {x, z, 0}: ' .. repr(found))
     ScenarioResult.done = true
 end)
