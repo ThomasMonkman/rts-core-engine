@@ -14,13 +14,14 @@
 //! it has seen, and what it remembers of units it has lost sight of
 //! (moho's recon blips outlive sight): a mobile unit's threat where it was
 //! last detected, whole for [`MEMORY_HOLD_TICKS`] then fading over 50
-//! updates; a structure's for good, also once destroyed out of sight. Its
-//! own army's threat is exact.
+//! updates, also once it is dead; a structure's for good, also once
+//! destroyed out of sight. Its own army's threat is exact.
 //!
 //! Each jammer fake a brain believes in (on its radar, not known fake:
 //! `sim::vision::Fake`) adds its jammer's whole threat at the fake's spot
-//! (probe_intel_jam). Not modelled: the probe's previous generation of
-//! fakes still counting after a jammer reset.
+//! (probe_intel_jam). Once it goes (a jammer reset) it is remembered there,
+//! whole while the jammer lives, the last two sets that went only, then as
+//! a lost unit (probe_re_jam).
 //!
 //! Script-assigned threat (`AssignThreatAtPosition`) counts from the next
 //! update and loses `decay` x its amount per update while positive;
@@ -188,6 +189,10 @@ struct Memory {
     seen: Option<u64>,
     /// Structures are remembered undecayed.
     structure: bool,
+    /// For a jammer fake that went: its jammer (the threat is the
+    /// jammer's; it's held whole while the jammer lives).
+    #[serde(default)]
+    jammer: Option<crate::engine::sim::entity::EntityId>,
 }
 
 /// Ticks between threat map updates: moho's map changes only on a 30-tick
@@ -317,12 +322,14 @@ impl ThreatMap {
         self.update_with_fakes(world, now, brains, knows, &[]);
     }
 
-    /// [`ThreatMap::update`] plus jammer fakes: each `(brain, jammer, at)`
-    /// adds the jammer's whole threat at `at` to what `brain` knows of the
-    /// jammer's army (probe_intel_jam: every fake on the brain's radar and
-    /// not known fake counts the jammer's full threat at its own spot; not
-    /// remembered once it goes). In the order given.
-    pub fn update_with_fakes(&mut self, world: &EntityWorld, now: u64, brains: &[u32], knows: &dyn Fn(u32, &crate::engine::sim::entity::Entity) -> Knowledge, fakes: &[(u32, crate::engine::sim::entity::EntityId, FxVec3)]) {
+    /// [`ThreatMap::update`] plus jammer fakes: each `(brain, fake, jammer,
+    /// at, believed)` the brain believes in adds the jammer's whole threat
+    /// at `at` to what `brain` knows of the jammer's army (probe_intel_jam:
+    /// every fake on the brain's radar and not known fake counts the
+    /// jammer's full threat at its own spot), and is remembered there once
+    /// it goes; one it knows is fake (`believed` false) is forgotten. In
+    /// the order given.
+    pub fn update_with_fakes(&mut self, world: &EntityWorld, now: u64, brains: &[u32], knows: &dyn Fn(u32, &crate::engine::sim::entity::Entity) -> Knowledge, fakes: &[(u32, crate::engine::sim::entity::EntityId, crate::engine::sim::entity::EntityId, FxVec3, bool)]) {
         let n = (self.cols * self.rows) as usize;
         self.built = true;
         for grid in self.cells.iter_mut() {
@@ -358,28 +365,73 @@ impl ThreatMap {
                         memory.remove(&e.id);
                     }
                     Knowledge::Detected => {
-                        memory.insert(e.id, Memory { army, cell: index, threat: data.threat, seen: Some(now), structure });
+                        memory.insert(e.id, Memory { army, cell: index, threat: data.threat, seen: Some(now), structure, jammer: None });
                     }
                     Knowledge::SeenStructure => {
                         let seen = memory.get(&e.id).and_then(|m| m.seen);
-                        memory.insert(e.id, Memory { army, cell: index, threat: data.threat, seen, structure: true });
+                        memory.insert(e.id, Memory { army, cell: index, threat: data.threat, seen, structure: true, jammer: None });
                     }
                     Knowledge::Unknown => continue,
                 }
                 counted.push(e.id);
                 add(grid_of(&mut self.known[b], army, n), index as usize, &data.threat);
             }
-            // Units out of intel, and gone ones: one that died in sight
-            // (detected at the last update) is forgotten, one destroyed out
-            // of sight stays remembered (probe_ai_threat: the tank and point
-            // defence destroyed unseen at +165 still count).
+            // The fakes it believes in now count at their spots and are
+            // remembered there.
+            let mut believed: Vec<u32> = Vec::new();
+            for &(_, fake, jammer, at, real) in fakes.iter().filter(|f| f.0 == brain) {
+                // Known to be a fake: forgotten.
+                if !real {
+                    memory.remove(&fake);
+                    continue;
+                }
+                let Some((army, data)) = world.get(jammer).and_then(|e| Some((e.army?, e.unit.as_deref()?))) else { continue };
+                let index = self.index_of(at);
+                memory.insert(fake, Memory { army, cell: index, threat: data.threat, seen: Some(now), structure: false, jammer: Some(jammer) });
+                believed.push(fake);
+                add(grid_of(&mut self.known[b], army, n), index as usize, &data.threat);
+            }
+            believed.sort_unstable();
+            // Of a living jammer's fakes that went, only the last two sets
+            // are remembered (probe_re_jam: after the 4th reset the total stays
+            // at three sets, 96, and the cell at the frigate reads 36: the
+            // first set's two fakes there gone, the 4th's three added).
+            let mut gone: Vec<(crate::engine::sim::entity::EntityId, std::cmp::Reverse<u32>)> =
+                memory.iter().filter_map(|(&id, m)| m.jammer.filter(|_| believed.binary_search(&id).is_err()).map(|j| (j, std::cmp::Reverse(id)))).collect();
+            if !gone.is_empty() {
+                gone.sort_unstable();
+                let mut i = 0;
+                while i < gone.len() {
+                    let j = gone[i].0;
+                    let end = i + gone[i..].iter().take_while(|g| g.0 == j).count();
+                    // While it lives: the set it had when it died stays too
+                    // (probe_re_jam: still 96 after the frigate died).
+                    let keep = world.get(j).filter(|e| !e.destroyed && !e.cold.killed).and_then(|e| e.unit.as_deref()?.jammer).map(|spec| 2 * spec.blips as usize);
+                    if let Some(keep) = keep {
+                        for g in &gone[(i + keep).min(end)..end] {
+                            memory.remove(&g.1.0);
+                        }
+                    }
+                    i = end;
+                }
+            }
+            // Units out of intel, gone ones and fakes that went: remembered
+            // where they were last known, whole for a while, then fading.
+            // Dead and destroyed units too, whether they died in sight or
+            // not (probe_ai_threat: a tank and a point defence destroyed
+            // unseen at +165 still count; probe_re_jam2: radar-only K and
+            // seen V destroyed at 100 stay 2.40 to 380, then 2.35 at 390,
+            // 2.11 at 540). A fake that went is held whole while its
+            // jammer lives (probe_re_jam: each jammer reset adds its 5
+            // fakes' 30 on top, 36 -> 66 -> 96, still 96 at 440, 280 ticks
+            // after the second set went and 80 after the frigate died).
             memory.retain(|&id, m| {
-                if counted.binary_search(&id).is_ok() {
+                if counted.binary_search(&id).is_ok() || believed.binary_search(&id).is_ok() {
                     return true;
                 }
-                let alive = world.get(id).is_some_and(|e| !e.destroyed && e.kind == EntityKind::Unit);
-                if !alive && m.seen.is_some_and(|s| s + UPDATE_TICKS >= now) {
-                    return false;
+                if let Some(j) = m.jammer
+                    && world.get(j).is_some_and(|e| !e.destroyed && !e.cold.killed) {
+                    m.seen = Some(now);
                 }
                 let Some(left) = m.left(now) else { return false };
                 let grid = grid_of(&mut self.known[b], m.army, n);
@@ -389,11 +441,6 @@ impl ThreatMap {
                 true
             });
             self.memory[b] = memory;
-            for &(_, jammer, at) in fakes.iter().filter(|f| f.0 == brain) {
-                let Some((army, data)) = world.get(jammer).and_then(|e| Some((e.army?, e.unit.as_deref()?))) else { continue };
-                let index = self.index_of(at) as usize;
-                add(grid_of(&mut self.known[b], army, n), index, &data.threat);
-            }
         }
         self.age_assigned();
     }
@@ -639,7 +686,7 @@ mod tests {
     /// keeps its threat where it was last detected for 300 ticks after that
     /// update, then loses 2% of it per 30-tick update; a structure seen stays
     /// whole, also when destroyed out of sight; a unit that dies in sight is
-    /// forgotten.
+    /// remembered the same way (probe_re_jam2).
     #[test]
     fn lost_units_are_remembered_then_fade() {
         let mut w = EntityWorld::default();
@@ -679,13 +726,57 @@ mod tests {
         assert_eq!(at(&map, 40.0, 40.0), 0.0, "gone after 50 updates");
         assert_eq!(at(&map, 200.0, 40.0), 16.0);
 
-        // Dies in sight: forgotten at the next update.
+        // Dies in sight: whole for 300 ticks after the last update that
+        // saw it, then fading.
         seen.set(true);
-        map.update(&w, 2000, &[1], &knows);
+        map.update(&w, 2010, &[1], &knows);
         assert_eq!(at(&map, 40.0, 200.0), 2.0);
         w.get_mut(tank).unwrap().destroyed = true;
-        map.update(&w, 2030, &[1], &knows);
-        assert_eq!(at(&map, 40.0, 200.0), 0.0);
+        for now in (2040..=2280).step_by(30) {
+            map.update(&w, now, &[1], &knows);
+            assert_eq!(at(&map, 40.0, 200.0), 2.0, "+{now}");
+        }
+        map.update(&w, 2310, &[1], &knows);
+        assert!((at(&map, 40.0, 200.0) - 2.0 * 49.0 / 50.0).abs() < 1e-6, "a fiftieth lost");
+    }
+
+    /// Jammer fakes it believed in are remembered once they go, whole while
+    /// the jammer lives, the last two sets that went only; known fakes are
+    /// forgotten (probe_re_jam).
+    #[test]
+    fn gone_fakes_are_remembered_while_the_jammer_lives() {
+        use crate::engine::sim::vision::{FAKE_ID_BASE, JammerSpec};
+        let mut w = EntityWorld::default();
+        let land = ThreatKinds { land: true, ..Default::default() };
+        let jammer = unit(&mut w, 2, 16.0, 16.0, 6, land);
+        w.get_mut(jammer).unwrap().unit.as_mut().unwrap().jammer = Some(JammerSpec { blips: 1, min: Fx::ZERO, max: Fx::ZERO });
+        let mut map = ThreatMap::new(256, 256);
+        let unknown = |_: u32, _: &Entity| Knowledge::Unknown;
+        let enemies = |a: u32| a == 2;
+        let at = |m: &ThreatMap, x: f64| m.threat_at(FxVec3::from_f64(x, 0.0, 16.0), 0, ThreatType::Overall, 1, &enemies).to_num::<f64>();
+        let fake = |i: u32, x: f64| (1, FAKE_ID_BASE + i, jammer, FxVec3::from_f64(x, 0.0, 16.0), true);
+        // One set at a time, each at its own cell.
+        for (i, now) in [30u64, 60, 90, 120].into_iter().enumerate() {
+            let x = 48.0 + 32.0 * i as f64;
+            map.update_with_fakes(&w, now, &[1], &unknown, &[fake(i as u32, x)]);
+        }
+        assert_eq!(at(&map, 48.0), 0.0, "the first set: pushed out by the 4th");
+        assert_eq!((at(&map, 80.0), at(&map, 112.0), at(&map, 144.0)), (6.0, 6.0, 6.0), "two gone sets and the live one");
+        for now in (150..=900).step_by(30) {
+            map.update_with_fakes(&w, now, &[1], &unknown, &[fake(3, 144.0)]);
+        }
+        assert_eq!(at(&map, 80.0), 6.0, "held whole while the jammer lives");
+        // Known to be fake: forgotten.
+        map.update_with_fakes(&w, 930, &[1], &unknown, &[(1, FAKE_ID_BASE + 3, jammer, FxVec3::from_f64(144.0, 0.0, 16.0), false)]);
+        assert_eq!(at(&map, 144.0), 0.0);
+        // The jammer dies: then the usual hold and fade.
+        w.get_mut(jammer).unwrap().destroyed = true;
+        for now in (960..=1200).step_by(30) {
+            map.update_with_fakes(&w, now, &[1], &unknown, &[]);
+        }
+        assert_eq!(at(&map, 80.0), 6.0, "whole for 300 ticks after the last update it lived");
+        map.update_with_fakes(&w, 1230, &[1], &unknown, &[]);
+        assert!((at(&map, 80.0) - 6.0 * 49.0 / 50.0).abs() < 1e-6, "then fading");
     }
 
     /// dev/probes probe_ai_threat: `decay` is the fraction of the amount lost
