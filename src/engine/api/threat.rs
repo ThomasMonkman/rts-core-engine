@@ -4,7 +4,8 @@
 //! cell (0 = that cell only), which is how FAF uses them (e.g.
 //! `GetThreatAtPosition(pos, 1, ...)`, `GetThreatsAroundPosition(pos, 16, ...)`),
 //! despite the annotations calling it game units. `armyIndex` picks one army's
-//! threat; without it, every enemy of the brain counts.
+//! threat (none for the brain's own or an allied army); without it, every
+//! enemy of the brain counts.
 
 use crate::lua_api::shapes;
 use mlua::prelude::*;
@@ -68,13 +69,13 @@ pub(crate) fn refresh(lua: &Lua, map: &mut ThreatMap) {
 }
 
 /// Runs `f` on the (refreshed) threat map with the army filter for `brain`.
-/// `allies_count_zero`: a requested army allied to the brain contributes
-/// nothing (`GetHighestThreatPosition`'s rule).
+/// A requested army that is the brain's own or an ally's contributes no unit
+/// threat (assigned threat still counts): the real game answers 0 for its own
+/// and an allied index (dev/probes probe_ai_threat `own:self`, `ally:idx`).
 fn query<R>(
     lua: &Lua,
     brain: &LuaTable,
     army: Option<u32>,
-    allies_count_zero: bool,
     f: impl FnOnce(&ThreatMap, u32, &dyn Fn(u32) -> bool) -> R,
 ) -> LuaResult<R> {
     let ArmyHandle(me) = script_object::handle(brain)?;
@@ -83,7 +84,7 @@ fn query<R>(
     let armies = lua.app_data_ref::<Armies>().expect("Armies");
     let alliance = |a: u32| armies.alliance(me, a);
     let counts = |a: u32| match army {
-        Some(x) => a == x && !(allies_count_zero && alliance(x) == Alliance::Ally),
+        Some(x) => a == x && alliance(x) != Alliance::Ally,
         None => alliance(a) == Alliance::Enemy,
     };
     Ok(f(&map, me, &counts))
@@ -97,7 +98,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             let ty = threat_type(ty)?;
             let ArmyHandle(me) = script_object::handle(&brain)?;
             let start = lua.app_data_ref::<Armies>().and_then(|a| a.get(me).and_then(|a| a.start)).unwrap_or_default();
-            let (pos, t) = query(lua, &brain, army, true, |m, me, counts| m.highest(rings(ring), ty, me, counts, start))?;
+            let (pos, t) = query(lua, &brain, army, |m, me, counts| m.highest(rings(ring), ty, me, counts, start))?;
             Ok((entity::vector(lua, pos)?, t.to_num::<f64>()))
         },
     )?;
@@ -106,7 +107,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// brain's enemies (or only army `army`).
         GetThreatAtPosition = |lua, (brain, pos, radius, _restriction, ty, army): (Obj<moho::AIBrain>, shapes::Vector, f64, Option<bool>, Option<String>, Option<u32>)| {
             let (ty, p) = (threat_type(ty)?, position(&pos)?);
-            let t = query(lua, &brain, army, false, |m, me, counts| m.threat_at(p, rings(radius), ty, me, counts))?;
+            let t = query(lua, &brain, army, |m, me, counts| m.threat_at(p, rings(radius), ty, me, counts))?;
             Ok(t.to_num::<f64>())
         },
     )?;
@@ -114,7 +115,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// `{ {x, z, threat}, ... }` for cells with threat, row-major.
         GetThreatsAroundPosition = |lua, (brain, pos, radius, _restriction, ty, army): (Obj<moho::AIBrain>, shapes::Vector, f64, Option<bool>, Option<String>, Option<u32>)| {
             let (ty, p) = (threat_type(ty)?, position(&pos)?);
-            let cells = query(lua, &brain, army, false, |m, me, counts| m.around(p, rings(radius), ty, me, counts))?;
+            let cells = query(lua, &brain, army, |m, me, counts| m.around(p, rings(radius), ty, me, counts))?;
             let out = lua.create_table_with_capacity(cells.len(), 0)?;
             for (i, (x, z, t)) in cells.into_iter().enumerate() {
                 let row = lua.create_table_with_capacity(3, 0)?;
@@ -131,7 +132,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// enemies (or only army `army`).
         GetThreatBetweenPositions = |lua, (brain, a, b, _restriction, ty, army): (Obj<moho::AIBrain>, shapes::Vector, shapes::Vector, Option<bool>, Option<String>, Option<u32>)| {
             let (ty, a, b) = (threat_type(ty)?, position(&a)?, position(&b)?);
-            let t = query(lua, &brain, army, false, |m, me, counts| m.between(a, b, ty, me, counts))?;
+            let t = query(lua, &brain, army, |m, me, counts| m.between(a, b, ty, me, counts))?;
             Ok(t.to_num::<f64>())
         },
     )?;
