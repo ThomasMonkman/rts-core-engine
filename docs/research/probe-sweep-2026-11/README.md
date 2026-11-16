@@ -11,7 +11,7 @@ Items are counted as bullets of the batches below. A bullet that was half fixed 
 | Batch | Fixed | Open | Needs a decision | Needs a new probe | Closed, no change | Items |
 |---|---|---|---|---|---|---|
 | 1. Engine aborts and harness | 3 | 2 | 0 | 0 | 0 | 5 |
-| 2. Lua runtime | 3 | 21 | 0 | 0 | 1 | 25 |
+| 2. Lua runtime | 9 | 18 | 0 | 0 | 1 | 28 |
 | 3. Orders and construction | 14 | 29 | 0 | 0 | 2 | 45 |
 | 4. Weapons, projectiles, shields | 15 | 14 | 0 | 5 | 0 | 34 |
 | 5. Movement and transports | 14 | 9 | 0 | 3 | 2 | 28 |
@@ -20,7 +20,7 @@ Items are counted as bullets of the batches below. A bullet that was half fixed 
 | 8. Interface | 11 | 43 | 0 | 2 | 0 | 56 |
 | 9. API surface and arity | 2 | 26 | 0 | 0 | 0 | 28 |
 | 10. Intel: jamming and contact icons | 6 | 3 | 0 | 3 | 0 | 12 |
-| **Total** | 86 | 173 | 0 | 14 | 6 | 279 |
+| **Total** | 92 | 170 | 0 | 14 | 6 | 282 |
 
 ### Decisions made (2026-11-16)
 
@@ -43,28 +43,31 @@ Items are counted as bullets of the batches below. A bullet that was half fixed 
 
 - [x] **`^` is integer XOR in the real game, not power** (fixed `af857a4`) (A). Real: `2^0.5` = 4294967296, `2 ^ 3 ^ 2` = 3; power is `math.pow` / `__pow`. Ours: Luau power. FAF's `x ^ 0` truncation in `fa/lua/sim/NavUtils.lua:443` and `:490` reverses only the ends of a path in ours. No `^` rewrite in `engine/lua_translation/` (`bitwise.rs` covers `~ | & << >>`). `probe_api_spot`, `probe_api_lang`. [api L1](api.md#l1) RNGAI's `x ^ 2` now computes XOR, as in the real game (see Decisions needed).
 - [x] **`import` of a missing file raises** (fixed `ae86c4a`) (A). Real: `doscript` of a missing file raises `Unable to find file <path>`, so `import` raises and `pcall(import, optional)` takes the fallback. Ours returned an empty module, so the call succeeded; it now raises. Whether relative, backslash and `..` paths fail to import as in the real game is not rechecked. `engine/api/dofile_or_script.rs`. `probe_api_spot`, `probe_api_lang`. [api L17](api.md#l17)
-- [ ] **`doscript` returns nil whatever the chunk returns** (C). Ours returns the chunk's value. `engine/api/dofile_or_script.rs`. `probe_api_lang`. [api L18](api.md#l18)
+- [x] **`doscript` returns nil whatever the chunk returns** (fixed `263c80b`) (C). Ours returned the chunk's value. `engine/api/dofile_or_script.rs`. `probe_api_lang`. [api L18](api.md#l18)
 - [x] **`_TRACEBACK` missing in both VMs** (fixed `21e595a`) (A, rare paths). Real: global exists; `fa/lua/system/Localization.lua:177` and `maui/layouthelpers.lua:2360` call it. Ours: "nonexistent global". `probe_api_census`. [api M1](api.md#m1)
-- [ ] **Missing globals: `serialize` table, `__pow`, `_LOADED`, `loadfile`, `GetTimeForProfile`, `__factory_objects`, `__serialize_*`, sim `GetMouseWorldPos`.** `serialize` is read at load by `fa/lua/system/saveload.lua:33`. `probe_api_census`. [api M2](api.md#m2)
-- [ ] **`loadstring` and `HashChecker` missing in the interface VM.** Real: `loadstring` works there (FA syntax, bytecode). `probe_api_census`, `probe_api_lang`. [api M3](api.md#m3)
-- [ ] **`debug.*` (`sethook`, `getlocal`, `getupvalue`, ...) and `string.dump` / `string.lualex` missing; `debug.getinfo` lacks `func`, `namewhat`, `what`.** Developer tools only (`sim/Profiler.lua:25`, `system/profile.lua:113`). `probe_api_census`. [api M4](api.md#m4), [api M5](api.md#m5)
-- [ ] **Nested long brackets fail to compile in ours** (B). Real: `[[a [[b]] c]]` and nested `--[[ ]]` work. Ours: the file silently does not load. Not handled in `engine/lua_translation/`. `probe_api_lang`. [api L12](api.md#l12)
-- [ ] **Closures share the loop variable** (B). Real: `{3 3 3}`; ours `{1 2 3}`. Luau semantics. `probe_api_lang`. [api L2](api.md#l2)
-- [ ] **`for k, v in nil` raises** (C). Real: error; ours: empty loop. `engine/lua/shims/lua50_aliases.lua:15-18`. `probe_api_spot`. [api L3](api.md#l3)
-- [ ] **`table.getn` / `setn` / `n` field** (B). Real honours `n` and `setn`, `getn({1,2,nil,4})` = 2; ours `4 3 0 0`, `setn` no-op. `lua50_aliases.lua:5-6`. `probe_api_spot`, `probe_api_lang`. [api L4](api.md#l4)
-- [ ] **`string.gsub` with a function returning nil / false / number** (B). Real deletes the match; ours keeps it or inserts the number. `probe_api_spot`. [api L5](api.md#l5)
-- [ ] **`string.format` rounding and widths** (B). Real rounds halves away from zero, 3-digit exponents, `%x` of -1 is `ffffffff`; ours `%5.1f` 2.25 prints 2.2, 16 f's. `probe_api_spot`. [api L6](api.md#l6)
-- [ ] **Lua numbers are float32 in the real game** (B). Already in the Confirmed table; loop counts are new evidence (`for x = 0, 1, 0.1` runs 10 times, ours 11). `probe_api_spot`, `probe_api_lang`. [api L7](api.md#l7)
-- [ ] **Assigning the numeric-for variable changes the iteration** (C). Real 3, ours 5. `probe_api_lang`. [api L8](api.md#l8)
-- [ ] **No string-to-number coercion in the real game** (C). `'10' + 5` raises; engine functions reject numeric strings. Ours coerces. `probe_api_spot`. [api L9](api.md#l9)
-- [ ] **`pcall` returns a string with traceback; `assert` returns one value** (C). Ours keeps error tables. `probe_api_spot`. [api L10](api.md#l10)
-- [ ] **Proper tail calls** (C). Real depth 1e6 fine; ours stack overflow. `probe_api_lang`. [api L11](api.md#l11)
-- [ ] **Bit operators bind tighter than arithmetic** (B, rare). Real `1 | 2 & 3 + 4` = 7; ours 3. `engine/lua_translation/bitwise.rs`. `probe_api_lang`. [api L13](api.md#l13)
-- [ ] **`type(print)` is `"cfunction"`; `ForkThread(math.abs)` raises** (C). FAF checks both names (`class.lua:453`, `config.lua:70`). Ours `"function"`. `probe_api_census`, `probe_api_spot`, `probe_ui_controls`. [api L14](api.md#l14), [ui 31](ui.md#r31)
-- [ ] **`tonumber` rejects `'0x10'`, `'inf'`, `'nan'`, `' 0x1F '`** (C). Ours accepts. `probe_api_spot`. [api L15](api.md#l15)
-- [ ] **`table.concat` / `unpack` / `foreachi` / `string.byte` / `gsub` replacement edge cases** (C). `probe_api_spot`. [api L16](api.md#l16)
+- [x] **Missing globals `__pow`, `_LOADED`, `GetTimeForProfile`** (fixed `a5e08a4`). `__pow` is power; `_LOADED` holds the libraries (only its type was probed); `GetTimeForProfile(origin)` is seconds since `origin` on the sim clock in the sim (as `GetSystemTimeSecondsOnlyForProfileUse`) and on the `CurrentTime` clock in the interface. `probe_api_census`, `probe_api_spot`. [api M2](api.md#m2)
+- [ ] **Missing globals `serialize` table, `loadfile`, `__factory_objects`, `__serialize_*`, sim `GetMouseWorldPos`** (open: left alone). `serialize.tostring` / `fromstring` have an unknown format, and FAF only reads the table to name it (`fa/lua/system/saveload.lua:33`, which copes with nil); `loadfile` is used only by FAF's `tests/syntax_check.lua` and whether it reads disk or the VFS is unknown; `__serialize_*` are made by `saveload.lua` itself; a sim `GetMouseWorldPos` would make the sim read interface input (debug grids only, guarded by `rawget`). `probe_api_census`. [api M2](api.md#m2)
+- [x] **`loadstring` missing in the interface VM** (fixed `a2c602e`). Real: works there, taking FA syntax; ours now translates and compiles the text. Bytecode is refused (moho's bytecode isn't Luau's), and compile messages are Luau's. `probe_api_census`, `probe_api_lang`. [api M3](api.md#m3)
+- [ ] **`HashChecker` missing in the interface VM** (open: what it does is unknown, and nothing in FAF calls it). `probe_api_census`, `probe_api_lang`. [api M3](api.md#m3)
+- [ ] **`debug.*` (`sethook`, `getlocal`, `getupvalue`, ...) and `string.dump` / `string.lualex` missing; `debug.getinfo` lacks `func`, `namewhat`, `what`** (open: developer tools only). Developer tools only (`sim/Profiler.lua:25`, `system/profile.lua:113`). `probe_api_census`. [api M4](api.md#m4), [api M5](api.md#m5)
+- [x] **Nested long brackets fail to compile in ours** (fixed `9d70a76`) (B). Real: `[[a [[b]] c]]` and nested `--[[ ]]` work. Ours: the file silently did not load; a nesting bracket is now rewritten with a level (`engine/lua_translation/long_bracket.rs`). No FAF or RNGAI file has one. `probe_api_lang`. [api L12](api.md#l12)
+- [ ] **Closures share the loop variable** (open: disproportionate) (B). Real: `{3 3 3}`; ours `{1 2 3}`. Luau semantics: every loop that captures its variable would need rewriting to an outer local, and FAF code that captures a loop variable mostly wants ours. `probe_api_lang`. [api L2](api.md#l2)
+- [ ] **`for k, v in nil` raises** (open: ours laxer on purpose) (C). Real: error; ours: empty loop. FAF's own `Unit.DoDeathWeapon` loops over `bp.Weapon` unguarded, so raising would end `OnKilled` early for a unit without weapons, and under the test suites a sim error ends the run; no mod gains from the error. `engine/lua/shims/lua50_aliases.lua:15-18`. `probe_api_spot`. [api L3](api.md#l3)
+- [x] **`table.getn` / `setn` / `n` field** (fixed `db01909`) (B). Real honours `n` and `setn`; ours ignored `n` and `setn` was a no-op. Now `getn` reads `n`, then a `setn` size, and `insert` / `remove` keep them (`engine/lua/shims/table_getn.lua`; about 10 ns more per `insert` / `getn`, bench `lua_call/table`). `probe_api_spot`, `probe_api_lang`. [api L4](api.md#l4)
+- [ ] **`table.getn` stops at the first nil; `insert` / `remove` give every table a size** (open: cost) (B). Real: `getn({1,2,nil,4})` = 2, `{nil,nil,3}` = 0; `insert(t, 5, x)` on two items makes getn 5, `remove(t, 5)` on three makes it 2. Ours: Luau's border (4, 3) and sizes. Counting to the first nil, or a size per table, would cost every `getn` / `insert`, and holes in FAF's lists are bugs either way. [api L4](api.md#l4)
+- [x] **`string.gsub` with a function returning nil / false / number** (fixed `433547b`) (B). Real deletes the match; ours kept it or inserted the number (`engine/lua/shims/lua50_aliases.lua`). `probe_api_spot`. [api L5](api.md#l5)
+- [ ] **`string.format` rounding and widths** (open: display only; would mean writing `string.format` over in Luau, a hot interface call) (B). Real rounds halves away from zero, 3-digit exponents, `%x` of -1 is `ffffffff`; ours `%5.1f` 2.25 prints 2.2, 16 f's. `probe_api_spot`. [api L6](api.md#l6)
+- [ ] **Lua numbers are float32 in the real game** (open: known, a VM change) (B). Already in the Confirmed table; loop counts are new evidence (`for x = 0, 1, 0.1` runs 10 times, ours 11). `probe_api_spot`, `probe_api_lang`. [api L7](api.md#l7)
+- [ ] **Assigning the numeric-for variable changes the iteration** (open: Luau semantics, rare) (C). Real 3, ours 5. `probe_api_lang`. [api L8](api.md#l8)
+- [ ] **No string-to-number coercion in the real game** (open: would make ours stricter, no gain for mods) (C). `'10' + 5` raises; engine functions reject numeric strings. Ours coerces. `probe_api_spot`. [api L9](api.md#l9)
+- [ ] **`pcall` returns a string with traceback; `assert` returns one value** (open: Luau semantics, error paths only) (C). Ours keeps error tables. `probe_api_spot`. [api L10](api.md#l10)
+- [ ] **Proper tail calls** (open: Luau has none; a VM change) (C). Real depth 1e6 fine; ours stack overflow. `probe_api_lang`. [api L11](api.md#l11)
+- [ ] **Bit operators bind tighter than arithmetic** (open: `full_moon`'s Lua 5.3 precedence is fixed, so it needs its own expression parser; FAF only writes plain `A | B`) (B, rare). Real `1 | 2 & 3 + 4` = 7; ours 3. `engine/lua_translation/bitwise.rs`. `probe_api_lang`. [api L13](api.md#l13)
+- [ ] **`type(print)` is `"cfunction"`; `ForkThread(math.abs)` raises** (open: Luau has no such type; FAF checks both names) (C). FAF checks both names (`class.lua:453`, `config.lua:70`). Ours `"function"`. `probe_api_census`, `probe_api_spot`, `probe_ui_controls`. [api L14](api.md#l14), [ui 31](ui.md#r31)
+- [ ] **`tonumber` rejects `'0x10'`, `'inf'`, `'nan'`, `' 0x1F '`** (open: would make ours stricter, no gain) (C). Ours accepts. `probe_api_spot`. [api L15](api.md#l15)
+- [ ] **`table.concat` / `unpack` / `foreachi` / `string.byte` / `gsub` replacement edge cases** (open: mostly stricter in the real game, error paths) (C). `probe_api_spot`. [api L16](api.md#l16)
 - [ ] **Arithmetic metamethods are not tried from the right operand when the left is a number** (open: needs a VM patch, low value) (C, medium). `2 * Vector(1,2,3)` raises at the call site; ours reaches FAF's `__mul`. Which operator fails is not isolated. `probe_api_spot`. [api L19](api.md#l19)
-- [ ] **Lua 5.0 cannot yield across `pcall`.** Real: `coroutine.yield` inside `pcall` fails; ours (Luau) yields. `probe_api_spot`. [api H3](api.md#h3)
+- [ ] **Lua 5.0 cannot yield across `pcall`** (open: would make ours stricter, no gain). Real: `coroutine.yield` inside `pcall` fails; ours (Luau) yields. `probe_api_spot`. [api H3](api.md#h3)
 - [x] **Syntax and library extras in ours that the real game rejects** (closed: no change, accepted by the owner 2026-11-16): `%`, `#t`, `//`, `+=`, hex / binary / `_` literals, `\x` `\z`, `goto`, `...` as expression; Luau libraries `bit32`, `buffer`, `utf8`, `os`, `select`, `xpcall`, `typeof`, `coroutine.close` and others. A script that feature-tests `os` or `xpcall` sees them. `probe_api_lang`, `probe_api_census`. [api: Ours has](api.md#ours-has-real-doesnt)
 
 ## 3. Orders and construction
