@@ -556,6 +556,11 @@ fn silo() {
 }
 
 #[test]
+fn orders_refused_at_issue() {
+    scenario("orders_refused_at_issue", 200);
+}
+
+#[test]
 fn air_motion() {
     scenario("air_motion", 150);
 }

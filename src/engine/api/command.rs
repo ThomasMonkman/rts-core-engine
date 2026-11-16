@@ -102,13 +102,23 @@ fn capable(lua: &Lua, name: &str, units: Vec<EntityId>) -> Vec<EntityId> {
     let Some(cap_name) = required_cap(name) else { return units };
     let Some(cap) = cap_bit(&COMMAND_CAPS, cap_name) else { return units };
     let needs_motion = name != "IssueFactoryAssist" && matches!(cap_name, "RULEUCC_Move" | "RULEUCC_Guard" | "RULEUCC_Patrol" | "RULEUCC_Ferry");
+    // `IssueFactoryAssist` is taken by factories only: an engineer, a
+    // commander or a tank gets nothing queued (dev/probes probe_re2_orders
+    // FA).
+    let factory = (name == "IssueFactoryAssist").then(|| crate::engine::api::categories::domain(lua).ok().and_then(|d| d.named.get("FACTORY").cloned()));
     let w = entity::world(lua);
     units
         .into_iter()
         .filter(|&id| {
-            w.get(id).and_then(|e| e.unit.as_deref()).is_some_and(|u| {
-                u.command_caps & cap != 0 && (!needs_motion || u.motion_params.kind != crate::engine::sim::movement::MotionKind::None)
-            })
+            let e = w.get(id);
+            let factory_ok = match &factory {
+                None => true,
+                Some(set) => e.and_then(|e| e.category_index).zip(set.as_ref()).is_some_and(|(i, s)| s.contains(i)),
+            };
+            factory_ok
+                && e.and_then(|e| e.unit.as_deref()).is_some_and(|u| {
+                    u.command_caps & cap != 0 && (!needs_motion || u.motion_params.kind != crate::engine::sim::movement::MotionKind::None)
+                })
         })
         .collect()
 }
@@ -142,6 +152,13 @@ pub(crate) fn issue(lua: &Lua, units: &[EntityId], kind: CommandKind, target: Co
         }
         _ => units,
     };
+    // A silo build order goes to the silo's own requests, not the command
+    // queue (the real game's queue stays empty: dev/probes
+    // probe_re2_orders SILO). The handle is of a command nobody holds.
+    if matches!(kind, CommandKind::BuildSiloTactical | CommandKind::BuildSiloNuke) {
+        crate::engine::api::silo::request(lua, units, kind, count);
+        return CommandHandle(commands(lua).issue(&[], kind, target, blueprint, count));
+    }
     let mut c = commands(lua);
     let capped: Vec<EntityId>;
     let units = if units.iter().any(|&u| c.queue_len(u) > MAX_QUEUED) {
