@@ -152,8 +152,10 @@ pub struct WorldView {
     pub mini: bool,
     /// The camera it shows (`GetCamera(name)`).
     pub camera: Option<String>,
-    /// `LockInput` (cinematics): the world doesn't get the mouse over it.
-    pub input_locked: bool,
+    /// `LockInput` (cinematics): the world doesn't get the mouse over it
+    /// while any lock is held. Counted, as moho's: two locks need two
+    /// unlocks (`probe_ui_controls` cam).
+    pub input_locks: u32,
     pub cartographic: bool,
     pub resources: bool,
     /// `SetCustomRender`: the engine calls its `OnRenderWorld` each frame
@@ -1134,11 +1136,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         HasHighlightCommand = |lua, _this: Obj<moho::UIWorldView>| Ok(lua.globals().raw_get::<LuaValue>("__engine_highlight_command")? != LuaNil))?;
     lua_method!(lua, moho::UIWorldView,
         /// The camera argument is ignored: a view locks its own camera.
-        LockInput = |lua, (this, _camera): (Obj<moho::UIWorldView>, Loose<Option<Obj<moho::CameraImpl>>>)| with_view(lua, &this, |v| v.input_locked = true).map(|_| ()))?;
+        LockInput = |lua, (this, _camera): (Obj<moho::UIWorldView>, Loose<Option<Obj<moho::CameraImpl>>>)| with_view(lua, &this, |v| v.input_locks = v.input_locks.saturating_add(1)).map(|_| ()))?;
     lua_method!(lua, moho::UIWorldView,
-        UnlockInput = |lua, (this, _camera): (Obj<moho::UIWorldView>, Loose<Option<Obj<moho::CameraImpl>>>)| with_view(lua, &this, |v| v.input_locked = false).map(|_| ()))?;
+        UnlockInput = |lua, (this, _camera): (Obj<moho::UIWorldView>, Loose<Option<Obj<moho::CameraImpl>>>)| with_view(lua, &this, |v| v.input_locks = v.input_locks.saturating_sub(1)).map(|_| ()))?;
     lua_method!(lua, moho::UIWorldView,
-        IsInputLocked = |lua, (this, _camera): (Obj<moho::UIWorldView>, Loose<Option<Obj<moho::CameraImpl>>>)| Ok(with_view(lua, &this, |v| v.input_locked)?.unwrap_or(false)))?;
+        IsInputLocked = |lua, (this, _camera): (Obj<moho::UIWorldView>, Loose<Option<Obj<moho::CameraImpl>>>)| Ok(with_view(lua, &this, |v| v.input_locks > 0)?.unwrap_or(false)))?;
     lua_method!(lua, moho::UIWorldView,
         /// Every camera object drives the renderer's one camera, and the minimap
         /// always shows the whole map: only a main view resets.
@@ -2303,7 +2305,7 @@ fn hit(lua: &Lua, x: f32, y: f32) -> LuaResult<Option<Hit>> {
                 continue;
             }
             let what = match &ctl.kind {
-                Kind::WorldView(v) if v.input_locked => Hit::Locked,
+                Kind::WorldView(v) if v.input_locks > 0 => Hit::Locked,
                 Kind::WorldView(_) => Hit::World(id),
                 _ => Hit::Control(id),
             };
@@ -2363,7 +2365,7 @@ fn bubble(lua: &Lua, mut id: Option<ControlId>, event: &LuaTable) -> LuaResult<b
 pub fn hovered_world_view(lua: &Lua) -> LuaResult<Option<LuaTable>> {
     let Some(id) = lua.named_registry_value::<Option<u32>>("user.hover")? else { return Ok(None) };
     match controls(lua).map.get(&id).map(|c| &c.kind) {
-        Some(Kind::WorldView(v)) if !v.input_locked => {}
+        Some(Kind::WorldView(v)) if v.input_locks == 0 => {}
         _ => return Ok(None),
     }
     object(lua, id)
