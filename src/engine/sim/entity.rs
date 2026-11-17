@@ -557,6 +557,9 @@ pub struct EntityWorld {
     /// by clearing `attachment`); destroy re-checks each child. Ids are
     /// never reused, so a stale pair can't match a new entity.
     children: std::collections::BTreeSet<(EntityId, EntityId)>,
+    /// The follow pass's list of attached entities, reused.
+    #[serde(skip)]
+    follow_scratch: Vec<u32>,
     /// Bumped by anything that may change a unit (any mutable access to
     /// one, a unit spawned, the grids rebuilt): a unit query cached earlier
     /// in a tick is still right while this is unchanged
@@ -1223,6 +1226,15 @@ impl EntityWorld {
             .collect()
     }
 
+    /// Every entity attached to something now, ascending id (from the attach
+    /// index, each re-checked), into `out` (cleared first).
+    pub fn attached_into(&self, out: &mut Vec<EntityId>) {
+        out.clear();
+        out.extend(self.children.iter().filter(|&&(p, c)| self.get(c).is_some_and(|e| e.attachment.is_some_and(|a| a.parent == p))).map(|&(_, c)| c));
+        out.sort_unstable();
+        out.dedup();
+    }
+
     /// Whether a unit is attached to `parent` now (cargo), without
     /// collecting them.
     pub fn carries_units(&self, parent: EntityId) -> bool {
@@ -1292,16 +1304,40 @@ impl EntityWorld {
 
     /// [`EntityWorld::follow_attachments`] onto parent bones as `posed`
     /// places them (FA's tractor claw reels its victim in on a slid bone).
+    ///
+    /// Walks the attach index, not every entity, and drops its stale pairs
+    /// (a child detached by script, or since removed), so it stays the size
+    /// of the live attachments.
     pub fn follow_attachments_posed(&mut self, posed: impl Fn(&Entity, u32) -> Option<FxVec3>) {
-        for i in 0..self.dense.len() {
-            let e = &self.dense[i];
+        if self.children.is_empty() {
+            return;
+        }
+        // The attached entities' dense indices (a child has one parent, so
+        // no repeats), sorted: id order.
+        let mut kids = std::mem::take(&mut self.follow_scratch);
+        kids.clear();
+        let mut stale = false;
+        for &(p, c) in &self.children {
+            match self.index(c) {
+                Some(i) if self.dense[i].attachment.is_some_and(|a| a.parent == p) => kids.push(i as u32),
+                _ => stale = true,
+            }
+        }
+        if stale {
+            let (slot, dense) = (&self.slot, &self.dense);
+            self.children.retain(|&(p, c)| matches!(slot.get(c as usize), Some(&i) if i != REMOVED && dense[i as usize].attachment.is_some_and(|a| a.parent == p)));
+        }
+        kids.sort_unstable();
+        for &i in &kids {
+            let e = &self.dense[i as usize];
             if e.destroyed {
                 continue;
             }
             if let Some(a) = e.attachment {
-                self.snap(i, a, &posed);
+                self.snap(i as usize, a, &posed);
             }
         }
+        self.follow_scratch = kids;
     }
 }
 
@@ -1788,6 +1824,41 @@ mod tests {
         // Re-sizing the grids re-lists everything.
         loaded.set_bounds(2048, 2048);
         check_volumes(&loaded, &mut rng);
+    }
+
+    /// The attach index lists what's attached now, in id order, and the
+    /// follow pass drops pairs a script detach or a removal left behind.
+    #[test]
+    fn attach_index_lists_live_attachments() {
+        let mut w = EntityWorld::default();
+        let (p, q) = (spawn(&mut w), spawn(&mut w));
+        let kids: Vec<EntityId> = (0..6).map(|_| spawn(&mut w)).collect();
+        let to = |parent| Attachment { parent, parent_bone: None, self_bone: None };
+        for (i, &k) in kids.iter().enumerate() {
+            w.attach(k, to(if i % 2 == 0 { p } else { q }));
+        }
+        let mut out = Vec::new();
+        w.attached_into(&mut out);
+        assert_eq!(out, kids);
+        // A script detach, a re-attach elsewhere, a destroyed child removed.
+        w.get_mut(kids[0]).unwrap().attachment = None;
+        w.attach(kids[2], to(q));
+        w.destroy(kids[5]);
+        w.finish_destroys();
+        w.compact_now();
+        w.attached_into(&mut out);
+        assert_eq!(out, vec![kids[1], kids[2], kids[3], kids[4]]);
+        assert_eq!(w.attached_to(p), vec![kids[4]]);
+        assert_eq!(w.attached_to(q), vec![kids[1], kids[2], kids[3]]);
+        // Following moves the live children and prunes the stale pairs.
+        w.set_position(p, FxVec3::from_f64(5.0, 0.0, 5.0));
+        w.follow_attachments();
+        assert_eq!(w.children.len(), 4, "stale pairs dropped");
+        assert_eq!(w.get(kids[4]).unwrap().position(), FxVec3::from_f64(5.0, 0.0, 5.0));
+        assert_eq!(w.get(kids[0]).unwrap().position(), FxVec3::default(), "detached: stays");
+        let loaded: EntityWorld = postcard::from_bytes(&postcard::to_allocvec(&w).unwrap()).unwrap();
+        loaded.attached_into(&mut out);
+        assert_eq!(out, vec![kids[1], kids[2], kids[3], kids[4]]);
     }
 
     #[test]

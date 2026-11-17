@@ -1387,11 +1387,12 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// Units attached to this one (transport cargo), in id order.
         GetCargo = |lua, this: Obj<moho::Unit>| {
         let id = entity_id(&this)?;
-        let cargo: Vec<_> = world(lua)
-            .iter()
-            .filter(|e| !e.destroyed && e.kind == EntityKind::Unit && e.attachment.is_some_and(|a| a.parent == id))
-            .map(|e| e.id)
-            .collect();
+        let cargo: Vec<_> = {
+            let w = world(lua);
+            let mut ids = w.attached_to(id);
+            ids.retain(|&c| w.get(c).is_some_and(|e| !e.destroyed && e.kind == EntityKind::Unit));
+            ids
+        };
         let out = lua.create_table_with_capacity(cargo.len(), 0)?;
         for (i, c) in cargo.into_iter().enumerate() {
             if let Some(obj) = crate::engine::api::entity::object(lua, c)? {
