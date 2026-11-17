@@ -372,6 +372,14 @@ pub struct Projectiles {
     /// within the tick, so never saved.
     #[serde(skip)]
     pub checks: Vec<Check>,
+    /// The unit hits of each projectile this step (indexed like `list`),
+    /// for `checks`.
+    #[serde(skip)]
+    hit_scratch: Vec<UnitHits>,
+    /// `EntityWorld::unit_epoch` when this step's unit tests ran: the
+    /// checks' [`UnitHits`] hold while it is unchanged.
+    #[serde(skip)]
+    pub checks_epoch: u64,
 }
 
 impl Projectiles {
@@ -507,6 +515,79 @@ pub struct Check {
     pub id: EntityId,
     pub from: FxVec3,
     pub to: FxVec3,
+    /// The unit hits along the step, for sweeping on without testing every
+    /// unit again ([`resweep`]).
+    pub hits: UnitHits,
+}
+
+/// Unit hits a [`UnitHits`] keeps: one past the most refusals a shot is
+/// swept on through in a step (`api::projectile`'s 16), so a whole chain
+/// of refusals needs no new test.
+const UNIT_HITS: usize = 17;
+
+/// The earliest unit hits along a projectile's step (fraction, id, layer),
+/// in (fraction, id) order, as the step's unit test found them. A refused
+/// collision check sweeps the step again past the refusing unit
+/// ([`resweep`]); its unit is the first of these not passed through, so
+/// the units needn't all be tested again, as long as none has changed
+/// since (`EntityWorld::unit_epoch`, checked by the caller). Moho asks the
+/// check while it sweeps, so a refusal costs it no new search either.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UnitHits {
+    /// Filled by a whole unit test (none passed through but the
+    /// projectile's launcher and last hit).
+    valid: bool,
+    len: u8,
+    /// More hits than kept.
+    more: bool,
+    /// The launcher and last hit the test left out.
+    launcher: Option<EntityId>,
+    last_hit: Option<EntityId>,
+    hits: [(Fx, EntityId, crate::engine::sim::layer::Layer); UNIT_HITS],
+}
+
+impl UnitHits {
+    /// Keeps `hit` if it is among the earliest [`UNIT_HITS`].
+    fn push(&mut self, hit: (Fx, EntityId, crate::engine::sim::layer::Layer)) {
+        let n = self.len as usize;
+        let at = self.hits[..n].partition_point(|h| (h.0, h.1) < (hit.0, hit.1));
+        if at == UNIT_HITS {
+            self.more = true;
+            return;
+        }
+        if n == UNIT_HITS {
+            self.more = true;
+        } else {
+            self.len += 1;
+        }
+        let end = self.len as usize;
+        self.hits.copy_within(at..end - 1, at + 1);
+        self.hits[at] = hit;
+    }
+
+    /// What [`first_unit_hit`] (passing friends) would answer for `p`
+    /// passing through `skip` as well, when the kept hits tell: the units
+    /// left out then must still be left out, and an answer past the kept
+    /// ones needs the full test.
+    fn first(&self, p: &ProjectileState, skip: &[EntityId]) -> Option<Option<(Fx, EntityId, crate::engine::sim::layer::Layer)>> {
+        let passed = |id: EntityId| Some(id) == p.launcher || Some(id) == p.last_hit || skip.contains(&id);
+        if !self.valid || !self.launcher.is_none_or(passed) || !self.last_hit.is_none_or(passed) {
+            return None;
+        }
+        match self.hits[..self.len as usize].iter().find(|h| !passed(h.1)) {
+            Some(&h) => Some(Some(h)),
+            None if self.more => None,
+            None => Some(None),
+        }
+    }
+}
+
+/// Per-thread scratch of the unit test: candidate ids, and the hits found
+/// (see [`UnitHits`]).
+#[derive(Default)]
+pub struct Scan {
+    ids: Vec<EntityId>,
+    hits: UnitHits,
 }
 
 /// Work units (1 per projectile, +9 per re-aligning one, +7 per one testing
@@ -552,6 +633,9 @@ pub struct Env<'a> {
     /// Entities whose collision check refused the projectile earlier in
     /// this step ([`resweep`]): passed through. Empty in the main pass.
     pub skip: &'a [EntityId],
+    /// For [`resweep`]: the unit hits the step's first test found, when no
+    /// unit has changed since ([`UnitHits`]).
+    pub unit_hits: Option<&'a UnitHits>,
 }
 
 /// A shield entity's collision sphere, gathered once per tick.
@@ -686,33 +770,41 @@ pub fn step_with(
     parallel_min: usize,
 ) {
     use rayon::prelude::*;
-    let Projectiles { list, scratch, turned_last_tick, colliding_last_tick, water_crossings, water_crossing_from, script_crossings, checks, .. } = projectiles;
+    let Projectiles { list, scratch, hit_scratch, turned_last_tick, colliding_last_tick, water_crossings, water_crossing_from, script_crossings, checks, checks_epoch, .. } = projectiles;
+    *checks_epoch = world.unit_epoch();
     water_crossings.clear();
     water_crossing_from.clear();
     script_crossings.clear();
     checks.clear();
     scratch.clear();
     scratch.resize(list.len(), Motion::default());
+    // (Only read for a projectile whose step it was written in.)
+    hit_scratch.resize(list.len(), UnitHits::default());
     {
         let world = &*world;
-        let advance = |buf: &mut Vec<EntityId>, (p, m): (&mut ProjectileState, &mut Motion)| {
+        let advance = |scan: &mut Scan, ((p, m), h): ((&mut ProjectileState, &mut Motion), &mut UnitHits)| {
             if let Some(e) = world.get(p.id).filter(|e| !e.destroyed) {
-                *m = advance(p, e.position(), e.orientation, e.army, world, env, buf);
+                scan.hits = UnitHits::default();
+                *m = advance(p, e.position(), e.orientation, e.army, world, env, scan);
+                if m.sweep.is_some() {
+                    *h = scan.hits;
+                }
             }
         };
         if list.len() >= parallel_min {
             list.par_iter_mut()
                 .zip(scratch.par_iter_mut())
+                .zip(hit_scratch.par_iter_mut())
                 .with_min_len(256)
-                .for_each_init(|| (Vec::new(), crate::prof_span!("projectiles advance (worker)")), |(buf, _), pm| advance(buf, pm));
+                .for_each_init(|| (Scan::default(), crate::prof_span!("projectiles advance (worker)")), |(scan, _), pm| advance(scan, pm));
         } else {
-            let mut buf = Vec::new();
-            list.iter_mut().zip(scratch.iter_mut()).for_each(|pm| advance(&mut buf, pm));
+            let mut scan = Scan::default();
+            list.iter_mut().zip(scratch.iter_mut()).zip(hit_scratch.iter_mut()).for_each(|pm| advance(&mut scan, pm));
         }
     }
     *turned_last_tick = 0;
     *colliding_last_tick = 0;
-    for (p, m) in list.iter().zip(scratch.iter()) {
+    for ((p, m), hits) in list.iter().zip(scratch.iter()).zip(hit_scratch.iter()) {
         if !m.live {
             continue;
         }
@@ -735,7 +827,7 @@ pub fn step_with(
             out.push(Impact { id: p.id, kind, target: m.target });
         }
         if let Some((from, to)) = m.sweep {
-            checks.push(Check { id: p.id, from, to });
+            checks.push(Check { id: p.id, from, to, hits: *hits });
         }
     }
 }
@@ -753,9 +845,9 @@ pub fn step_with(
 pub fn resweep(projectiles: &mut Projectiles, world: &mut EntityWorld, env: Env, id: EntityId, from: FxVec3, to: FxVec3) -> (Option<Impact>, Option<Check>) {
     let Some(i) = projectiles.list.binary_search_by_key(&id, |p| p.id).ok() else { return (None, None) };
     let Some((orientation, army)) = world.get(id).filter(|e| !e.destroyed).map(|e| (e.orientation, e.army)) else { return (None, None) };
-    let mut buf = Vec::new();
+    let mut scan = Scan::default();
     let p = &mut projectiles.list[i];
-    let m = sweep(p, from, to, orientation, false, army, world, env, &mut buf);
+    let m = sweep(p, from, to, orientation, false, army, world, env, &mut scan);
     if let Some(entering) = m.water {
         projectiles.water_crossings.push((id, entering));
         projectiles.water_crossing_from.push(from);
@@ -764,7 +856,10 @@ pub fn resweep(projectiles: &mut Projectiles, world: &mut EntityWorld, env: Env,
     if let Some(e) = m.entered {
         projectiles.script_crossings.push((id, e));
     }
-    (m.impact.map(|kind| Impact { id, kind, target: m.target }), m.sweep.map(|(from, to)| Check { id, from, to }))
+    // The hits passed on hold for the next refusal too (it passes through
+    // more); hits found here passing some through don't.
+    let hits = env.unit_hits.copied().unwrap_or_default();
+    (m.impact.map(|kind| Impact { id, kind, target: m.target }), m.sweep.map(|(from, to)| Check { id, from, to, hits }))
 }
 
 /// A bounce off the ground on the way from `position` to `next`
@@ -805,7 +900,7 @@ fn spin(p: &mut ProjectileState, orientation: FxQuat, dt: Fx) -> FxQuat {
 }
 
 /// Moves one projectile from `position`/`orientation` (pure apart from `p`
-/// and the scratch `buf`).
+/// and the scratch `scan`).
 fn advance(
     p: &mut ProjectileState,
     position: FxVec3,
@@ -813,7 +908,7 @@ fn advance(
     army: Option<u32>,
     world: &EntityWorld,
     env: Env,
-    buf: &mut Vec<EntityId>,
+    scan: &mut Scan,
 ) -> Motion {
     // The tick after an impact it survived: no motion (see
     // [`ProjectileState::resting`]).
@@ -934,7 +1029,7 @@ fn advance(
         false => orientation,
     };
     let q = if spinning { spin(p, q, dt) } else { q };
-    sweep(p, position, next, q, turned, army, world, env, buf)
+    sweep(p, position, next, q, turned, army, world, env, scan)
 }
 
 /// The collisions of the step `position -> next` (velocity and facing `q`
@@ -950,7 +1045,7 @@ fn sweep(
     army: Option<u32>,
     world: &EntityWorld,
     env: Env,
-    buf: &mut Vec<EntityId>,
+    scan: &mut Scan,
 ) -> Motion {
     let terrain = env.terrain;
     // Detonation heights: crossing them is an `Air` impact where the path
@@ -961,7 +1056,7 @@ fn sweep(
     // burst with no unit on its step carries none).
     if (p.detonate_below > Fx::ZERO || p.detonate_above > Fx::ZERO)
         && let Some(at) = terrain.and_then(|t| detonation(p, position, next, t)) {
-        let unit = if p.collide_entity { first_unit_hit(p, position, next, army, world, env, buf, p.collide_friendly).map(|(_, u, _)| u) } else { None };
+        let unit = if p.collide_entity { first_unit_hit(p, position, next, army, world, env, scan, p.collide_friendly).map(|(_, u, _)| u) } else { None };
         return Motion { live: true, turned, position: at, orientation: q, impact: Some(ImpactKind::Air), target: unit, water: None, entered: None, sweep: None };
     }
 
@@ -980,7 +1075,11 @@ fn sweep(
     if p.collide_entity {
         // Own and allied units too: their `OnCollisionCheck` decides (FAF's
         // stock one lets the shot through unless it collides with friends).
-        let unit = first_unit_hit(p, position, next, army, world, env, buf, true);
+        // Past a refused check, the step's earlier test may tell.
+        let unit = match env.unit_hits.and_then(|h| h.first(p, env.skip)) {
+            Some(unit) => unit,
+            None => first_unit_hit(p, position, next, army, world, env, scan, true),
+        };
         let shield = first_shield_hit(p, position, next, env.shields, Some((army, env.armies)), env.skip);
         let under_water = |t: Fx| terrain.and_then(|tr| tr.water_surface).is_some_and(|w| (position + (next - position) * t).y < w);
         let mut hit = match (unit, shield) {
@@ -1261,13 +1360,18 @@ fn first_unit_hit(
     army: Option<u32>,
     world: &EntityWorld,
     env: Env,
-    buf: &mut Vec<EntityId>,
+    scan: &mut Scan,
     friends: bool,
 ) -> Option<(Fx, EntityId, crate::engine::sim::layer::Layer)> {
     use crate::engine::sim::army::Alliance;
     let reach = world.unit_reach();
+    let Scan { ids: buf, hits } = scan;
     buf.clear();
     world.unit_candidates(from.x.min(to.x) - reach, from.z.min(to.z) - reach, from.x.max(to.x) + reach, from.z.max(to.z) + reach, buf);
+    // Every hit is kept when only the launcher and last hit are passed
+    // through (see [`UnitHits`]).
+    let keep = friends && env.skip.is_empty();
+    *hits = UnitHits { valid: keep, launcher: p.launcher, last_hit: p.last_hit, ..UnitHits::default() };
     let friendly = |other: Option<u32>| match (army, other) {
         (Some(a), Some(b)) => match env.armies {
             Some(armies) => armies.alliance(a, b) == Alliance::Ally,
@@ -1297,6 +1401,9 @@ fn first_unit_hit(
         let Some(t) = crate::engine::sim::collision::segment_hit(from, to, pos, e.orientation, &shape) else { continue };
         // The layer the impact type goes by: an aircraft's is `Air`, landed or not.
         let layer = e.unit.as_deref().map(|u| if u.motion_params.kind == crate::engine::sim::movement::MotionKind::Air { crate::engine::sim::layer::Layer::Air } else { u.layer }).unwrap_or_default();
+        if keep {
+            hits.push((t, id, layer));
+        }
         if best.is_none_or(|(bt, bid, _)| (t, id) < (bt, bid)) {
             best = Some((t, id, layer));
         }
@@ -1657,6 +1764,73 @@ mod tests {
     /// A detonation on a step that also hits a unit is `Air` with that unit
     /// (FAF probe `probe_re_wpn` `air.wpn`); an aircraft is hit as
     /// `UnitAir` even landed.
+    #[test]
+    fn refusals_sweep_on_through_the_kept_hits_as_through_a_new_test() {
+        use crate::engine::sim::entity::CollisionShape;
+        // A row of 12 units across a step (two side by side, hit at the same
+        // fraction: lowest id first); every check refuses. With and without
+        // the step's kept hits, the same units in the same order, then
+        // nothing. A longer row (more hits than kept) stops at 16
+        // refusals, the same either way.
+        let chain = |kept: bool, rows: usize| {
+            let mut w = EntityWorld::default();
+            for i in 0..rows {
+                for x in if i == 4 { vec![0.0, 0.6] } else { vec![0.0] } {
+                    let id = w.spawn(EntityKind::Unit, BlueprintKind::Unit, String::new(), Some(2), FxVec3::from_f64(x, 5.0, 2.0 + 2.0 * i as f64), FxQuat::IDENTITY);
+                    w.set_base_collision(id, CollisionShape::Box { center: FxVec3::default(), half: FxVec3::from_f64(0.5, 0.5, 0.5) });
+                }
+            }
+            let (mut ps, mut out) = (Projectiles::default(), Vec::new());
+            let t = ProjectileTemplate { collide_entity: true, ..Default::default() };
+            let id = launch(&mut w, &mut ps, &t, FxVec3::from_f64(0.3, 5.0, 0.0), FxVec3::from_f64(0.0, 0.0, 600.0));
+            step(&mut ps, &mut w, Env::default(), &mut out);
+            let mut seq = vec![out[0].target];
+            let mut c = ps.checks[0];
+            let mut refused = Vec::new();
+            for _ in 0..16 {
+                let target = seq.last().copied().flatten().unwrap();
+                ps.get_mut(id).unwrap().last_hit = Some(target);
+                refused.push(target);
+                assert_eq!(w.unit_epoch(), ps.checks_epoch, "no unit changed");
+                let env = Env { skip: &refused, unit_hits: kept.then_some(&c.hits), ..Default::default() };
+                let (impact, next) = resweep(&mut ps, &mut w, env, id, c.from, c.to);
+                seq.push(impact.and_then(|i| i.target));
+                match next {
+                    Some(n) => c = n,
+                    None => break,
+                }
+            }
+            seq
+        };
+        let fresh = chain(false, 11);
+        assert_eq!(fresh.len(), 13, "12 units, then none: {fresh:?}");
+        assert_eq!(fresh.last(), Some(&None));
+        assert_eq!(chain(true, 11), fresh);
+        let long = chain(false, 24);
+        assert_eq!(long.len(), 17, "16 refusals: {long:?}");
+        assert!(long.iter().all(|t| t.is_some()));
+        assert_eq!(chain(true, 24), long);
+    }
+
+    #[test]
+    fn unit_changes_move_the_unit_epoch() {
+        let mut w = EntityWorld::default();
+        let p = w.spawn(EntityKind::Projectile, BlueprintKind::Projectile, String::new(), None, FxVec3::default(), FxQuat::IDENTITY);
+        let u = w.spawn(EntityKind::Unit, BlueprintKind::Unit, String::new(), Some(1), FxVec3::default(), FxQuat::IDENTITY);
+        let e = w.unit_epoch();
+        w.set_transform(p, FxVec3::from_f64(1.0, 0.0, 0.0), FxQuat::IDENTITY);
+        let _ = w.get_mut(p);
+        assert_eq!(w.unit_epoch(), e, "projectiles don't");
+        w.set_position(u, FxVec3::from_f64(1.0, 0.0, 0.0));
+        assert_ne!(w.unit_epoch(), e);
+        let e = w.unit_epoch();
+        let _ = w.get_mut(u);
+        assert_ne!(w.unit_epoch(), e);
+        let e = w.unit_epoch();
+        w.destroy(u);
+        assert_ne!(w.unit_epoch(), e);
+    }
+
     #[test]
     fn detonation_keeps_the_unit_hit_and_aircraft_are_air() {
         use crate::engine::sim::entity::CollisionShape;

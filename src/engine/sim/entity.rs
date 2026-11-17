@@ -546,6 +546,13 @@ pub struct EntityWorld {
     /// by clearing `attachment`); destroy re-checks each child. Ids are
     /// never reused, so a stale pair can't match a new entity.
     children: std::collections::BTreeSet<(EntityId, EntityId)>,
+    /// Bumped by anything that may change a unit (any mutable access to
+    /// one, a unit spawned, the grids rebuilt): a unit query cached earlier
+    /// in a tick is still right while this is unchanged
+    /// ([`EntityWorld::unit_epoch`]). Bookkeeping only, never read by the
+    /// sim's results.
+    #[serde(skip)]
+    unit_epoch: u64,
 }
 
 /// Which spatial index a query reads.
@@ -579,6 +586,7 @@ impl EntityWorld {
         self.slot.push(self.dense.len() as u32);
         if kind == EntityKind::Unit {
             self.unit_slots.push(self.dense.len() as u32);
+            self.unit_epoch += 1;
         }
         self.dense.push(Entity {
             id,
@@ -633,6 +641,12 @@ impl EntityWorld {
         id
     }
 
+    /// Changes whenever a unit may have changed (see the field): equal
+    /// values mean every unit's state is as it was.
+    pub fn unit_epoch(&self) -> u64 {
+        self.unit_epoch
+    }
+
     /// See `unit_reach`.
     pub fn unit_reach(&self) -> Fx {
         self.unit_reach
@@ -672,6 +686,7 @@ impl EntityWorld {
     /// Sizes the spatial grids to the map and re-indexes every live unit
     /// and prop.
     pub fn set_bounds(&mut self, width: u32, height: u32) {
+        self.unit_epoch += 1;
         self.grid = SpatialGrid::new(width, height);
         self.prop_grid = SpatialGrid::new(width, height);
         for e in self.dense.iter_mut() {
@@ -688,8 +703,10 @@ impl EntityWorld {
 
     /// Moves entity `i` (dense index), re-celling it if indexed.
     fn move_to(&mut self, i: usize, p: FxVec3) {
-        if self.dense[i].kind == EntityKind::Prop {
-            self.note_prop(self.dense[i].id);
+        match self.dense[i].kind {
+            EntityKind::Prop => self.note_prop(self.dense[i].id),
+            EntityKind::Unit => self.unit_epoch += 1,
+            _ => {}
         }
         let e = &mut self.dense[i];
         e.position = p;
@@ -715,6 +732,7 @@ impl EntityWorld {
 
     pub fn set_transform(&mut self, id: EntityId, p: FxVec3, q: FxQuat) {
         if let Some(i) = self.index(id) {
+            // (`move_to` bumps `unit_epoch` for a unit.)
             self.dense[i].orientation = q;
             self.move_to(i, p);
         }
@@ -903,8 +921,10 @@ impl EntityWorld {
 
     pub fn get_mut(&mut self, id: EntityId) -> Option<&mut Entity> {
         let i = self.index(id)?;
-        if self.dense[i].kind == EntityKind::Prop {
-            self.note_prop(id);
+        match self.dense[i].kind {
+            EntityKind::Prop => self.note_prop(id),
+            EntityKind::Unit => self.unit_epoch += 1,
+            _ => {}
         }
         Some(&mut self.dense[i])
     }
@@ -963,6 +983,7 @@ impl EntityWorld {
 
     /// [`EntityWorld::units`], mutably.
     pub fn for_each_unit_mut(&mut self, mut f: impl FnMut(&mut Entity)) {
+        self.unit_epoch += 1;
         for &i in &self.unit_slots {
             f(&mut self.dense[i as usize]);
         }
@@ -973,6 +994,7 @@ impl EntityWorld {
     /// goes through [`EntityWorld::get_mut`] / `set_*`, which tell snapshots
     /// (`prop_changes`). The per-tick users touch unit state only.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Entity> {
+        self.unit_epoch += 1;
         self.dense.iter_mut()
     }
 
@@ -1003,6 +1025,7 @@ impl EntityWorld {
         if self.destroyed == 0 {
             return Vec::new();
         }
+        self.unit_epoch += 1;
         let mut removed = Vec::with_capacity(self.destroyed);
         self.dense.retain(|e| {
             if e.gone {
@@ -1131,6 +1154,9 @@ impl EntityWorld {
     /// (manipulators applied: sliders, aims, clips), else its rest pose.
     pub fn attach_posed(&mut self, child: EntityId, attachment: Attachment, posed: impl Fn(&Entity, u32) -> Option<FxVec3>) {
         let Some(i) = self.index(child) else { return };
+        if self.dense[i].kind == EntityKind::Unit {
+            self.unit_epoch += 1;
+        }
         self.dense[i].attachment = Some(attachment);
         if let Some(u) = self.dense[i].unit.as_deref_mut() {
             u.on_ground = false;
@@ -1150,6 +1176,9 @@ impl EntityWorld {
             bone => bone.and_then(|b| posed(p, b)).unwrap_or_else(|| p.bone_world_position(bone)),
         };
         let target = bone_at + orientation.rotate(offset);
+        if self.dense[i].kind == EntityKind::Unit {
+            self.unit_epoch += 1;
+        }
         let c = &mut self.dense[i];
         c.orientation = orientation;
         let bone = c.bone_world_position(a.self_bone);
