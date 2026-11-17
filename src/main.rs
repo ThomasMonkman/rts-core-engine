@@ -188,7 +188,10 @@ fn main() -> std::process::ExitCode {
                 })
                 .with_filter(ui_filter),
         )
-        .with(tracy_layer())
+        // Filtered like the logs: unfiltered, a window's wgpu / naga TRACE
+        // events (millions) outran the link to Tracy and the busiest
+        // threads' zones (sim, render) fell ever further behind.
+        .with(tracy_layer().with_filter(log_filter()))
         .init();
     rts_core_engine::threads::init_global_pool();
     // Before any VM or script cache: it changes how scripts compile.

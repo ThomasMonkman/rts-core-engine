@@ -697,13 +697,15 @@ impl IntelGrids {
                 this.merge_chunk(&old[lo..hi], c);
             });
             // Serial apply: the chunks' outputs in chunk order.
-            let _join = crate::prof_span!("intel merge join");
+            let join = crate::prof_span!("intel merge join");
             for c in &chunks {
                 out.wanted.extend_from_slice(&c.wanted);
                 out.ops.extend_from_slice(&c.ops);
                 out.own_flags.extend_from_slice(&c.own_flags);
                 out.jammers.extend_from_slice(&c.jammers);
             }
+            // Inner span first: spans exit in the order they were entered.
+            drop(join);
             drop(merge);
             self.update_chunks = chunks;
         } else {
