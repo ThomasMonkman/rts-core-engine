@@ -340,6 +340,48 @@ fn spatial(c: &mut Criterion) {
         c.bench_function("spatial/damage ring r2-4 shapes (2000 units)", |b| b.iter(|| black_box(w.touching_shell(Indexed::Units, at, Fx::from_num(2), Fx::from_num(4)))));
     }
 
+    // Area damage's shield pass (four per crashing plane, once per blast):
+    // 500 shield bubbles (radius 15-45, as T2 / T3 shields) over a 4096
+    // map, a radius-4 blast touching 2 of them. The volume index against
+    // the plain list of every shield it replaced.
+    {
+        use rts_core_engine::engine::api::damage::shield_entities_touched;
+        use rts_core_engine::engine::sim::collision::sphere_touches;
+        use rts_core_engine::engine::sim::entity::CollisionShape;
+        let mut w = EntityWorld::default();
+        w.set_bounds(4096, 4096);
+        let at = FxVec3::from_f64(2048.0, 20.0, 2048.0);
+        let bubble = |w: &mut EntityWorld, p: FxVec3, r: i32| {
+            let id = w.spawn(EntityKind::Shield, BlueprintKind::Unit, String::new(), Some(1), p, FxQuat::IDENTITY);
+            w.set_collision_override(id, Some(CollisionShape::Sphere { center: FxVec3::default(), radius: Fx::from_num(r) }));
+            id
+        };
+        let mut list = Vec::new();
+        while list.len() < 498 {
+            let p = FxVec3 { x: Fx::from_num((rng.next_u64() % 4096) as i32), y: Fx::from_num(20), z: Fx::from_num((rng.next_u64() % 4096) as i32) };
+            if (p.x - at.x).abs() < Fx::from_num(120) && (p.z - at.z).abs() < Fx::from_num(120) {
+                continue;
+            }
+            list.push(bubble(&mut w, p, 15 + (rng.next_u64() % 31) as i32));
+        }
+        list.push(bubble(&mut w, at + FxVec3::from_f64(30.0, 0.0, 0.0), 32));
+        list.push(bubble(&mut w, at + FxVec3::from_f64(0.0, 0.0, -40.0), 42));
+        let r = Fx::from_num(4);
+        assert_eq!(shield_entities_touched(&w, at, Fx::ZERO, r).len(), 2, "the blast touches two bubbles");
+        c.bench_function("spatial/damage area shields r4 (index, 500 shields)", |b| b.iter(|| black_box(shield_entities_touched(&w, at, Fx::ZERO, r))));
+        c.bench_function("spatial/damage area shields r4 (list, 500 shields)", |b| {
+            b.iter(|| {
+                let ids: Vec<u32> = list
+                    .iter()
+                    .filter_map(|&id| w.get(id))
+                    .filter(|e| !e.destroyed && sphere_touches(at, r, e.position(), e.orientation, &e.collision_shape()))
+                    .map(|e| e.id)
+                    .collect();
+                black_box(ids)
+            })
+        });
+    }
+
     // Auto-reclaim scan: props within reach (r 8) of an engineer, on a
     // 1024 map with Seton's Clutch's 5182 props spread uniformly.
     let mut props = EntityWorld::default();

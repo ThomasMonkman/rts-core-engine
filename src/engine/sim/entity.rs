@@ -41,7 +41,7 @@ use crate::engine::sim::intel::IntelMap;
 
 use crate::engine::api::blueprints::BlueprintKind;
 use crate::engine::sim::math::{Fx, FxQuat, FxVec3};
-use crate::engine::sim::spatial::SpatialGrid;
+use crate::engine::sim::spatial::{CellRect, SpatialGrid};
 
 pub type EntityId = u32;
 
@@ -519,9 +519,6 @@ pub struct EntityWorld {
     /// Dense indices of the units (ascending, so in id order): passes over
     /// units skip the props (most of a big map's entities).
     unit_slots: Vec<u32>,
-    /// Dense indices of the shield bubbles (ascending): area damage and
-    /// beams look at every shield without reading every unit and prop.
-    shield_slots: Vec<u32>,
     /// Freed entities still in `dense` (lets `compact` skip quiet ticks).
     destroyed: usize,
     /// Entities `destroy`ed whose `OnDestroy` hasn't run yet, in the order
@@ -531,6 +528,17 @@ pub struct EntityWorld {
     grid: SpatialGrid,
     /// Live props by map cell (kept apart so unit queries never scan trees).
     prop_grid: SpatialGrid,
+    /// Live shield bubbles and script entities (flares, missile
+    /// redirectors, depth charges) that have a collision shape, listed in
+    /// every cell their shape can reach (position +- `collision::reach`,
+    /// on XZ): bubbles are big and few, so a query looks only at the cells
+    /// it covers instead of widening by the biggest bubble. Kept in sync by
+    /// [`EntityWorld::index_volume`] wherever a position, a shape or the
+    /// destroyed flag changes.
+    volume_grid: SpatialGrid,
+    /// The cells each entity in `volume_grid` is listed in, by id (so the
+    /// listed volumes in id order, too).
+    volume_cells: BTreeMap<EntityId, CellRect>,
     /// Props that may have changed (spawned, destroyed, moved, or reached
     /// mutably through [`EntityWorld::get_mut`]) since snapshots last took
     /// them, so a snapshot sends only those props' views. Recorded only once
@@ -591,9 +599,6 @@ impl EntityWorld {
             self.unit_slots.push(self.dense.len() as u32);
             self.unit_epoch += 1;
         }
-        if kind == EntityKind::Shield {
-            self.shield_slots.push(self.dense.len() as u32);
-        }
         self.dense.push(Entity {
             id,
             kind,
@@ -644,7 +649,51 @@ impl EntityWorld {
         if kind == EntityKind::Prop {
             self.note_prop(id);
         }
+        self.index_volume(self.dense.len() - 1);
         id
+    }
+
+    /// Whether the volume index ([`EntityWorld::volumes_in`]) covers
+    /// entities of this kind.
+    fn volume_kind(kind: EntityKind) -> bool {
+        matches!(kind, EntityKind::Shield | EntityKind::Script)
+    }
+
+    /// Re-lists entity `i` (dense index) in the volume index: in every cell
+    /// its collision shape can reach if it is a live shield or script
+    /// entity with a shape, else nowhere. Cheap when nothing changed.
+    fn index_volume(&mut self, i: usize) {
+        let e = &self.dense[i];
+        if !Self::volume_kind(e.kind) {
+            return;
+        }
+        let want = match e.collision_shape() {
+            _ if e.destroyed => None,
+            CollisionShape::None => None,
+            shape => {
+                let (p, r) = (e.position, crate::engine::sim::collision::reach(&shape));
+                Some(self.volume_grid.rect_of(p.x - r, p.z - r, p.x + r, p.z + r))
+            }
+        };
+        let id = e.id;
+        let have = self.volume_cells.get(&id).copied();
+        if want == have {
+            return;
+        }
+        if let Some(r) = have {
+            self.volume_grid.remove_rect(id, r);
+            self.volume_cells.remove(&id);
+        }
+        if let Some(r) = want {
+            self.volume_grid.insert_rect(id, r);
+            self.volume_cells.insert(id, r);
+        }
+    }
+
+    fn index_volume_id(&mut self, id: EntityId) {
+        if let Some(i) = self.index(id) {
+            self.index_volume(i);
+        }
     }
 
     /// Changes whenever a unit may have changed (see the field): equal
@@ -673,6 +722,7 @@ impl EntityWorld {
             e.cold.base_collision = shape;
         }
         self.note_reach(id);
+        self.index_volume_id(id);
     }
 
     pub fn set_collision_override(&mut self, id: EntityId, shape: Option<CollisionShape>) {
@@ -680,6 +730,7 @@ impl EntityWorld {
             e.cold.collision = shape;
         }
         self.note_reach(id);
+        self.index_volume_id(id);
     }
 
     fn grid(&self, which: Indexed) -> &SpatialGrid {
@@ -695,6 +746,11 @@ impl EntityWorld {
         self.unit_epoch += 1;
         self.grid = SpatialGrid::new(width, height);
         self.prop_grid = SpatialGrid::new(width, height);
+        self.volume_grid = SpatialGrid::new(width, height);
+        self.volume_cells.clear();
+        for i in 0..self.dense.len() {
+            self.index_volume(i);
+        }
         for e in self.dense.iter_mut() {
             e.grid_cell = NOT_INDEXED;
             let Some(which) = Indexed::of(e.kind).filter(|_| !e.destroyed) else { continue };
@@ -728,6 +784,7 @@ impl EntityWorld {
                 e.grid_cell = cell;
             }
         }
+        self.index_volume(i);
     }
 
     pub fn set_position(&mut self, id: EntityId, p: FxVec3) {
@@ -804,6 +861,23 @@ impl EntityWorld {
         });
         ids.sort_unstable();
         ids
+    }
+
+    /// The live shield bubbles and script entities with a collision shape
+    /// listed in a cell the XZ box overlaps: every one whose shape reaches
+    /// into the box, and some near it (callers apply the exact test). Into
+    /// `out` (cleared first), ascending id.
+    pub fn volumes_in(&self, min_x: Fx, min_z: Fx, max_x: Fx, max_z: Fx, out: &mut Vec<EntityId>) {
+        out.clear();
+        self.volume_grid.candidates(min_x, min_z, max_x, max_z, out);
+        out.sort_unstable();
+        out.dedup();
+    }
+
+    /// Every live shield bubble and script entity with a collision shape,
+    /// ascending id (what the volume index lists).
+    pub fn volumes(&self) -> impl Iterator<Item = &Entity> {
+        self.volume_cells.keys().filter_map(|&id| self.get(id))
     }
 
     /// Every live unit in a grid cell overlapping the XZ box (unsorted, no
@@ -981,13 +1055,6 @@ impl EntityWorld {
         self.unit_slots.iter().map(|&i| &self.dense[i as usize])
     }
 
-    /// The shield bubbles (destroyed ones too until compaction), in id
-    /// order: what `iter().filter(kind == Shield)` gives without reading
-    /// every unit and prop.
-    pub fn shields(&self) -> impl Iterator<Item = &Entity> {
-        self.shield_slots.iter().map(|&i| &self.dense[i as usize])
-    }
-
     /// The units' indices into [`EntityWorld::as_slice`], in id order (for
     /// parallel passes over the units).
     pub fn unit_indices(&self) -> &[u32] {
@@ -1050,13 +1117,10 @@ impl EntityWorld {
             self.slot[id as usize] = REMOVED;
         }
         self.unit_slots.clear();
-        self.shield_slots.clear();
         for (i, e) in self.dense.iter().enumerate() {
             self.slot[e.id as usize] = i as u32;
-            match e.kind {
-                EntityKind::Unit => self.unit_slots.push(i as u32),
-                EntityKind::Shield => self.shield_slots.push(i as u32),
-                _ => {}
+            if e.kind == EntityKind::Unit {
+                self.unit_slots.push(i as u32);
             }
         }
         self.destroyed = 0;
@@ -1088,6 +1152,7 @@ impl EntityWorld {
                 _ => self.grid.remove(id, cell),
             }
         }
+        self.index_volume_id(id);
         self.destroyed_log.push(id);
         self.destroy_queue.push_back(id);
         true
@@ -1618,6 +1683,111 @@ mod tests {
                 assert_eq!(w.in_shell(which, center, min_r, r), brute);
             }
         }
+    }
+
+    /// The volume index against a brute-force pass over every entity: the
+    /// live shields and script entities with a shape whose reach box
+    /// overlaps the query box are all found, in id order.
+    fn volumes_brute(w: &EntityWorld, min_x: Fx, min_z: Fx, max_x: Fx, max_z: Fx) -> Vec<EntityId> {
+        w.iter()
+            .filter(|e| matches!(e.kind, EntityKind::Shield | EntityKind::Script) && !e.destroyed)
+            .filter(|e| {
+                let shape = e.collision_shape();
+                let r = crate::engine::sim::collision::reach(&shape);
+                let p = e.position();
+                shape != CollisionShape::None && p.x + r >= min_x && p.x - r <= max_x && p.z + r >= min_z && p.z - r <= max_z
+            })
+            .map(|e| e.id)
+            .collect()
+    }
+
+    /// Every brute-force hit is in the index's answer, which is in id order
+    /// with no repeats, and nothing in it lacks a shape or is destroyed.
+    fn check_volumes(w: &EntityWorld, rng: &mut crate::engine::sim::rng::SimRng) {
+        let coord = |rng: &mut crate::engine::sim::rng::SimRng| Fx::from_num((rng.next_u64() % 1200) as i32 - 100);
+        let mut got = Vec::new();
+        for _ in 0..60 {
+            let (x, z, r) = (coord(rng), coord(rng), Fx::from_num((rng.next_u64() % 120) as i32));
+            w.volumes_in(x - r, z - r, x + r, z + r, &mut got);
+            let want = volumes_brute(w, x - r, z - r, x + r, z + r);
+            assert!(want.iter().all(|id| got.binary_search(id).is_ok()), "missed: want {want:?} got {got:?}");
+            assert!(got.windows(2).all(|p| p[0] < p[1]), "id order, no repeats");
+            assert!(got.iter().all(|&id| w.get(id).is_some_and(|e| !e.destroyed && e.collision_shape() != CollisionShape::None)));
+        }
+        let listed: Vec<EntityId> = w.volumes().map(|e| e.id).collect();
+        let all = volumes_brute(w, Fx::MIN / 2, Fx::MIN / 2, Fx::MAX / 2, Fx::MAX / 2);
+        assert_eq!(listed, all, "volumes() is every indexed entity, ascending");
+    }
+
+    /// Shields (bubbles spanning many cells) and script spheres stay
+    /// indexed through spawn, moves, shape changes (a bubble going down and
+    /// up), destroys, compaction and a save / load.
+    #[test]
+    fn volume_index_stays_in_sync() {
+        use crate::engine::sim::rng::SimRng;
+        let mut rng = SimRng::new(11);
+        let coord = |rng: &mut SimRng| Fx::from_num((rng.next_u64() % 1200) as i32 - 100);
+        let mut w = EntityWorld::default();
+        w.set_bounds(1024, 1024);
+        let mut ids = Vec::new();
+        for i in 0..120 {
+            let kind = [EntityKind::Shield, EntityKind::Script, EntityKind::Unit, EntityKind::Projectile][i % 4];
+            let p = FxVec3 { x: coord(&mut rng), y: Fx::ZERO, z: coord(&mut rng) };
+            let id = w.spawn(kind, BlueprintKind::Unit, String::new(), Some(1), p, FxQuat::IDENTITY);
+            let radius = Fx::from_num((rng.next_u64() % 90) as i32 + 1);
+            let shape = if i % 5 == 0 {
+                CollisionShape::Box { center: FxVec3::from_f64(0.0, 1.0, 2.0), half: FxVec3 { x: radius, y: radius, z: radius } }
+            } else {
+                CollisionShape::Sphere { center: FxVec3::from_f64(0.0, -1.75, 0.0), radius }
+            };
+            w.set_collision_override(id, Some(shape));
+            ids.push(id);
+        }
+        // Spawned without a shape: not listed.
+        w.spawn(EntityKind::Shield, BlueprintKind::Unit, String::new(), None, FxVec3::default(), FxQuat::IDENTITY);
+        check_volumes(&w, &mut rng);
+        for round in 0..6 {
+            for (i, &id) in ids.iter().enumerate() {
+                match (i + round) % 7 {
+                    0 | 1 => w.set_position(id, FxVec3 { x: coord(&mut rng), y: Fx::ZERO, z: coord(&mut rng) }),
+                    // Small steps (a bubble on a moving unit).
+                    2 => {
+                        let p = w.get(id).unwrap().position();
+                        w.set_transform(id, p + FxVec3::from_f64(7.0, 0.0, -5.0), FxQuat::from_heading(Fx::from_num(round)).0);
+                    }
+                    // Down and back up.
+                    3 => w.set_collision_override(id, Some(CollisionShape::None)),
+                    4 => w.set_collision_override(id, None),
+                    5 => w.set_base_collision(id, CollisionShape::Sphere { center: FxVec3::default(), radius: Fx::from_num(40) }),
+                    _ => {}
+                }
+            }
+            check_volumes(&w, &mut rng);
+        }
+        for &id in ids.iter().step_by(3) {
+            w.destroy(id);
+        }
+        check_volumes(&w, &mut rng);
+        w.finish_destroys();
+        assert!(!w.compact_now().is_empty());
+        check_volumes(&w, &mut rng);
+        // Attached bubbles follow their parent and stay listed where they are.
+        let parent = ids[1];
+        let shield = ids[4];
+        w.attach(shield, Attachment { parent, parent_bone: None, self_bone: None });
+        w.set_position(parent, FxVec3::from_f64(900.0, 0.0, 30.0));
+        w.follow_attachments();
+        check_volumes(&w, &mut rng);
+        // A save and load keeps the index.
+        let bytes = postcard::to_allocvec(&w).unwrap();
+        let mut loaded: EntityWorld = postcard::from_bytes(&bytes).unwrap();
+        check_volumes(&loaded, &mut rng);
+        let id = ids[2];
+        loaded.set_position(id, FxVec3::from_f64(10.0, 0.0, 10.0));
+        check_volumes(&loaded, &mut rng);
+        // Re-sizing the grids re-lists everything.
+        loaded.set_bounds(2048, 2048);
+        check_volumes(&loaded, &mut rng);
     }
 
     #[test]

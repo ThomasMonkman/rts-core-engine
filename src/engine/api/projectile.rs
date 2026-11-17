@@ -442,7 +442,8 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         // (flares, missile redirectors, depth charges).
         use crate::engine::sim::entity::{CollisionShape, EntityKind};
         let last = std::mem::take(&mut ps.script_sphere_centers);
-        for e in w.iter().filter(|e| !e.destroyed && matches!(e.kind, EntityKind::Shield | EntityKind::Script)) {
+        // (From the volume index: ascending id, live, with a shape.)
+        for e in w.volumes().filter(|e| !e.destroyed && matches!(e.kind, EntityKind::Shield | EntityKind::Script)) {
             if let CollisionShape::Sphere { center, radius } = e.collision_shape()
                 && radius > crate::engine::sim::math::Fx::ZERO {
                 let center = e.position() + e.orientation.rotate(center);

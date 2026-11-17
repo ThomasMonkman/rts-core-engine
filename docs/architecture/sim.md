@@ -83,6 +83,14 @@ Units are also indexed in a uniform grid of 32-unit cells (`sim/spatial.rs`). Ev
 through `EntityWorld::set_position` / `set_transform`, which re-cell the entity, so the index can't
 drift. Map props live in their own grid, so unit queries never see them.
 
+Shield bubbles and script entities (flares, missile redirectors, depth charges) that have a
+collision shape live in a third grid, the volume index (`EntityWorld::volumes_in`, `volumes`). A
+bubble is big, so it's listed in every cell its shape can reach (position ± `collision::reach`),
+not just the one under its origin: a query reads only the cells it covers, with no margin for the
+biggest bubble. Moves, shape changes (`set_collision_override`: FAF drops a bubble's shape while
+it's down) and `destroy` re-list it. Area damage, damage rings, beams and the projectile step's
+shield gather ask it, never the whole world.
+
 ## Orders
 
 1. **Issuing.** An `Issue*` call (or a player command) makes one shared command (`sim/command.rs`,

@@ -6,12 +6,26 @@
 //! and identical on every machine. Order inside a cell is arbitrary (removal
 //! swap-removes); queries sort their result by id, so callers always see id
 //! order. Positions off the map clamp into the border cells.
+//!
+//! A point entity is listed in the one cell under it. Something bigger than
+//! a cell (a shield bubble) can instead be listed in every cell its extent
+//! covers ([`SpatialGrid::insert_rect`]), so a query finds it from any cell
+//! it reaches into without widening by the largest extent in the world.
 
 use crate::engine::sim::entity::EntityId;
 use crate::engine::sim::math::{Fx, FxVec3};
 
 /// Cell edge = 2^CELL_SHIFT world units (32).
 const CELL_SHIFT: u32 = 5;
+
+/// An inclusive range of grid columns (`x0..=x1`) and rows (`z0..=z1`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CellRect {
+    pub x0: u32,
+    pub z0: u32,
+    pub x1: u32,
+    pub z1: u32,
+}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct SpatialGrid {
@@ -69,6 +83,35 @@ impl SpatialGrid {
     /// The ids in one cell (unordered).
     pub fn cell(&self, i: u32) -> &[EntityId] {
         &self.cells[i as usize]
+    }
+
+    /// The cells overlapping the XZ box [min, max], as an inclusive range
+    /// of columns and rows (clamped to the grid like [`SpatialGrid::cell_of`]).
+    pub fn rect_of(&self, min_x: Fx, min_z: Fx, max_x: Fx, max_z: Fx) -> CellRect {
+        CellRect {
+            x0: Self::axis(min_x, self.cols),
+            z0: Self::axis(min_z, self.rows),
+            x1: Self::axis(max_x, self.cols),
+            z1: Self::axis(max_z, self.rows),
+        }
+    }
+
+    /// Lists `id` in every cell of `r` (for something bigger than a cell).
+    pub fn insert_rect(&mut self, id: EntityId, r: CellRect) {
+        for z in r.z0..=r.z1 {
+            for x in r.x0..=r.x1 {
+                self.insert(id, z * self.cols + x);
+            }
+        }
+    }
+
+    /// Takes `id` out of every cell of `r` ([`SpatialGrid::insert_rect`]).
+    pub fn remove_rect(&mut self, id: EntityId, r: CellRect) {
+        for z in r.z0..=r.z1 {
+            for x in r.x0..=r.x1 {
+                self.remove(id, z * self.cols + x);
+            }
+        }
     }
 
     /// Ids in every cell overlapping the XZ box [min, max] (unsorted,
