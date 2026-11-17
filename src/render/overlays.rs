@@ -524,6 +524,9 @@ pub const CONTACT: [f32; 3] = [197.0 / 255.0, 197.0 / 255.0, 197.0 / 255.0];
 /// The land contact's shape (also when a contact's unit has no icon).
 const LAND_CONTACT: &str = "icon_land_generic";
 
+/// Every aircraft's contact shape (FAF's `GenericIcons.Air`).
+const AIR_CONTACT: &str = "icon_fighter_generic";
+
 /// The draw layer of aircraft icons (`snapshot::icon_layer`).
 const AIR_LAYER: u8 = 1;
 
@@ -532,18 +535,18 @@ const AIR_LAYER: u8 = 1;
 /// `/lua/ui/game/strategicIcons.lua`, the plain grey `icon_*_generic`
 /// textures): a diamond for every land unit (commanders, bots and land
 /// experimentals included), a square for structures and factories, a
-/// half-dome for ships and subs alike (FAF probe `probe_intel_icons`). An
-/// aircraft's contact while flying isn't confirmed: ours keeps its own
-/// generic air shape (fighter, bomber, gunship), and an air experimental's.
+/// half-dome for ships and subs alike (FAF probe `probe_intel_icons`), and
+/// the fighter's triangle for every aircraft (`GenericIcons.Air`): probe_re3_intel
+/// shows a gunship's contact as the triangle, never `icon_gunship_generic`
+/// (an upside-down trapezoid that reads as a half-dome). The shape follows the
+/// blueprint, not the surface under the unit.
 fn unidentified_icon(name: &str, air: bool) -> &'static str {
     let shape = name.strip_prefix("icon_").and_then(|r| r.split('_').next()).map(|s| s.trim_end_matches(|c: char| c.is_ascii_digit())).unwrap_or("");
     match shape {
         "structure" | "factory" | "factoryhq" => "icon_structure_generic",
         "ship" | "sub" => "icon_ship_generic",
-        "fighter" => "icon_fighter_generic",
-        "bomber" => "icon_bomber_generic",
-        "gunship" => "icon_gunship_generic",
-        "experimental" if air => "icon_experimental_generic",
+        "fighter" | "bomber" | "gunship" => AIR_CONTACT,
+        "experimental" if air => AIR_CONTACT,
         _ => LAND_CONTACT,
     }
 }
@@ -682,8 +685,8 @@ mod bar_tests {
     }
 
     /// probe_intel_icons: a never-seen contact is one of four plain shapes,
-    /// giving away no class beyond land / structure / naval (aircraft keep
-    /// theirs: unconfirmed).
+    /// giving away no class beyond land / structure / naval / air
+    /// (probe_re3_intel: a gunship over water is the air triangle).
     #[test]
     fn contacts_show_the_plain_generic_shapes() {
         use super::unidentified_icon as shape;
@@ -696,7 +699,10 @@ mod bar_tests {
         assert_eq!(shape("icon_ship2_directfire", false), "icon_ship_generic");
         assert_eq!(shape("icon_sub2_antinavy", false), "icon_ship_generic", "subs as ships");
         assert_eq!(shape("icon_fighter1_antiair", true), "icon_fighter_generic");
-        assert_eq!(shape("icon_experimental_generic", true), "icon_experimental_generic", "an air experimental");
+        for air in ["icon_bomber2_directfire", "icon_gunship2_directfire", "icon_gunship3_antinavy"] {
+            assert_eq!(shape(air, true), "icon_fighter_generic", "{air}");
+        }
+        assert_eq!(shape("icon_experimental_generic", true), "icon_fighter_generic", "an air experimental");
     }
 
     #[test]
