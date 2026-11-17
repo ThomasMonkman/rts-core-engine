@@ -571,6 +571,68 @@ fn projectile_collision(c: &mut Criterion) {
     g.finish();
 }
 
+/// Refused collision checks: 500 shots each flying through a block of its
+/// own side's aircraft (2000, 3 apart), every check refusing (FAF's stock
+/// answer to a friendly hit), swept on up to 16 times as
+/// `api::projectile` does. "kept" passes on the step's kept unit hits
+/// (`projectile::UnitHits`), "retest" tests every unit again each time.
+fn projectile_refusals(c: &mut Criterion) {
+    use rts_core_engine::engine::api::blueprints::BlueprintKind;
+    use rts_core_engine::engine::sim::entity::{CollisionShape, EntityKind, EntityWorld};
+    use rts_core_engine::engine::sim::math::{FxQuat, FxVec3};
+    use rts_core_engine::engine::sim::projectile::{self, Env, ProjectileState, ProjectileTemplate, Projectiles};
+    let setup = || {
+        let mut world = EntityWorld::default();
+        world.set_bounds(1024, 1024);
+        for i in 0..2000 {
+            let (x, z) = (400.0 + (i % 45) as f64 * 3.0, 400.0 + (i / 45) as f64 * 3.0);
+            let id = world.spawn(EntityKind::Unit, BlueprintKind::Unit, String::new(), Some(1), FxVec3::from_f64(x, 20.0, z), FxQuat::IDENTITY);
+            world.set_base_collision(id, CollisionShape::Box { center: FxVec3::default(), half: FxVec3::from_f64(1.0, 0.5, 1.0) });
+        }
+        let mut ps = Projectiles::default();
+        let t = ProjectileTemplate { collide_entity: true, ..Default::default() };
+        let mut rng = SimRng::new(14);
+        for _ in 0..500 {
+            let (x, z) = (400.0 + (rng.next_u64() % 130) as f64, 400.0 + (rng.next_u64() % 120) as f64);
+            let id = world.spawn(EntityKind::Projectile, BlueprintKind::Projectile, String::new(), Some(1), FxVec3::from_f64(x, 20.0, z), FxQuat::IDENTITY);
+            ps.insert(ProjectileState::new(id, None, &t, FxVec3::from_f64(0.0, 0.0, 300.0)));
+        }
+        let mut impacts = Vec::new();
+        projectile::step_with(&mut ps, &mut world, Env::default(), &mut impacts, usize::MAX);
+        (world, ps, impacts)
+    };
+    let mut g = c.benchmark_group("projectiles/refusals");
+    for (mode, kept) in [("kept", true), ("retest", false)] {
+        g.bench_function(BenchmarkId::new(mode, 500), |b| {
+            b.iter_batched_ref(
+                setup,
+                |(world, ps, impacts)| {
+                    let checks = std::mem::take(&mut ps.checks);
+                    let mut refused = Vec::new();
+                    for first in checks {
+                        let mut c = first;
+                        let mut target = impacts.iter().find(|i| i.id == c.id).and_then(|i| i.target);
+                        refused.clear();
+                        while let Some(t) = target.filter(|_| refused.len() < 16) {
+                            refused.push(t);
+                            ps.get_mut(c.id).unwrap().last_hit = Some(t);
+                            let env = Env { skip: &refused, unit_hits: kept.then_some(&c.hits), ..Default::default() };
+                            let (impact, next) = projectile::resweep(ps, world, env, c.id, c.from, c.to);
+                            target = impact.and_then(|i| i.target);
+                            match next {
+                                Some(n) => c = n,
+                                None => break,
+                            }
+                        }
+                    }
+                },
+                criterion::BatchSize::LargeInput,
+            )
+        });
+    }
+    g.finish();
+}
+
 /// AI threat map: the 30-tick update over 2000 units (8 armies, every brain
 /// detecting half of the others' units and remembering the rest) and the two
 /// common queries on a 20 km map (16x16 cells of 64).
@@ -2372,5 +2434,5 @@ fn audio(c: &mut Criterion) {
     eprintln!("audio bench: {} cues active", e.active());
 }
 
-criterion_group!(benches, scripts, blueprints, mods, categories, rng, bounded_props, terrain, trig, scheduler, sim_tick, entities, spatial, economy, checksum, unit_stats, projectiles, projectile_collision, weapons, threat, movement, avoidance, effects, attachments, intel, nav, snapshot, poses, models, map_render, manipulators, transport, construction, lua_call_overhead, lua_table_shims, lua_api, lua_interrupt, interface, movies, audio);
+criterion_group!(benches, scripts, blueprints, mods, categories, rng, bounded_props, terrain, trig, scheduler, sim_tick, entities, spatial, economy, checksum, unit_stats, projectiles, projectile_collision, projectile_refusals, weapons, threat, movement, avoidance, effects, attachments, intel, nav, snapshot, poses, models, map_render, manipulators, transport, construction, lua_call_overhead, lua_table_shims, lua_api, lua_interrupt, interface, movies, audio);
 criterion_main!(benches);
