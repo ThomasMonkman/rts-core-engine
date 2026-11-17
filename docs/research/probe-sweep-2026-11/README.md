@@ -11,16 +11,16 @@ Items are counted as bullets of the batches below. A bullet that was half fixed 
 | Batch | Fixed | Open | Needs a decision | Needs a new probe | Closed, no change | Items |
 |---|---|---|---|---|---|---|
 | 1. Engine aborts and harness | 3 | 2 | 0 | 0 | 0 | 5 |
-| 2. Lua runtime | 9 | 18 | 0 | 0 | 1 | 28 |
+| 2. Lua runtime | 9 | 19 | 0 | 0 | 1 | 29 |
 | 3. Orders and construction | 39 | 4 | 0 | 0 | 4 | 47 |
 | 4. Weapons, projectiles, shields | 19 | 14 | 0 | 0 | 2 | 35 |
-| 5. Movement and transports | 14 | 8 | 0 | 3 | 3 | 28 |
-| 6. AI brain, platoons, threat | 26 | 12 | 0 | 3 | 1 | 42 |
+| 5. Movement and transports | 15 | 7 | 0 | 3 | 3 | 28 |
+| 6. AI brain, platoons, threat | 28 | 12 | 0 | 1 | 1 | 42 |
 | 7. Blueprint defaults | 1 | 3 | 0 | 0 | 0 | 4 |
 | 8. Interface | 25 | 33 | 0 | 0 | 1 | 59 |
 | 9. API surface and arity | 10 | 18 | 0 | 0 | 0 | 28 |
 | 10. Intel: jamming and contact icons | 7 | 3 | 0 | 2 | 0 | 12 |
-| **Total** | 153 | 115 | 0 | 8 | 12 | 288 |
+| **Total** | 156 | 115 | 0 | 6 | 12 | 289 |
 
 ### Decisions made (2026-11-16)
 
@@ -68,6 +68,7 @@ Items are counted as bullets of the batches below. A bullet that was half fixed 
 - [ ] **`table.concat` / `unpack` / `foreachi` / `string.byte` / `gsub` replacement edge cases** (open: mostly stricter in the real game, error paths) (C). `probe_api_spot`. [api L16](api.md#l16)
 - [ ] **Arithmetic metamethods are not tried from the right operand when the left is a number** (open: needs a VM patch, low value) (C, medium). `2 * Vector(1,2,3)` raises at the call site; ours reaches FAF's `__mul`. Which operator fails is not isolated. `probe_api_spot`. [api L19](api.md#l19)
 - [ ] **Lua 5.0 cannot yield across `pcall`** (open: would make ours stricter, no gain). Real: `coroutine.yield` inside `pcall` fails; ours (Luau) yields. `probe_api_spot`. [api H3](api.md#h3)
+- [ ] **`pcall` around a function that yields (`WaitTicks`)** (open: more lenient in ours, no gain from matching). Real: fails with "attempt to yield across metamethod/C-call boundary"; ours allows it. `probe_api_spot`. [api M7](api.md#m7)
 - [x] **Syntax and library extras in ours that the real game rejects** (closed: no change, accepted by the owner 2026-11-16): `%`, `#t`, `//`, `+=`, hex / binary / `_` literals, `\x` `\z`, `goto`, `...` as expression; Luau libraries `bit32`, `buffer`, `utf8`, `os`, `select`, `xpcall`, `typeof`, `coroutine.close` and others. A script that feature-tests `os` or `xpcall` sees them. `probe_api_lang`, `probe_api_census`. [api: Ours has](api.md#ours-has-real-doesnt)
 
 ## 3. Orders and construction

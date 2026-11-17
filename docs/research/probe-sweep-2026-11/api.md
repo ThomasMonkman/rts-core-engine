@@ -152,6 +152,7 @@ Missing: sim `CDamage` `GetInstigator/GetTarget/SetInstigator/SetTarget`, `AddLo
 | <a id="m4"></a>M4 | `debug.` `allobjects allocinfo debug gethook getlocal getupvalue listcode listk listlocals profiledata sethook setlocal setupvalue trackallocations` | census | `sim/Profiler.lua:25` (sethook), `shared/DebugFunction.lua`, `system/profile.lua:113`: developer tools only. `debug.getinfo` also lacks `func`, `namewhat`, `what` fields | C | open |
 | <a id="m5"></a>M5 | `string.dump`, `string.lualex` | census | none | C | open |
 | <a id="m6"></a>M6 | `AddLocalImpulse` on every entity class; `aibrain_methods.AddArmyStat`; `CDamage` `GetInstigator GetTarget SetInstigator SetTarget` | census | none | C | open |
+| <a id="m7"></a>M7 | `pcall` around a function that yields (`WaitTicks`) | `probe_api_spot` | the real game fails with "attempt to yield across metamethod/C-call boundary"; ours lets the yield through, so ours is more lenient (see H3) | C | open |
 
 ## Ours has, real doesn't
 
