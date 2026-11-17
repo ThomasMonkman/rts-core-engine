@@ -416,12 +416,18 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
     use crate::engine::sim::projectile;
     // Last step's impacts first: units have moved a step since.
     let pending = lua.app_data_mut::<Projectiles>().map(|mut ps| std::mem::take(&mut ps.pending_impacts)).unwrap_or_default();
-    run_impacts(lua, pending)?;
+    {
+        // The projectiles' `OnImpact` scripts and the damage they deal
+        // (`OnDamage`, `OnKilled`).
+        let _lua = crate::prof_span!("lua projectile impacts");
+        run_impacts(lua, pending)?;
+    }
     // This step's shield bubbles, script spheres and projectile velocities,
     // kept for sweeping again past a refused collision check.
     let (mut shields, mut script_spheres) = (Vec::new(), Vec::new());
     let velocities: Vec<(u32, crate::engine::sim::math::FxVec3)>;
     {
+        let _step = crate::prof_span!("projectiles step");
         let (Some(mut ps), Some(mut w)) = (lua.app_data_mut::<Projectiles>(), lua.app_data_mut::<crate::engine::sim::entity::EntityWorld>()) else {
             return Ok(());
         };
@@ -463,10 +469,15 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         projectile::step(&mut ps, &mut w, env, &mut impacts);
         ps.pending_impacts = impacts;
     }
-    run_collision_checks(lua, &shields, &script_spheres, &velocities)?;
-    // The rest is the projectiles' scripts: water crossings, collision
-    // checks, impacts (and the damage they deal: `OnDamage`, `OnKilled`).
-    let _lua = crate::prof_span!("lua projectile impacts");
+    {
+        // `OnCollisionCheck` on what each projectile hit, and the sweeps on
+        // past a refusal.
+        let _lua = crate::prof_span!("lua projectile collision checks");
+        run_collision_checks(lua, &shields, &script_spheres, &velocities)?;
+    }
+    // The rest is the projectiles' scripts: water crossings and script
+    // spheres entered.
+    let _lua = crate::prof_span!("lua projectile crossings");
     // Splashes and torpedo behaviour, before impacts (a torpedo's script
     // retunes it on entering the water).
     // Moho runs these from `Projectile::CheckCollision` (MohoEngine.dll
