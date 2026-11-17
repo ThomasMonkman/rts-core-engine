@@ -811,18 +811,28 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_method!(lua, moho::AIBrain,
-        /// Sets a script-kept army stat to a number or string.
+        /// Sets a script-kept army stat to a number or string. A stat it
+        /// makes with a number is an integer: the real game's
+        /// `SetArmyStat('x', 10.5)` read back 10 (dev/probes probe_re3_ai
+        /// ST1; what an existing float stat takes isn't measured, so it's
+        /// stored as given).
         SetArmyStat = |lua, (brain, name, value): (Obj<moho::AIBrain>, String, LuaValue)| {
             let ArmyHandle(index) = script_object::handle(&brain)?;
             let value = stat_value(&value)?;
             if let Some(a) = lua.app_data_mut::<Armies>().expect("Armies").get_mut(index) {
+                let value = match value {
+                    StatValue::Number(n) if !a.stats.contains_key(&name) => StatValue::Number(n.trunc()),
+                    v => v,
+                };
                 a.stats.insert(name, value);
             }
             Ok(())
         })?;
     lua_method!(lua, moho::AIBrain,
         /// Calls `brain:OnStatsTrigger(name)` once when `stat` compares true
-        /// against `value`. The category argument is ignored.
+        /// against `value`. On a stat that doesn't exist yet
+        /// (`Army::stat_exists`) the trigger is dead: it never fires, as
+        /// in the real game. The category argument is ignored.
         SetArmyStatsTrigger = |lua,
          (brain, stat, name, compare, value, _category): (
             Obj<moho::AIBrain>,
@@ -835,8 +845,10 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             let ArmyHandle(index) = script_object::handle(&brain)?;
             let compare = Comparator::parse(&compare)
                 .ok_or_else(|| LuaError::runtime(format!("unknown comparator '{compare}'")))?;
-            if let Some(a) = lua.app_data_mut::<Armies>().expect("Armies").get_mut(index) {
-                a.stat_triggers.insert((stat, name), StatTrigger { compare, value });
+            let tick = crate::engine::api::sim_time::current_tick(lua);
+            if let Some(a) = lua.app_data_mut::<Armies>().expect("Armies").get_mut(index)
+                && a.stat_exists(&stat, tick) {
+                a.add_stat_trigger(StatTrigger { stat, name, compare, value });
             }
             Ok(())
         })?;
@@ -848,7 +860,7 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
         RemoveArmyStatsTrigger = |lua, (brain, _stat, name): (Obj<moho::AIBrain>, String, String)| {
             let ArmyHandle(index) = script_object::handle(&brain)?;
             if let Some(a) = lua.app_data_mut::<Armies>().expect("Armies").get_mut(index) {
-                a.stat_triggers.retain(|(_, n), _| *n != name);
+                a.stat_triggers.retain(|t| t.name != name);
             }
             Ok(())
         })?;

@@ -36,8 +36,9 @@ pub struct Army {
     pub economy: Economy,
     /// Army statistics (`brain:SetArmyStat` / `GetArmyStat`), name-ordered.
     pub stats: BTreeMap<String, StatValue>,
-    /// One-shot stat triggers keyed by (stat, trigger name).
-    pub stat_triggers: BTreeMap<(String, String), StatTrigger>,
+    /// One-shot stat triggers, in registration order (the order the real
+    /// game fires same-tick ones in: dev/probes probe_re3_ai ST1).
+    pub stat_triggers: Vec<StatTrigger>,
     /// Blueprints this army may not build (union of `AddBuildRestriction`s).
     pub build_restrictions: Option<CategorySet>,
     pub unit_cap: u32,
@@ -91,6 +92,8 @@ impl Comparator {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StatTrigger {
+    pub stat: String,
+    pub name: String,
     pub compare: Comparator,
     pub value: f64,
 }
@@ -143,26 +146,46 @@ impl Army {
         *self.blueprint_stats.entry((std::borrow::Cow::Borrowed(name), blueprint)).or_insert(0.0) += delta;
     }
 
+    /// Whether stat `name` exists, for a trigger registered on it at `tick`
+    /// (`SetArmyStatsTrigger`): one a script set or read
+    /// (`SetArmyStat`, `GetArmyStat`), one the engine counted
+    /// (`Units_Active` from the army's first unit), or an economy stat once
+    /// the economy has run (tick 1 on). The real game's triggers on a stat
+    /// that didn't exist yet never fired, even once a script made it and
+    /// set it past the threshold; an economy trigger set at tick 0 never
+    /// fired, one set at tick 2 did (dev/probes probe_re3_ai ST0, ST1).
+    pub fn stat_exists(&self, name: &str, tick: u64) -> bool {
+        self.stats.contains_key(name) || (tick >= 1 && self.economy_stat(name).is_some()) || matches!(name, "UnitCap_MaxCap" | "UnitCap_Current")
+    }
+
+    /// Registers a stat trigger, replacing one of the same stat and name.
+    pub fn add_stat_trigger(&mut self, t: StatTrigger) {
+        self.stat_triggers.retain(|o| o.stat != t.stat || o.name != t.name);
+        self.stat_triggers.push(t);
+    }
+
     /// Removes and returns the names of triggers whose condition now holds, in
-    /// (stat, name) order. The tick loop dispatches them to
+    /// registration order. The tick loop dispatches them to
     /// `brain:OnStatsTrigger(name)`.
     pub fn fire_stat_triggers(&mut self) -> Vec<String> {
-        let fired: Vec<(String, String)> = self
-            .stat_triggers
-            .iter()
-            .filter(|((stat, _), t)| match self.economy_stat(stat) {
+        let mut fired = Vec::new();
+        let mut kept = Vec::with_capacity(self.stat_triggers.len());
+        for t in std::mem::take(&mut self.stat_triggers) {
+            let holds = match self.economy_stat(&t.stat) {
                 Some(v) => t.compare.test(v.to_num::<f64>(), t.value),
-                None => match self.stats.get(stat) {
+                None => match self.stats.get(&t.stat) {
                     Some(StatValue::Number(v)) => t.compare.test(*v, t.value),
                     _ => false,
                 },
-            })
-            .map(|(k, _)| k.clone())
-            .collect();
-        for k in &fired {
-            self.stat_triggers.remove(k);
+            };
+            if holds {
+                fired.push(t.name);
+            } else {
+                kept.push(t);
+            }
         }
-        fired.into_iter().map(|(_, name)| name).collect()
+        self.stat_triggers = kept;
+        fired
     }
 }
 
@@ -292,7 +315,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stat_triggers_fire_once_in_order() {
+    fn stat_triggers_fire_once_in_registration_order() {
         let mut a = Army {
             index: 1,
             name: "ARMY_1".into(),
@@ -309,7 +332,7 @@ mod tests {
             resource_sharing: true,
             economy: Economy::default(),
             stats: BTreeMap::new(),
-            stat_triggers: BTreeMap::new(),
+            stat_triggers: Vec::new(),
             build_restrictions: None,
             unit_cap: 0,
             ignore_unit_cap: false,
@@ -319,13 +342,13 @@ mod tests {
             blueprint_stats: BTreeMap::new(),
         };
         a.stats.insert("Economy_Ratio_Energy".into(), StatValue::Number(0.0));
-        for name in ["b", "a"] {
-            a.stat_triggers.insert(
-                ("Economy_Ratio_Energy".into(), name.into()),
-                StatTrigger { compare: Comparator::LessThanOrEqual, value: 0.0 },
-            );
+        a.stats.insert("Probe".into(), StatValue::Number(1.0));
+        for (stat, name) in [("Probe", "b"), ("Economy_Ratio_Energy", "c"), ("Probe", "a")] {
+            a.add_stat_trigger(StatTrigger { stat: stat.into(), name: name.into(), compare: Comparator::LessThanOrEqual, value: 1.0 });
         }
-        assert_eq!(a.fire_stat_triggers(), vec!["a", "b"]);
+        assert_eq!(a.fire_stat_triggers(), vec!["b", "c", "a"], "registration order");
         assert!(a.fire_stat_triggers().is_empty());
+        assert!(a.stat_exists("Probe", 0) && !a.stat_exists("Missing", 50));
+        assert!(!a.stat_exists("Economy_Stored_Mass", 0) && a.stat_exists("Economy_Stored_Mass", 1), "economy stats once the economy has run");
     }
 }
