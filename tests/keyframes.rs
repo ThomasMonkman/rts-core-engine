@@ -178,6 +178,45 @@ fn a_keyframe_after_dropped_category_results_loads_the_same() {
     assert_eq!(gcid_next(loaded.sim_lua()).unwrap(), gcid_next(original.sim_lua()).unwrap(), "gcids part");
 }
 
+/// A `GetPosition` table a script kept is still its entity's shared table
+/// after a load (`entity::shared_position`: the link is a weak-keyed table
+/// in the Lua heap, saved with it), so identity checks such as RNGAI's
+/// `TargetPos ~= targetPosition` hold across a save.
+#[test]
+fn a_kept_get_position_table_is_still_shared_after_a_load() {
+    if !have_data() {
+        return;
+    }
+    let mut original = started();
+    to_collection_tick(&mut original, 100);
+    original.tick().expect("tick");
+    original
+        .sim_lua()
+        .load(
+            r#"
+            local u = ArmyBrains[1]:GetListOfUnits(categories.COMMAND, false)[1]
+            KeyframeTestUnit = u
+            KeyframeTestPos = u:GetPosition()
+            "#,
+        )
+        .exec()
+        .expect("keep a position");
+    let now = tick_of(&original);
+    to_collection_tick(&mut original, now);
+    let at = tick_of(&original);
+    let saved = keyframe::save(original.sim_lua(), at).expect("save");
+
+    let loaded = started();
+    keyframe::load(loaded.sim_lua(), &saved).expect("load");
+    if let Some(d) = difference(&saved, &keyframe::save(loaded.sim_lua(), at).expect("save the loaded sim")) {
+        panic!("the loaded sim saves differently: {d}");
+    }
+    for engine in [&original, &loaded] {
+        let same: bool = engine.sim_lua().load("return KeyframeTestUnit:GetPosition() == KeyframeTestPos").eval().expect("read back");
+        assert!(same, "the kept table is the entity's shared table");
+    }
+}
+
 /// A keyframe taken mid-ferry (`tests/scenarios/ferry_service.lua`: units
 /// riding the route on their beacon order, then delivered) loads and plays
 /// on as a straight replay: the ferry routes and waits (`api::ferry`) are

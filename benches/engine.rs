@@ -2110,6 +2110,21 @@ fn lua_api(c: &mut Criterion) {
         .call(units.clone())
         .unwrap();
     g.bench_function("unit positions x1000 (GetPosition, GetPositionXYZ, Warp)", |b| b.iter(|| positions.call::<()>(()).unwrap()));
+    // Plain `GetPosition` alone: each unit's shared table, rewritten.
+    let get_position: LuaFunction = lua
+        .load(
+            "local units = ...
+             return function()
+                 for i = 1, #units do
+                     local u = units[i]
+                     u:GetPosition()
+                     u:GetPosition()
+                 end
+             end",
+        )
+        .call(units.clone())
+        .unwrap();
+    g.bench_function("GetPosition x2000 (1000 units)", |b| b.iter(|| get_position.call::<()>(()).unwrap()));
 
     // Callbacks: FAF-shaped objects (instance -> script class -> base class).
     let objs: Vec<LuaTable> = lua

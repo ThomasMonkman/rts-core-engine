@@ -326,6 +326,11 @@ fn projectile_position() {
 }
 
 #[test]
+fn shared_position() {
+    scenario("shared_position", 100);
+}
+
+#[test]
 fn projectile_spin() {
     scenario("projectile_spin", 100);
 }

@@ -26,6 +26,33 @@ fn objects(lua: &Lua) -> LuaResult<LuaTable> {
     crate::engine::api::script_object::registry_table(lua, ENTITIES_KEY)
 }
 
+/// Registry table, weak-keyed: entity Lua object -> its `GetPosition` table.
+/// Made at start-up (no lazy objects after the keyframe base); an entry is
+/// made on an entity's first plain `GetPosition` and goes with its object.
+/// Being a Lua heap table, the link is saved and loaded with keyframes.
+const SHARED_POSITIONS_KEY: &str = "sim.shared_positions";
+
+/// Plain `GetPosition()`: the real game hands back the same table for an
+/// entity on every call, rewritten (only) by the call. FAF relies on it:
+/// `AIBehaviors` keeps one as "a reference ... so it will autoupdate", and AI
+/// mods compare kept tables by identity (dev/probes probe_re4_pos: kept
+/// tables don't move between calls, writes last until the next call, an
+/// extra `[4]` is gone after it, a destroyed entity's keeps its last values).
+pub(crate) fn shared_position(lua: &Lua, obj: &LuaTable, v: FxVec3) -> LuaResult<shapes::Vector> {
+    let cache = crate::engine::api::script_object::registry_table(lua, SHARED_POSITIONS_KEY)?;
+    let Some(t) = cache.raw_get::<Option<LuaTable>>(obj)? else {
+        let fresh = vector(lua, v)?;
+        cache.raw_set(obj, &fresh.0)?;
+        return Ok(fresh);
+    };
+    let (x, y, z) = v.to_f64();
+    t.clear()?;
+    t.raw_set(1, x)?;
+    t.raw_set(2, y)?;
+    t.raw_set(3, z)?;
+    Ok(shapes::Vector(t))
+}
+
 pub fn entity_id(obj: &LuaTable) -> LuaResult<EntityId> {
     Ok(script_object::handle::<EntityHandle>(obj)?.0)
 }
@@ -497,6 +524,11 @@ pub fn spawn_prop(lua: &Lua, bp_path: &str, position: FxVec3, orientation: FxQua
 
 pub fn register(lua: &Lua) -> LuaResult<()> {
     lua.set_app_data(EntityWorld::default());
+    let positions = lua.create_table()?;
+    let weak = lua.create_table_with_capacity(0, 1)?;
+    weak.raw_set("__mode", "k")?;
+    positions.set_metatable(Some(weak));
+    lua.set_named_registry_value(SHARED_POSITIONS_KEY, positions)?;
     lua.set_app_data(crate::engine::sim::bounded_props::BoundedProps::default());
 
     lua_fn!(lua, global,
@@ -1022,10 +1054,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(world(lua).get(id).map_or(0.0, |e| e.orientation.heading().to_num::<f64>()))
         })?;
     lua_method!(lua, moho::Entity,
-        /// The position (of `bone`, if given) as a vector.
+        /// The position (of `bone`, if given) as a vector. Without a bone
+        /// it's the entity's one shared table, rewritten by each call
+        /// ([`shared_position`]); with one, a new table.
         GetPosition = |lua, (this, bone): (Obj<moho::Entity>, Option<shapes::Bone>)| {
-            let pos = bone_position(lua, &this, bone.map(shapes::Bone::into_inner))?;
-            vector(lua, pos)
+            let bone = bone.map(shapes::Bone::into_inner).filter(|b| !b.is_nil());
+            let shared = bone.is_none();
+            let pos = bone_position(lua, &this, bone)?;
+            if shared { shared_position(lua, &this, pos) } else { vector(lua, pos) }
         })?;
     lua_method!(lua, moho::Entity,
         /// Attaches this entity's `selfBone` to `parentBone` of `parent`.
