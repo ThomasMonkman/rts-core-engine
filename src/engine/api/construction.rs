@@ -212,8 +212,8 @@ pub(crate) fn snap_site(lua: &Lua, bp: &str, site: FxVec3) -> LuaResult<FxVec3> 
 fn cap_used(lua: &Lua, army: u32, cache: &mut BTreeMap<u32, Fx>) -> Fx {
     *cache.entry(army).or_insert_with(|| {
         entity::world(lua)
-            .iter()
-            .filter(|e| !e.destroyed && e.army == Some(army))
+            .units_of(army)
+            .filter(|e| !e.destroyed)
             .filter_map(|e| e.unit.as_deref().map(|u| u.cap_cost))
             .fold(Fx::ZERO, |a, b| a.saturating_add(b))
     })

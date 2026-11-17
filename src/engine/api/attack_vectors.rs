@@ -20,7 +20,7 @@ use crate::lua_api::shapes::{self, Shaped};
 use crate::lua_api::{Obj, lua_method};
 use crate::engine::sim::army::{Alliance, Armies};
 use crate::engine::sim::category::CategorySet;
-use crate::engine::sim::entity::{EntityId, EntityKind};
+use crate::engine::sim::entity::EntityId;
 use crate::engine::sim::math::{from_lua, Fx};
 
 /// Side of a grid cell (world units).
@@ -153,8 +153,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             let vectors = {
                 let world = entity::world(lua);
                 let positions = world
-                    .iter()
-                    .filter(|e| e.kind == EntityKind::Unit && !e.destroyed && e.army == Some(enemy))
+                    .units_of(enemy)
+                    .filter(|e| !e.destroyed)
                     .filter(|e| e.category_index.is_some_and(|i| category.contains(i)))
                     .map(|e| (e.position().x, e.position().z));
                 compute(width, height, positions)
@@ -268,8 +268,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 let world = entity::world(lua);
                 let armies = lua.app_data_ref::<Armies>().expect("Armies");
                 world
-                    .iter()
-                    .filter(|e| e.kind == EntityKind::Unit && !e.destroyed)
+                    .units()
+                    .filter(|e| !e.destroyed)
                     .filter(|e| category.as_ref().is_none_or(|c| e.category_index.is_some_and(|i| c.contains(i))))
                     .filter(|e| e.army.is_some_and(|a| armies.alliance(index, a) == alliance))
                     .map(|e| (e.id, e.position().x, e.position().z, e.cold.blueprint_id.clone()))

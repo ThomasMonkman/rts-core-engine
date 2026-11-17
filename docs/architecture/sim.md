@@ -91,6 +91,15 @@ biggest bubble. Moves, shape changes (`set_collision_override`: FAF drops a bubb
 it's down) and `destroy` re-list it. Area damage, damage rings, beams and the projectile step's
 shield gather ask it, never the whole world.
 
+Other indexes, all kept in id order so passes need no sort:
+
+- `units()` / `unit_indices()`: every unit; `units_of(army)`: one army's (AI brain queries such
+  as `GetListOfUnits`, `GetCurrentUnits`, the unit cap).
+- The attach index (`attached_to(parent)`, `attached_into`): what's attached to what (transport
+  cargo, docked aircraft, shield bubbles on their units). The per-tick follow pass walks it and
+  drops pairs a script detach left behind.
+- Weapons are sorted by (unit, index): `Weapons::of(unit)` is one unit's.
+
 ## Orders
 
 1. **Issuing.** An `Issue*` call (or a player command) makes one shared command (`sim/command.rs`,

@@ -415,8 +415,8 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
         )| {
             let ArmyHandle(index) = script_object::handle(&brain)?;
             let ids: Vec<u32> = crate::engine::api::entity::world(lua)
-                .iter()
-                .filter(|e| e.unit.is_some() && !e.destroyed && e.army == Some(index))
+                .units_of(index)
+                .filter(|e| e.unit.is_some() && !e.destroyed)
                 .filter(|e| e.category_index.is_some_and(|i| category.0.contains(i)))
                 .map(|e| e.id)
                 .collect();
@@ -449,8 +449,8 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             };
             let commands = lua.app_data_ref::<crate::engine::sim::command::Commands>();
             let ids: Vec<u32> = crate::engine::api::entity::world(lua)
-                .iter()
-                .filter(|e| !e.destroyed && e.army == Some(index) && e.fraction_complete >= Fx::ONE)
+                .units_of(index)
+                .filter(|e| !e.destroyed && e.fraction_complete >= Fx::ONE)
                 .filter(|e| e.category_index.is_some_and(|i| factory.contains(i) && !mobile.is_some_and(|m| m.contains(i))))
                 .filter(|e| e.unit.as_deref().is_some_and(|u| !busy.is_some_and(|b| u.states.contains(b))))
                 .filter(|e| commands.as_ref().is_none_or(|c| c.queue(e.id).next().is_none()))
@@ -480,8 +480,8 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             let in_category = |id: u32, cat: &crate::engine::api::categories::EntityCategory| {
                 w.get(id).is_some_and(|e| e.unit.is_some() && e.category_index.is_some_and(|i| cat.0.contains(i)))
             };
-            Ok(w.iter()
-                .filter(|e| !e.destroyed && e.army == Some(index) && e.fraction_complete >= Fx::ONE)
+            Ok(w.units_of(index)
+                .filter(|e| !e.destroyed && e.fraction_complete >= Fx::ONE)
                 .filter(|e| e.category_index.is_some_and(|i| builder_category.0.contains(i)))
                 .filter_map(|e| e.unit.as_deref())
                 .filter(|u| busy.iter().flatten().any(|&s| u.states.contains(s)))
@@ -504,8 +504,8 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             let (Some(engineer), Some(building)) = (domain.named.get("ENGINEER"), UnitStates::index("Building")) else { return Ok(false) };
             let w = crate::engine::api::entity::world(lua);
             let focus_in_category = |id: u32| w.get(id).is_some_and(|e| e.unit.is_some() && e.category_index.is_some_and(|i| category.0.contains(i)));
-            Ok(w.iter()
-                .filter(|e| !e.destroyed && e.army == Some(index) && e.fraction_complete >= Fx::ONE)
+            Ok(w.units_of(index)
+                .filter(|e| !e.destroyed && e.fraction_complete >= Fx::ONE)
                 .filter(|e| e.category_index.is_some_and(|i| engineer.contains(i)))
                 .filter_map(|e| e.unit.as_deref())
                 .any(|u| u.states.contains(building) && u.focus.is_some_and(focus_in_category)))
@@ -708,8 +708,8 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
                 let w = crate::engine::api::entity::world(lua);
                 let commands = lua.app_data_ref::<crate::engine::sim::command::Commands>();
                 let need_idle = need_idle.unwrap_or(false);
-                w.iter()
-                    .filter(|e| e.kind == crate::engine::sim::entity::EntityKind::Unit && !e.destroyed && e.army == Some(index))
+                w.units_of(index)
+                    .filter(|e| !e.destroyed)
                     .filter(|e| e.category_index.is_some_and(|c| category.0.contains(c)))
                     .filter(|e| !need_idle || commands.as_ref().is_none_or(|c| c.is_idle(e.id)))
                     .map(|e| e.id)
@@ -743,8 +743,8 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
         GetCurrentUnits = |lua, (brain, category): (Obj<moho::AIBrain>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>)| {
             let ArmyHandle(index) = script_object::handle(&brain)?;
             let w = crate::engine::api::entity::world(lua);
-            Ok(w.iter()
-                .filter(|e| e.kind == crate::engine::sim::entity::EntityKind::Unit && !e.destroyed && e.army == Some(index))
+            Ok(w.units_of(index)
+                .filter(|e| !e.destroyed)
                 .filter(|e| e.fraction_complete >= crate::engine::sim::math::Fx::ONE)
                 .filter(|e| e.category_index.is_some_and(|c| category.0.contains(c)))
                 .count())
@@ -908,8 +908,8 @@ fn engine_army_stat(lua: &Lua, index: u32, name: &str) -> Option<f64> {
         "UnitCap_Current" => {
             drop(armies);
             let used = crate::engine::api::entity::world(lua)
-                .iter()
-                .filter(|e| !e.destroyed && e.army == Some(index))
+                .units_of(index)
+                .filter(|e| !e.destroyed)
                 .filter_map(|e| e.unit.as_deref().map(|u| u.cap_cost))
                 .fold(Fx::ZERO, |a, b| a.saturating_add(b));
             Some(used.to_num::<f64>())

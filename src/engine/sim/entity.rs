@@ -519,6 +519,11 @@ pub struct EntityWorld {
     /// Dense indices of the units (ascending, so in id order): passes over
     /// units skip the props (most of a big map's entities).
     unit_slots: Vec<u32>,
+    /// The same per army (`army_units[a]`, ascending): an AI brain's
+    /// queries (`GetListOfUnits`, `GetCurrentUnits`, ...) read only its own
+    /// army's units. A unit's army is set when it's spawned and never
+    /// changes (capture makes a new unit).
+    army_units: Vec<Vec<u32>>,
     /// Freed entities still in `dense` (lets `compact` skip quiet ticks).
     destroyed: usize,
     /// Entities `destroy`ed whose `OnDestroy` hasn't run yet, in the order
@@ -600,6 +605,13 @@ impl EntityWorld {
         self.slot.push(self.dense.len() as u32);
         if kind == EntityKind::Unit {
             self.unit_slots.push(self.dense.len() as u32);
+            if let Some(a) = army {
+                let a = a as usize;
+                if self.army_units.len() <= a {
+                    self.army_units.resize_with(a + 1, Vec::new);
+                }
+                self.army_units[a].push(self.dense.len() as u32);
+            }
             self.unit_epoch += 1;
         }
         self.dense.push(Entity {
@@ -1058,6 +1070,13 @@ impl EntityWorld {
         self.unit_slots.iter().map(|&i| &self.dense[i as usize])
     }
 
+    /// Army `army`'s units (destroyed ones too until compaction), in id
+    /// order: what `units().filter(army == Some(army))` gives without
+    /// reading other armies' units.
+    pub fn units_of(&self, army: u32) -> impl Iterator<Item = &Entity> {
+        self.army_units.get(army as usize).map_or(&[][..], |v| v.as_slice()).iter().map(|&i| &self.dense[i as usize]).filter(move |e| e.army == Some(army))
+    }
+
     /// The units' indices into [`EntityWorld::as_slice`], in id order (for
     /// parallel passes over the units).
     pub fn unit_indices(&self) -> &[u32] {
@@ -1120,10 +1139,17 @@ impl EntityWorld {
             self.slot[id as usize] = REMOVED;
         }
         self.unit_slots.clear();
+        self.army_units.iter_mut().for_each(Vec::clear);
         for (i, e) in self.dense.iter().enumerate() {
             self.slot[e.id as usize] = i as u32;
             if e.kind == EntityKind::Unit {
                 self.unit_slots.push(i as u32);
+                if let Some(a) = e.army.map(|a| a as usize) {
+                    if self.army_units.len() <= a {
+                        self.army_units.resize_with(a + 1, Vec::new);
+                    }
+                    self.army_units[a].push(i as u32);
+                }
             }
         }
         self.destroyed = 0;
@@ -1824,6 +1850,43 @@ mod tests {
         // Re-sizing the grids re-lists everything.
         loaded.set_bounds(2048, 2048);
         check_volumes(&loaded, &mut rng);
+    }
+
+    /// Each army's unit list matches filtering every entity, through
+    /// spawns (props and armyless entities mixed in), destroys, compaction
+    /// and a save / load.
+    #[test]
+    fn army_unit_lists_stay_in_sync() {
+        let mut w = EntityWorld::default();
+        let mut ids = Vec::new();
+        for i in 0..200u32 {
+            let (kind, army) = match i % 5 {
+                0 => (EntityKind::Prop, None),
+                1 => (EntityKind::Projectile, Some(i % 3)),
+                _ => (EntityKind::Unit, Some(i % 7)),
+            };
+            ids.push(w.spawn(kind, BlueprintKind::Unit, String::new(), army, FxVec3::default(), FxQuat::IDENTITY));
+        }
+        let check = |w: &EntityWorld| {
+            for army in 0..9 {
+                let got: Vec<EntityId> = w.units_of(army).map(|e| e.id).collect();
+                let want: Vec<EntityId> = w.iter().filter(|e| e.kind == EntityKind::Unit && e.army == Some(army)).map(|e| e.id).collect();
+                assert_eq!(got, want, "army {army}");
+            }
+        };
+        check(&w);
+        for &id in ids.iter().step_by(4) {
+            w.destroy(id);
+        }
+        check(&w);
+        w.finish_destroys();
+        assert!(!w.compact_now().is_empty());
+        check(&w);
+        w.spawn(EntityKind::Unit, BlueprintKind::Unit, String::new(), Some(12), FxVec3::default(), FxQuat::IDENTITY);
+        check(&w);
+        let loaded: EntityWorld = postcard::from_bytes(&postcard::to_allocvec(&w).unwrap()).unwrap();
+        check(&loaded);
+        assert_eq!(loaded.units_of(12).count(), 1);
     }
 
     /// The attach index lists what's attached now, in id order, and the

@@ -1281,8 +1281,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             let index = resolve_army(lua, &army)?;
             let w = world(lua);
             let total = w
-                .iter()
-                .filter(|e| e.kind == EntityKind::Unit && !e.destroyed && e.army == Some(index))
+                .units_of(index)
+                .filter(|e| !e.destroyed)
                 .filter_map(|e| e.unit.as_deref().map(|u| u.cap_cost))
                 .fold(Fx::ZERO, |a, b| a.saturating_add(b));
             Ok(total.to_num::<f64>())

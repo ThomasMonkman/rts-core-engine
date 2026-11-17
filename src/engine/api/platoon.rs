@@ -396,8 +396,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 let Some(centre) = members.first().and_then(|&m| w.get(m)).map(|e| e.position()) else { return Ok(None) };
                 let armies = lua.app_data_ref::<Armies>().expect("Armies");
                 let known = known_to(lua, army);
-                w.iter()
-                    .filter(|e| e.kind == crate::engine::sim::entity::EntityKind::Unit && !e.destroyed)
+                w.units()
+                    .filter(|e| !e.destroyed)
                     .filter(|e| e.category_index.is_some_and(|c| category.0.contains(c)))
                     .filter(|e| e.army.is_some_and(|a| armies.alliance(army, a) == want && !(want == Alliance::Ally && a == army)))
                     .filter(|e| known(e))
