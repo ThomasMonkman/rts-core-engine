@@ -679,14 +679,47 @@ pub(crate) fn near_spot_offsets(rings: i32) -> Vec<(i32, i32)> {
 /// `CreateUnitNearSpot`'s step between spots: 2 for a mobile unit; for a
 /// structure its skirt plus 2, rounded down to even, at most 8 (the real
 /// game's steps: wall 2, T1 generator 4, land factory 8, tank 2; dev/probes
-/// probe_re2_build NEAR). Fitted to those four: a request off the 2-grid
-/// (a generator at +0.3, +0.7) stepped 3 there, which this doesn't explain.
+/// probe_re2_build NEAR). Fitted to those four; a request off the whole
+/// numbers steps the skirt plus 1 instead (`create_unit_near_spot`).
 fn near_spot_step(placement: &Placement) -> Fx {
     if placement.mobile.is_some() {
         return Fx::from_num(2);
     }
     let size = (placement.skirt.x1 - placement.skirt.x0).max(placement.skirt.z1 - placement.skirt.z0);
     (((size + Fx::from_num(2)) / 2).floor() * 2).clamp(Fx::from_num(2), Fx::from_num(8))
+}
+
+/// `CreateUnitNearSpot`'s first spot on one axis: `floor(v) + 0.5` for a
+/// request off the whole numbers, else as [`near_spot_first`] (the real
+/// game's generator asked at +1.25, +1.5 or +1.75 from an even point went
+/// to +1.5, at +1.0 to +0.5, at +0.25..0.75 to +0.5: dev/probes probe_re3_ai
+/// NS2; the near-spot rule had put all of them at +0.5).
+fn near_unit_first(v: Fx) -> Fx {
+    if v.frac() == Fx::ZERO { near_spot_first(v) } else { v.floor() + Fx::ONE / 2 }
+}
+
+/// `CreateUnitNearSpot`'s search for a request off the whole numbers: the
+/// step is the structure's skirt plus 1 (2..8; a T1 generator 3, a wall 2,
+/// a land factory and a T3 generator 8), and the spots go a ring at a time
+/// round the first, each ring's cells x-major (x ascending, then z). The
+/// real game's generator asked at (0.3, 0.7) went to 0.5,0.5 -2.5,-2.5
+/// -2.5,0.5 -2.5,3.5 0.5,-2.5 0.5,3.5 (dev/probes probe_re3_ai NS). (An odd
+/// whole-number request gives patterns not decoded; it keeps the on-grid
+/// search.)
+fn near_unit_ring_offsets(rings: i32) -> Vec<(i32, i32)> {
+    let side = (2 * rings + 1).max(1) as usize;
+    let mut out = Vec::with_capacity(side * side);
+    out.push((0, 0));
+    for r in 1..=rings {
+        for x in -r..=r {
+            for z in -r..=r {
+                if x.abs() == r || z.abs() == r {
+                    out.push((x, z));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Spawns `bp` finished for `army` at `pos`, ground height, facing north.
@@ -739,10 +772,16 @@ fn is_structure(lua: &Lua, e: &crate::engine::sim::entity::Entity) -> bool {
 fn create_unit_near_spot(lua: &Lua, army: u32, bp: &str, x: Fx, z: Fx) -> LuaResult<Option<Obj<moho::Unit>>> {
     let placement = Placement::of(lua, bp)?;
     let (hx, hz) = placement.half;
-    let (fx, fz) = (near_spot_first(x), near_spot_first(z));
-    let step = near_spot_step(&placement);
+    let off_grid = x.frac() != Fx::ZERO || z.frac() != Fx::ZERO;
+    let (fx, fz) = (near_unit_first(x), near_unit_first(z));
+    let (step, offsets) = if off_grid && placement.mobile.is_none() {
+        let size = (placement.skirt.x1 - placement.skirt.x0).max(placement.skirt.z1 - placement.skirt.z0);
+        ((size + Fx::ONE).clamp(Fx::from_num(2), Fx::from_num(8)), near_unit_ring_offsets(NEAR_SPOT_RINGS))
+    } else {
+        (near_spot_step(&placement), near_spot_offsets(NEAR_SPOT_RINGS))
+    };
     let mut ids = Vec::new();
-    for (dx, dz) in near_spot_offsets(NEAR_SPOT_RINGS) {
+    for (dx, dz) in offsets {
         let (cx, cz) = (fx + step * Fx::from_num(dx), fz + step * Fx::from_num(dz));
         let p = FxVec3 { x: cx, y: Fx::ZERO, z: cz };
         if !placement.allows(lua, p, &[])? {
@@ -927,5 +966,23 @@ mod near_spot_tests {
     fn the_first_spot_is_on_the_two_grid_plus_a_half() {
         let f = |v: f64| near_spot_first(Fx::from_num(v)).to_num::<f64>();
         assert_eq!((f(0.0), f(0.3), f(0.7), f(3.0), f(-5.0), f(657.0)), (0.5, 0.5, 0.5, 2.5, -5.5, 656.5));
+    }
+
+    /// dev/probes probe_re3_ai NS2: offsets from an even point.
+    #[test]
+    fn create_unit_near_spot_starts_at_the_floor_plus_a_half_off_the_whole_numbers() {
+        let f = |v: f64| near_unit_first(Fx::from_num(v)).to_num::<f64>();
+        let got: Vec<f64> = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.5, 3.0, -1.0].into_iter().map(f).collect();
+        assert_eq!(got, [0.5, 0.5, 0.5, 0.5, 1.5, 1.5, 1.5, 2.5, 2.5, -1.5]);
+    }
+
+    /// Off the whole numbers: rings x-major (the generator at (0.3, 0.7)
+    /// went 0,0 -1,-1 -1,0 -1,1 0,-1 0,1 in steps of 3).
+    #[test]
+    fn create_unit_near_spot_off_the_grid_rings_x_major() {
+        let o = near_unit_ring_offsets(2);
+        assert_eq!(&o[..9], &[(0, 0), (-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]);
+        assert_eq!(o[9], (-2, -2));
+        assert_eq!(o.len(), 25);
     }
 }
