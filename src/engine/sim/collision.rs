@@ -66,33 +66,39 @@ pub fn segment_hit(p0: FxVec3, p1: FxVec3, pos: FxVec3, orientation: FxQuat, sha
     }
 }
 
-/// Blast radius above which a collision sphere is tested per axis plane
-/// ([`sphere_touches`]).
-const PLANAR_SPHERE_TEST_ABOVE: Fx = Fx::from_bits(3 << 32);
+/// Blast radius above which a collision sphere is also met by the blast's
+/// cube ([`sphere_touches`]).
+const SPHERE_CUBE_TEST_ABOVE: Fx = Fx::from_bits(3 << 32);
+
+/// 1/sqrt(2): the half-size of a blast's cube per unit of its radius.
+const FRAC_1_SQRT_2: Fx = Fx::from_bits(3_037_000_500);
 
 /// Whether the sphere `c` / `r` touches `shape` placed at `pos` /
 /// `orientation`: moho's area-damage test (`DamageArea` gathers entities
 /// whose collision shape meets the sphere, MohoEngine.dll 0x102f5780).
 ///
-/// A collision sphere (a unit's, a shield bubble's) is met exactly by a
-/// blast of radius 3 or less. A larger blast meets it when, in each of the
-/// axis planes xy, yz and xz, its centre's projection is within `r` of the
-/// sphere's projected square (half-size its radius): FAF probes
+/// A collision sphere (a unit's, a shield dome's, a personal shield's) is met
+/// exactly by a blast of radius 3 or less. A larger blast meets it exactly,
+/// or when the blast's centre is within `radius + r / sqrt(2)` of the
+/// sphere's centre on each world axis (the blast's cube of half-size
+/// `r / sqrt(2)` meets the sphere's bounding box). FAF probes
 /// `probe_re3_wpn_b`/`_d`, bisected to 1/128, with the switch between radius
-/// 3 and 3.25. An air scout's sphere of 1.6 is reached at 4.594 every way by
-/// a blast of 3, but by one of 5 at 6.594 along an axis, 7.258 diagonally
-/// in xz and 8.891 along (1, 1, 1).
+/// 3 and 3.25. At radius 5: an air scout's sphere of 1.6 is reached at 6.594
+/// along an axis, 7.258 diagonally in xz and 8.891 along (1, 1, 1); the
+/// Fatboy's dome (radius 12, centre 6.3 below the unit) at 15.79 along x
+/// (exact) but 13.055 along `xup` (cube); `ual0303`'s personal shield
+/// (radius 1.25, centre 0.84 up) at 6.188 along x and 6.820 along `xup`
+/// (exact), 6.766 along xz (cube).
 pub fn sphere_touches(c: FxVec3, r: Fx, pos: FxVec3, orientation: FxQuat, shape: &CollisionShape) -> bool {
     match *shape {
         CollisionShape::None => false,
         CollisionShape::Sphere { center, radius } => {
             let d = c - (pos + orientation.rotate(center));
-            if r > PLANAR_SPHERE_TEST_ABOVE {
-                let out = |v: Fx| (v.abs() - radius).max(Fx::ZERO);
-                let (x, y, z) = (out(d.x), out(d.y), out(d.z));
-                let sq = |v: Fx| v.saturating_mul(v);
-                let r2 = sq(r);
-                return sq(x).saturating_add(sq(y)) <= r2 && sq(y).saturating_add(sq(z)) <= r2 && sq(x).saturating_add(sq(z)) <= r2;
+            if r > SPHERE_CUBE_TEST_ABOVE {
+                let reach = radius.saturating_add(r.saturating_mul(FRAC_1_SQRT_2));
+                if d.x.abs() <= reach && d.y.abs() <= reach && d.z.abs() <= reach {
+                    return true;
+                }
             }
             let reach = r.saturating_add(radius);
             dot(d, d) <= reach.saturating_mul(reach)
@@ -152,7 +158,7 @@ mod tests {
         assert!(sphere_touches(v(0.0, 2.4, 0.0), Fx::from_num(0.5), FxVec3::default(), FxQuat::IDENTITY, &ball));
         assert!(!sphere_touches(v(0.0, 2.6, 0.0), Fx::from_num(0.5), FxVec3::default(), FxQuat::IDENTITY, &ball));
         assert!(!sphere_touches(FxVec3::default(), Fx::from_num(5), FxVec3::default(), FxQuat::IDENTITY, &CollisionShape::None));
-        // Above radius 3 a sphere is met per axis plane (FAF probe
+        // Above radius 3 a sphere is met exactly or by the blast's cube (FAF probe
         // `probe_re3_wpn_b`, `uea0203`'s sphere of 1.6 against a blast of 5:
         // 6.594 along x, 7.258 diagonally in xz, 8.891 along (1, 1, 1)).
         let scout = CollisionShape::Sphere { center: FxVec3::default(), radius: Fx::from_num(1.6) };
@@ -164,6 +170,35 @@ mod tests {
         assert!(hit(v(d3(8.88), d3(8.88), d3(8.88)), 5.0) && !hit(v(d3(8.90), d3(8.90), d3(8.90)), 5.0));
         // Radius 3 and under: the exact sphere (4.594 every way).
         assert!(hit(v(d2(4.59), 0.0, d2(4.59)), 3.0) && !hit(v(d2(4.61), 0.0, d2(4.61)), 3.0));
+    }
+
+    /// The measured edges (FAF probe `probe_re3_wpn_b`, bisected to 1/128) of
+    /// spheres whose centre sits off the unit's origin: the Fatboy's dome
+    /// (radius 12, centre 6.305 below) and `ual0303`'s personal shield
+    /// (radius 1.25, centre 0.844 up), along x, xz and `xup` from the unit.
+    #[test]
+    fn sphere_touches_shield_edges() {
+        let v = |x: f64, y: f64, z: f64| FxVec3 { x: Fx::from_num(x), y: Fx::from_num(y), z: Fx::from_num(z) };
+        let s2 = std::f64::consts::FRAC_1_SQRT_2;
+        // Hit at `edge - 0.01` and missed at `edge + 0.01` along `dir`.
+        let edge = |shape: &CollisionShape, dir: (f64, f64, f64), r: f64, edge: f64| {
+            let at = |t: f64| sphere_touches(v(dir.0 * t, dir.1 * t, dir.2 * t), Fx::from_num(r), FxVec3::default(), FxQuat::IDENTITY, shape);
+            at(edge - 0.01) && !at(edge + 0.01)
+        };
+        let (x, xz, xup) = ((1.0, 0.0, 0.0), (s2, 0.0, s2), (s2, s2, 0.0));
+        let dome = CollisionShape::Sphere { center: v(0.0, -6.305, 0.0), radius: Fx::from_num(12) };
+        for (r, ex, eup) in [(1.0, 11.375, 7.758), (3.0, 13.617, 9.867), (5.0, 15.789, 13.055), (8.0, 18.984, 16.055)] {
+            assert!(edge(&dome, x, r, ex), "dome x r {r}");
+            assert!(edge(&dome, xup, r, eup), "dome xup r {r}");
+        }
+        // Along xz the dome is still hit where the probe's scan ended.
+        assert!(sphere_touches(v(s2 * 21.24, 0.0, s2 * 21.24), Fx::from_num(5), FxVec3::default(), FxQuat::IDENTITY, &dome));
+        let personal = CollisionShape::Sphere { center: v(0.0, 0.844, 0.0), radius: Fx::from_num(1.25) };
+        for (r, ex, exz, eup) in [(1.0, 2.078, 2.078, 2.766), (3.0, 4.164, 4.164, 4.805), (5.0, 6.188, 6.766, 6.820), (8.0, 9.203, 9.766, 9.828)] {
+            assert!(edge(&personal, x, r, ex), "personal x r {r}");
+            assert!(edge(&personal, xz, r, exz), "personal xz r {r}");
+            assert!(edge(&personal, xup, r, eup), "personal xup r {r}");
+        }
     }
 
     #[test]
