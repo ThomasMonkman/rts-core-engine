@@ -1372,7 +1372,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         });
         let target = ordered.or_else(|| {
             lua.app_data_ref::<crate::engine::sim::weapon::Weapons>().and_then(|w| {
-                w.iter().filter(|s| s.unit == id).find_map(|s| match s.target {
+                w.of(id).iter().find_map(|s| match s.target {
                     Some(crate::engine::sim::weapon::WeaponTarget::Entity(t)) => Some(t),
                     _ => None,
                 })

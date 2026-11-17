@@ -1373,7 +1373,7 @@ fn auto_assist(lua: &Lua) {
         let w = entity::world(lua);
         let mut orders: Vec<(EntityId, EntityId)> = Vec::new();
         let mut homes: Vec<(EntityId, FxVec3)> = Vec::new();
-        for e in w.iter() {
+        for e in w.units() {
             let Some(u) = e.unit.as_deref() else { continue };
             if e.destroyed || e.cold.killed || !u.auto_mode || u.paused || u.command_caps & repair == 0 || e.fraction_complete < Fx::ONE || e.attachment.is_some() || !commands.is_idle(e.id) {
                 continue;

@@ -1436,7 +1436,7 @@ fn ferry_states(lua: &Lua) {
     };
     let mut world = entity::world(lua);
     let mut was: Vec<EntityId> = Vec::new();
-    for e in world.iter() {
+    for e in world.units() {
         if e.unit.as_deref().is_some_and(|u| u.states.contains(index)) {
             was.push(e.id);
         }
