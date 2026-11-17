@@ -18,9 +18,9 @@ Items are counted as bullets of the batches below. A bullet that was half fixed 
 | 6. AI brain, platoons, threat | 28 | 14 | 0 | 1 | 1 | 44 |
 | 7. Blueprint defaults | 1 | 3 | 0 | 0 | 0 | 4 |
 | 8. Interface | 26 | 31 | 0 | 0 | 2 | 59 |
-| 9. API surface and arity | 10 | 18 | 0 | 0 | 1 | 29 |
+| 9. API surface and arity | 11 | 17 | 0 | 0 | 1 | 29 |
 | 10. Intel: jamming and contact icons | 11 | 2 | 0 | 1 | 2 | 16 |
-| **Total** | 169 | 113 | 0 | 4 | 18 | 304 |
+| **Total** | 170 | 112 | 0 | 4 | 18 | 304 |
 
 ### Decisions made (2026-11-16)
 
@@ -30,6 +30,7 @@ Items are counted as bullets of the batches below. A bullet that was half fixed 
 4. **Sim stage errors** (`9e290e0`): keep. An error out of a sim stage is logged and the beat goes on; under the test suites it ends the run (`set_strict_stage_errors` in `engine/sim/tick.rs`, turned on by `test_data::require`).
 5. **`^` is XOR** (`af857a4`): keep. A rerun of `probe_api_lang` with RNGAI's own expressions (`syn_rngpow.lua`) gives XOR in the real game in both VMs: `(1.25 - 0.5) ^ 2` = 2, `0.4 ^ 2` = 2, `30.5 ^ 2` = 28, `1.5 ^ 3` = 2. `syn_powzero.lua` loops 4 times in the real game, as ours does now. RNGAI's `x ^ 2` lines are bugs in the real game too.
 6. **Syntax and library extras in ours that the real game rejects**: accepted, no change.
+7. **`GetPosition()` table identity** ([weapons 5](weapons.md#r5); `b6a71e8`): match the real game. Plain `GetPosition()` returns one table per entity, rewritten by each call; FAF's AI code and AI mods depend on it.
 
 ## 1. Engine aborts and harness
 
@@ -357,7 +358,7 @@ Unused by FAF or cosmetic (C)
 - [x] **`EntityCategoryFilterDown` drops a destroyed unit**; ours keeps it (fixed `40be7e2`: destroyed only; a killed, dying unit stays, untested) (C). `engine/api/categories.rs:229`. [api S9](api.md#s9)
 - [ ] **Error paths that raise in the real game**: `GetCargo` on a non-transport, `TestCommandCaps` bad enum, `CanBuild('nosuch')`, `SetMaxHealth('500')`, `PlatoonExists(nil)`, bad squad, `CreateRotator` bad bone / axis, `SetEmitterParam` bad name, any manipulator method after `Destroy`, `GetShieldRatio()` without argument; ours accept. Ours stricter on `GetScriptBit(99)` (false in real). `engine/api/` typed conversions. [units 31](units.md#r31), [api S11](api.md#s11)
 - [ ] **Return shapes** (C): empty `GetSquadUnits` returns nothing, `MoveToLocation` a table, `CreateTrail` / `CreateLightParticle` nothing, `Rotator:ClearGoal` not self, manipulator `Destroy` nothing, `GetCurrentTargetPosition` with no target `{0,0,0}`, command-queue entries have `_c_object`. `engine/api/platoon.rs:235`, `orders.rs`, effects / manipulator bindings. [api S13](api.md#s13)
-- [ ] **`GetPosition()` returns the same table every call, updated in place** (API, possible gameplay effect): FAF code that keeps an old table and compares later sees 0 movement in the real game; ours a fresh table. `engine/api/entity.rs` (`entity::vector`). `probe_wpn_misc2` tbl. [weapons 5](weapons.md#r5)
+- [x] **`GetPosition()` returns the same table every call, rewritten by each call** (fixed `b6a71e8`) (API, gameplay effect): FAF code that keeps an old table and compares later sees 0 movement in the real game; ours made a fresh table. FAF's `AIBehaviors` ACU return-home loop and AI mods' table-identity checks (RNGAI `TargetPos ~= targetPosition`) rely on it. Ours now keeps one table per entity (a weak-keyed registry table, saved with keyframes), rewritten only by a plain call, as `probe_re4_pos` measured. `engine/api/entity.rs` (`shared_position`). `probe_wpn_misc2` tbl, `probe_re4_pos`. [weapons 5](weapons.md#r5) Matches the real game (see Decisions made). Side effect: the Yolona Oss script (`SIFExperimentalStrategicMissile01_script.lua:47-48`) adds 20 to the shared table FAF already handed to its nuke rings (`Projectile.lua:740`, forked `NukeDamage.lua` `SlowNuke`), so the rings are centred 20 up and kill 4-12 ticks later; `probe_re4_nuke` checks the real game.
 - [ ] **Stubs: real results** for `PointVector`, `AITarget`, `EntityCategoryEmpty`, `GetEntitiesInRect`, global `GetBlueprint`, `GenerateRandomOrientation`, `SelectedUnit`, interface `SecondsPerTick` (0.1) and `OrientFromDir`, `KeycodeMSWToMaui`; and of many methods ours leaves "not implemented" (`IsValidTarget`, `GetCurrentMoveLocation`, `GetScale`, `PrintCommandQueue`, navigator calls, platoon and brain getters). `engine/api/pending.rs`. `probe_api_spot`, `probe_api_arity`. [api: Stubs](api.md#stubs-what-the-real-ones-return-ours-raise-not-implemented)
 - [x] **Arity: `CanBuildPlatoon(template[, factories])` is 2..3 in the real game; ours needs 3** (fixed `95ed7aa`) (raises with one argument; FAF passes two at `FactoryBuilderManager.lua:500`). `probe_api_arity`. [api: Arity](api.md#arity-complete)
 - [x] **Arity: stubs declare the wrong counts** (fixed `95ed7aa`) (`EntityCategoryCountAroundPosition` 4, `GetEntitiesInRect` 1..4, `PlayLoop` / `StopLoop` 1, `CoordinateAttacks` 1, `SetAlliedVictory` 2, `CAiAttacker:IsWithinAttackRange` 2..3). `probe_api_arity`. [api: Arity](api.md#arity-complete) `CAiAttacker:IsWithinAttackRange` is not changed.
