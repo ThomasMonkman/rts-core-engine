@@ -3621,7 +3621,8 @@ pub fn apply(world: &mut EntityWorld, commands: &mut Commands, moved: &[Moved], 
             // FAF's scripts read it that way (`DefaultProjectileWeapon`'s
             // unpack lock, the Notha's `OnGotTarget`).
             use crate::engine::sim::command::CommandKind as K;
-            let shows = match commands.current(m.unit).map(|c| c.kind) {
+            let current = commands.current(m.unit).map(|c| c.kind);
+            let shows = match current {
                 Some(K::Attack | K::FormAttack | K::Patrol | K::FormPatrol | K::AggressiveMove | K::FormAggressiveMove) => false,
                 Some(K::Guard) => u.build_rate > Fx::ZERO,
                 _ => true,
@@ -3637,7 +3638,7 @@ pub fn apply(world: &mut EntityWorld, commands: &mut Commands, moved: &[Moved], 
             static RUN: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("MakingAttackRun").expect("state"));
             u.states.set(*RUN, matches!(m.state.combat, 1 | 2 | 6));
             if u.motion_params.kind == MotionKind::Air {
-                air_vertical_states(u, commands.current(m.unit).is_some_and(|c| c.kind.is_transport_load_unload()), m);
+                air_vertical_states(u, current.is_some_and(|k| k.is_transport_load_unload()), m);
             }
         }
         if m.arrived && commands.dispatched(m.unit).is_some() {
