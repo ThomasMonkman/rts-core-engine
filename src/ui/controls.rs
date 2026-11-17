@@ -284,6 +284,11 @@ pub enum DrawItem {
     /// Movie control `movie`'s current frame stretched over `rect`
     /// (YCbCr planes; the renderer converts them).
     Movie { rect: [f32; 4], movie: ControlId, frame: super::movie::FrameRef, color: [f32; 4] },
+    /// A strategic icon (moho's `primbatcher.fx` `TStrategicIcon`): the
+    /// texture point sampled, its grey texels (within 0.5 of mid-grey)
+    /// replaced by `color`'s RGB, the rest (outline, glyph, tech pip) kept;
+    /// `color`'s alpha fades it. `uv` as a quad's.
+    Icon { rect: [f32; 4], texture: String, uv: [f32; 4], color: [f32; 4] },
 }
 
 /// `"ffRRGGBB"` (ARGB), `"RRGGBB"`, or a moho colour name
@@ -2022,7 +2027,7 @@ fn under_world(items: Vec<(bool, DrawItem)>) -> Vec<DrawItem> {
 /// covers it.
 fn cut(item: DrawItem, hole: [f32; 4]) -> Vec<DrawItem> {
     let rect = match &item {
-        DrawItem::Quad { rect, .. } | DrawItem::Text { rect, .. } | DrawItem::Movie { rect, .. } => *rect,
+        DrawItem::Quad { rect, .. } | DrawItem::Text { rect, .. } | DrawItem::Movie { rect, .. } | DrawItem::Icon { rect, .. } => *rect,
         _ => return vec![item],
     };
     let [l, t, r, b] = rect;
