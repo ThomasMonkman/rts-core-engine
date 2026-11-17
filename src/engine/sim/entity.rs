@@ -519,6 +519,9 @@ pub struct EntityWorld {
     /// Dense indices of the units (ascending, so in id order): passes over
     /// units skip the props (most of a big map's entities).
     unit_slots: Vec<u32>,
+    /// Dense indices of the shield bubbles (ascending): area damage and
+    /// beams look at every shield without reading every unit and prop.
+    shield_slots: Vec<u32>,
     /// Freed entities still in `dense` (lets `compact` skip quiet ticks).
     destroyed: usize,
     /// Entities `destroy`ed whose `OnDestroy` hasn't run yet, in the order
@@ -587,6 +590,9 @@ impl EntityWorld {
         if kind == EntityKind::Unit {
             self.unit_slots.push(self.dense.len() as u32);
             self.unit_epoch += 1;
+        }
+        if kind == EntityKind::Shield {
+            self.shield_slots.push(self.dense.len() as u32);
         }
         self.dense.push(Entity {
             id,
@@ -975,6 +981,13 @@ impl EntityWorld {
         self.unit_slots.iter().map(|&i| &self.dense[i as usize])
     }
 
+    /// The shield bubbles (destroyed ones too until compaction), in id
+    /// order: what `iter().filter(kind == Shield)` gives without reading
+    /// every unit and prop.
+    pub fn shields(&self) -> impl Iterator<Item = &Entity> {
+        self.shield_slots.iter().map(|&i| &self.dense[i as usize])
+    }
+
     /// The units' indices into [`EntityWorld::as_slice`], in id order (for
     /// parallel passes over the units).
     pub fn unit_indices(&self) -> &[u32] {
@@ -1037,10 +1050,13 @@ impl EntityWorld {
             self.slot[id as usize] = REMOVED;
         }
         self.unit_slots.clear();
+        self.shield_slots.clear();
         for (i, e) in self.dense.iter().enumerate() {
             self.slot[e.id as usize] = i as u32;
-            if e.kind == EntityKind::Unit {
-                self.unit_slots.push(i as u32);
+            match e.kind {
+                EntityKind::Unit => self.unit_slots.push(i as u32),
+                EntityKind::Shield => self.shield_slots.push(i as u32),
+                _ => {}
             }
         }
         self.destroyed = 0;

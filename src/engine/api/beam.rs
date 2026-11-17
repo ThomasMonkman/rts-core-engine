@@ -224,7 +224,7 @@ fn trace(lua: &Lua, beam: &Beam) -> (Vec<(&'static str, EntityId, FxVec3)>, (&'s
         hits.push((t, id, kind));
     }
     // Shield bubbles the beam enters from outside.
-    for e in w.iter().filter(|e| !e.destroyed && e.kind == crate::engine::sim::entity::EntityKind::Shield) {
+    for e in w.shields().filter(|e| !e.destroyed) {
         let crate::engine::sim::entity::CollisionShape::Sphere { center, radius } = e.collision_shape() else { continue };
         if radius <= Fx::ZERO {
             continue;

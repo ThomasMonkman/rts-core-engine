@@ -189,10 +189,10 @@ fn damage_shell(
 /// order.
 fn shield_entities_touched(w: &crate::engine::sim::entity::EntityWorld, center: FxVec3, min_r: Fx, r: Fx) -> Vec<EntityId> {
     use crate::engine::sim::collision::sphere_touches;
-    use crate::engine::sim::entity::{CollisionShape, EntityKind};
+    use crate::engine::sim::entity::CollisionShape;
     let mut ids: Vec<EntityId> = w
-        .iter()
-        .filter(|e| !e.destroyed && e.kind == EntityKind::Shield)
+        .shields()
+        .filter(|e| !e.destroyed)
         .filter(|e| {
             let shape = e.collision_shape();
             !matches!(shape, CollisionShape::None)
@@ -234,7 +234,7 @@ fn shields_absorbing(
     source_army: Option<u32>,
 ) -> LuaResult<Vec<Absorbing>> {
     use crate::engine::sim::collision::sphere_touches;
-    use crate::engine::sim::entity::{CollisionShape, EntityKind};
+    use crate::engine::sim::entity::CollisionShape;
     if amount <= 0.0 {
         return Ok(Vec::new());
     }
@@ -242,8 +242,8 @@ fn shields_absorbing(
         let w = world(lua);
         let armies = lua.app_data_ref::<Armies>();
         let mut ids: Vec<EntityId> = w
-            .iter()
-            .filter(|e| !e.destroyed && e.kind == EntityKind::Shield)
+            .shields()
+            .filter(|e| !e.destroyed)
             .filter(|e| match (friendly, source_army, e.army, &armies) {
                 (false, Some(from), Some(to), Some(a)) => a.alliance(from, to) != Alliance::Ally,
                 _ => true,
