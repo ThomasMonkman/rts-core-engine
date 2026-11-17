@@ -240,6 +240,7 @@ sim  WARN native
 sim  WaitFor luau
 sim  Warp native
 sim  _ALERT native
+sim  _TRACEBACK luau
 sim  __engine_IssueTransportReverseLoad native
 sim  __forin luau
 sim  _c_CreateEntity native
@@ -523,6 +524,9 @@ sim  moho.aipersonality_methods.GetTargetSpread native
 sim  moho.aipersonality_methods.GetTeamSupport native
 sim  moho.aipersonality_methods.GetTechAdvancement native
 sim  moho.aipersonality_methods.GetUpgradesDriven native
+sim  moho.blip_methods.BeenDestroyed native
+sim  moho.blip_methods.GetEntityId native
+sim  moho.blip_methods.GetPosition native
 sim  moho.blip_methods.GetSource native
 sim  moho.blip_methods.IsKnownFake native
 sim  moho.blip_methods.IsMaybeDead native
@@ -1227,6 +1231,7 @@ user WaitFor luau
 user WorldIsLoading native
 user WorldIsPlaying luau
 user _ALERT native
+user _TRACEBACK luau
 user __disc_close native
 user __disc_count native
 user __disc_open native
@@ -1243,6 +1248,7 @@ user __engine_key_action luau
 user __engine_overlay_filters luau
 user __engine_overlay_version luau
 user __engine_predict_command luau
+user __engine_select_by_category native
 user __engine_toggle_ping_grid luau
 user __engine_unit luau
 user __engine_user_decals luau

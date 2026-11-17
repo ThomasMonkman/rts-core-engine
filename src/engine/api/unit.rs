@@ -26,10 +26,11 @@ pub(crate) fn with_unit<R: Default>(
 
 /// Lua module + class for a unit blueprint: explicit `ScriptModule`/
 /// `ScriptClass`, else `<Source minus _unit.bp>_script.lua` and its `TypeClass`.
+/// Empty strings, the reflected default every blueprint carries, mean unset.
 fn script_of(bp: &LuaTable, id: &str) -> LuaResult<(String, String)> {
     if let (Some(m), Some(c)) = (
-        bp.get::<Option<String>>("ScriptModule")?,
-        bp.get::<Option<String>>("ScriptClass")?,
+        bp.get::<Option<String>>("ScriptModule")?.filter(|s| !s.is_empty()),
+        bp.get::<Option<String>>("ScriptClass")?.filter(|s| !s.is_empty()),
     ) {
         return Ok((m, c));
     }
@@ -309,6 +310,13 @@ fn unit_threat(lua: &Lua, bp: &LuaTable, category_index: Option<u32>) -> LuaResu
         (Some(i), Some(set)) => set.contains(i),
         _ => false,
     };
+    // An external factory (FAF's helper unit attached to a Fatboy, carrier
+    // or Atlantis, `<id>ef` with category EXTERNALFACTORYUNIT) adds nothing:
+    // in the real game the Fatboy's cell reads 993.36 Overall, without the
+    // helper's 2000 EconomyThreatLevel (dev/probes probe_ai_threat).
+    if is("EXTERNALFACTORYUNIT") {
+        return Ok([Fx::ZERO; crate::engine::sim::threat::THREAT_TYPES]);
+    }
     let kinds = ThreatKinds {
         structure: is("STRUCTURE"),
         mass_extraction: is("MASSEXTRACTION"),
@@ -317,7 +325,9 @@ fn unit_threat(lua: &Lua, bp: &LuaTable, category_index: Option<u32>) -> LuaResu
         land: is("LAND"),
         experimental: is("EXPERIMENTAL"),
         commander: is("COMMAND"),
-        artillery: is("ARTILLERY"),
+        // Mobile artillery and the Fatboy read 0 Artillery threat in the real
+        // game (dev/probes probe_ai_find); structures unverified.
+        artillery: is("ARTILLERY") && is("STRUCTURE"),
     };
     Ok(unit_threat(level("AirThreatLevel")?, level("SurfaceThreatLevel")?, level("SubThreatLevel")?, level("EconomyThreatLevel")?, kinds))
 }
@@ -434,6 +444,23 @@ pub fn spawn_unit_built_by(
     if builder.is_none() && motion_params.kind == crate::engine::sim::movement::MotionKind::Water && matches!(layer, crate::engine::sim::layer::Layer::Water | crate::engine::sim::layer::Layer::Sub)
         && let Some(surface) = lua.app_data_ref::<Terrain>().map(|t| t.surface_at(position.x, position.z)) {
         world(lua).set_position(id, FxVec3 { y: surface + depth, ..position });
+    }
+    // Everything else starts on its layer's height too: on the ground or the
+    // seabed, or on the water for hover units and floating structures. The
+    // real game's tank made 30 up stands on the ground at once, a tank or a
+    // power generator made at the water surface sits on the seabed, and a
+    // hover tank, an engineer or a torpedo launcher made on the seabed is on
+    // the surface (dev/probes probe_unit_api `layer`).
+    if builder.is_none() && !matches!(motion_params.kind, crate::engine::sim::movement::MotionKind::Air | crate::engine::sim::movement::MotionKind::Water) {
+        use crate::engine::sim::layer::Layer;
+        let y = lua.app_data_ref::<Terrain>().and_then(|t| match layer {
+            Layer::Land | Layer::Seabed => Some(t.height_at(position.x, position.z)),
+            Layer::Water => Some(t.surface_at(position.x, position.z)),
+            _ => None,
+        });
+        if let Some(y) = y {
+            world(lua).set_position(id, FxVec3 { y, ..position });
+        }
     }
     let threat = unit_threat(lua, &bp, category_index)?;
     let skirt = skirt_of_bp(&bp)?;
@@ -844,28 +871,46 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::Unit,
         /// Whether the unit can path to `goal` (a position or an entity's):
         /// the goal is in the unit's connected region for its footprint
-        /// class. One result, as moho's binding (MohoEngine.dll 0x102a9840;
-        /// FAF's AI also reads a second, always nil). Fliers: true
-        /// (inferred; FAF's AI doesn't ask them).
+        /// class (MohoEngine.dll 0x102a9840). A second value is a position,
+        /// as in the real game (dev/probes probe_unit_api `risky`,
+        /// probe_api_spot; FAF's AI reads it, `AI/aiutilities.lua:1434`):
+        /// the goal's cell centre on the ground when it can, else the last
+        /// open cell on the straight line towards the goal (inferred: the
+        /// real game's false cases were all on a unit's first tick).
+        /// Fliers: true and the goal (the real game's is NaN). A structure
+        /// takes the real game down; ours: true.
         CanPathTo = |lua, (this, goal): (Obj<moho::Unit>, shapes::OrderTarget)| {
         let id = entity_id(&this)?;
         let to = match crate::engine::api::command::target_of(&goal)? {
             crate::engine::sim::command::CommandTarget::Entity(e) => match world(lua).get(e) {
                 Some(e) => e.position(),
-                None => return Ok(false),
+                None => return Ok((false, None)),
             },
             crate::engine::sim::command::CommandTarget::Ground(p) => p,
-            _ => return Ok(false),
+            _ => return Ok((false, None)),
         };
         let (from, class) = {
             let w = world(lua);
-            let Some(e) = w.get(id) else { return Ok(false) };
-            let Some(u) = e.unit.as_deref() else { return Ok(false) };
-            let Some(mut nav) = lua.app_data_mut::<crate::engine::sim::nav::NavGrid>() else { return Ok(false) };
+            let Some(e) = w.get(id) else { return Ok((false, None)) };
+            let Some(u) = e.unit.as_deref() else { return Ok((false, None)) };
+            let Some(mut nav) = lua.app_data_mut::<crate::engine::sim::nav::NavGrid>() else { return Ok((false, None)) };
             (e.position(), crate::engine::sim::movement::nav_class(u, &nav).inspect(|&c| nav.ensure(c)))
         };
-        let Some(class) = class else { return Ok(true) };
-        Ok(lua.app_data_mut::<crate::engine::sim::nav::NavGrid>().is_some_and(|mut nav| nav.reachable(class, from, to)))
+        let Some(class) = class else { return Ok((true, Some(crate::engine::api::entity::vector(lua, to)?))) };
+        let (ok, (x, z)) = {
+            let Some(mut nav) = lua.app_data_mut::<crate::engine::sim::nav::NavGrid>() else { return Ok((false, None)) };
+            let ok = nav.reachable(class, from, to);
+            let spot = if ok {
+                let cell = nav.cell_for(class, to);
+                nav.point_of(class, cell)
+            } else {
+                let p = nav.clamp_along(class, from, to);
+                (p.x, p.z)
+            };
+            (ok, spot)
+        };
+        let y = lua.app_data_ref::<Terrain>().map_or(to.y, |t| t.height_at(x, z));
+        Ok((ok, Some(crate::engine::api::entity::vector(lua, FxVec3 { x, y, z })?)))
     })?;
     lua_method!(lua, moho::Unit,
         /// How many units the unit's queued factory and engineer build orders
@@ -928,8 +973,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         let now = crate::engine::api::sim_time::current_tick(lua);
         with_unit(lua, &this, |u| u.stunned_until > now)
     })?;
-    lua_method!(lua, moho::Unit, GetResourceConsumed = |lua, this: Obj<moho::Unit>| {
-        with_unit(lua, &this, |u| u.resource_consumed.to_num::<f64>())
+    lua_method!(lua, moho::Unit,
+        /// The share of its consumption the economy served last tick; 0 for
+        /// a unit consuming nothing (idle, a producer, consumption off), as
+        /// in the real game (dev/probes probe_unit_econ D).
+        GetResourceConsumed = |lua, this: Obj<moho::Unit>| {
+        with_unit(lua, &this, |u| {
+            let consuming = u.consumption_active && (u.consumption_mass > Fx::ZERO || u.consumption_energy > Fx::ZERO);
+            if consuming { u.resource_consumed.to_num::<f64>() } else { 0.0 }
+        })
     })?;
     state_setter(lua, "SetBusy", "Busy")?;
     state_setter(lua, "SetUnSelectable", "UnSelectable")?;
@@ -965,21 +1017,17 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     })?;
     lua_method!(lua, moho::Unit,
         /// Unknown state names read as false (moho doesn't validate either).
-        /// `Attacking` is also on while the unit's current order is an
-        /// attack (FAF's Fire Beetle enables its kamikaze weapon only then:
-        /// the real game's fires on `IssueAttack` and never on a target it
-        /// merely sees, dev/probes/maps/probe_auditgaps g5).
+        /// The states an order gives (`Attacking`, `Guarding`, `Patrolling`)
+        /// and a killed unit's `NoCost` are read off the current order and
+        /// the kill when asked ([`crate::engine::api::command::order_state`]),
+        /// so nothing has to set them on every unit each tick.
         IsUnitState = |lua, (this, state): (Obj<moho::Unit>, String)| {
         let Some(index) = crate::engine::sim::unit_state::UnitStates::index(&state) else { return Ok(false) };
         if with_unit(lua, &this, |u| u.states.contains(index))? {
             return Ok(true);
         }
-        static ATTACKING: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("Attacking").expect("unit state"));
-        if index != *ATTACKING {
-            return Ok(false);
-        }
         let id = crate::engine::api::entity::entity_id(&this)?;
-        Ok(crate::engine::api::command::is_attacking(lua, id))
+        Ok(crate::engine::api::command::order_state(lua, id, index))
     })?;
     lua_method!(lua, moho::Unit, SetConsumptionActive = |lua, (this, on): (Obj<moho::Unit>, bool)| {
         if with_unit(lua, &this, |u| std::mem::replace(&mut u.consumption_active, on) != on)? {
@@ -1155,15 +1203,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             spawn_unit(lua, &bp, index, FxVec3::from_f64(x, y, z), q)
         })?;
     lua_fn!(lua, global,
-        /// `ChangeUnitArmy(unit, army, allowCommanders)`: a copy of the unit in
-        /// `army` (same blueprint, transform, health, build progress), then the
-        /// old one is destroyed. nil for dead units, a move to the same army, or
-        /// COMMAND units without `allowCommanders` (FAF's engine patch). Nor
-        /// past the receiving army's unit cap: the giving army's brain hears
-        /// `OnFailedUnitTransfer` and the unit stays (inferred: which brain, and
-        /// that `allowCommanders` doesn't lift the cap; FAF's army merge raises
-        /// the cap first).
-        ChangeUnitArmy = |lua, (unit, army, allow_commanders): (Obj<moho::Unit>, shapes::Army, Option<bool>)| {
+        /// `ChangeUnitArmy(unit, army)`: a copy of the unit in `army` (same
+        /// blueprint, transform, health, build progress), then the old one is
+        /// destroyed. nil for dead units or a move to the same army. Commanders
+        /// transfer too: refusing them is FAF's `SimHooks.lua` wrapper (which
+        /// passes only two arguments when its `noRestrictions` flag is set), as
+        /// in the real game (dev/probes probe_unit_api `givecdr`). Not past the
+        /// receiving army's unit cap: the receiving army's brain hears
+        /// `OnFailedUnitTransfer` and the unit stays (probe_unit_api `army`).
+        ChangeUnitArmy = |lua, (unit, army, _no_restrictions): (Obj<moho::Unit>, shapes::Army, Option<bool>)| {
             let id = crate::engine::api::entity::entity_id(&unit)?;
             let to = resolve_army(lua, &army)?;
             let Some((bp, pos, rot, health, max_health, fraction, from)) = world(lua)
@@ -1176,15 +1224,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             if from == Some(to) {
                 return Ok(None);
             }
-            if !allow_commanders.unwrap_or(false) {
-                let domain = crate::engine::api::categories::domain(lua)?;
-                let commander = domain.named.get("COMMAND").zip(domain.index_of(&bp)).is_some_and(|(set, i)| set.contains(i));
-                if commander {
-                    return Ok(None);
-                }
-            }
             if over_cap(lua, id, to) {
-                if let Some(LuaValue::Table(brain)) = from.map(|a| crate::engine::api::army::brain(lua, a)).transpose()? {
+                if let LuaValue::Table(brain) = crate::engine::api::army::brain(lua, to)? {
                     AIBrainCallbacks::on_failed_unit_transfer(lua, &brain, "brain")?;
                 }
                 return Ok(None);
@@ -1258,15 +1299,34 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::Unit,
         /// Per-tick displacement (moho reports velocity per tick: x10 = per second).
         /// A dead aircraft reports its fall (FAF's ShieldCollider follows it).
+        /// On the ground x / z carry the whole ground speed and y the climb
+        /// on top (the slope under it along the way it's going, the water's
+        /// surface for hover units): the real game's T1 tank on a ramp reads
+        /// 3.40 along and 1.45 up a second, a hover unit's y follows the
+        /// ground too (dev/probes probe_mov_api S*; ours held the 3D length
+        /// at the speed, 3.12 along, and hover units read y 0).
         GetVelocity = |lua, this: Obj<moho::Unit>| {
+        use crate::engine::sim::movement::MotionKind;
         let id = entity_id(&this)?;
         if let Some(v) = crate::engine::api::movement::Falling::velocity(lua, id) {
             return Ok(v.to_f64());
         }
         let w = world(lua);
         let Some(e) = w.get(id) else { return Ok((0.0, 0.0, 0.0)) };
-        let f = crate::engine::sim::movement::velocity(e) * (Fx::ONE / Fx::from_num(10));
-        Ok(f.to_f64())
+        let mut v = crate::engine::sim::movement::velocity(e);
+        let surface = e.unit.as_deref().filter(|u| u.on_ground && e.attachment.is_none()).map(|u| (u.motion_params.kind, u.motion_state.speed.abs()));
+        if let (Some((kind, speed)), Some(t)) = (surface.filter(|&(k, _)| matches!(k, MotionKind::Land | MotionKind::Hover | MotionKind::Amphibious)), lua.app_data_ref::<crate::engine::sim::terrain::Terrain>()) {
+            let flat = crate::engine::sim::math::sqrt(v.x.saturating_mul(v.x).saturating_add(v.z.saturating_mul(v.z)));
+            if flat > Fx::ZERO {
+                let (dx, dz) = (v.x / flat, v.z / flat);
+                let p = e.position();
+                let half = Fx::from_num(0.5);
+                let at = |x: Fx, z: Fx| if kind == MotionKind::Hover { t.surface_at(x, z) } else { t.height_at(x, z) };
+                let rise = at(p.x + dx * half, p.z + dz * half) - at(p.x - dx * half, p.z - dz * half);
+                v = FxVec3 { x: dx * speed, y: rise.saturating_mul(speed), z: dz * speed };
+            }
+        }
+        Ok((v * (Fx::ONE / Fx::from_num(10))).to_f64())
     })?;
     lua_method!(lua, moho::Unit,
         /// The unit's target: what its attack order is on, else the first of its

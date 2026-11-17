@@ -2,8 +2,9 @@
 -- Moho's attack task surfaces a `SurfacingSub` in the `Sub` layer when the
 -- blueprint sets it and none of its weapons can hit the target from where it
 -- is (MohoEngine.dll 0x101df772..0x101df8d4, AI +0x6c). No FAF unit sets it,
--- so this sets it on the sub's blueprint: a submerged sub ordered to attack a
--- tank on the shore surfaces; one without the flag stays under.
+-- and the engine's default is true (every real blueprint dump has it,
+-- dev/probes probe_api_spot): a submerged sub ordered to attack a tank on the
+-- shore surfaces; one with the flag set false stays under.
 rawset(_G, "ScenarioResult", { done = false, failures = {}, notes = {} })
 local function check(ok, msg) if not ok then table.insert(ScenarioResult.failures, msg) end end
 local function note(msg) table.insert(ScenarioResult.notes, msg) end
@@ -42,11 +43,12 @@ ForkThread(function()
             WaitTicks(2)
             return was, surfacing, layer
         end
+        check(bp.AI.AutoSurfaceToAttack == true, 'the default is true')
         local was, surfacing, layer = trial(true)
         note(string.format('with the flag: %s -> %s (surfacing seen %s)', was, layer, tostring(surfacing)))
         check(was == 'Sub', 'the sub starts under the water: ' .. was)
         check(surfacing and layer == 'Water', 'it surfaces to attack the tank: ' .. layer)
-        was, surfacing, layer = trial(nil)
+        was, surfacing, layer = trial(false)
         note(string.format('without: %s -> %s', was, layer))
         check(not surfacing and layer == 'Sub', 'without the flag it stays under: ' .. layer)
     end)

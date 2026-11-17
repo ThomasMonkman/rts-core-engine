@@ -1,0 +1,461 @@
+# Probe sweep 2026-11: work list
+
+On 2026-11-14 and 2026-11-15, 41 probes under `dev/probes/maps/probe_{api,wpn,mov,unit,ai,ui,intel}_*` were each run in FAF's `ForgedAlliance.exe` and in ours, and their `PROBE` log lines compared (real logs go to `dev/probes/out/<probe>.faf.log`). The result is seven per-area files: [api.md](api.md), [weapons.md](weapons.md), [movement.md](movement.md), [units.md](units.md), [ai.md](ai.md), [ui.md](ui.md), [intel.md](intel.md). Each lists every difference with its evidence, severity, confidence and our source location, then what matched and what could not be tested. Reruns and follow-up probes on 2026-11-15 are merged into the main tables, and each row carries a State column (fixed with the commit, or open). This page turns the rows into fix batches grouped by the area of source they touch, most severe first inside each. Each item is one line, a checkbox (`[x]` fixed, with the fixing commit; `[ ]` open, with the reason where one is known) and then: real game vs ours, our source, the probe, and a link to the row. Severity letters are those of the area file and differ between files (api A/B/C, weapons G/N/C, movement G/N/C, units A/B/C, ai A/B/C, ui A/B/C, intel B/C). Rows with low or medium confidence need a second probe before a fix; several rows contradict guesses in `docs/research/verifying-against-the-binary.md` and issues #7-#12 (see the last sections). "Ours" paths are under `src/` unless shown in full.
+
+## Status (2026-11-16)
+
+The fixes marked below are the commits of the `fix/probe-sweep` branch (the hashes given are that branch's). The probe folders named here (`dev/probes/maps/probe_*`) and their logs are not in the repository.
+
+Items are counted as bullets of the batches below. A bullet that was half fixed was split in two, so each is counted once. "Open" covers items not started and items left alone on purpose (the reason is in the bullet). "Needs a decision" is for the owner to choose, "needs a new probe" is where the evidence is unclear, low in confidence or the cause is not found, "closed" means no change was needed: a rerun showed it, or the owner chose to keep ours.
+
+| Batch | Fixed | Open | Needs a decision | Needs a new probe | Closed, no change | Items |
+|---|---|---|---|---|---|---|
+| 1. Engine aborts and harness | 3 | 2 | 0 | 0 | 0 | 5 |
+| 2. Lua runtime | 3 | 21 | 0 | 0 | 1 | 25 |
+| 3. Orders and construction | 14 | 29 | 0 | 0 | 2 | 45 |
+| 4. Weapons, projectiles, shields | 15 | 14 | 0 | 5 | 0 | 34 |
+| 5. Movement and transports | 14 | 9 | 0 | 3 | 2 | 28 |
+| 6. AI brain, platoons, threat | 17 | 23 | 0 | 1 | 1 | 42 |
+| 7. Blueprint defaults | 1 | 3 | 0 | 0 | 0 | 4 |
+| 8. Interface | 11 | 43 | 0 | 2 | 0 | 56 |
+| 9. API surface and arity | 2 | 26 | 0 | 0 | 0 | 28 |
+| 10. Intel: jamming and contact icons | 6 | 3 | 0 | 3 | 0 | 12 |
+| **Total** | 86 | 173 | 0 | 14 | 6 | 279 |
+
+### Decisions made (2026-11-16)
+
+1. **Turn speed, reversing and route choice** ([movement 6](movement.md#r6), [movement 7](movement.md#r7)): keep ours.
+2. **Engineer work ranges** ([units 12](units.md#r12)): keep ours (work starts from about 7 away while moving).
+3. **Air staging and plane move-end** ([movement 8](movement.md#r8), [movement 26](movement.md#r26); `f4a6701`, `581236c`): keep the fixes, though both are slower than before.
+4. **Sim stage errors** (`9e290e0`): keep. An error out of a sim stage is logged and the beat goes on; under the test suites it ends the run (`set_strict_stage_errors` in `engine/sim/tick.rs`, turned on by `test_data::require`).
+5. **`^` is XOR** (`af857a4`): keep. A rerun of `probe_api_lang` with RNGAI's own expressions (`syn_rngpow.lua`) gives XOR in the real game in both VMs: `(1.25 - 0.5) ^ 2` = 2, `0.4 ^ 2` = 2, `30.5 ^ 2` = 28, `1.5 ^ 3` = 2. `syn_powzero.lua` loops 4 times in the real game, as ours does now. RNGAI's `x ^ 2` lines are bugs in the real game too.
+6. **Syntax and library extras in ours that the real game rejects**: accepted, no change.
+
+## 1. Engine aborts and harness
+
+- [x] **`IssueScript` with an unknown `TaskName` aborts our run.** (fixed `9e290e0`) Real: order dropped, game carries on. Ours: `engine start failed: access to nonexistent global variable`. `engine/api/script_task.rs` (~104-121), lookup raises outside a protected call. `probe_unit_orders` (last case). [units 5](units.md#r5)
+- [x] **`BuildStructure` with an unknown blueprint id aborts our run.** (fixed `9e290e0`) Real: returns `false`, carries on. Ours: queues a BuildMobile order, the build start raises `unknown Unit blueprint` and the run aborts; `IssueBuildMobile` with a bad id likely the same. `engine/api/command.rs:862-878`, `construction.rs:723` and `:238`, `entity.rs:417`. `probe_ai_misc`. [ai D43](ai.md#d43)
+- [x] **`--ui-lua` skipped Lua translation.** (fixed `5d05759`) Real: n/a (harness). Ours: raw `lua.load` (`render/frame.rs:1327`); the code now goes through `lua_translation` like every other game script (`ui/mod.rs`). No numbered row of ui.md changed with it. [api H4](api.md#h4)
+- [ ] **`--script` skips Lua translation.** Real: n/a (harness). Ours: raw `lua.load` in `engine/session.rs` (~266), so probes run that way are plain Luau (`!=`, `arg`, `for k in t` over a `__call` table hang or raise). `docs/guides/probing.md` recommends `--script`. `probe_api_spot`. [api H1](api.md#h1)
+- [ ] **Add the probe-writing gotchas to `docs/guides/probing.md`.** Hooking `wep.OnFire` / `OnGotTarget` on an instance stops the weapon firing; `GetBlueprint()` on a shield entity ends the real run silently; `DamageArea` / `DamageRing` radius 0 abort the calling thread; `GetPosition()` returns one table; AIs run for armies 5-8; moho counts arguments, so padding with trailing `nil`s raises; some bad-argument calls take the game down (table below). `probe_wpn_*`, `probe_ui_*`, `probe_api_spot`. [weapons.md](weapons.md), [ui.md](ui.md), [api H2](api.md#h2)
+
+## 2. Lua runtime
+
+- [x] **`^` is integer XOR in the real game, not power** (fixed `af857a4`) (A). Real: `2^0.5` = 4294967296, `2 ^ 3 ^ 2` = 3; power is `math.pow` / `__pow`. Ours: Luau power. FAF's `x ^ 0` truncation in `fa/lua/sim/NavUtils.lua:443` and `:490` reverses only the ends of a path in ours. No `^` rewrite in `engine/lua_translation/` (`bitwise.rs` covers `~ | & << >>`). `probe_api_spot`, `probe_api_lang`. [api L1](api.md#l1) RNGAI's `x ^ 2` now computes XOR, as in the real game (see Decisions needed).
+- [x] **`import` of a missing file raises** (fixed `ae86c4a`) (A). Real: `doscript` of a missing file raises `Unable to find file <path>`, so `import` raises and `pcall(import, optional)` takes the fallback. Ours returned an empty module, so the call succeeded; it now raises. Whether relative, backslash and `..` paths fail to import as in the real game is not rechecked. `engine/api/dofile_or_script.rs`. `probe_api_spot`, `probe_api_lang`. [api L17](api.md#l17)
+- [ ] **`doscript` returns nil whatever the chunk returns** (C). Ours returns the chunk's value. `engine/api/dofile_or_script.rs`. `probe_api_lang`. [api L18](api.md#l18)
+- [x] **`_TRACEBACK` missing in both VMs** (fixed `21e595a`) (A, rare paths). Real: global exists; `fa/lua/system/Localization.lua:177` and `maui/layouthelpers.lua:2360` call it. Ours: "nonexistent global". `probe_api_census`. [api M1](api.md#m1)
+- [ ] **Missing globals: `serialize` table, `__pow`, `_LOADED`, `loadfile`, `GetTimeForProfile`, `__factory_objects`, `__serialize_*`, sim `GetMouseWorldPos`.** `serialize` is read at load by `fa/lua/system/saveload.lua:33`. `probe_api_census`. [api M2](api.md#m2)
+- [ ] **`loadstring` and `HashChecker` missing in the interface VM.** Real: `loadstring` works there (FA syntax, bytecode). `probe_api_census`, `probe_api_lang`. [api M3](api.md#m3)
+- [ ] **`debug.*` (`sethook`, `getlocal`, `getupvalue`, ...) and `string.dump` / `string.lualex` missing; `debug.getinfo` lacks `func`, `namewhat`, `what`.** Developer tools only (`sim/Profiler.lua:25`, `system/profile.lua:113`). `probe_api_census`. [api M4](api.md#m4), [api M5](api.md#m5)
+- [ ] **Nested long brackets fail to compile in ours** (B). Real: `[[a [[b]] c]]` and nested `--[[ ]]` work. Ours: the file silently does not load. Not handled in `engine/lua_translation/`. `probe_api_lang`. [api L12](api.md#l12)
+- [ ] **Closures share the loop variable** (B). Real: `{3 3 3}`; ours `{1 2 3}`. Luau semantics. `probe_api_lang`. [api L2](api.md#l2)
+- [ ] **`for k, v in nil` raises** (C). Real: error; ours: empty loop. `engine/lua/shims/lua50_aliases.lua:15-18`. `probe_api_spot`. [api L3](api.md#l3)
+- [ ] **`table.getn` / `setn` / `n` field** (B). Real honours `n` and `setn`, `getn({1,2,nil,4})` = 2; ours `4 3 0 0`, `setn` no-op. `lua50_aliases.lua:5-6`. `probe_api_spot`, `probe_api_lang`. [api L4](api.md#l4)
+- [ ] **`string.gsub` with a function returning nil / false / number** (B). Real deletes the match; ours keeps it or inserts the number. `probe_api_spot`. [api L5](api.md#l5)
+- [ ] **`string.format` rounding and widths** (B). Real rounds halves away from zero, 3-digit exponents, `%x` of -1 is `ffffffff`; ours `%5.1f` 2.25 prints 2.2, 16 f's. `probe_api_spot`. [api L6](api.md#l6)
+- [ ] **Lua numbers are float32 in the real game** (B). Already in the Confirmed table; loop counts are new evidence (`for x = 0, 1, 0.1` runs 10 times, ours 11). `probe_api_spot`, `probe_api_lang`. [api L7](api.md#l7)
+- [ ] **Assigning the numeric-for variable changes the iteration** (C). Real 3, ours 5. `probe_api_lang`. [api L8](api.md#l8)
+- [ ] **No string-to-number coercion in the real game** (C). `'10' + 5` raises; engine functions reject numeric strings. Ours coerces. `probe_api_spot`. [api L9](api.md#l9)
+- [ ] **`pcall` returns a string with traceback; `assert` returns one value** (C). Ours keeps error tables. `probe_api_spot`. [api L10](api.md#l10)
+- [ ] **Proper tail calls** (C). Real depth 1e6 fine; ours stack overflow. `probe_api_lang`. [api L11](api.md#l11)
+- [ ] **Bit operators bind tighter than arithmetic** (B, rare). Real `1 | 2 & 3 + 4` = 7; ours 3. `engine/lua_translation/bitwise.rs`. `probe_api_lang`. [api L13](api.md#l13)
+- [ ] **`type(print)` is `"cfunction"`; `ForkThread(math.abs)` raises** (C). FAF checks both names (`class.lua:453`, `config.lua:70`). Ours `"function"`. `probe_api_census`, `probe_api_spot`, `probe_ui_controls`. [api L14](api.md#l14), [ui 31](ui.md#r31)
+- [ ] **`tonumber` rejects `'0x10'`, `'inf'`, `'nan'`, `' 0x1F '`** (C). Ours accepts. `probe_api_spot`. [api L15](api.md#l15)
+- [ ] **`table.concat` / `unpack` / `foreachi` / `string.byte` / `gsub` replacement edge cases** (C). `probe_api_spot`. [api L16](api.md#l16)
+- [ ] **Arithmetic metamethods are not tried from the right operand when the left is a number** (open: needs a VM patch, low value) (C, medium). `2 * Vector(1,2,3)` raises at the call site; ours reaches FAF's `__mul`. Which operator fails is not isolated. `probe_api_spot`. [api L19](api.md#l19)
+- [ ] **Lua 5.0 cannot yield across `pcall`.** Real: `coroutine.yield` inside `pcall` fails; ours (Luau) yields. `probe_api_spot`. [api H3](api.md#h3)
+- [x] **Syntax and library extras in ours that the real game rejects** (closed: no change, accepted by the owner 2026-11-16): `%`, `#t`, `//`, `+=`, hex / binary / `_` literals, `\x` `\z`, `goto`, `...` as expression; Luau libraries `bit32`, `buffer`, `utf8`, `os`, `select`, `xpcall`, `typeof`, `coroutine.close` and others. A script that feature-tests `os` or `xpcall` sees them. `probe_api_lang`, `probe_api_census`. [api: Ours has](api.md#ours-has-real-doesnt)
+
+## 3. Orders and construction
+
+Orders and states
+
+- [x] **`IssueStop` appends a Stop behind the queue; it does not clear or interrupt** (fixed `eb5c260`) (A / G). Real: queue reads `2 2 2 1`, all 46 land units and all 24 ships carry on to their goal; upgrade finishes, factory keeps building. Ours: clears and brakes. `engine/api/command.rs:747`. `probe_mov_misc` ST, `probe_mov_land` p4, `probe_mov_naval`, `probe_mov_mult` SQ, `probe_unit_orders`, `probe_unit_build` G2-G4. [units 2](units.md#r2), [movement 2](movement.md#r2) The player's stop key keeps its own path and still stops units at once.
+- [x] **One `IssuePatrol` point ends at the point** (fixed `9cd7f28`) (A). Real: order done, queue 0. Ours patrols back for ever. `engine/sim/movement.rs:3462-3478`. `probe_unit_orders` O3. [units 3](units.md#r3)
+- [x] **Engineer on `IssueAggressiveMove` keeps the order and reclaims props in reach** (fixed `d22181d`) (A). Ours drops the order within 4 ticks. Not traced (`sim/movement.rs`, `api/orders.rs`). `probe_unit_misc` A. [units 4](units.md#r4)
+- [ ] **Orders refused at issue**: `IssueDive` / `IssueOverCharge` on a tank, `IssueFactoryAssist` by an engineer, `IssueSiloBuild*`; `IssueSacrifice` on a finished own structure is kept (C). Ours queues the first, drops the last. `engine/api/command.rs` capability checks. `probe_unit_orders` Q. [units 33](units.md#r33)
+- [ ] **`Issue*` return values**: real returns a table for a real order and nothing for an empty list; `IssueClearCommands` returns nothing (C). Ours returns userdata always. `engine/api/orders.rs`. `probe_api_spot`. [api S2](api.md#s2)
+- [x] **Unit states `Guarding`, `Patrolling`, and `NoCost` on a killed unit** (fixed `bf142e0`) (B). Real: patrol / aggressive move give `Patrolling`, guard gives `Guarding`, a killed unit carries `NoCost`. FAF reads `Guarding` (EngineerManager) and `Patrolling` (SimCallbacks). Ours now reads them from the current order and the kill. `engine/api/command.rs`, `api/unit.rs`. `probe_unit_orders`, `probe_unit_build` G9. [units 13](units.md#r13), [units 41](units.md#r41), [api S5](api.md#s5)
+- [ ] **Unit states: the rest** (B). Real: attack gives `Attacking` only, upgrade `Upgrading+NoCost`, transports `TransportLoading` etc.; a fresh idle tank reads `Moving` true and `IsIdleState` false 3 ticks after `CreateUnitHPR`. Ours sets `Moving` for all and never sets `GuardBusy`, `WaitingForTransport`, `TransportUnloading`. `engine/sim/unit_state.rs` has the names only. `probe_unit_orders`, `probe_unit_build` G9, `probe_api_spot`. [units 13](units.md#r13), [api S5](api.md#s5)
+- [ ] **Attack order stops 15.94 from the target (range 18)**; ours 14.60 (B, medium). `engine/api/orders.rs`. `probe_unit_orders` O5. [units 25](units.md#r25)
+- [ ] **`SetDoNotTarget(true)` under an attack order**: real keeps firing and `IsUnitState('DoNotTarget')` is true; ours stops and the state stays false (B, medium). `engine/api/unit.rs:1319`. `probe_unit_orders` O5. [units 15](units.md#r15)
+- [ ] **`GetCommandQueue()` on a unit killed by `IssueKillSelf` raises** (open: would break FAF code) (`invalid UnitCommandQueue`); ours returns `{}` (C). `engine/api/command.rs:1057`. `probe_unit_build` G9. [units 40](units.md#r40)
+- [ ] **`IssueRepair` on a damaged own tank: order gone at once** in the real game; ours repairs it (B?, low, one case). Not traced. `probe_unit_misc` W. [units 36](units.md#r36)
+- [ ] **Build / repair / prop reclaim start 9-10 ticks after the order** with the engineer already in reach; ours 1 tick (B?). `probe_unit_build` G1, G2, G5, G6. [units 37](units.md#r37)  The unit-reclaim start is not delayed in either game ([units 45](units.md#r45)), so the delay is for props, builds and repairs.
+
+Construction
+
+- [x] **Cancelled upgrade keeps draining; cancelled build calls `OnStopBuild` and `OnFailedToBuild`** (fixed `e318a8b`) (A). Real: drain stops (`spent mass 66.92`), old structure gets `OnStopBuild(new, 'Upgrade')`; a cancelled build calls both callbacks. Ours: drain continues for good, only `OnStopBuild` (or only `OnFailedToBuild` for upgrades). `engine/api/construction.rs:1060-1076`, `:1081`, `:1094-1097`. `probe_unit_build` G2-G4. [units 1](units.md#r1), [units 7](units.md#r7)
+- [ ] **An upgrade's new structure starts at fraction 0.02, total cost exactly 180 mass**; ours starts at 0, costs 182.31 (B, medium). `engine/api/construction.rs`. `probe_unit_build` G4. [units 17](units.md#r17)
+- [ ] **No adjacency callbacks between an upgraded structure and its predecessor; adjacency order for `CreateUnitHPR` pairs** (C). Ours fires `OnAdjacentTo` / `OnNotAdjacentTo` between old and new, and after `OnStopBeingBuilt` for made pairs. `engine/api/build.rs:328`. `probe_unit_build` G1, G4. [units 27](units.md#r27), [units 28](units.md#r28)
+- [x] **Two captors share one capture** (fixed `434438d`) (A). Real: 16 ticks against 31, total energy 750, both get `OnStopCapture` / `OnCaptured`. Ours: each captor runs its own full-cost capture, 32 ticks, the loser gets `OnFailedCapture`. `engine/api/capture.rs:188-192`. `probe_unit_build` G7. [units 6](units.md#r6), [units 38](units.md#r38)
+- [x] **Sacrifice takes time and needs closer reach** (fixed `0f09c51`) (B). Real: walks, starts +12, consumed 9 ticks later, bonus at the end. Ours: instant at the order tick. `engine/api/sacrifice.rs:42-81`. `probe_unit_build` G8. [units 39](units.md#r39)
+- [x] **Engineers walk up before working** (closed: no change, the owner keeps ours, 2026-11-16; ours starts from about 7, the real game from about 3) (B). Real: reclaim / capture start ~3.0 from a tank's centre (6.0 for a land factory), repair 3.8 / 6.7, and stand still while working. Ours starts at 7.3-7.9 while moving. Reach is build range + 2 in `engine/api/reclaim.rs`, `capture.rs`, `construction.rs`. `probe_unit_misc` W. [units 12](units.md#r12)
+- [x] **Factory default rally point is 5 in front** (fixed `18d8514`) (A). Real rally 736,229 for a factory at 736,224; ours on the factory. `engine/api/construction.rs:595-598` (missing `InitialRallyZ` reads 0). `probe_unit_build` G3. [units 9](units.md#r9)
+- [x] **`ChangeUnitArmy`** (fixed `da53791`) (A). Real transfers the commander with the flag, raises on the same army, runs `OnFailedUnitTransfer` on the receiver. Ours: no commander transfer, nil on the same army, callback on the giver. `engine/api/unit.rs` / `entity.rs`. `probe_unit_api` life, army. [units 11](units.md#r11)
+- [x] **`CreateUnitHPR` puts a unit on its layer's height at once** (fixed `ef91934`) (A). Real: tank made 30 up is at `y 18.68`; sea-bed / surface cases snap. Ours keeps the given y. `engine/api/unit.rs`, `sim/layer.rs`. `probe_unit_api` layer. [units 10](units.md#r10)
+- [ ] **`CreateUnitNearSpot` search** (B / C). Real: free spot at +0.5,+0.5, taken spots step 4 north-west first; ours `-0.5 -0.5`, adjacent steps. `engine/api/army.rs`. `probe_unit_misc` S, `probe_ai_build`. [units 22](units.md#r22), [ai D31](ai.md#d31)
+- [ ] **`CreatePropHPR` heading is in degrees** in the real game; ours radians (B). `engine/api/terrain.rs`. `probe_unit_misc` R. [units 26](units.md#r26)
+- [ ] **Misc unit values** (C): `GetBlip(own)` nil, `GetScriptBit(0)` nil, `SetPaused` on a tank false, `RemoveTacticalSiloAmmo` goes negative, `OnKilled` type `''`, prop `OnReclaimed` gets nil, queue entries carry `_c_object`. `engine/api/unit.rs`, `blip.rs:383`. `probe_unit_api`, `probe_unit_misc`. [units 32](units.md#r32)
+- [ ] **`GetStat` / `SetStat`** (B / C): real returns `{Name, Type, Value=0}` (default only types it), nil when unset without default, string stats work; ours `{Value=default}`, string `SetStat` errors. `engine/api/unit_stats.rs`, `unit.rs:1030`. `probe_unit_api`, `probe_api_spot`. [units 30](units.md#r30), [api S1](api.md#s1)
+- [x] **Reclaiming a finished unit drains its health, pays nothing and leaves its wreck** (fixed `f6a3f81`) (A). Real: a T1 tank at build rate 10 drains to 0 health over ~27 ticks and gains no mass or energy; then `OnReclaimed`, the tank dies and leaves a wreck that the engineer reclaims under the same order for 45.36 mass, 0 energy (a half-health tank: the same). Ours paid the build cost pro rata (56 mass, 266 energy) and left no wreck. `engine/api/reclaim.rs`. `probe_unit_reclaim2`. [units 42](units.md#r42)
+- [ ] **Interrupting a capture with `IssueClearCommands` fails it inside the call** (C). Real: `OnFailedBeingCaptured` / `OnFailedCapture` in the same tick and nothing more is charged; ours a tick later, one more tick of cost (+24.2 energy). Progress is lost in both. `engine/api/capture.rs:162-168`. `probe_unit_capture2` CI. [units 43](units.md#r43)
+- [ ] **`SetCapturable(false)` mid-capture calls `OnStopCapture` with the captor itself first** (C). Real: next tick `OnStopCapture(captor)`, then `OnFailedBeingCaptured` and `OnFailedCapture`; ours has no `OnStopCapture`. `engine/api/capture.rs:171-175`. `probe_unit_capture2` CU. [units 44](units.md#r44)
+
+Economy
+
+- [x] **`GetResourceConsumed()` is 0 for a unit with no active consumption** (fixed `364266b`); ours 1 (B). `engine/sim/economy.rs:401-405`, `api/unit.rs:540`. `probe_unit_econ` D. [units 19](units.md#r19)
+- [ ] **`GetEconomyUsage` in a stall counts single-resource consumers at their full request** (B, medium). `engine/api/army.rs:353`. `probe_unit_econ` E, F, Js. [units 20](units.md#r20)
+- [ ] **Negative `SetProductionPerSecondMass` / `SetConsumptionPerSecondEnergy` count as 0**; ours subtracts / adds (B). `engine/sim/economy.rs`. `probe_unit_econ` C, D. [units 21](units.md#r21)
+
+Queries and intel
+
+- [ ] **`GetUnitsInRect` / `GetReclaimablesInRect` are coarse in the real game** (B, medium): a rect between units still returns them; 11 props where ours finds 5. `engine/api/entity.rs`, `terrain.rs`. `probe_unit_api` rect, `probe_unit_misc` R. [units 23](units.md#r23)
+- [ ] **`GetUnitsAroundPoint(..., 'Enemy')` still lists a structure after sight is lost** (B, medium). `engine/api/army.rs`. `probe_unit_intel`. [units 24](units.md#r24)
+- [x] **Omni detects but does not count as seen** (fixed `be9c6cc`) (`IsSeenNow` / `IsSeenEver` false); ours counts it (B). `engine/sim/vision.rs:728`. `probe_unit_intel`. [units 14](units.md#r14)
+- [ ] **Intel getters**: `GetIntelRadius('RadarStealth')` gives the field radius for field units; radar / sonar enabled on a just-made unit (C, medium). `engine/api/unit.rs`. `probe_unit_intel`. [units 34](units.md#r34)
+- [ ] **A radar-stealthed unit inside vision and radar reads `IsOnRadar` true**; ours false (C, medium). `engine/sim/vision.rs`. `probe_unit_intel`. [units 35](units.md#r35)
+
+Building queries and AI build orders
+
+- [ ] **`BuildStructure` offset is from the army start position**, not the builder (A). Real `{4, 6, 0}` queues at (676.5, 352.5); ours (654, 172). FAF's `EngineerBuildAI` passes `buildRelative` (`platoon.lua:3800`). `engine/api/command.rs:862`. `probe_ai_build`. [ai D23](ai.md#d23)
+- [ ] **`BuildStructure` on a blocked site moves the build to a free spot and returns a boolean** (A, medium). Ours queues on the blocked site and the engineer drops it. `engine/api/command.rs:862`. `probe_ai_build`. [ai D24](ai.md#d24)
+- [ ] **Queued and started sites are reserved for `CanBuildStructureAt`** (A). Real false on an engineer's first and second queued site; ours true (the "AI queued the same extractor twice" case). `engine/api/build.rs:204-260`. `probe_ai_build`. [ai D25](ai.md#d25)
+- [ ] **Skirt clearance is one cell wider in the real game** (A): factory 5 east of a 2x2 pgen refused. `engine/api/build.rs` `Skirt::of` / overlap. `probe_ai_build`. [ai D26](ai.md#d26)
+- [ ] **A mobile blueprint cannot be placed on a structure** (C). `engine/api/build.rs:213`. `probe_ai_build`. [ai D27](ai.md#d27)
+- [ ] **`BuildPlatoon`: template line i goes to factory i; `CanBuildPlatoon` returns one factory per line** (B). Ours puts everything on the first factory. `engine/api/build.rs:692`. `probe_ai_build`. [ai D28](ai.md#d28)
+- [ ] **`FindPlaceToBuild` third element is always 0** (C). `engine/api/build.rs:431-531`, `:729-748`. `probe_ai_build`. [ai D29](ai.md#d29)
+- [x] **`DecideWhatToBuild(eng, 'T1LandFactory', nil)` returns nothing, and type names match case-insensitively** (fixed `6cacbd8`); ours raised on the nil template and matched case-sensitively (C). `engine/api/build.rs:729`. `probe_ai_misc`. [ai D44](ai.md#d44), [ai D29](ai.md#d29)
+- [x] **`CanBuildStructureAt` with an unknown blueprint crashes the real game** (closed: no change, ours raises a catchable error, which is safer); ours raises a catchable error (C, ours is safer; no fix needed). `probe_ai_misc`. [ai D30](ai.md#d30)
+
+## 4. Weapons, projectiles, shields
+
+- [x] **Strategic bombers do no damage in ours** (fixed `7857efc`) (G). Real: `uea0304` / `uaa0304` bombs land (sum 3101 / 3001). Ours: `hits 0`; full run raises `weapon.lua:551: attempt to index nil with 'CreatedByWeapon'` (weapon `CreateProjectile` returned nil); in a bomber-only run they get `OnFire` and never call it. `engine/api/weapon.rs:636-648`, release gate `engine/sim/weapon.rs:1777-1789`. `probe_wpn_ctrl` `bomber-*0304`. [weapons 23](weapons.md#r23) Cause: the attack-run state was set only in combat states 1 and 2; moho also sets it in 6 (break-off), and bombs drop only with it, so a bomber ordered onto a target already inside `BreakOffDistance` overflew it and bombed on a second pass. The nil `CreateProjectile` errors in the full run were not a bomber bug (see `89e178a`).
+- [x] **`SetCanBeKilled(false)` is ignored by `Kill`** (fixed `f86f5b9`) (G). Real: the engine asks `CheckCanBeKilled`; `Kill()` does nothing, lethal damage leaves the unit at 0 health. Ours: kills in the engine, FAF's `OnKilled` returns early, so the unit is alive in Lua and dead for good in the engine (build drones, `ExternalFactoryUnit`, Seraphim energy ball). `engine/api/entity.rs:1342`; no `CheckCanBeKilled` in `src/`. `probe_wpn_misc2`, `probe_wpn_damage`. [weapons 1](weapons.md#r1)
+- [x] **Bubble shield centre** (fixed `ae9f05a`) (G). Real: origin + `SizeY/2` + `ShieldVerticalOffset` (bone -1 is the box centre). Ours: origin + offset, `SizeY/2` too low; a shot at height 10 passes over `ueb4202`. Where bone -1 resolves for `AttachBoneTo`. `probe_wpn_shield` `geo.*`. [weapons 2](weapons.md#r2)
+- [x] **Shots from inside an enemy bubble** (fixed `6eafc0a`) (G). Real: hit the shield on the way out. Ours: get out. `engine/sim/projectile.rs:520-545`. `probe_wpn_shield`. [weapons 3](weapons.md#r3)
+- [x] **Terrain and water impact point** (fixed `3152bd5`) (G/N). Real: intersected along the tick segment, `OnImpact` at the contact point. Ours: tested at the step end, burst up to speed/10 past the surface; ground-attack bursts centred ~3 long; units before terrain. `engine/sim/projectile.rs:841-852`, `:875`, `:815-838`. `probe_wpn_proj`, `probe_wpn_proj2`, `probe_wpn_ctrl`. [weapons 4](weapons.md#r4)
+- [x] **Projectile with no `Lifetime` lives 15 s in the real game** (fixed `fda1c6e`); ours forever (N). Issue #7 guess wrong. `engine/sim/projectile.rs:54,154,230`. `probe_wpn_misc2`. [weapons 6](weapons.md#r6)
+- [x] **Lifetime in ticks = ceil(10 L + 0.5)** (fixed `fda1c6e`); ours ceil(10 L), one tick short (N). `engine/sim/projectile.rs:199-205`. `probe_wpn_proj`, `probe_wpn_proj2`, `probe_wpn_misc2`. [weapons 7](weapons.md#r7)
+- [x] **`Weapon:CanFire()` ignores the reload clock** (fixed `e7348d7`) (N). Real true every tick of a reload; ours false until the clock is 0. `engine/api/weapon.rs:609-611`; read by `DefaultProjectileWeapon.lua:785` and the SMD scripts. `probe_wpn_ctrl` fireclock. [weapons 27](weapons.md#r27)
+- [ ] **`SetTargetGround` fires at the ground point at once** (open: attempt reverted) (N, medium, one case). Ours never fires at the point. `engine/api/weapon.rs:595-598`; used by `TIFCarpetBombWeapon.lua:49`, `SEnergyBallUnit.lua:80`. `probe_wpn_ctrl` manual. [weapons 26](weapons.md#r26)
+- [x] **T1 bombers drop the whole salvo; ours loses some bombs** (fixed `7857efc`) (N, medium). `engine/api/weapon.rs:636-648`. `probe_wpn_ctrl` `bomber-*0103`. [weapons 24](weapons.md#r24) Cause: `Weapon:SetTargetGround` left the target marked as the attack order's, the next tick sent `OnHaltFire` and ended the salvo (the UEF T1 bomber dropped 2 of 4). `ura0103`'s lower count in the full run and the nil `CreateProjectile` returns were not bomber bugs (`89e178a`: a unit destroyed this beat still creates its weapon's projectiles).
+- [ ] **Bomber run height** (open: needs a new probe, evidence unclear): real drops at 10.7-10.8 above target; ours 14.0 (`Elevation`) (N, medium). `engine/sim/movement.rs` air controller. `probe_wpn_ctrl`. [weapons 25](weapons.md#r25)
+- [x] **`CreateChildProjectile` speed and launcher** (fixed `c13fccf`) (N). Real: child at its own `InitialSpeed`, `GetLauncher` is the parent's launcher unit; ours takes the parent's speed, launcher is the parent projectile. `engine/api/projectile.rs:777-788`. `probe_wpn_misc2`, `probe_wpn_proj2`. [weapons 8](weapons.md#r8)
+- [x] **`DamageArea` does not hit the instigator when `damageFriendly` is false** (fixed `0cd527c`) (N). Ours hits it. `engine/api/damage.rs:137-139`. `probe_wpn_damage`, `probe_wpn_misc2`. [weapons 9](weapons.md#r9)
+- [ ] **A surviving projectile stays at the contact point and gets `OnImpact` every 2 ticks; the engine never destroys it at expiry** (open: needs a new probe, low confidence) (N). Ours: one `OnImpact`, goes on through; destroys at expiry. `engine/api/projectile.rs:536-556`. `probe_wpn_proj`, `probe_wpn_misc`. [weapons 10](weapons.md#r10)
+- [x] **Homing aims at the target's centre** (fixed `524cfe8`), not its origin (N). `engine/sim/projectile.rs:~893`, `api/projectile.rs:754`. `probe_wpn_proj` `trk.*`. [weapons 11](weapons.md#r11)
+- [ ] **`DamageArea` reach at radius 5 and for personal shields** (N). Real differs from an exact sphere test (Fatboy `up:5.500`; `ual0303` reached ~0.6 further). Cause a guess. `engine/api/damage.rs`, `engine/sim/collision.rs:72-88`. `probe_wpn_damage`. [weapons 12](weapons.md#r12)
+- [ ] **`Kill()` leaves health alone, default type `""`, `Dead` / `IsDead()` already true inside `OnKilled`** (N). Ours: health 0, `'Normal'`, `Dead` nil. `engine/api/entity.rs:1342-1362`. `probe_wpn_misc2`, `probe_wpn_damage`. [weapons 13](weapons.md#r13)
+- [ ] **`Damage()` on a killed unit calls nothing** (`DamageArea` still does); ours calls both (N, medium). `engine/api/damage.rs`. `probe_wpn_damage`, `probe_wpn_misc2`. [weapons 14](weapons.md#r14)
+- [ ] **`OnHealthChanged` timing** (open: needs a new probe, low confidence) (C). Real: at the moment of damage, once per step, on the killing blow, ratios over 1. Ours: once a tick, living units only, capped at 1. Contradiction with the units file: it records ours as never calling `OnHealthChanged`; check which probe case is right. `engine/api/unit.rs:1397-1470`, `engine/api/callbacks.rs`. `probe_wpn_damage`, `probe_unit_api` life. [weapons 15](weapons.md#r15), [units 29](units.md#r29)
+- [ ] **Own and allied units are asked `OnCollisionCheck`; a rejected check costs no time** (C). Ours skips them unless `CollideFriendly`; a rejection costs a tick. `engine/sim/projectile.rs:1043-1049`, `api/projectile.rs:525-527`. `probe_wpn_misc`, `probe_wpn_proj2`. [weapons 16](weapons.md#r16)
+- [ ] **`GetVelocity()` of a projectile is the last tick's displacement** (C). Ours the next step's. `engine/api/projectile.rs:643-646`. `probe_wpn_proj`, `probe_wpn_misc`. [weapons 17](weapons.md#r17)
+- [ ] **`GetTrackingTarget()` of a plain shell is not the weapon's target; `TrackTarget(true)` with no target calls `OnLostTarget`** (C, medium). `engine/api/projectile.rs:764-769`. `probe_wpn_misc`, `probe_wpn_misc2`. [weapons 18](weapons.md#r18)
+- [ ] **`DamageArea` radius 0 and `DamageRing` min radius 0 raise `0 radius specified`**; ours accepts (C). `engine/api/damage.rs:321-331`. `probe_wpn_damage`. [weapons 19](weapons.md#r19)
+- [ ] **Missile / torpedo blueprints made by `CreateProjectile` are destroyed in their creation tick; `DestroyOnWater` made under water too** (N?, cause unknown). Ours: they fly. `engine/sim/projectile.rs:841-848`. `probe_wpn_misc2`, `probe_wpn_misc`, `probe_wpn_proj`. [weapons 20](weapons.md#r20)
+- [ ] **Rack-charge weapons call `OnFire` once per salvo**; ours every reload; Mongoose grenade first salvo tick 13 vs 4 (N, medium). `engine/sim/weapon.rs` fire clock vs `RackSalvoChargeState`. `probe_wpn_census`. [weapons 21](weapons.md#r21)
+- [ ] **Shield timing**: up at tick 1 with no energy; beam hit counts differ (N, medium). Not chased. `probe_wpn_shield`. [weapons 22](weapons.md#r22)
+- [ ] **A gunship killed in the air falls for 17 ticks and its crash damages the wall ahead** (open: needs a new probe, evidence unclear); ours 11, no damage (N, medium). Ours starts the fall with flight velocity. `engine/sim/movement.rs:2983` `crash_step`. `probe_wpn_ctrl` death-gunship. [weapons 28](weapons.md#r28)
+- [x] **`ChangeDamageRadius` / `ChangeDamageType` exist in the real game** (fixed `d48217a`); ours raise (C). `engine/api/pending.rs:93`. `probe_wpn_ctrl` dmg. [weapons 29](weapons.md#r29)
+- [x] **`FireWeapon()` returns nothing** (fixed `d48217a`); ours `true` (C, medium). `engine/api/weapon.rs:529-536`. `probe_wpn_ctrl` manual. [weapons 30](weapons.md#r30)
+- [ ] **`SetStunned(4)` next shot exactly 40 ticks later**; ours one tick later relative (N, low). `probe_wpn_ctrl` stun. [weapons 31](weapons.md#r31)
+- [ ] **`TreeFire` damage never reaches a unit in the real game**; it does in ours in three lanes (C, low). `probe_wpn_ctrl`, `probe_wpn_census`. [weapons 32](weapons.md#r32)
+- [x] **Weapons whose muzzle salvo nearly fills the reload interval lost every other salvo** (fixed `ab5e4b7`) (N). Aeon T1 AA (`uab2104`, `RateOfFire` 10/6, 3 shots 0.2 s apart): real `OnFire` every 7 ticks and every one fires (72 hits, 1080 damage); ours `OnFire` every 6 ticks and only every other one made shots (43 hits, 645). The `OnFire` landed while FAF's salvo state was still busy and was dropped; a weapon now waits while its unit is Busy. `engine/sim/weapon.rs:1880-1888`. `probe_wpn_aa_hold`, `probe_wpn_aa`. [weapons 33](weapons.md#r33)
+- [ ] **Some `Air` impacts carry the target entity** (open: low confidence, needs a new probe) (C). Real: `delk002` gatling `Air*=42` (every shot), flak lanes `Air*=4..23`; ours `Air` impacts never carry an entity, so FAF scripts that test `targetEntity` on an `Air` impact see nil. Damage is equal. `probe_wpn_aa`, `probe_wpn_aa_hold`. [weapons 34](weapons.md#r34)
+- [ ] **Against a patrolling gunship the real AA guns miss a lot** (open: movement domain, a gunship patrol-speed question; with the target held still the weapons match) (N, medium). Real: `uel0104` 23 of 36 shots hit, flak damage about half of ours; the real gunship patrols at 5-8 a second, ours at 0.3-4. `probe_wpn_aa`. [weapons 35](weapons.md#r35), cf. [movement 18](movement.md#r18)
+
+## 5. Movement and transports
+
+- [x] **A transport ordered to load flies to its cargo; all cargo attaches on the same tick** (fixed `a1c28d5`) (G). Ours: transport stays and sinks, cargo drives to it, attaches one at a time (done at t=106 vs 75). `engine/api/transport.rs`, `engine/sim/movement.rs` `hover_step`. `probe_mov_air` TR1-TR3. [movement 1](movement.md#r1)
+- [ ] **A transport hovers about 16 ticks before the beam takes its cargo** (open: unexplained, needs a new probe) (N?). Left after the pick-up fix (`a1c28d5`); where the real game's timing differs is not known. `engine/api/transport.rs`. `probe_mov_air` TR1-TR3. [movement 1](movement.md#r1)
+- [x] **A loaded transport flies at `Elevation` and descends to `TransportHoverHeight` only over the drop point** (fixed `886606b`) (G). Ours flies the whole leg at hover height. `engine/sim/movement.rs` `hover_step` (`CommandKind::is_transport_load_unload`). `probe_mov_air` TR1, TR2. [movement 3](movement.md#r3)
+- [x] **Dead cargo of a killed transport falls and impacts** (fixed `2dab3ab`) (G). Ours: no detach callbacks, passengers hang in the air until the wreck lands. `engine/api/transport.rs`. `probe_mov_air` TR3. [movement 4](movement.md#r4)
+- [x] **Air staging: the plane lands on the pad before it docks** (fixed `f4a6701`); ours attaches on arrival, 11 s sooner, docked layer `Air` and velocity still 14.94 (N). `engine/api/transport.rs`. `probe_mov_air` F4. [movement 8](movement.md#r8) Ours now lands first and docks at rest, which is slower than ours used to be (see Decisions needed).
+- [ ] **Transport slot choice** (C, medium): real 4 tanks + 2 scouts take `Left/Right_Attachpoint07`, `01`, `02`; ours `04..07`. `engine/api/transport.rs`. `probe_mov_air` TR2. [movement 20](movement.md#r20)
+- [x] **`SetSpeedMult(m)` under 1 is squared on land / hover / naval units** (fixed `7a4d73c`) (G/N). Ours linear; hover units in water and subs 5.5-10% fast. `engine/api/unit.rs:806`. `probe_mov_api`, `probe_mov_air`, `probe_mov_naval`, `probe_mov_mult`. [movement 5](movement.md#r5)
+- [ ] **Gunship multipliers act through the air controller** (open: needs a new probe, evidence unclear) (N, medium): `SetSpeedMult(0.5)` cruises 5.5-5.96, `SetAccMult(0.25)` lowers the cruise speed. Ours linear / acceleration only. `engine/api/unit.rs:806`, `:818`. `probe_mov_mult` G0.5, Ga0.25. [movement 25](movement.md#r25)
+- [x] **A winged plane's move order ends only once it has circled in near the goal** (fixed `581236c`) (N, medium). Ours: done when it passes within its turn radius. `engine/sim/movement.rs:1574-1583`. `probe_mov_mult` I2, Ia0.25, I0.75. [movement 26](movement.md#r26) Ours now ends a plane's move later than it used to (see Decisions needed).
+- [x] **Units keep their speed through turns** (closed: no change, the owner keeps ours, 2026-11-16; ours is intentionally different, as is route choice) (N; G for short patrols). Real: T2 tank holds 3.10 through a U-turn, a 12-unit patrol leg loops every 62 ticks. Ours: quarter speed beyond 45 degrees off course, brakes onto patrol points, 108 ticks. `engine/sim/movement.rs:981` `corner_slow`, caller ~1918. `probe_mov_land` p2, p3, p5, `probe_mov_api` P. [movement 6](movement.md#r6)
+- [x] **A moving unit does not back up** (closed: no change, the owner keeps ours, 2026-11-16; ours is intentionally different) (N). Real: units with `BackUpDistance >= 8` U-turn forwards at speed; ours brakes and reverses (21 of 46 units). `engine/sim/movement.rs:914` `drive`. `probe_mov_land` p2. [movement 7](movement.md#r7)
+- [x] **`Warp` during a move clears the order** (fixed `991aba2`) (N, high after rerun): real brakes from the new spot and stays; ours drives on. `engine/api/entity.rs:1383`. `probe_mov_api` W2, `probe_mov_mult` WP. [movement 9](movement.md#r9)
+- [x] **`Warp` / `CreateUnitHPR` above the ground: a land unit is on the ground at once** (fixed `991aba2 (`Warp`), `ef91934` (`CreateUnitHPR`)`) (N). Ours: idle tank stays at height. `engine/api/entity.rs:1383`. `probe_mov_api` W3, W4. [movement 10](movement.md#r10)
+- [ ] **Move to an unreachable point (out to sea)**: real stops at the water's edge on the line (33.7 from goal); ours 35.3, 25 away (N, medium). `engine/sim/movement.rs` goal replacement. `probe_mov_misc` U1. [movement 11](movement.md#r11)
+- [ ] **Guard follow distance**: real sets off at ~20, stops 1.6 away; ours 4 and 5.4 (N, medium, one case). `CUnitGuardTask`. `probe_mov_misc` Ga, Gb. [movement 12](movement.md#r12)
+- [x] **Formation move end state** (fixed `6fd4993`): all six face the formation heading and finish on the same tick; ours keep arrival heading, finish separately, one ends 3 off the row (N). `engine/sim/movement.rs` formation completion. `probe_mov_misc` FM1-6. [movement 13](movement.md#r13)
+- [x] **`SetImmobile(true)` at speed halts the unit on the spot** (fixed `7bcfa80`); ours brakes over 8 ticks (N). `engine/api/unit.rs:937`. `probe_mov_api` I2. [movement 14](movement.md#r14)
+- [x] **Factory roll-off without a rally point** (fixed `18d8514`): built facing the exit, stops at (+0.3, +5.7); ours (+0.9, -3.5) (N). `probe_mov_api` R. [movement 15](movement.md#r15) The roll-off now ends at the default rally point 5 in front.
+- [ ] **Plane cruise speed is not flat** (15.0-18.5, mean 15.76); ours exactly 15 (N, medium). `engine/sim/movement.rs` plane clamp. `probe_mov_air` F1, F3. [movement 16](movement.md#r16)
+- [ ] **Take-off** (open: needs a new probe, evidence unclear): winged planes climb 4.7-5.4 a second and are slower along the ground at first; ours 3.5 and faster (N). `engine/sim/movement.rs` plane climb. `probe_mov_air` TK*. [movement 17](movement.md#r17)
+- [ ] **Idle landing times** differ (gunship 29 vs 42, Cybran light gunship 64 vs 31, ASF 70 vs 82) (N). `engine/sim/landing`. `probe_mov_air` TK*. [movement 18](movement.md#r18)
+- [x] **`GetVelocity` on a slope** (fixed `e1df80c`): x/z keep the full ground speed, y adds the climb; ours holds the 3D length, hover y = 0 (N). `engine/api/unit.rs:1261`. `probe_mov_api` S*. [movement 19](movement.md#r19)
+- [ ] **Motion callback order and extra events** (C): take-off sequence, no vertical event on air creation, `TopSpeed -> Cruise -> TopSpeed` at corners, passenger `Top -> Bottom` on attach, loading transport `Down -> Hover`. `engine/sim/movement.rs` event emission. `probe_mov_air`, `probe_mov_land`. [movement 21](movement.md#r21)
+- [ ] **Script API on structures and navigator** (C): real `GetFuelRatio` raises, `GetNavigator` nil; navigator methods work and `GetGoalPos` carries height; ours returns -1, an object, raises on five methods. `engine/api/script_task.rs:253`, `pending.rs:78`. `probe_mov_api`, `probe_mov_air`. [movement 22](movement.md#r22)
+- [ ] **Reversing holds heading exactly**; ours jumps ~0.1 rad (C). `engine/sim/movement.rs` `drive`. `probe_mov_land` p5. [movement 23](movement.md#r23)
+- [x] **`GetHeading` equals the yaw of `GetOrientation`** (fixed `b0eecc0`); ours stays on the course (C). `probe_mov_api` S*. [movement 24](movement.md#r24)
+- [ ] **Layer change on a beach comes later going in and earlier coming out** (N, small): real water 0.13-0.21 deep at the unit, ours 0.01-0.04. `engine/sim/layer.rs`. `probe_mov_naval`. [movement: Naval census and the beach](movement.md#naval-census-and-the-beach-probe_mov_naval)
+- [x] **`Unit:CanPathTo` returns a second value, a position** (fixed `0161804`) (B). Real: `true, {x,y,z}` or `false, closest point`; on a structure it takes the game down. Ours: one boolean (`true` on a structure). `engine/api/unit.rs:850`; FAF reads it at `AI/aiutilities.lua:1434` and `:1438`. `probe_api_spot`, `probe_unit_api` risky, `probe_ai_brain`. [api S6](api.md#s6), [units 18](units.md#r18), [ai D22](ai.md#d22) A structure still returns `true` and a position where the real game goes down.
+
+## 6. AI brain, platoons, threat
+
+- [x] **Threat of units that left intel is remembered** (fixed `9a106be`) (A). Real keeps mobile units and units destroyed while unseen; ours keeps only seen structures. `engine/api/threat.rs:42-52`. `probe_ai_threat`. [ai D1](ai.md#d1)
+- [x] **Remembered threat decays 2% of its original every update from ~27 s after sight is lost** (fixed `9a106be`) (A, medium). Ours no decay. `engine/sim/threat.rs`. `probe_ai_threat`. [ai D2](ai.md#d2)
+- [x] **Threat map updates every 30 ticks** (fixed `9a106be`); ours rebuilds each tick (B). `engine/sim/threat.rs:206`, `api/threat.rs:144`. `probe_ai_threat`. [ai D3](ai.md#d3)
+- [x] **`AssignThreatAtPosition` decay is a fraction of the amount per 30-tick update; assignments in a cell add; negative assignments subtract from unit threat** (fixed `9a106be`) (A). Ours linear per second, negatives dropped after a tick. `engine/sim/threat.rs:286-296`. `probe_ai_threat`. [ai D4](ai.md#d4), [ai D5](ai.md#d5)
+- [ ] **`armyIndex` of own or an ally gives 0 unit threat**; ours gives the real value (B). `engine/api/threat.rs:66-70`. `probe_ai_threat`. [ai D6](ai.md#d6)
+- [ ] **Invalid army index and an explicit trailing `nil` raise in `GetThreatAtPosition`**; ours returns 0 and accepts (C). `engine/api/threat.rs`. `probe_ai_threat`, `probe_ai_misc`. [ai D7](ai.md#d7)
+- [x] **`GetHighestThreatPosition` ties and the empty map go to the cell nearest the brain's start; `y` is 0** (fixed `339d6dc`) (A for the empty map). Ours first row-major cell, surface height. `engine/sim/threat.rs`, `api/threat.rs:88`. `probe_ai_threat`. [ai D8](ai.md#d8)
+- [x] **`GetHighestThreatPosition(1, true, 'Overall')` with no threat: the first value is a table** (closed: no change). The api S8 row had it as a number (only `type()` was logged); a rerun logging both values shows a table, as ours returns. `aibrain_methods`; `ScenarioPlatoonAI.lua:103`. `probe_api_spot`. [api S8](api.md#s8)
+- [ ] **`GetThreatsAroundPosition` rows are sorted by threat, highest first**; ours row-major (B). `engine/api/threat.rs:103`. `probe_ai_threat`. [ai D9](ai.md#d9)
+- [x] **The Fatboy's attached external-factory helper is not in the threat map** (fixed `c4d6422`); ours adds 2000 economy + structure threat for every Fatboy / carrier / Atlantis (A). `engine/sim/threat.rs:206-228`. `probe_ai_threat`. [ai D10](ai.md#d10)
+- [x] **Jammer blips count as threat** (fixed `040d0de`) (frigate 18.00 vs 6.00) (C, medium). Blip-based map. `probe_ai_threat`. [ai D11](ai.md#d11)
+- [ ] **`CalculatePlatoonThreat` type names**: only `Surface`, `Air`, `Sub`, `Economy` select a level, other strings return the total with no error; ours maps brain enum names and raises on a bogus name, and `CalculatePlatoonThreat('NoSuch', cat)` raises (C). `engine/api/platoon.rs:~492`. `probe_ai_platoon`, `probe_api_spot`. [ai D12](ai.md#d12), [api S12](api.md#s12)
+- [ ] **`GetUnitsAroundPoint` / `GetNumUnitsAroundPoint` radius is strict; r=0 returns nothing**; ours inclusive (B). `engine/api/army.rs:505-530`. `probe_ai_brain`. [ai D13](ai.md#d13)
+- [x] **`GetCurrentUnits` does not count units under construction; `GetListOfUnits` lists them and `requireBuilt` does nothing** (fixed `364266b` and `6cacbd8`) (A). Ours the opposite on both. `engine/api/army.rs:652-660`. `probe_ai_brain`, `probe_unit_build` G3. [ai D14](ai.md#d14), [units 16](units.md#r16)
+- [ ] **`GetArmyStat` shape and default handling** (B): `{Name, Type, Value}` plus `Blueprints` for `Units_*`, default ignored for a new stat, custom stats integers, `Economy_Trend_Energy` and `PeakStorage` tracked; `GetArmyStat('NOSUCH', 3)` is 0. Ours `{Value=}`, default kept. `engine/api/army.rs:624`. `probe_ai_brain`, `probe_api_spot`. [ai D15](ai.md#d15), [api S10](api.md#s10)
+- [ ] **`SetArmyStatsTrigger` on a script-set stat never fires; `'Equal'` is not a comparator** (B, medium). Ours fires and accepts. `engine/api/army.rs`. `probe_ai_brain`. [ai D16](ai.md#d16)
+- [ ] **`FindUnit`, `SetGreaterOf`, `AddArmyStat` exist**; ours "not implemented" / absent (B). `engine/api/pending.rs:83`. `probe_ai_brain`. [ai D17](ai.md#d17)
+- [ ] **`TakeResource('MASS', -5)` returns -5 and adds 5**; ours returns 0 and takes all (C). `engine/api/army.rs`. `probe_ai_brain`. [ai D18](ai.md#d18)
+- [ ] **At t=3 other armies' units are not listed; order is own army first** (C). Ours lists from tick 1 in id order. `probe_ai_brain`. [ai D19](ai.md#d19)
+- [ ] **Brain and platoon return values** (C): `SetCurrentEnemy` returns the brain, `AssignUnitsToPlatoon` the formation string (`"None"` for unknown), `UniquelyNamePlatoon` the name, `DisbandPlatoon` the platoon, `BuildUnit` the count, `BuildStructure` a boolean, platoon orders a table; ours nothing / userdata. `probe_ai_*`. [ai D20](ai.md#d20)
+- [x] **`GetSquadUnits` is nil for an empty squad** (fixed `6cacbd8`) (A). Ours returned `{}`. `engine/api/platoon.rs`. `probe_ai_platoon`. [ai D32](ai.md#d32)
+- [ ] **A bad squad name raises `Invalid enum value`** (A, also in `AssignUnitsToPlatoon`; confirmed on a live platoon). Ours accepts it and the units land in a squad no query returns. `engine/api/platoon.rs`. `probe_ai_platoon`, `probe_ai_transport`. [ai D32](ai.md#d32)
+- [ ] **`GetPlatoonsList` leaves out platoons with no units** (B). `engine/api/platoon.rs`. `probe_ai_platoon`. [ai D33](ai.md#d33)
+- [ ] **An emptied platoon gets `OnDestroy` the next tick** (B). Ours the same tick. `engine/sim/platoon.rs`. `probe_ai_platoon`. [ai D34](ai.md#d34)
+- [ ] **Calls on a disbanded platoon raise `Game object has been destroyed`, except `GetPlatoonUnits()` (`{}`)** (B). Ours returns values and `AssignUnitsToPlatoon` re-adds units. `engine/api/platoon.rs:35`. `probe_ai_platoon`, `probe_ai_misc`. [ai D35](ai.md#d35)
+- [ ] **Two platoons may share a unique name; lookups return the first**; ours moves the name (C). `engine/sim/platoon.rs`. `probe_ai_platoon`. [ai D36](ai.md#d36)
+- [ ] **`AggressiveMoveToLocation` sets `IsPatrolling`; flags lag the order ~2 ticks; `IsCommandsActive` stays true a few ticks after `Stop`** (C). Ours `IsMoving`, same-tick flips. `engine/api/platoon.rs`. `probe_ai_platoon`. [ai D37](ai.md#d37)
+- [ ] **`FormPlatoon` does not check the template minimum**; ours returns nil (C). `engine/api/platoon.rs`. `probe_ai_platoon`. [ai D38](ai.md#d38)
+- [x] **Platoon `LoadUnits`, `UnloadAllAtLocation`, `UnloadUnitsAtLocation`** (fixed `10550bd`) (B). Real: `LoadUnits(cat)` returns a command and loads the platoon's land units into its own transport; `UnloadAllAtLocation(pos)` returns a command and the loaded transport sets everything down there; `UnloadUnitsAtLocation` also works for an air transport. Ours: stubs raising "not implemented". `engine/api/command.rs`. `probe_ai_transport`. [ai D55](ai.md#d55), [ai D39](ai.md#d39)
+- [ ] **`SwitchAIPlan`, `GetAIPlan`, `GetFactionIndex`, `GetPersonality`, `GetPlatoonLifetimeStats`, `GetFerryBeacons`, `CanConsiderFormingPlatoon`, `DisbandOnIdle`, `FindFurthestUnit` / `FindHighestValueUnit` / `FindClosestUnitToBase` exist**; ours: "not implemented" (B; the `Find*` three C, no FAF or RNGAI call site). Real: the furthest known unit, the highest-value unit (the ACU, then the T3 tank once it is out of sight), the unit nearest the map origin (army 1 has no AI base). `engine/api/pending.rs`. `probe_ai_platoon`, `probe_ai_misc`, `probe_ai_find`. [ai D39](ai.md#d39), [ai D53](ai.md#d53)
+- [x] **`AIPersonality:AdjustDelay(a, b)` = `a * (1 + trunc(b) * 0.5)`** (fixed `2721127`) (A). Ours returned `a`, so 14 FAF call sites never lengthened waits. `engine/api/personality.rs`. `probe_ai_brain`, `probe_ai_misc`. [ai D40](ai.md#d40)
+- [ ] **Personality values** (B). Real: name `AverageJoe`, difficulty 0.50, army size 75. Ours: difficulty 2.0, inferred placeholders. `engine/api/personality.rs`. `probe_ai_brain`. [ai D40](ai.md#d40)
+- [ ] **`PickBestAttackVector` returns the first vector for every compare name; bad names raise** (C, medium). `engine/api/attack_vectors.rs`. `probe_ai_misc`. [ai D41](ai.md#d41)
+- [x] **`CheckBlockingTerrain` with arc `'none'` is false on flat ground** (fixed `d991511`); ours true for every line (A). Endpoints sit on the ground in `engine/sim/terrain.rs:197-211`. `probe_ai_brain`. [ai D42](ai.md#d42)
+- [x] **`PlatoonExists(nil)` / `({})` raise** (fixed `6cacbd8`) (C); ours false. `engine/api/platoon.rs:196`. `probe_ai_misc`. [ai D45](ai.md#d45)
+- [x] **`MakePlatoon('Name')` with no plan returns nil; `MakePlatoon()` raises** (fixed `6cacbd8`) (C). `engine/api/platoon.rs:604`. `probe_ai_misc`. [ai D46](ai.md#d46)
+- [x] **`ArmyPool:FormPlatoon` with a template with no unit lines raises** (fixed `6cacbd8`); ours returns a platoon (C). `engine/api/platoon.rs:543`. `probe_ai_misc`. [ai D47](ai.md#d47)
+- [x] **Platoon `FindClosestUnit` / `FindPrioritizedUnit` go by intel** (fixed `15d6b50`) (A). Real: nil before the first intel update (t=3, t=8), then only enemy units the army sees now and structures it has seen, never an unseen unit; `FindClosestUnit` honours `canAttack`, and its `'Ally'` means other allied armies, not the own one. Ours answered from t=3 with unseen units, ignored `canAttack` and counted the own army as Ally. FAF: `FindClosestUnit` 26 call sites (`platoon.lua:477`, `:1156` attack targets), `FindPrioritizedUnit` 5. `engine/api/platoon.rs:336-418`. `probe_ai_find`. [ai D50](ai.md#d50), [ai D51](ai.md#d51), [ai D52](ai.md#d52)
+- [x] **Threat type `Artillery` is 0 for mobile artillery and the Fatboy** (fixed `6cacbd8`) (C). Ours counted category `ARTILLERY` (1.20 and 993.36). Which units moho does count is not known; no `GetThreat*(..., 'Artillery')` call site in FAF or RNGAI. `engine/api/unit.rs:320`, `engine/sim/threat.rs:134`. `probe_ai_find`. [ai D54](ai.md#d54)
+- [ ] **`UseFerryBeacon`: the real pick-up waits about 90 ticks longer** (open: where the wait comes from is not traced, needs a new probe) (B, medium; one call site, `ScenarioPlatoonAI.lua:990`). Real: the tanks walk to the beacon and board at +140, drop at +250; ours boards at +50 and drops at +130, `IsMoving('Attack')` is false while they walk, and `tr2`'s queue is 3 after two `IssueFerry` calls (real 2). `engine/api/ferry.rs`, `engine/api/command.rs:971`. `probe_ai_transport`. [ai D56](ai.md#d56)
+- [ ] **`IsFerrying()` with no squad raises; `GetFerryBeacons()` returns `{}`; `AssignUnitsToPlatoon` returns `"None"`** (C). Ours: `IsFerrying()` false, `GetFerryBeacons` not implemented, returns nothing (D20). `engine/api/command.rs:953-966`, `pending.rs:62`. `probe_ai_transport`. [ai D57](ai.md#d57)
+- [ ] **Error texts for bad arguments are moho's** (usage strings, `Invalid enum value`); ours mlua conversion messages (C, text only). `engine/api/threat.rs`, `army.rs`. `probe_ai_misc`. [ai D49](ai.md#d49)
+
+## 7. Blueprint defaults
+
+- [x] **Registered unit blueprints carry the engine's filled-in defaults for `Air`, `AI`, `Economy` and `Weapon`** (fixed `18d8514`) (B / A). Real: uel0201 428 fields, ours 274; all of `Air.*` for every unit (ours `bp.Air == nil`, so `bp.Air.X` raised), ~45 `Weapon.*` defaults, `AI.*`, `Economy.Storage*`, `InitialRallyZ`, `General.UpgradesTo`. `engine/api/blueprints.rs`. `probe_api_spot` BP dumps, `probe_unit_api` bp. [units 8](units.md#r8), [units 9](units.md#r9), [api S7](api.md#s7)
+- [ ] **Blueprint defaults still left out** (B). `AI.StagingPlatformScanRadius`, `Physics.MaxBrake`, footprint zeros, and the projectile `Physics.*` / `Footprint.*` fields; `ProjectileId` lower-casing and `CatchUpAcc` 3.4 not rechecked. `engine/api/blueprints.rs`. [units 8](units.md#r8), [api S7](api.md#s7)
+- [ ] **`__blueprints` shape**: real has no emitter blueprints (5334 string keys vs 8277), 0-based numeric part, metatables, upper-case ids resolve to nil (C). `engine/api/blueprints.rs`. `probe_api_spot`. [api C7](api.md#c7)
+- [ ] **`GetBlueprint()` is not the same table as `__blueprints[id]`** in the real game, for `GetUnitBlueprintByName`, `unit:GetBlueprint()`, `unit.Blueprint` and the interface `GetBlueprint()`; ours shares one table (C). `engine/api/blueprints.rs`. `probe_api_spot`, `probe_ui_units`. [api C8](api.md#c8), [ui 38](ui.md#r38)
+
+## 8. Interface
+
+Used by FAF's interface Lua and wrong (A)
+
+- [x] **`SelectUnits` and `UISelectionByCategory` are synchronous.** (fixed `ecf9a4e`) Real: select, issue an order, reselect in one frame works; `GetSelectedUnits()` on the next line returns the new selection. Ours: the order goes to whatever is selected at the end of the frame (a tank gets `BuildFactory`); `GetSelectedUnits()` returns the old selection. `ui/user_api.rs:975-992`, `render/frame.rs` (`take_selection_request`, `take_orders`). FAF: `construction.lua:186-194`, `hotkeys/dock-damaged.lua:59-60`, `keymap/hotbuild.lua:665`, `gamemain.lua:147`, `keymap/misckeyactions.lua:22/128/485`. `probe_ui_units` X, C, `probe_api_spot` uu. [ui 1](ui.md#r1), [ui 50](ui.md#r50)
+- [x] **`BitmapWidth` / `BitmapHeight` are the texture size minus 2 x border; `GetTextureDimensions`** (fixed `53750b1`) (A). Real 62x62 for a 64x64 icon, `2 30` for 4x32; ours full size. `ui/controls.rs:1331-1343`. `probe_ui_controls` bmp, `probe_api_spot`. [ui 2](ui.md#r2), [api U1](api.md#u1)
+- [x] **Font metrics** (fixed `7a55a72`): real is an em of n pixels with whole-pixel metrics (Arial 14: ascent 13, `Hello World` 72); ours `1.25 x n`, fractional (80.67). `ui/fonts.rs:31-33`. `probe_ui_controls` text, edit, list, `probe_api_spot`. [ui 3](ui.md#r3), [api U2](api.md#u2)
+- [x] **`Hide` / `Show` / `SetHidden` set the flag on every descendant** (fixed `291a32a`) (86 `IsHidden` uses in `lua/ui`). Ours changes only the control. `ui/controls.rs:954-975`. `probe_ui_controls` ctl. [ui 4](ui.md#r4)
+- [x] **`UserUnit:GetFocus()` for builders returns the unit being built** (fixed `296ca36`) (A). Ours returned nil because units under construction are not in the interface's unit data; it now looks the unit up in the latest frame, as `GetUnitById` does. A unit guarding a tank reporting the tank as its focus is not rechecked. `ui/units.lua`. `probe_ui_units`. [ui 5](ui.md#r5)
+- [ ] **`focusUpgrade` in `GetRolloverInfo`** (A). Real has it over an upgrading radar; ours does not. Same root cause as `GetFocus`, not rechecked after `296ca36`. `ui/user_api.rs:1115-1120`. FAF `ui/game/unitview.lua:680`. `probe_ui_hover`. [ui 51](ui.md#r51)
+- [x] **`UISelectionByCategory('ALLUNITS')` includes the structure under construction and leaves out a unit loaded in a transport** (fixed `fd8b17e`); ours the opposite. `render/console.rs:451-459`. `probe_ui_units` A, B. [ui 6](ui.md#r6)
+- [x] **`EnableHitTest()` with no argument is not recursive** (fixed `291a32a`); ours is (26 FAF uses). `ui/controls.rs:940-944`. `probe_ui_controls` ctl. [ui 7](ui.md#r7)
+- [x] **`GetCurrentFocusControl()` returns the control that last took keyboard focus** (fixed `e238824`); ours always nil (stub, 3 FAF uses). `ui/controls.rs:1031`. `probe_ui_controls`. [ui 8](ui.md#r8)
+- [x] **`Edit:SetText` and `ClearText` call `OnTextChanged(new, old)`** (fixed `e9cb1b4`); ours neither. Contradicts the #11 guess. `ui/controls.rs:1530`, `:1541`. `probe_ui_controls` edit. [ui 9](ui.md#r9)
+- [x] **`GetFireState(units)` is -1 for units with no fire state and for mixed lists** (fixed `86dc112`); ours 0 / the first unit's. `ui/units.lua:310`. `probe_ui_units`. [ui 10](ui.md#r10)
+- [ ] **`GetFireState` / `GetScriptBit` / `GetIsPaused` follow any unit, selected or not** (open: needs a performance design); ours only selected units. Details are sent for selected units only. `probe_ui_units` C. [ui 11](ui.md#r11)
+- [x] **`GetUnitCommandData` buildable categories of a mixed selection are the intersection** (fixed `78e08dc`) (orders are the union); ours the union. `ui/user_api.rs:559-567`. FAF `gamemain.lua:657/687`, `construction.lua:1306`, `keymap/hotbuild.lua`. `probe_ui_hover` build. [ui 49](ui.md#r49)
+
+Used, smaller effect (B)
+
+- [ ] **`SetCurrentFactoryForQueueDisplay` on an idle factory or non-factory returns nil**; ours `{ }` (`construction.lua:186` tests `if queue`). `ui/units.lua:254-260`. `probe_ui_units` Q. [ui 12](ui.md#r12)
+- [ ] **`GetUnitCommandFromCommandCap` returns short names and maps some caps differently**; ours `'UNITCOMMAND_' .. name`. `ui/user_api.rs:1256`. `probe_ui_units` A. [ui 13](ui.md#r13)
+- [ ] **`GetValidAttackingUnits()` returns a list; `GetAssistingUnitsList` is empty for guards** (B, medium; rules inferred). Ours nil and the guarding units. `ui/user_api.rs:1250-1251`. `probe_ui_units`. [ui 14](ui.md#r14), [ui 15](ui.md#r15)
+- [ ] **Interface `GetStat`**: `{Name, Type, Value}`, missing stat 0 even with a default; ours `{Value}` and the default. `ui/units.lua:83`. `probe_ui_units`, `probe_api_spot`. [ui 16](ui.md#r16)
+- [ ] **Missile launcher building a missile**: real `GetEconData` shows the drain and `tacticalSiloBuildCount` 1; ours econ 0 and a fraction. `ui/units.lua:160`. `probe_ui_units`. [ui 17](ui.md#r17)
+- [ ] **Control setters return the control** in the real game (`SetName`, `SetUV`, `Destroy`, `DeleteItem`, ...); ours nil, so chained calls raise. `lua_method!` bodies in `ui/controls.rs`. `probe_ui_controls`. [ui 18](ui.md#r18)
+- [ ] **Camera calls take effect at once** (`SnapTo`, `SetZoom(z, 0)`); ours a frame later. `ui/camera.lua:37`, `:63`. `probe_ui_controls` cam. [ui 19](ui.md#r19)
+- [ ] **Timed zoom is smoothstep in time, linear in zoom; `GetTargetZoom` reads the target**; ours log zoom. Contradicts the #11 "zoom linear in log distance" guess. `render/camera.rs:459`. `probe_ui_controls` cam. [ui 20](ui.md#r20)
+- [ ] **`Camera:Reset()` zoom = `GetMaxZoom()`, pitch 1.57**; ours 0.79 x and 1.53. `ui/camera.lua:81`. `probe_ui_controls` cam. [ui 21](ui.md#r21)
+- [ ] **`SetZoom` does not clamp**; ours clamps to min 5 and max. `probe_ui_controls` cam. [ui 22](ui.md#r22)
+- [ ] **`TargetEntities` takes entity id strings**; a `UserUnit` raises; ours accepts the unit. `ui/camera.lua`. `probe_ui_controls` cam. [ui 23](ui.md#r23)
+- [ ] **Camera focus over water sits on the surface (y 17.50)**; ours the sea bed (10.51) (medium). `probe_ui_controls` cam. [ui 24](ui.md#r24)
+- [ ] **`Destroy` order and `ClearChildren`**: real parent first then children; `ClearChildren` last child first. Ours reversed. `ui/controls.rs:887`, `:902`. `probe_ui_controls` ctl. [ui 25](ui.md#r25)
+- [ ] **`Edit:SetMaxChars` cuts the text; default limit 1024; caret hidden by default**; ours 255, text kept, caret shown. `ui/controls.rs:1579`. `probe_ui_controls` edit. [ui 26](ui.md#r26)
+- [ ] **Edit colour getters return `'ffffffff'` strings**; ours nil (not implemented). `probe_ui_controls` edit. [ui 27](ui.md#r27)
+- [ ] **A factory's `GetCommandQueue` `Move` entry is the rally point**; ours the factory position. `ui/units.lua`. `probe_ui_units` Q. [ui 28](ui.md#r28)
+- [ ] **`LockInput` is counted; `IsInputLocked()` with no camera raises**; ours a flag. `ui/controls.rs` world view methods. `probe_ui_controls` cam. [ui 29](ui.md#r29)
+- [ ] **Pause is seen at once and the clock stops while paused** (open: needs a new probe, cause unconfirmed); ours a frame late, `GameTime` advances 1.00 over a paused second (B, cause unconfirmed). `render/frame.rs:1138`, `ui/user_api.rs:1135-1137`, `engine/mod.rs:451`. `probe_ui_globals` time. [ui 52](ui.md#r52)
+- [ ] **`SetGameSpeed(4)` gives 50 ticks in 2 s** (open: needs a new probe, cause unconfirmed); ours ~20 although `GetGameSpeed` reports 4 (B, medium; rerun windowed first). `render/frame.rs:1127`. `probe_ui_globals` time. [ui 53](ui.md#r53)
+- [ ] **Right-click order**: real `rmb radar over ground` nothing, `transport over shield unit` `RULEUCC_Transport`, `tank over transport` `RULEUCC_Move`; ours Move / CallTransport (B, medium). `render/player.rs:600-609`, `ui/mod.rs:1821`. `probe_ui_hover` rmb. [ui 53a](ui.md#r53a)
+- [ ] **`GetFrontEndData` / `SetFrontEndData` round trip**; ours stubs returning nil (B). `ui/user_api.rs:1202-1203`. FAF `uimain.lua:56`, `ui/game/tabs.lua:301`, `keymap/misckeyactions.lua:701`, `uiutil.lua:1326`. `probe_ui_globals` prefs. [ui 54](ui.md#r54)
+
+Unused by FAF or cosmetic (C)
+
+- [ ] **A replaced global `OnSync` is never called**; ours calls it. `probe_ui_units`. [ui 32](ui.md#r32)
+- [ ] **`GameTime()` runs ahead of the tick inside a beat**; ours tick / 10. `ui/user_api.rs:871`. [ui 33](ui.md#r33)
+- [ ] **`GetInterpolatedPosition` differs from `GetPosition` for a moving plane**; ours the same. `ui/units.lua:29`. [ui 34](ui.md#r34)
+- [ ] **Dying plane**: `IsDead()` true the tick it is killed, `GetUnitById` returns it until the wreck is destroyed 22 ticks later; ours both 2 ticks after. `probe_ui_units`. [ui 35](ui.md#r35)
+- [ ] **`IsDestroyed(control)` false for a destroyed control; methods on one raise**; ours true / nil. `probe_ui_controls`. [ui 36](ui.md#r36), [ui 37](ui.md#r37)
+- [ ] **`GetCommandQueue` entries have no `blueprintId` on `BuildMobile`**; ours does. `ui/units.lua`. [ui 39](ui.md#r39)
+- [ ] **`ApplyFunction` visits the control and its direct children**; ours the subtree. [ui 40](ui.md#r40)
+- [ ] **New control `GetName()` = `"group"`, `GetRenderPass()` = 8**; ours `""` and 0. `ui/controls.rs`. `probe_api_spot`, `probe_ui_controls`. [ui 41](ui.md#r41), [api U5](api.md#u5)
+- [ ] **`SetAlpha(2)` is stored as 2**; ours clamps. [ui 42](ui.md#r42)
+- [ ] **`Text:SetText(nil)` raises; newline / tab in `GetStringAdvance` have zero width.** [ui 43](ui.md#r43)
+- [ ] **Bitmap odds and `SetSolidColor` validation**: no texture 0 frames, solid colour size 2x2, missing texture 2x2, `SetSolidColor('f00')` / `('nosuchcolor')` raise; ours 1 frame, size unchanged, 0x0, accepted. `ui/controls.rs`. `probe_ui_controls`, `probe_api_spot`. [ui 44](ui.md#r44), [api U6](api.md#u6)
+- [ ] **A `Bitmap` with no debug name is named `Bitmap`.** [ui 45](ui.md#r45)
+- [ ] **`ItemList:GetItem(-1)` is `''`; `Edit:SetCaretPosition(-1)` is -1**; ours nil / 0. [ui 46](ui.md#r46)
+- [ ] **`ToggleFireState(units, 0)` ends at 1**; ours stays 0 (low, one sample). `ui/user_api.rs:1266`. [ui 47](ui.md#r47)
+- [ ] **`SetTargetZoom` eases over ~0.5 s**; ours instant. [ui 48](ui.md#r48)
+- [ ] **Methods on a dead `UserUnit` raise `Game object has been destroyed`** except `IsDead` / `IsIdle`; ours placeholders. `ui/units.lua`. `probe_ui_hover` risky. [ui 56](ui.md#r56)
+- [ ] **Preferences**: a numeric path segment means the numeric key; `SetPreference` over a number raises; nil raises; `profile.current` is a number; ours string key first, replaces scalars, string `'player'`. `ui/prefs.rs:43-47`, `:76`. `probe_ui_globals` prefs. [ui 57](ui.md#r57)
+- [ ] **`UserUnit` odds**: `IsInCategory` takes a string only, `GetCustomName` needs an argument, `SetCustomName` not seen in the same frame, `_c_object` present. `ui/units.lua`. `probe_api_spot` uu. [ui 61](ui.md#r61)
+- [ ] **An upgrade's command queue entry has a NaN position and no `blueprintId`**; ours real position and id. `ui/units.lua`. `probe_ui_hover` orders. [ui 62](ui.md#r62)
+- [ ] **Key code conversion** (`KeycodeMauiToMSW` / `KeycodeMSWToMaui`) works in the real game (310 to 19, 342 to 112, ...); ours stubs. `ui/user_api.rs`. `probe_api_spot`, `probe_ui_globals`. [api U3](api.md#u3), [ui 60](ui.md#r60)
+- [ ] **`SessionIsBeingRecorded()` true, `SessionIsObservingAllowed()` false** in single player; ours the reverse. `ui/user_api.rs:1138-1139`. `probe_api_spot`. [api U4](api.md#u4)
+- [ ] **Argument validation in the interface**: `GetResourceSharing` takes 0 arguments, `IsAlly(1, 99)` raises, `GetFrame()` raises, `GetFrame(5)` nil, `SimCallback()` raises; ours accept and return a frame. `ui/user_api.rs`. `probe_api_spot`. [api U7](api.md#u7)
+- [ ] **`GetSessionClients()` has `maxSP`, `ping`; `SessionGetScenarioInfo()` has `PlayableRect` and none of the sim keys**; ours the sim's tables and an extra `armyIndex` (C, medium). `ui/` session tables. `probe_api_spot`. [api U8](api.md#u8)
+- [ ] **`GetIdleEngineers()` returned the commander** when only it existed; ours nil (C, low). `ui/user_api.rs:969`. `probe_api_spot`. [api U9](api.md#u9)
+- [ ] **`GetMouseScreenPos()` has a metatable.** `probe_api_spot`. [api U10](api.md#u10)
+
+## 9. API surface and arity
+
+- [ ] **`STR_GetTokens` returns a 0-based table; an empty delimiter returns the whole string** (B). Ours 1-based, raises on an empty delimiter. `engine/lua/shims/string_utils.lua:7-18`. `probe_api_spot`. [api C1](api.md#c1)
+- [ ] **`OrientFromDir(Vector(1,2,3))`** gives `{-0.275 0.154 0.045 0.948}`; ours `{-0.428 0.144 0.069 0.890}`; interface stub (B). `engine/api/entity.rs:1051-1052`, `ui/user_api.rs:313`. `probe_api_spot`. [api C2](api.md#c2)
+- [ ] **`VPerpDot` sign** is -6; ours +6 (B, no FAF call site). `engine/lua/shims/vector_math.lua:50-52`. [api C3](api.md#c3)
+- [ ] **`STR_itox` is upper case; `STR_xtoi` edge cases** (C). Contradicts the #12 guess. `string_utils.lua`. [api C4](api.md#c4)
+- [ ] **`ParseEntityCategory` operators**: `+` and `-` are not operators, ids are case-sensitive (C). `engine/api/categories.rs`. [api C5](api.md#c5)
+- [ ] **Categories cover projectile and prop blueprints** (1877 keys; `PROJECTILE` 288, `UEF` 250); ours 917 keys, counts 0 / 181 (B). `engine/api/categories.rs:63`. `probe_api_census`, `probe_api_spot`. [api C6](api.md#c6)
+- [ ] **`DiskGetFileInfo` / `exists` on folders**: real fields `IsFolder ReadOnly SizeBytes TimeStamp WriteTime`, false for folders and relative / backslash paths; `exists('/lua/ui/game')` false; ours wrong field names, true for folders. FAF `ui/lobby/aitypes.lua:167/303`. `engine/api/disk_get_file_info.rs:21-37`, `exists.rs:11`. [api C9](api.md#c9), [ui 55](ui.md#r55)
+- [ ] **`Basename`, `Dirname`, `FileCollapsePath` edge cases** (C): `Basename` needs 2 arguments, `Dirname('/a/b')` keeps the last part, `FileCollapsePath` returns a second value. `string_utils.lua:20-28`, `engine/api/path_utils.rs:11`. [api C10](api.md#c10), [ui 58](ui.md#r58)
+- [ ] **`Vector` / `Rect` / `VDist3` strictness and metatables** (C). `engine/lua/shims/vector_math.lua`. [api C11](api.md#c11)
+- [ ] **`MATH_Lerp` with 4 arguments returns nothing**; ours raises (C). [api C12](api.md#c12)
+- [ ] **Laxer argument checks in ours**: `EntityCategoryFilterDown(cat, nil)`, `GetEntityById()`, `IsDestroyed()`, `KillThread()`, `IssueMove()`, `Sound({})` (C). Typed API conversions. [api C13](api.md#c13)
+- [ ] **Entity ids encode the army** (`army_index << 20 | n`; projectiles from 0x10000000); ours one global counter (C). [api C14](api.md#c14)
+- [ ] **`GetUnitById('nosuch')` returns a unit; `GetCurrentCommandSource()` is a number**; ours nil (C, medium). `engine/api/command_source.rs:39`. [api C15](api.md#c15)
+- [ ] **Bad bone names / indexes and `IsUnitState('NoSuchState')` raise**; ours return values (C). `engine/api/entity.rs`, `unit.rs`. [api S3](api.md#s3)
+- [ ] **`GetTerrainType` out of bounds (and at (1024, 1024) / (-1, -1)) is `Default`**; ours the edge cell's type `Water03` (C; FAF's default lookup uses (-1, -1)). `engine/api/terrain.rs:240`. [api S4](api.md#s4), [ai D21](ai.md#d21)
+- [ ] **`EntityCategoryFilterDown` drops a destroyed unit**; ours keeps it (C). `engine/api/categories.rs:229`. [api S9](api.md#s9)
+- [ ] **Error paths that raise in the real game**: `GetCargo` on a non-transport, `TestCommandCaps` bad enum, `CanBuild('nosuch')`, `SetMaxHealth('500')`, `PlatoonExists(nil)`, bad squad, `CreateRotator` bad bone / axis, `SetEmitterParam` bad name, any manipulator method after `Destroy`, `GetShieldRatio()` without argument; ours accept. Ours stricter on `GetScriptBit(99)` (false in real). `engine/api/` typed conversions. [units 31](units.md#r31), [api S11](api.md#s11)
+- [ ] **Return shapes** (C): empty `GetSquadUnits` returns nothing, `MoveToLocation` a table, `CreateTrail` / `CreateLightParticle` nothing, `Rotator:ClearGoal` not self, manipulator `Destroy` nothing, `GetCurrentTargetPosition` with no target `{0,0,0}`, command-queue entries have `_c_object`. `engine/api/platoon.rs:235`, `orders.rs`, effects / manipulator bindings. [api S13](api.md#s13)
+- [ ] **`GetPosition()` returns the same table every call, updated in place** (API, possible gameplay effect): FAF code that keeps an old table and compares later sees 0 movement in the real game; ours a fresh table. `engine/api/entity.rs` (`entity::vector`). `probe_wpn_misc2` tbl. [weapons 5](weapons.md#r5)
+- [ ] **Stubs: real results** for `PointVector`, `AITarget`, `EntityCategoryEmpty`, `GetEntitiesInRect`, global `GetBlueprint`, `GenerateRandomOrientation`, `SelectedUnit`, interface `SecondsPerTick` (0.1) and `OrientFromDir`, `KeycodeMSWToMaui`; and of many methods ours leaves "not implemented" (`IsValidTarget`, `GetCurrentMoveLocation`, `GetScale`, `PrintCommandQueue`, navigator calls, platoon and brain getters). `engine/api/pending.rs`. `probe_api_spot`, `probe_api_arity`. [api: Stubs](api.md#stubs-what-the-real-ones-return-ours-raise-not-implemented)
+- [x] **Arity: `CanBuildPlatoon(template[, factories])` is 2..3 in the real game; ours needs 3** (fixed `95ed7aa`) (raises with one argument; FAF passes two at `FactoryBuilderManager.lua:500`). `probe_api_arity`. [api: Arity](api.md#arity-complete)
+- [x] **Arity: stubs declare the wrong counts** (fixed `95ed7aa`) (`EntityCategoryCountAroundPosition` 4, `GetEntitiesInRect` 1..4, `PlayLoop` / `StopLoop` 1, `CoordinateAttacks` 1, `SetAlliedVictory` 2, `CAiAttacker:IsWithinAttackRange` 2..3). `probe_api_arity`. [api: Arity](api.md#arity-complete) `CAiAttacker:IsWithinAttackRange` is not changed.
+- [ ] **Arity: declared signatures stricter or looser than the real counts** (`CreateBuilderArmController` 2..4, `GetReclaimablesInRect` 1..4, `entity:Kill` 1..4, `platoon:MoveToLocation` 2..4, `SetArmyStatsTrigger` 5..6, interface `GetPreference`, `IssueCommand`, `PlayVoice`, ...); 20 interface methods exist but are missing from `--dump-api`; 110 functions printed no count. `probe_api_arity`. [api: Arity](api.md#arity-complete)
+- [ ] **Every binding checks its argument count and raises its usage text on extra arguments, trailing nils included**; ours ignores extras (C). `probe_ui_controls`, `probe_api_arity`. [ui 30](ui.md#r30)
+- [ ] **Small interface / math globals**: `MATH_IRound(1e10)` = -2147483648, `IsKeyDown('BogusKey')` raises, `PlaySound` returns nothing, `ConTextMatches` returns matches (FAF `ui/dialogs/console.lua:138`), `GetSystemTime()` is a string, `GetTextureDimensions(file, 1)` raises; ours differ (C). `engine/api/math/scalar.rs:43`, `ui/user_api.rs:731`, `:863`, `ui/sound.rs:87`. [ui 59](ui.md#r59)
+- [ ] **Missing methods**: `AddLocalImpulse` on every entity class, `aibrain:AddArmyStat`, `CDamage` `GetInstigator` / `GetTarget` / `SetInstigator` / `SetTarget` (C). `probe_api_census`. [api M6](api.md#m6)
+- [ ] **Blueprint loader functions and engine constants leak into both VMs' globals** (`LoadBlueprints`, `UnitBlueprint`, ... about 40; `LAND`, `AIR`, `Engine`, `GameType`, ...). The real game runs them in a separate state. [api: Ours has](api.md#ours-has-real-doesnt)
+- [ ] **Engine internals as globals and extra methods in ours**: `__engine_*`, `__net_*`, `__disc_*`, `__forin`; `BeenDestroyed` on manipulators, `HideBone` / `ShowBone` / `RevertCollisionShape` on entity classes, extra `unit_methods` (`GetCreator`, `IsAutoSurfaceMode`), `text_methods.SetVertical`, `PathDebugger_methods`; sim `EntityCategoryFilterOut`, interface `EntityCategoryCount`, `GetUnitBlueprintByName`. [api: Ours has](api.md#ours-has-real-doesnt)
+
+## 10. Intel: jamming and contact icons
+
+From `probe_intel_jam` and `probe_intel_icons` ([intel.md](intel.md)). All fixed items are on `fix/probe-sweep-intel` and now on `fix/probe-sweep`.
+
+- [x] **Jammer fakes are real blips with fixed offsets** (fixed `040d0de`) (B). Real: each of a jammer's `JammerBlips` fakes is a `ReconBlip` Lua object (`OnIntelChange`, `GetSource` / `GetBlueprint` the jammer's, own position and id), placed at a uniform random distance from 0 to the radius (`Min` is not a minimum), at fixed offsets that move with the jammer, re-made only when the Jammer intel is switched back on, and gone at once when it goes off or the jammer dies. Ours: positions only, no Lua object, uniform in the band `[Min, Max]`, re-placed every 50 ticks. How `Min` / `Max` set the radius exactly is low confidence (one `Min` != `Max` unit, 24 samples). `sim/vision.rs`, `api/blip.rs`. [intel J1](intel.md#j1), [intel J3](intel.md#j3), [intel J4](intel.md#j4), [intel J5](intel.md#j5)
+- [x] **Known fakes: seen or under omni, a fake is flagged, not drawn and not counted** (fixed `040d0de`) (B / C). Real: vision on a fake makes it a known fake but leaves it alive (`IsKnownFake` works); known fakes are not drawn; under omni they stay on radar flagged `R..OF`. Ours drew fakes inside vision, hid them only under omni, and `IsKnownFake` was always false. [intel J6](intel.md#j6), [intel J7](intel.md#j7)
+- [x] **Jammer fakes count as threat** (fixed `040d0de`) (B). Real: every live, not-known-fake fake adds the jammer's full threat at its own position (frigate ring 0 = 18 against 6); known fakes drop out. Same as [ai D11](ai.md#d11). `sim/threat.rs`. [intel J9](intel.md#j9)
+- [x] **Omni detects but does not see** (fixed `be9c6cc`) (B). Real: a unit under omni only reads `IsOnOmni` but not `IsSeenNow` / `IsSeenEver`, and `OnIntelChange` gives `Omni` without `LOSNow`. Ours counted omni as seen. The engine keeps omni as eyes for drawing, targeting and structure memory, with an optical ever-seen record for `IsSeenEver`. Same as the batch 3 item on omni. [intel J8](intel.md#j8), [units 14](units.md#r14)
+- [x] **A never-seen radar or sonar contact is a plain grey shape** (fixed `7a49b53`) (B, look and information leak). Real: an 11 px grey diamond for every land unit, a small square for structures, a half-dome for naval contacts; no frame, no tech pips, the same size at every zoom; a jammer's fakes take the jammer's shape. Ours drew the strategic icon (commander, experimental, air class given away). `render/overlays.rs`. [intel I1](intel.md#i1), [intel I4](intel.md#i4)
+- [x] **A unit seen once and now only on radar keeps its full icon in army colour** (fixed `7a49b53`) (B). Ours sent mobile units back to the grey generic shape. `render/scene.rs`, `render/overlays.rs`. [intel I2](intel.md#i2)
+- [ ] **Fakes appear about 10 ticks after the jammer's own blip** (C, medium). Ours: not matched. [intel J12](intel.md#j12)
+- [ ] **A once-seen big unit out of sight is drawn as a grey wireframe at close zoom** (open: low confidence, needs a new probe) (C). Probably the Fatboy's attached helper or a build-site box; not identified. [intel I3](intel.md#i3)
+- [ ] **A flying aircraft's radar-contact shape, and a naval jammer's fakes on screen** (open: needs a new probe). The aircraft stayed landed in both engines and showed the land diamond. [intel: Not tested](intel.md#not-tested--open)
+- [ ] **The previous generation of fakes keeps counting as threat after a reset** (open: mechanism unknown, needs a new probe). Real: after the jammer's 15 s reset the old fakes still add threat at their old spots until the next reset. [intel J9](intel.md#j9)
+- [ ] **Remembered structures off radar, and the minimap's contact dots** (open: not changed by the icon fixes). Ours keeps a remembered structure's icon greyed; the minimap's contact dots were not compared. [intel I2](intel.md#i2)
+- [ ] **Ours' intel comes up late** (open: not investigated). At tick 2 ours had `IsIntelEnabled('Jammer')` and `('Radar')` false, jammers on at about 21 and the T3 radar's first contact at tick 62; the real game had both at tick 2 and contacts at tick 10 (possibly the energy start-up). [intel: Side findings](intel.md#side-findings)
+
+## Calls that take the real game down
+
+None of these may appear in a probe or a test that has to finish in the real game. The last column is what ours does.
+
+| Area | Call | Real | Ours |
+|---|---|---|---|
+| interface | `STR_Utf8SubString('hello', 10, 1)` (start past the end) | dies (log ends after `risky.Utf8Sub4`, `('hello', 2, 0)` = `""`) | `""` |
+| interface | `ItemList` `GetItem(5)` / `DeleteItem(5)` / `SetSelection(5)` on a one-item list (one of the three) | dies | no-ops, count stays 1, selection -1 |
+| interface | `WaitSeconds(0.1)` inside a plain `coroutine.create` coroutine resumed outside a managed thread | the log stops | returns at once |
+| sim | `unit:GetWeapon(0)` / `GetWeapon(99)` (one or both) | dies | returns nothing, no error |
+| sim | `unit:GetAttacker()` (idle T1 tank) and every call on its result | dies | raises "not implemented" (`engine/api/pending.rs:57`; no FAF or RNGAI call site) |
+| sim | `pgen:CanPathTo(pos)` (a structure has no navigator) | dies | returns `true` and a position (`0161804`) |
+| sim | `brain:CanBuildStructureAt('nosuch', pos)` | dies | raises `unknown Unit blueprint` |
+| sim | `Register*` (e.g. `RegisterBeamBlueprint`) and `Spec*` (e.g. `SpecFootprints`) with 12 nils | dies | not checked |
+| sim | `GetBlueprint()` on a shield entity (from a projectile's `OnImpact('Shield', entity)`) | the run ends silently | not checked |
+| sim | `IssueScript` with an unknown `TaskName` | order dropped, game carries on | fixed `9e290e0`: the order is dropped |
+| sim | `brain:BuildStructure(eng, 'zzz9999', pos, false)` | returns `false`, carries on | fixed `9e290e0`: returns `false` |
+| sim | `DamageArea` radius 0, `DamageRing` min radius 0 | raises, the calling thread dies | accepted |
+| sim | any method on a destroyed unit | raises `Game object has been destroyed`, the thread dies | silent values |
+
+The follow-up probes (platoon transports and finders, capture and reclaim, AA against a flying target, jamming and contact icons) added no entries to this table.
+
+## Guesses on issues #7-#12 settled or contradicted
+
+| Issue / item | Result | Row |
+|---|---|---|
+| `Unit:CanPathTo` "one boolean back ... FAF's AI reads a second value; there is none" (Confirmed table in `docs/research/verifying-against-the-binary.md`) | **Contradicted**: it returns a second value, the closest or goal position | [api S6](api.md#s6), [units 18](units.md#r18), [ai D22](ai.md#d22) |
+| #7 `P` projectile lifetime runs out: `OnImpact('Air')`, then destroyed | Wrong: never destroyed by the engine, `OnImpact` every 2 ticks; expiry one tick later | [weapons 10](weapons.md#r10), [weapons 7](weapons.md#r7) |
+| #7 `P` a surface impact the script survives fires once | Wrong: sticks at the contact point, fires every 2 ticks | [weapons 10](weapons.md#r10) |
+| #7 `G` `Lifetime` absent or 0 lives forever | Wrong: default 15 s | [weapons 6](weapons.md#r6) |
+| #7 `G` homing aim | Aims at the target's centre; turn rate confirmed | [weapons 11](weapons.md#r11) |
+| #7 `P` `Damage` direction is a unit vector | Not normalised in the real game; ours already matches | [weapons.md](weapons.md) |
+| #7 `P` `Kill`: health goes to 0 | Wrong: health untouched; `CheckCanBeKilled` missing | [weapons 13](weapons.md#r13), [weapons 1](weapons.md#r1) |
+| #7 `P` `OnHealthChanged` once a tick | Wrong: at the moment of damage, per step | [weapons 15](weapons.md#r15) |
+| #7 `S/P` `DamageArea` touches collision shapes | Confirmed at small radii; differs at radius 5 and for personal shields | [weapons 12](weapons.md#r12) |
+| #7 armour multipliers, unit box, `SetCollisionShape`, impact type strings, `Physics` gravity default | Confirmed | [weapons.md](weapons.md) |
+| #7 neutrals are hit by projectiles | Still open (terrain was hit first in the one case) | [weapons 4](weapons.md#r4) |
+| #8 "the transport doesn't fly to its cargo" | Wrong: it flies there and all cargo attaches on one tick | [movement 1](movement.md#r1) |
+| #8 "a transport on a load/unload order flies at `TransportHoverHeight`" | True only at the pick-up and drop points | [movement 3](movement.md#r3) |
+| #8 "slow to 1/4 speed while turning more than 45 degrees off course" | Does not happen for any of the 46 units | [movement 6](movement.md#r6) |
+| #8 climb rate = `LiftFactor` per second | Too slow for winged planes | [movement 17](movement.md#r17) |
+| #8 "we snap only movers" (to the ground) | The real game snaps surface units at once | [movement 10](movement.md#r10) |
+| #8 "Move orders complete within 0.5 units of the goal", fuel drain / recharge, passengers read layer `Air`, different armies' units block like allies | Confirmed | [movement.md](movement.md) |
+| #9 AssignThreat "decays linearly per second" | Wrong unit and period: fraction of the amount per 30-tick update | [ai D4](ai.md#d4) |
+| #9 `GetHighestThreatPosition` ties to the first row-major cell, cell centre at surface height | Both false | [ai D8](ai.md#d8) |
+| #9 `armyIndex`: that army's threat even if allied | False: own and allied give 0 | [ai D6](ai.md#d6) |
+| #9 queued build orders don't reserve their site | Moho does reserve | [ai D25](ai.md#d25) |
+| #9 "no ground-variation check" in `CanBuildStructureAt` | Ours already has one and it agrees | [ai.md](ai.md) |
+| #9 `BuildPlatoon` queues everything on the first factory | Count right, factory wrong | [ai D28](ai.md#d28) |
+| #9 `FindPlaceToBuild` result shape | `{x, z, 0}`; the `{x, z, dist}` comment in `aibuildstructures.lua` is wrong | [ai D29](ai.md#d29) |
+| #9 platoon "destroyed at the end of that tick" | The next tick | [ai D34](ai.md#d34) |
+| #9 personality ranges and `AdjustDelay` | Ranges collapse to 0.5 (army size 75); `AdjustDelay` formula found | [ai D40](ai.md#d40) |
+| #9 default terrain type = `GetTerrainType(-1, -1)` | Real gives `Default` at the edge too; ours does not | [ai D21](ai.md#d21) |
+| #10 cancelled upgrade "gets `OnFailedToBuild` (not `OnStopBuild`)" | Wrong: moho runs both | [units 1](units.md#r1), [units 7](units.md#r7) |
+| #10 lone patrol point (leg back) | Wrong: the order ends at the point | [units 3](units.md#r3) |
+| #10 captors combine ("moho combines them") | Measured: they share one capture, cost and callbacks | [units 6](units.md#r6), [units 38](units.md#r38) |
+| #10 reclaim / capture / repair / guard reach, `SetDoNotTarget`, `ChangeUnitArmy` giver | Refuted | [units 12](units.md#r12), [units 15](units.md#r15), [units 11](units.md#r11) |
+| #10 economy stall rule, economy events, natural decay, repair / assist rate, `GetParent`, `GetCargo` order, start layers | Confirmed | [units.md](units.md) |
+| #11 "`Edit:SetText` doesn't call `OnTextChanged`" | Wrong: both `SetText` and `ClearText` call it | [ui 9](ui.md#r9) |
+| #11 timed camera moves: easing right, "zoom linear in log distance" | Easing right, zoom is linear in the real game | [ui 20](ui.md#r20) |
+| #11 killed unit `IsDead` | The `IsDead` half holds | [ui 35](ui.md#r35) |
+| #11 `focusUpgrade` in `GetRolloverInfo` | Real has it; ours does not | [ui 51](ui.md#r51) |
+| #11 numeric preference path segment | Always the numeric key in the real game | [ui 57](ui.md#r57) |
+| #11 camera "0.81 factor" | At the same aspect ratio the projection agrees to three decimals; more likely an aspect-ratio comparison or the `Reset` zoom (0.79) than the camera maths | [ui.md](ui.md#the-known-081-camera-item) |
+| #12 `for k in nil` "is an empty loop" | Wrong: raises | [api L3](api.md#l3) |
+| #12 `STR_itox` lower case | Wrong: upper case | [api C4](api.md#c4) |
+| #12 `Vector * Vector` raises | Out of date: cross product in both (FAF's `utils.lua`) | [api.md](api.md) |
+| #12 alliance-name case, `MinLerp`, `MinSlerp`, `EnumColorNames`, `GetVersion` | Checked and matching | [api.md](api.md) |
+| #12 "Lua numbers are 32-bit floats" | Confirmed; loop counts show it | [api L7](api.md#l7) |
+| FAF's doc says `UnloadUnitsAtLocation` is for carriers only | **Contradicted**: it works for an air transport too | [ai D55](ai.md#d55) |
+| FAF's doc says `IsKnownFake` doesn't work | **Contradicted**: it works, and known fakes are not drawn | [intel J6](intel.md#j6) |
+| Our code comment "omni always sees" (`sim/vision.rs`) | **Contradicted**: omni detects but is not `IsSeenNow` / `IsSeenEver` | [intel J8](intel.md#j8), [units 14](units.md#r14) |
+| Our jammer model: fakes uniform in the band `[Min, Max]`, re-placed every 5 s | **Contradicted**: uniform distance from 0, fixed offsets that follow the jammer | [intel J3](intel.md#j3), [intel J4](intel.md#j4) |
+| Our reclaim model: a finished unit pays its cost pro rata like a prop | **Contradicted**: health drains, nothing is paid, a wreck is left | [units 42](units.md#r42) |
+| Weapons row 23 / 24: strategic and T1 bombers lose bombs through a nil `CreateProjectile` (cause unknown) | **Settled**: the attack-run state was not set in break-off, and `SetTargetGround` halted the salvo; the nil errors were not a bomber bug | [weapons 23](weapons.md#r23), [weapons 24](weapons.md#r24) |
+| api S8: `GetHighestThreatPosition` first value is a number | **Wrong**: it is a table, as in ours | [api S8](api.md#s8) |
+| api L17 (import of a missing file) | The real game raises; ours returned an empty module (fixed `ae86c4a`) | [api L17](api.md#l17) |
+| ai D2 decay start | Refined: the first 30-tick update at least about 275 ticks after sight is lost | [ai D2](ai.md#d2) |
+| Interrupted capture keeps its progress | Progress is lost in both games | [units.md](units.md) |
+| Direct-fire AA, flak, SAMs against a hovering target | Matching in shots, hits and damage, except the Aeon T1 AA salvo (fixed `ab5e4b7`) | [weapons 33](weapons.md#r33) |
+
+## Still untested
+
+Each file's "Could not test" section has the detail; the open items are:
+
+- **API** ([api.md](api.md#could-not-test)): which operator fails in L19; the order `next` visits `STR_GetTokens`' result; category tests on live projectiles and props; which of the three item-list calls kills the real game.
+- **Weapons** ([weapons.md](weapons.md#could-not-test-needs-another-real-game-run-the-probes-are-written-and-run-in-ours)): neutral units; air and submerged collision shapes (a shot at a hovering gunship missed in the real game and hit in ours); the cause of row 20; wrecks and props; death timing; the AA hit rate against a fast-moving target (needs the gunship's patrol speed settled first); a second `SetTargetGround` case; nukes, TML / TMD, `Buff` damage, depth charges, `RackRecoil`, `FiringTolerance`.
+- **Movement** ([movement.md](movement.md#could-not-test)): rows 11 and 12 rest on one case each; a destroyer walking ashore; ferry routes, `IssueTransportUnloadSpecific`, carriers; the pathfinder per-tick budget; `SetTurnMult` above 1 and on aircraft; gunship multipliers on a second type; the gunship patrol speed; steering, clumping and formation spacing (route choice is intentionally different).
+- **Units** ([units.md](units.md#could-not-test)): where a reclaimed unit's wreck is made (engine or Lua); reclaim of an unfinished unit; factory build with energy at half; the assist chain in `probe_unit_orders` O4 and guard follow distance; `IssueNuke` / `IssueTactical`, `OnGiven`, sight delay.
+- **AI** ([ai.md](ai.md#could-not-test)): ring sums 3 and 4 without the civilian-reveal artefact and the real game's AI armies; `UnloadUnitsAtLocation` on an air transport through to the drop, and on a carrier; where the real ferry pick-up's wait comes from; which units count as `Artillery` threat; `CheckBlockingTerrain` over a ridge; structures against the map border; `FindClosestArmyWithBase`; platoon formation moves, `UseTeleporter`.
+- **Interface** ([ui.md](ui.md#could-not-test)): `GetRolloverInfo` for the 15 hover targets (the real mouse cannot be moved from Lua); sync timing of `OnSync` against `OnBeat`; enemy units through the interface; pause and game speed in ours with a visible window; typing into edits, scrollbars, double click, `Movie`, `MapPreview`, `Mesh`, `WorldMesh`, `Histogram`, `Border`, `Dragger`, second head.
+- **Intel** ([intel.md](intel.md#not-tested--open)): a flying aircraft's contact shape; a naval jammer's fakes on screen; how `Min` / `Max` set the fake radius; why the old fake generation keeps its threat after a reset; `GetRolloverInfo` over a fake; `Spoof` intel and the stealth / cloak interaction with jamming.

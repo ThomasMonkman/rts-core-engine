@@ -27,8 +27,10 @@
 //!    order counts down first).
 //! A paused builder's job still tracks its assist's progress and completes
 //! it; progress callbacks fire only on change.
-//! A builder whose order was cleared stops (`OnStopBuild`) and leaves the
-//! half-built unit standing, to decay while nobody works on it (`decay`). Jobs are kept by builder id, so callbacks run
+//! A builder whose order was cleared stops (`OnStopBuild`, then
+//! `OnFailedToBuild`; a factory the other way round, and a cancelled
+//! upgrade `OnFailedToBuild` then `OnStopBuild`, dev/probes
+//! probe_unit_build G2-G4) and leaves the half-built unit standing, to decay while nobody works on it (`decay`). Jobs are kept by builder id, so callbacks run
 //! in a fixed order.
 //! A builder (or assister) whose structure is destroyed unfinished gets
 //! `OnFailedToBuild` then `OnStopBuild(target, order)`, as moho's build stop
@@ -285,6 +287,15 @@ fn ready_to_start(lua: &Lua, builder: EntityId) -> LuaResult<Option<(BuildOrder,
     let commands = lua.app_data_ref::<Commands>();
     let Some(cmd) = commands.as_ref().and_then(|c| c.current(builder)) else { return Ok(None) };
     let Some(bp) = cmd.blueprint.clone() else { return Ok(None) };
+    // A blueprint that doesn't exist (orders are checked at issue,
+    // `api::command::issue`; this is the backstop): the order is dropped.
+    if matches!(cmd.kind, CommandKind::BuildMobile | CommandKind::BuildFactory | CommandKind::Upgrade)
+        && !crate::engine::api::command::unit_blueprint_known(lua, &bp) {
+        drop(commands);
+        tracing::warn!(target: "lua", builder, blueprint = %bp, "build order for an unknown unit blueprint; dropped");
+        lua.app_data_mut::<Commands>().expect("Commands").pop_front(builder);
+        return Ok(None);
+    }
     let (site, reach) = {
         let w = entity::world(lua);
         // Moho's dispatch hold: a factory rolling a unit off
@@ -1053,7 +1064,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         // FA: left standing it would stay invulnerable (FAF's OnStartBuild
         // turns its collision and damage off until it completes). The old
         // structure, if alive, is told it failed so FAF leaves the
-        // upgrading state. An assist can finish it while the builder still
+        // upgrading state, and stops (its consumption ends). An assist can finish it while the builder still
         // holds it (paused): a stop at fraction 1 completes it instead —
         // the builder's `OnStopBuild`, where FAF's script swaps the
         // upgrade — failing it would take down a fully built structure.
@@ -1064,24 +1075,42 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                 complete(lua, builder, &job, &b, &t)?;
                 continue;
             }
-            stop(lua, builder, false)?;
+            if finished {
+                stop(lua, builder, false)?;
+                continue;
+            }
+            // Moho's build stop, as for any failed build: `OnFailedToBuild`
+            // (FAF's `UpgradingState` one, which returns the structure to
+            // its idle state), then `OnStopBuild(new, 'Upgrade')`, where FAF
+            // turns the upgrade's consumption off. The real game logs the
+            // new structure's `OnFailedToBeBuilt` first, `OnStopBuild` after
+            // and the new one's `OnDestroy` last (dev/probes probe_unit_build
+            // G4 `upcancel`; the probe's class hook can't see the state's
+            // `OnFailedToBuild`, but `OnStopBuild` only reaches the class
+            // once the state has gone back to idle).
+            let target_obj = object(lua, job.target)?;
+            if let Some(t) = &target_obj {
+                UnitCallbacks::on_failed_to_be_built(lua, t, "unit")?;
+            }
             if builder_alive
                 && let Some(b) = object(lua, builder)? {
                 UnitCallbacks::on_failed_to_build(lua, &b, "unit")?;
             }
-            if !finished
-                && let Some(t) = object(lua, job.target)? {
-                UnitCallbacks::on_failed_to_be_built(lua, &t, "unit")?;
-                EntityCallbacks::destroy(lua, &t, "unit")?;
+            stop(lua, builder, builder_alive)?;
+            if let Some(t) = &target_obj {
+                EntityCallbacks::destroy(lua, t, "unit")?;
             }
             continue;
         }
-        // A factory build that stops unfinished (cancelled, or the factory
-        // died) fails: FAF's `OnFailedToBeBuilt` destroys the unit a tick
-        // later. Mobile builds leave theirs standing.
+        // A cancelled one: the factory's `OnFailedToBuild`, then its
+        // `OnStopBuild` (dev/probes probe_unit_build G3).
         if job.order == BuildOrder::Factory && target_alive && (!builder_alive || !order_current) {
-            stop(lua, builder, builder_alive)?;
             let unfinished = entity::world(lua).get(job.target).is_some_and(|e| e.fraction_complete < Fx::ONE);
+            if unfinished && builder_alive
+                && let Some(b) = object(lua, builder)? {
+                UnitCallbacks::on_failed_to_build(lua, &b, "unit")?;
+            }
+            stop(lua, builder, builder_alive)?;
             if unfinished
                 && let Some(t) = object(lua, job.target)? {
                 UnitCallbacks::on_failed_to_be_built(lua, &t, "unit")?;
@@ -1092,8 +1121,15 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             target_lost(lua, builder, &job)?;
             continue;
         }
+        // A mobile build cancelled unfinished: `OnStopBuild`, then
+        // `OnFailedToBuild` (dev/probes probe_unit_build G2, G8).
         if !builder_alive || !order_current {
             stop(lua, builder, builder_alive)?;
+            let unfinished = entity::world(lua).get(job.target).is_some_and(|e| e.fraction_complete < Fx::ONE);
+            if builder_alive && unfinished
+                && let Some(b) = object(lua, builder)? {
+                UnitCallbacks::on_failed_to_build(lua, &b, "unit")?;
+            }
             continue;
         }
         let (Some(builder_obj), Some(target_obj)) = (object(lua, builder)?, object(lua, job.target)?) else { continue };

@@ -47,6 +47,23 @@ impl MotionKind {
         })
     }
 
+    /// What `SetSpeedMult(m)` does to this kind's top speed. Surface units
+    /// (land, hover, amphibious, naval and subs) take a multiplier under 1
+    /// squared and one of 1 or more as it is; aircraft take it as it is.
+    /// The real game's T1 tank (3.40) runs 0.21 / 0.85 / 1.91 / 2.75 at
+    /// m = 0.25 / 0.5 / 0.75 / 0.9 and 5.10 / 10.17 at 1.5 / 3, the hover
+    /// tank and frigate the same law, and FAF's `SubSpeedMultiplier` 0.9 /
+    /// `WaterSpeedMultiplier` 0.945 come out 0.81 / 0.893 (dev/probes
+    /// probe_mov_mult, probe_mov_naval). Gunships follow neither law in the
+    /// real game (0.5 gives ~0.43): not modelled, linear here.
+    pub fn speed_mult(self, m: Fx) -> Fx {
+        if self != MotionKind::Air && self != MotionKind::None && m < Fx::ONE {
+            m.saturating_mul(m)
+        } else {
+            m
+        }
+    }
+
     /// It can be on land (its occupancy caps include `LAND`).
     pub fn on_land(self) -> bool {
         self.caps().is_some_and(|c| c & crate::engine::sim::nav::caps::LAND != 0)
@@ -802,7 +819,16 @@ fn goal(cmd: Option<&crate::engine::sim::command::Command>, world: &EntityWorld,
             });
             building.or_else(|| touch(cmd.target)).map(|p| (p, build_range, false))
         }
-        K::Repair | K::Reclaim | K::Capture | K::Sacrifice => touch(cmd.target).map(|p| (p, build_range, false)),
+        K::Repair | K::Reclaim | K::Capture => touch(cmd.target).map(|p| (p, build_range, false)),
+        // Right up to it (`api::sacrifice::REACH`; the real engineer walks
+        // in, dev/probes probe_unit_build G8).
+        K::Sacrifice => touch(cmd.target).map(|p| (p, crate::engine::api::sacrifice::REACH, false)),
+        // A load order its air transport joined (`api::transport`'s
+        // pick-up): the cargo gathers at the order's gather point and the
+        // transport flies there.
+        K::TransportLoadUnits if gathers(cmd, unit) || cmd.target == CommandTarget::Entity(unit) => {
+            cmd.gather.map(|g| (g, if cmd.target == CommandTarget::Entity(unit) { Fx::ZERO } else { Fx::ONE }, false))
+        }
         // Board a transport (`api::transport` attaches it once in reach).
         K::TransportLoadUnits => at(cmd.target).map(|p| (p, Fx::ONE, false)),
         // Fly out to a unit to pick it up (`api::transport` boards it once
@@ -831,6 +857,17 @@ fn goal(cmd: Option<&crate::engine::sim::command::Command>, world: &EntityWorld,
         // (`api::ferry`); the ferry order itself holds still.
         K::Ferry => None,
         _ => None,
+    }
+}
+
+/// Whether `unit` is cargo gathering for a pick-up: its load order has a
+/// gather point and the transport it names is one of the order's units
+/// (`api::transport`). The cargo settles round the point as a group sent to
+/// one spot does.
+fn gathers(cmd: &crate::engine::sim::command::Command, unit: EntityId) -> bool {
+    match (cmd.kind, cmd.target, cmd.gather) {
+        (CommandKind::TransportLoadUnits, CommandTarget::Entity(t), Some(_)) => t != unit && cmd.units.binary_search(&t).is_ok(),
+        _ => false,
     }
 }
 
@@ -1184,6 +1221,15 @@ pub fn leaning(bank: (Fx, Fx)) -> bool {
     bank.0.saturating_mul(bank.0).saturating_add(bank.1.saturating_mul(bank.1)) > Fx::from_num(1e-6)
 }
 
+/// Where the air staging pad `cmd` docks onto stands: a load order onto a
+/// live `AIRSTAGINGPLATFORM` that isn't a carrier (carriers take aircraft
+/// inside, `api::transport`).
+fn staging_pad(cmd: Option<&crate::engine::sim::command::Command>, world: &EntityWorld) -> Option<FxVec3> {
+    let cmd = cmd.filter(|c| c.kind == CommandKind::TransportLoadUnits)?;
+    let CommandTarget::Entity(t) = cmd.target else { return None };
+    world.get(t).filter(|t| !t.destroyed && t.unit.as_deref().and_then(|u| u.staging.as_deref()).is_some_and(|s| !s.carrier)).map(|t| t.position())
+}
+
 /// Horizontal distance.
 fn dist2(a: FxVec3, b: FxVec3) -> Fx {
     let (dx, dz) = (b.x - a.x, b.z - a.z);
@@ -1292,8 +1338,17 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     if p.kind == MotionKind::None || (immobile && state.speed == Fx::ZERO) {
         return None;
     }
+    // Made immobile at speed, a surface unit halts on the spot: the real
+    // game's tank stood where it was from the next tick, ours braked 2.2 on
+    // over 8 ticks (dev/probes probe_mov_api I2).
+    if immobile && p.kind != MotionKind::Air {
+        let mut m = still(unit, e, MotionState { speed: Fx::ZERO, horz: HorzState::Stopped, arrival: Arrival::Cruising, ..state });
+        m.event = (state.horz != HorzState::Stopped).then_some((HorzState::Stopped, state.horz));
+        m.on_ground = data.on_ground;
+        return Some(m);
+    }
     let mult = data.motion;
-    let mut max_speed = p.max_speed.saturating_mul(mult.speed);
+    let mut max_speed = p.max_speed.saturating_mul(p.kind.speed_mult(mult.speed));
     if let Some(t) = env.terrain.filter(|_| p.shallows_depth < Fx::ZERO) {
         let pos = e.position();
         max_speed = max_speed.saturating_mul(shallows_factor(p.shallows_depth, t, pos.x, pos.z));
@@ -1433,12 +1488,24 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     // spot and lands there (`sim::landing`). The real game's T3 fighters do
     // (dev/probes probe_air); ours circled.
     let mut land_search = false;
-    let holding = winged && !immobile && goal.is_none() && cmd.is_none();
+    // Docking on an air staging pad (a load order onto one): over the pad
+    // (within `StartTurnDistance`, at least a unit) a plane lands on it as
+    // an idle one lands on its spot, without the wait, and the pad takes it
+    // once it's down (`api::transport`). The real game's interceptor
+    // arrived over the pad at t~41, came down to about half its height,
+    // circled, and touched down and docked at t=153 (dev/probes
+    // probe_mov_air F4; ours docked on arrival, 11 s sooner).
+    let pad = if p.kind == MotionKind::Air && p.winged && !immobile { staging_pad(cmd, world) } else { None };
+    let docking = pad.filter(|&d| winged && (state.landing == Some(d) || dist2(pos, d) <= p.air.start_turn_distance.max(Fx::ONE)));
+    let holding = winged && !immobile && ((goal.is_none() && cmd.is_none()) || docking.is_some());
     let state = if winged && !immobile {
         // (It looks for a spot only once nearly stopped over its point:
         // every plane in the real-game probe started down from a hover.
         // Inferred.)
-        let (mut s, search) = landing_state(p, state, pos, holding && state.speed < Fx::ONE, holding, env.tick.unwrap_or(0));
+        let (mut s, search) = landing_state(p, state, pos, holding && docking.is_none() && state.speed < Fx::ONE, holding, env.tick.unwrap_or(0));
+        if docking.is_some() {
+            s.landing = docking;
+        }
         if holding {
             if let Some(at) = s.landing.or(s.hold) {
                 goal = Some((at, Fx::ZERO, false));
@@ -1479,7 +1546,8 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     // then takes off.
     let landed = data.layer != crate::engine::sim::layer::Layer::Air && (!p.winged || state.landing.is_some());
     if p.kind == MotionKind::Air && landed {
-        if cmd.is_none() && data.navigator_goal.is_none() {
+        // (Down on the pad it's docking on: it waits for the pad to take it.)
+        if (cmd.is_none() && data.navigator_goal.is_none()) || pad.is_some_and(|d| dist2(pos, d) <= Fx::ONE) {
             return None;
         }
         let mut m = still(unit, e, MotionState { vertical: VerticalMotion::Up, idle_since: None, hold: None, landing: None, ..state });
@@ -1521,6 +1589,9 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
         }
         return moved.map(|m| Moved { ordered: cmd.is_some(), patrolling: cmd.is_some_and(|c| matches!(c.kind, CommandKind::Patrol | CommandKind::FormPatrol)), ..m });
     }
+    // (A formation member at its slot may still turn to the layout's
+    // facing, below.)
+    let mut face = face;
     // Hover units wobble even at rest, and a lean eases back after a stop.
     let wobbles = p.kind == MotionKind::Hover && p.ground.wobble_factor > Fx::ZERO && terrain.is_some();
     let settling = wobbles || (p.kind == MotionKind::Hover && terrain.is_some() && leaning(state.bank));
@@ -1571,14 +1642,28 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     if let Some((g, radius, completes)) = goal {
         let (dx, dz) = (g.x - pos.x, g.z - pos.z);
         let dist = sqrt(dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)));
-        // A winged aircraft can't stop on a point: a move is done once it's
-        // within its turning radius.
+        // A winged aircraft's last move is done only once it's over the
+        // point: it overshoots, circles back and slows onto it (D is capped
+        // at the distance) until it's within a quarter of a unit. The real
+        // game's interceptors went idle 0.11..0.24 from the goal, some
+        // circling in for 17 s after first passing it at speed (`I2` at
+        // 30 a second: idle 0.24 away at v 0.26), one flying straight
+        // through it at 6.2 (dev/probes probe_mov_mult I0.5, I0.75, I2,
+        // Ia0.25; ours ended the order a turning radius out at speed).
+        // Other orders (patrols, aggressive moves) still end a turning
+        // radius out.
         let radius = if winged && completes && turn > Fx::ZERO {
-            // (Flying through: a second of flight at top speed out. The real
-            // game's planes start each queued corner about that far out: the
-            // spy planes ~25 at 27, the T3 fighters ~22 at 22
-            // (dev/probes probe_air_all). Fitted.)
-            radius.max(if through { max_speed } else { state.speed.max(p.min_speed) / turn })
+            if through {
+                // (Flying through: a second of flight at top speed out. The
+                // real game's planes start each queued corner about that
+                // far out: the spy planes ~25 at 27, the T3 fighters ~22 at
+                // 22 (dev/probes probe_air_all). Fitted.)
+                radius.max(max_speed)
+            } else if cmd.is_some_and(|c| matches!(c.kind, CommandKind::Move | CommandKind::FormMove)) {
+                Fx::from_num(0.25)
+            } else {
+                radius.max(state.speed.max(p.min_speed) / turn)
+            }
         } else {
             radius
         };
@@ -1655,9 +1740,26 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
         // At rest on a work order: hold anywhere in work range (pushed off
         // the units parked at the same spot, it stays there).
         let parked = !completes && !chasing && pace.is_none() && state.speed == Fx::ZERO && cmd.is_some_and(|c| is_work(c.kind)) && dist <= radius + work_slack();
-        if dist <= radius || parked || (completes && crowded()) {
+        // (Cargo gathering for a pick-up settles in a clump round the
+        // gather point, as a group moved to one spot does.)
+        let gathering = cmd.is_some_and(|c| gathers(c, unit));
+        if dist <= radius || parked || ((completes || gathering) && crowded()) {
             arrived = completes;
-            if arrived && eases {
+            // A formation move ends with each member turned on the spot to
+            // the layout's facing: the real game's six tanks all finished
+            // facing the order's heading, ours kept the headings they
+            // arrived with (dev/probes probe_mov_misc FM1..6).
+            let mut turning = false;
+            if arrived && eases
+                && let Some(h) = cmd.filter(|c| c.kind == CommandKind::FormMove).and_then(|c| c.slot(unit).and_then(|s| c.travel.get(s.group as usize)).map(|t| t.final_heading)) {
+                let err = wrap(h - facing(e));
+                if err.abs() > Fx::from_num(0.01) && turn > Fx::ZERO {
+                    arrived = false;
+                    turning = true;
+                    face = Some(err);
+                }
+            }
+            if (arrived || turning) && eases {
                 arrival = Arrival::Coasting;
             }
             if data.path.is_some() {
@@ -1836,9 +1938,9 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
                 // (Not boarding or working: those still push. Only a crowd
                 // gathering at one point closes up round it: not formation
                 // members, each bound for its own slot.)
-                let squad = cmd.filter(|c| c.issued > 1 && moving(c.kind)).map(|c| {
-                    let gathering = matches!(c.kind, CommandKind::Move | CommandKind::AggressiveMove) && c.slot(unit).is_none();
-                    crate::engine::sim::avoidance::Squad { cmd: c.id, goal: (completes && final_leg && gathering).then_some((g, c.issued)) }
+                let squad = cmd.filter(|c| c.issued > 1 && (moving(c.kind) || gathering)).map(|c| {
+                    let closes_up = gathering || (completes && matches!(c.kind, CommandKind::Move | CommandKind::AggressiveMove) && c.slot(unit).is_none());
+                    crate::engine::sim::avoidance::Squad { cmd: c.id, goal: (final_leg && closes_up).then_some((g, c.issued)) }
                 });
                 let (steer, squad_pace) = if p.kind == MotionKind::Air {
                     (steer, None)
@@ -2357,7 +2459,8 @@ struct Hover<'a> {
     /// before its ratio).
     aim_range: Fx,
     max_speed: Fx,
-    /// A load/unload order flies at `TransportHoverHeight`, not `Elevation`.
+    /// On a load/unload order: it lowers to `TransportHoverHeight` over
+    /// the order's point (`hover_step`).
     transport_dip: bool,
     /// Its motion state with this tick's idle bookkeeping (`landing_state`).
     state: MotionState,
@@ -2770,10 +2873,16 @@ fn hover_step(e: &crate::engine::sim::entity::Entity, data: &crate::engine::sim:
     let mut lift_push = Fx::ZERO;
     let mut height = p.elevation;
     if let Some(ground) = surface_height(p.kind, h.env.terrain, next.x, next.z, Fx::ZERO) {
-        // A transport on a load/unload order flies at its
-        // `TransportHoverHeight`, not its `Elevation`: it lowers for the
-        // tractor / drop and climbs back once the order ends (moho's
-        // `ShouldHoverInsteadOfLand`, MohoEngine.dll 0x1029b210).
+        // A transport on a load/unload order flies the leg at its
+        // `Elevation` and comes down to its `TransportHoverHeight` only
+        // over the pick-up / drop point: from where its target velocity
+        // drops below its top speed (within that distance of the point),
+        // and it climbs back once the order ends. The real game's T1
+        // transport flew both legs at h 8.2..8.8 and started down 10.3
+        // (pick-up) and 8.7..10.4 (drop) short, on the tick it began to
+        // brake (`Top -> Down` with `TopSpeed -> Stopping`), reaching 3.5
+        // as it stopped (dev/probes probe_mov_air TR1 / TR2); ours flew
+        // the whole leg at the hover height.
         // Landing (`CalcMoveAir` 0x1029df76): down to half its `Elevation`
         // on the way, onto the ground within 0.5 of the spot.
         let elevation = if let Some(d) = to_spot {
@@ -2784,7 +2893,7 @@ fn hover_step(e: &crate::engine::sim::entity::Entity, data: &crate::engine::sim:
             } else {
                 p.elevation / 2
             }
-        } else if p.air.transport_hover_height > Fx::ZERO && h.transport_dip {
+        } else if p.air.transport_hover_height > Fx::ZERO && h.transport_dip && h.goal.is_some_and(|(g, _, _)| dist2(next, g) <= h.max_speed) {
             p.air.transport_hover_height
         } else {
             p.elevation
@@ -3455,29 +3564,40 @@ pub fn apply(world: &mut EntityWorld, commands: &mut Commands, moved: &[Moved], 
             static MOVING: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("Moving").expect("state"));
             let moving = *MOVING;
             u.states.set(moving, m.state.speed != Fx::ZERO);
-            // In an attack run or tail chase (moho sets it in
-            // `ComputeAirCombatTactics`; its bombs drop only then).
+            // In an attack run, tail chase or break-off (moho's
+            // `ComputeAirCombatTactics` sets it in states 1 and 2,
+            // 0x1029bd5f, and in 6, 0x1029bf13; `CalcMoveAir` clears it
+            // every tick first, 0x1029e4e6). Its bombs drop only then. The
+            // break-off counts: a bomber ordered onto a target already
+            // inside `BreakOffDistance` goes straight from 0 to 6 and bombs
+            // on that pass (FAF's strategic bombers, 50, at a target 38 out).
             static RUN: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("MakingAttackRun").expect("state"));
-            u.states.set(*RUN, matches!(m.state.combat, 1 | 2));
+            u.states.set(*RUN, matches!(m.state.combat, 1 | 2 | 6));
         }
         if m.arrived && commands.dispatched(m.unit).is_some() {
             use crate::engine::sim::command::CommandKind as K;
-            let patrol = commands.current(m.unit).filter(|c| matches!(c.kind, K::Patrol | K::FormPatrol)).map(|c| (c.kind, c.target));
+            let patrol = commands.current(m.unit).filter(|c| matches!(c.kind, K::Patrol | K::FormPatrol)).map(|c| (c.kind, c.target, c.patrol_home));
             match patrol {
-                Some((kind, target)) => {
+                Some((kind, target, home)) => {
                     // Patrols loop: with anything queued after it, this one
                     // goes to the back (moho's dispatcher, MohoEngine.dll
                     // 0x101893d7..0x1018952b: any next command, of any
-                    // kind); alone, it's followed by a leg back to where the
-                    // unit started.
+                    // kind). Alone, it ends (a script's single
+                    // `IssuePatrol` point, dev/probes probe_unit_orders O3),
+                    // unless the player gave it: then a leg back to where
+                    // the unit started follows (`Command::patrol_home`).
                     let others = commands.queue(m.unit).nth(1).is_some();
                     let origin = world.get(m.unit).and_then(|e| e.unit.as_deref()).and_then(|u| u.patrol_origin);
                     if others {
                         commands.requeue_front(m.unit);
                     } else {
                         commands.pop_front(m.unit);
-                        if let Some(o) = origin {
-                            commands.issue(&[m.unit], kind, CommandTarget::Ground(o), None, 0);
+                        if home
+                            && let Some(o) = origin {
+                            let id = commands.issue(&[m.unit], kind, CommandTarget::Ground(o), None, 0);
+                            if let Some(c) = commands.get_mut(id) {
+                                c.patrol_home = true;
+                            }
                         }
                     }
                     if let (Some(u), CommandTarget::Ground(p)) = (world.get_mut(m.unit).and_then(|e| e.unit.as_deref_mut()), target) {
@@ -3812,11 +3932,12 @@ mod tests {
     }
 
     #[test]
-    fn patrol_loops_between_start_and_point() {
+    fn players_patrol_loops_between_start_and_point() {
         let mut w = EntityWorld::default();
         let mut c = Commands::default();
         let t = tank(&mut w, 0.0, 0.0);
-        c.issue(&[t], CommandKind::Patrol, CommandTarget::Ground(FxVec3::from_f64(20.0, 0.0, 0.0)), None, 0);
+        let id = c.issue(&[t], CommandKind::Patrol, CommandTarget::Ground(FxVec3::from_f64(20.0, 0.0, 0.0)), None, 0);
+        c.get_mut(id).unwrap().patrol_home = true;
         let (mut cands, mut moved, mut events) = (Vec::new(), Vec::new(), Vec::new());
         let (mut reached_far, mut back_home) = (0, 0);
         let mut near_far = false;
@@ -3835,6 +3956,23 @@ mod tests {
         }
         assert!(reached_far >= 2 && back_home >= 2, "loops: {reached_far} out, {back_home} back");
         assert!(!c.is_idle(t), "a patrol never ends by itself");
+    }
+
+    /// A script's single patrol point (no `patrol_home`) ends on arrival.
+    #[test]
+    fn scripts_single_patrol_point_ends() {
+        let mut w = EntityWorld::default();
+        let mut c = Commands::default();
+        let t = tank(&mut w, 0.0, 0.0);
+        c.issue(&[t], CommandKind::Patrol, CommandTarget::Ground(FxVec3::from_f64(20.0, 0.0, 0.0)), None, 0);
+        let (mut cands, mut moved, mut events) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..400 {
+            candidates(&w, &c, &mut cands);
+            step(&w, &c, Env::default(), &cands, usize::MAX, &mut moved);
+            apply(&mut w, &mut c, &moved, &mut events);
+        }
+        assert!(c.is_idle(t), "the order ended");
+        assert!(w.get(t).unwrap().position().x > Fx::from_num(19), "at the point");
     }
 
     #[test]

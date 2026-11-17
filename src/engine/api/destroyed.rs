@@ -29,7 +29,7 @@ fn entity_alive(lua: &Lua, id: u32) -> bool {
 
 /// `BeenDestroyed`: `Destroy` has been called (moho reads the destroy-queued
 /// flag, 0x102746d0 tests +0x1b9).
-fn entity_destroy_queued(lua: &Lua, this: &LuaTable) -> LuaResult<bool> {
+pub(crate) fn entity_destroy_queued(lua: &Lua, this: &LuaTable) -> LuaResult<bool> {
     let LuaValue::UserData(ud) = this.raw_get::<LuaValue>(C_OBJECT)? else { return Ok(true) };
     let Ok(h) = ud.borrow::<EntityHandle>() else { return is_destroyed(lua, &LuaValue::Table(this.clone())) };
     Ok(lua.app_data_ref::<EntityWorld>().and_then(|w| w.get(h.0).map(|e| e.destroyed)).unwrap_or(true))

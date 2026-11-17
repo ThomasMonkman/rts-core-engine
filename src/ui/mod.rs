@@ -190,6 +190,20 @@ struct UiDeposits(Arc<Vec<(u8, f64, f64, f64)>>);
 #[derive(Default)]
 struct UiBusy(Vec<u32>);
 
+/// Units that can't be selected (sorted): cargo in a transport, units still
+/// being built inside their factory. `UISelectionByCategory` skips them.
+#[derive(Default)]
+struct UiUnselectable(Vec<u32>);
+
+/// What `UISelectionByCategory` needs of the renderer's view this frame
+/// ([`UserVm::set_select_scope`]): whether a point is on screen
+/// (`inViewFrustum`), and the point `nearestToMouse` measures from (the
+/// ground under the cursor, else the camera's focus).
+pub struct SelectScope {
+    pub in_view: Box<dyn Fn([f32; 3]) -> bool>,
+    pub from: Option<[f32; 3]>,
+}
+
 /// Focus-army units hurt since the last beat (`OnFocusArmyUnitDamaged`).
 #[derive(Default)]
 struct DamagedUnits(Vec<u32>);
@@ -211,7 +225,9 @@ fn avatar_priority(lua: &Lua, blueprint: &str) -> LuaResult<Option<i64>> {
         .raw_get::<Option<LuaTable>>("__blueprints")?
         .and_then(|b| b.raw_get::<Option<LuaTable>>(blueprint).ok().flatten())
         .and_then(|bp| bp.raw_get::<Option<LuaTable>>("General").ok().flatten())
-        .and_then(|g| g.raw_get::<Option<i64>>("QuickSelectPriority").ok().flatten());
+        .and_then(|g| g.raw_get::<Option<i64>>("QuickSelectPriority").ok().flatten())
+        // 0 is the reflected default every blueprint carries: not an avatar.
+        .filter(|&p| p != 0);
     if let Some(mut a) = lua.app_data_mut::<AvatarPriorities>() {
         a.0.insert(blueprint.to_string(), priority);
     }
@@ -499,6 +515,58 @@ impl UserVm {
                 }
                 let f: LuaFunction = lua.globals().get("__engine_filter_category")?;
                 f.call::<Vec<u32>>((list, category))
+            })?;
+        lua_fn!(&lua, global_raw,
+            /// `UISelectionByCategory`'s units (user_api.rs), worked out at once
+            /// as moho does, so `GetSelectedUnits()` on the next line sees them:
+            /// the focus army's units (any army's with none) in the category
+            /// expression, idle / on screen / the one nearest the cursor when
+            /// asked, plus the selection when adding. Structures still being
+            /// built count; cargo and units inside their factory don't (as the
+            /// real game's `UISelectionByCategory('ALLUNITS')`). Nil when none,
+            /// leaving the selection as it is.
+            #[lua(internal)]
+            __engine_select_by_category = |lua, (expr, add, in_view, nearest, idle): (String, bool, bool, bool, bool)| {
+                let focus = lua.named_registry_value::<Option<i64>>("user.focus_army")?.unwrap_or(-1);
+                let units: Vec<(u32, std::sync::Arc<str>, [f32; 3])> = match lua.app_data_ref::<UiWorld>() {
+                    Some(w) => {
+                        let skip = lua.app_data_ref::<UiUnselectable>();
+                        w.0.iter()
+                            .filter(|u| focus < 1 || i64::from(u.army) == focus)
+                            .filter(|u| skip.as_ref().is_none_or(|s| s.0.binary_search(&u.id).is_err()))
+                            .map(|u| (u.id, u.blueprint.clone(), u.position))
+                            .collect()
+                    }
+                    None => Vec::new(),
+                };
+                let list = lua.create_table_with_capacity(units.len() * 2, 0)?;
+                for (id, bp, _) in &units {
+                    list.push(*id)?;
+                    list.push(&**bp)?;
+                }
+                let f: LuaFunction = lua.globals().get("__engine_filter_category")?;
+                let mut ids: Vec<u32> = f.call((list, expr))?;
+                let position = |id: u32| units.binary_search_by_key(&id, |u| u.0).ok().map(|i| units[i].2);
+                if idle && let Some(busy) = lua.app_data_ref::<UiBusy>() {
+                    ids.retain(|id| busy.0.binary_search(id).is_err());
+                }
+                let scope = lua.app_data_ref::<SelectScope>();
+                if in_view && let Some(scope) = scope.as_ref() {
+                    ids.retain(|&id| position(id).is_some_and(|p| (scope.in_view)(p)));
+                }
+                if nearest && let Some(from) = scope.as_ref().and_then(|s| s.from) {
+                    let d2 = |id: u32| position(id).map_or(f32::MAX, |p| (p[0] - from[0]).powi(2) + (p[2] - from[2]).powi(2));
+                    ids = ids.into_iter().min_by(|a, b| d2(*a).total_cmp(&d2(*b)).then(a.cmp(b))).into_iter().collect();
+                }
+                drop(scope);
+                if add {
+                    ids.extend(lua.globals().raw_get::<Option<LuaTable>>("__engine_selection")?.into_iter().flat_map(|t| {
+                        t.sequence_values::<LuaTable>().filter_map(|u| u.ok()?.raw_get::<Option<u32>>("_id").ok().flatten()).collect::<Vec<_>>()
+                    }));
+                }
+                ids.sort_unstable();
+                ids.dedup();
+                Ok(if ids.is_empty() { None } else { Some(ids) })
             })?;
         Ok(Self { lua })
     }
@@ -1047,6 +1115,16 @@ impl UserVm {
         self.lua.set_app_data(UiBusy(busy.to_vec()));
     }
 
+    /// Units that can't be selected this tick (sorted; see [`UiUnselectable`]).
+    pub fn set_unselectable(&self, ids: Vec<u32>) {
+        self.lua.set_app_data(UiUnselectable(ids));
+    }
+
+    /// The renderer's view for this frame's `UISelectionByCategory` calls.
+    pub fn set_select_scope(&self, scope: SelectScope) {
+        self.lua.set_app_data(scope);
+    }
+
     /// Units the interface holds data for (selected, or looked up), sorted.
     pub fn known_units(&self) -> LuaResult<Vec<u32>> {
         let data: LuaTable = self.lua.globals().raw_get("__engine_unit_data")?;
@@ -1107,7 +1185,10 @@ impl UserVm {
     fn selection_changed(&self, ids: &[u32], refresh: bool) -> LuaResult<()> {
         let unit: LuaFunction = self.lua.globals().get("__engine_unit")?;
         let old: Vec<u32> = self.lua.named_registry_value::<Option<Vec<u32>>>("user.selection")?.unwrap_or_default();
-        if old == ids && !refresh {
+        // The interface may have selected since (`SelectUnits` is
+        // synchronous): then the same ids are still a change for it.
+        let current: Vec<u32> = self.lua.globals().raw_get::<Option<LuaTable>>("__engine_selection")?.map_or_else(Vec::new, |t| t.sequence_values::<LuaTable>().filter_map(|u| u.ok()?.raw_get::<Option<u32>>("_id").ok().flatten()).collect());
+        if old == ids && current == ids && !refresh {
             return Ok(());
         }
         let list = |ids: &mut dyn Iterator<Item = u32>| -> LuaResult<LuaTable> {
@@ -2053,6 +2134,14 @@ impl UserVm {
     }
 }
 
+/// Runs interface Lua that isn't in the VFS (the console's `ui_lua`,
+/// `--ui-lua`): translated from SupCom Lua first, as every game script is
+/// (docs/architecture/lua-bridge.md), so it sees the same dialect as FAF's.
+pub fn run_source(lua: &Lua, code: &str, name: &str) -> LuaResult<()> {
+    let code = crate::engine::lua_translation::translate(code);
+    lua.load(code).set_name(name).exec()
+}
+
 /// Runs a console command line in the user layer (see [`UserVm::console`]);
 /// FAF's `ConExecute` comes here too.
 pub fn console(lua: &Lua, line: &str) -> LuaResult<()> {
@@ -2060,10 +2149,7 @@ pub fn console(lua: &Lua, line: &str) -> LuaResult<()> {
     let (cmd, rest) = line.split_once(char::is_whitespace).map_or((line, ""), |(c, r)| (c, r.trim()));
     let import = || -> LuaResult<LuaFunction> { lua.globals().get("import") };
     match cmd.to_ascii_lowercase().as_str() {
-        "ui_lua" => {
-            let code = crate::engine::lua_translation::translate(rest);
-            lua.load(code).set_name("=[console]").exec()?;
-        }
+        "ui_lua" => run_source(lua, rest, "=[console]")?,
         // Alt-F2 (`debug_create_unit`): FAF's spawn menu, opened or closed
         // (MohoEngine.dll imports `/lua/ui/dialogs/createunit.lua`; the sim
         // checks cheats when a spawn arrives).
@@ -2109,6 +2195,15 @@ pub fn console(lua: &Lua, line: &str) -> LuaResult<()> {
 mod tests {
     use super::*;
     use crate::engine::sim::command::CommandKind as K;
+
+    /// `--ui-lua` and the console's `ui_lua` take SupCom Lua (`!=`, `#`
+    /// comments, bit operators), like any game script.
+    #[test]
+    fn run_source_translates_supcom_lua() {
+        let lua = Lua::new();
+        run_source(&lua, "# comment\nr = (1 != 2) and (6 & 3)", "=test").unwrap();
+        assert_eq!(lua.globals().get::<i64>("r").unwrap(), 2);
+    }
 
     #[test]
     fn transport_order_names_round_trip() {

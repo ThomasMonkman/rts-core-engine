@@ -384,21 +384,20 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::AIBrain,
         /// This army's live units matching `category`, in entity id order.
         /// `needToBeIdle` is ignored (FAF notes it isn't functional in moho);
-        /// `requireBuilt` drops units still under construction.
+        /// `requireBuilt` does nothing either: the real game lists a factory at 3% with it
+        /// (dev/probes probe_ai_brain); FAF's callers check `GetFractionComplete` themselves.
         GetListOfUnits = |lua,
-         (brain, category, _need_to_be_idle, require_built): (
+         (brain, category, _need_to_be_idle, _require_built): (
             Obj<moho::AIBrain>,
             LuaUserDataRef<crate::engine::api::categories::EntityCategory>,
             Option<bool>,
             Option<bool>,
         )| {
             let ArmyHandle(index) = script_object::handle(&brain)?;
-            let require_built = require_built.unwrap_or(false);
             let ids: Vec<u32> = crate::engine::api::entity::world(lua)
                 .iter()
                 .filter(|e| e.unit.is_some() && !e.destroyed && e.army == Some(index))
                 .filter(|e| e.category_index.is_some_and(|i| category.0.contains(i)))
-                .filter(|e| !require_built || e.fraction_complete >= Fx::ONE)
                 .map(|e| e.id)
                 .collect();
             crate::engine::api::entity::objects_table::<moho::Unit>(lua, &ids)
@@ -648,12 +647,14 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             Ok(Some(Shaped::<ArmyStat>::new(t)))
         })?;
     lua_method!(lua, moho::AIBrain,
-        /// Live units of this army in `category` (finished or not).
+        /// Live, finished units of this army in `category` (a unit under
+        /// construction counts once it's done: dev/probes probe_unit_build G3).
         GetCurrentUnits = |lua, (brain, category): (Obj<moho::AIBrain>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>)| {
             let ArmyHandle(index) = script_object::handle(&brain)?;
             let w = crate::engine::api::entity::world(lua);
             Ok(w.iter()
                 .filter(|e| e.kind == crate::engine::sim::entity::EntityKind::Unit && !e.destroyed && e.army == Some(index))
+                .filter(|e| e.fraction_complete >= crate::engine::sim::math::Fx::ONE)
                 .filter(|e| e.category_index.is_some_and(|c| category.0.contains(c)))
                 .count())
         })?;

@@ -136,6 +136,16 @@ fn set_attached(lua: &Lua, id: EntityId, on: bool) {
 
 /// Attaches with the parent bone as posed by its manipulators (the rest pose
 /// for a parent without any). A unit enters its `Attached` state.
+/// The parent bone of an attachment: bone -1 is the centre of the parent's
+/// collision box ([`crate::engine::sim::entity::CENTRE_BONE`]).
+fn resolve_parent_bone(lua: &Lua, parent: EntityId, bone: &LuaValue) -> LuaResult<Option<u32>> {
+    match bone {
+        LuaValue::Integer(-1) => Ok(Some(crate::engine::sim::entity::CENTRE_BONE)),
+        LuaValue::Number(n) if *n == -1.0 => Ok(Some(crate::engine::sim::entity::CENTRE_BONE)),
+        _ => crate::engine::api::manipulator::resolve_bone(lua, parent, bone),
+    }
+}
+
 pub fn attach_posed(lua: &Lua, child: EntityId, attachment: crate::engine::sim::entity::Attachment) {
     {
         let manips = lua.app_data_ref::<crate::engine::sim::manipulator::Manipulators>();
@@ -644,7 +654,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         })?;
     lua_method!(lua, moho::Entity,
         /// Detaches this entity from what it is attached to.
-        DetachFrom = |lua, (this, _skip_ballistic): (Obj<moho::Entity>, Option<bool>)| {
+        ///
+        /// A transport's cargo leaves it as an unload does: the transport
+        /// hears `OnTransportDetach` and the unit falls from where it was
+        /// (`skipBallistic`: it doesn't), `transport::script_detach`.
+        DetachFrom = |lua, (this, skip_ballistic): (Obj<moho::Entity>, Option<bool>)| {
+            if crate::engine::api::transport::script_detach(lua, entity_id(&this)?, skip_ballistic.unwrap_or(false))? {
+                return Ok(());
+            }
             let parent = with_entity_mut(lua, &this, |e| e.attachment.take().map(|a| a.parent))?;
             take_off(lua, entity_id(&this)?, parent)
         })?;
@@ -991,10 +1008,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             quaternion(lua, q)
         })?;
     lua_method!(lua, moho::Entity,
-        /// The entity heading (yaw).
+        /// The entity heading: the yaw of its orientation (`GetOrientation`),
+        /// tilt and all. The real game's tank on a ramp reads the same
+        /// heading from both, drifting 0.02 with the tilt; ours gave the
+        /// course it was steering (dev/probes probe_mov_api S*).
         GetHeading = |lua, this: Obj<moho::Entity>| {
             let id = entity_id(&this)?;
-            Ok(world(lua).get(id).map_or(0.0, |e| crate::engine::sim::movement::facing(e).to_num::<f64>()))
+            Ok(world(lua).get(id).map_or(0.0, |e| e.orientation.heading().to_num::<f64>()))
         })?;
     lua_method!(lua, moho::Entity,
         /// The position (of `bone`, if given) as a vector.
@@ -1010,7 +1030,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             let parent = entity_id(&parent)?;
             let attachment = crate::engine::sim::entity::Attachment {
                 parent,
-                parent_bone: resolve_bone(lua, parent, &parent_bone)?,
+                parent_bone: resolve_parent_bone(lua, parent, &parent_bone)?,
                 self_bone: resolve_bone(lua, child, &self_bone)?,
             };
             attach_posed(lua, child, attachment);
@@ -1023,7 +1043,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             let parent = entity_id(&parent)?;
             let attachment = crate::engine::sim::entity::Attachment {
                 parent,
-                parent_bone: crate::engine::api::manipulator::resolve_bone(lua, parent, &parent_bone)?,
+                parent_bone: resolve_parent_bone(lua, parent, &parent_bone)?,
                 self_bone: None,
             };
             attach_posed(lua, child, attachment);
@@ -1339,7 +1359,21 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// calls `Destroy`. Later calls are no-ops. A `Destroy` earlier in the
         /// beat doesn't stop it (moho's `Unit::Kill`, 0x102878b0, only tests
         /// the dead flag).
+        ///
+        /// First the engine asks the script `CheckCanBeKilled(instigator)`
+        /// when it has one: false makes the kill a no-op (FAF's
+        /// `SetCanBeKilled(false)`: build drones, external factories,
+        /// campaign units). Lethal damage reaches here through FAF's
+        /// `DoTakeDamage`, so it leaves such a unit alive at 0 health, and the
+        /// next kill after `SetCanBeKilled(true)` goes through
+        /// (`probe_wpn_misc2` `kill cantkill*`, `probe_wpn_damage` `kill nokill*`).
         Kill = |lua, (this, instigator, kind, excess): (Obj<moho::Entity>, shapes::Instigator, Option<shapes::DamageType>, Option<f64>)| {
+            let alive = world(lua).get(entity_id(&this)?).is_some_and(|e| !e.cold.killed && !e.gone);
+            if alive
+                && let Ok(LuaValue::Function(check)) = this.table().get::<LuaValue>("CheckCanBeKilled")
+                && matches!(check.call::<LuaValue>((this.table().clone(), (*instigator).clone()))?, LuaValue::Nil | LuaValue::Boolean(false)) {
+                return Ok(());
+            }
             let first = with_entity_mut(lua, &this, |e| {
                 let first = !e.cold.killed && !e.gone;
                 if first {
@@ -1380,14 +1414,47 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
 
     lua_fn!(lua, global,
         /// Moves `obj` to `pos`, and turns it to `orient` (a quaternion) if given.
+        ///
+        /// A unit that moves on the ground or water is put on its layer's
+        /// height there at once, whatever `y` it's given (the real game's
+        /// idle tank warped 10 up reads its old height straight after, where
+        /// ours floated for good). And a unit warped on a move gives the move
+        /// up: on the next tick its queue is empty and it's idle, braking to
+        /// a halt from the new spot (dev/probes probe_mov_api W2 / W3,
+        /// probe_mov_mult WP; ours drove on to the goal). Only a plain move
+        /// was probed; that aggressive moves and patrols go the same way
+        /// (moho's navigator is reset) is inferred.
         Warp = |lua, (obj, pos, orient): (Obj<moho::Entity>, shapes::Vector, Option<shapes::Quaternion>)| {
+            use crate::engine::sim::command::{CommandKind, Commands};
+            use crate::engine::sim::layer::Layer;
+            use crate::engine::sim::movement::MotionKind;
             let id = entity_id(&obj)?;
-            let p = read_vector(&pos)?;
+            let mut p = read_vector(&pos)?;
             let q = orient.as_deref().map(read_quat).transpose()?;
-            let mut w = world(lua);
-            match q {
-                Some(q) => w.set_transform(id, p, q),
-                None => w.set_position(id, p),
+            let ground = world(lua).get(id).and_then(|e| e.unit.as_deref()).filter(|u| matches!(u.motion_params.kind, MotionKind::Land | MotionKind::Hover | MotionKind::Amphibious | MotionKind::Water)).map(|u| u.layer);
+            if let Some(layer) = ground
+                && let Some(t) = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>() {
+                match layer {
+                    Layer::Land | Layer::Seabed => p.y = t.height_at(p.x, p.z),
+                    Layer::Water => p.y = t.surface_at(p.x, p.z),
+                    _ => {}
+                }
+            }
+            {
+                let mut w = world(lua);
+                match q {
+                    Some(q) => w.set_transform(id, p, q),
+                    None => w.set_position(id, p),
+                }
+                // Stood (and tilted) to the ground there on the next tick.
+                if ground.is_some()
+                    && let Some(u) = w.get_mut(id).and_then(|e| e.unit.as_deref_mut()) {
+                    u.on_ground = false;
+                }
+            }
+            if let Some(mut c) = lua.app_data_mut::<Commands>()
+                && c.dispatched(id).is_some_and(|c| matches!(c.kind, CommandKind::Move | CommandKind::FormMove | CommandKind::AggressiveMove | CommandKind::FormAggressiveMove | CommandKind::Patrol | CommandKind::FormPatrol)) {
+                c.pop_front(id);
             }
             Ok(())
         })?;

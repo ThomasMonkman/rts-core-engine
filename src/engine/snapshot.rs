@@ -135,6 +135,15 @@ impl EntityView {
     }
 }
 
+/// A jammer's fake radar contact as the view army sees it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FakeBlip {
+    pub position: [f32; 3],
+    /// The jammer's blueprint index (as [`EntityView::blueprint`]): fakes
+    /// show the jammer's own contact shape.
+    pub blueprint: u32,
+}
+
 /// How the viewing army knows an entity it is shown (fog of war; see
 /// [`DebugRequest::view_army`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -149,6 +158,10 @@ pub enum Sighting {
     /// A structure seen before and out of sight now: its last-seen state
     /// (it may be gone).
     Remembered,
+    /// A unit seen before, out of sight now but on radar / sonar: its full
+    /// strategic icon in its army's colour (no mesh for a mobile unit; a
+    /// structure is its remembered state). FAF probe `probe_intel_icons`.
+    Identified,
 }
 
 /// The fog of war texture's changes (see [`Snapshot::fog`]).
@@ -846,8 +859,9 @@ pub struct Snapshot {
     /// The fog of war texture's changes since the last delivered snapshot
     /// (`None`: unchanged).
     pub fog: Option<FogUpdate>,
-    /// Fake radar contacts (enemy jammers) the view army sees now.
-    pub fake_blips: Vec<[f32; 3]>,
+    /// Fake radar contacts (enemy jammers) the view army believes in now:
+    /// on its radar, not known fakes.
+    pub fake_blips: Vec<FakeBlip>,
     /// While fog of war is on: the view army's side's vision sources, in
     /// entity order. The renderer draws the clear ground as their circles,
     /// blended between snapshots as the units are (moho's vision pass), while
@@ -2383,7 +2397,7 @@ fn debug_data(lua: &mlua::Lua, req: &DebugRequest, sink: &mut SnapshotSink) -> D
             Some((_, army, version)) => {
                 let armies = lua.app_data_ref::<crate::engine::sim::army::Armies>();
                 lua.app_data_mut::<crate::engine::sim::threat::ThreatMap>().and_then(|mut m| {
-                    crate::engine::api::threat::refresh(lua, &mut m, army);
+                    crate::engine::api::threat::refresh(lua, &mut m);
                     let armies = armies?;
                     let enemy = |a: u32| armies.alliance(army, a) == crate::engine::sim::army::Alliance::Enemy;
                     let (cols, rows, cell, values) = m.grid_values(crate::engine::sim::threat::ThreatType::Overall, army, &enemy);

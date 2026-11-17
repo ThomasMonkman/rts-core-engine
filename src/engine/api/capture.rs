@@ -20,9 +20,11 @@
 //! capture time (`GetCaptureCosts` 0: unfinished units) end the order.
 //! Captors are kept by id, so callbacks run in a fixed order.
 //!
-//! Inferred, not verified against the binary: each captor progresses on its
-//! own (FAF's `CheckCaptor` syncs the bars through `SetWorkProgress`, which
-//! ours doesn't read back), a paused captor holds (its event asks for
+//! Captors of one target share its capture (`shared`): their progress adds
+//! up and they all finish it together (dev/probes probe_unit_build G7).
+//!
+//! Inferred, not verified against the binary: a captor that drops out
+//! takes its share with it, a paused captor holds (its event asks for
 //! nothing), range = build range + 2.
 
 use std::collections::BTreeMap;
@@ -202,24 +204,57 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             }
         };
         let paused = entity::world(lua).get(captor).and_then(|e| e.unit.as_deref().map(|u| u.paused)).unwrap_or(false);
-        let state = lua.app_data_mut::<EconomyEvents>().expect("EconomyEvents").map.get_mut(&job.event).map(|ev| {
-            ev.held = paused;
-            (ev.progress(), ev.done())
-        });
+        let live = lua.app_data_mut::<EconomyEvents>().expect("EconomyEvents").map.get_mut(&job.event).map(|ev| ev.held = paused);
         // Its event gone (it can't be): the capture fails.
-        let Some((progress, done)) = state else {
+        if live.is_none() {
             end(lua, captor, false)?;
             continue;
-        };
+        }
+        // Captors of one target share its capture (`shared`).
+        let (progress, done, captors) = shared(lua, target);
         set_work(lua, captor, Some(target), progress)?;
         if !done {
             continue;
         }
-        end(lua, captor, true)?;
-        UnitCallbacks::on_captured(lua, &t_obj, "unit", Obj::new(c_obj.clone()))?;
-        pop_order(lua, captor, command);
+        // Every captor finishes it together, in id order: each one's
+        // `OnStopCapture` / `OnStopBeingCaptured` / `OnCaptured`.
+        for (other, other_command) in captors {
+            let Some(o_obj) = entity::object(lua, other)? else { continue };
+            end(lua, other, true)?;
+            UnitCallbacks::on_captured(lua, &t_obj, "unit", Obj::new(o_obj))?;
+            pop_order(lua, other, other_command);
+        }
     }
     Ok(())
+}
+
+/// The capture of `target`, shared by every captor on it: (progress, done,
+/// the captors with their commands, id order). Each captor pays its own
+/// event at the one-captor rate and the target's progress is the sum of
+/// theirs, so two captors take half the time at the same total cost and
+/// all finish together, as in the real game (dev/probes probe_unit_build
+/// G7: two engineers, 16 ticks for 750 energy against 31 for one; both get
+/// `OnStopCapture` / `OnCaptured`). A captor that drops out takes its share
+/// with it (inferred).
+fn shared(lua: &Lua, target: EntityId) -> (Fx, bool, Vec<(EntityId, CommandId)>) {
+    let captures = lua.app_data_ref::<Captures>().expect("Captures");
+    let events = lua.app_data_ref::<EconomyEvents>().expect("EconomyEvents");
+    let mut captors = Vec::new();
+    let (mut paid, mut ticks, mut sum, mut same) = (Fx::ZERO, None, Fx::ZERO, true);
+    for (&c, job) in captures.0.iter().filter(|(_, j)| j.target == target) {
+        captors.push((c, job.command));
+        let Some(ev) = events.map.get(&job.event) else { continue };
+        paid = paid.saturating_add(ev.paid);
+        sum = sum.saturating_add(ev.progress());
+        same &= *ticks.get_or_insert(ev.ticks) == ev.ticks;
+    }
+    // Equal ticks (the usual case): exactly, on the count paid.
+    let done = match ticks {
+        Some(t) if same => paid >= t,
+        Some(_) => sum >= Fx::ONE - Fx::from_bits(1 << 12),
+        None => false,
+    };
+    (sum.min(Fx::ONE), done, captors)
 }
 
 pub fn register(lua: &Lua) -> LuaResult<()> {

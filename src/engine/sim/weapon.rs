@@ -1555,7 +1555,7 @@ fn advance_target(
                 // `IsSeenEver` holds, MohoEngine.dll 0x101c5152 ->
                 // 0x10169500, 0x101c51c6).
                 let identified = || match (intel, army) {
-                    (Some(g), Some(a)) => g.ever_seen(a, id) || g.detect(a, e).seen,
+                    (Some(g), Some(a)) => g.ever_seen(a, id) || g.detect(a, e).eyes(),
                     _ => true,
                 };
                 let score = match barrel {
@@ -1882,7 +1882,17 @@ fn advance_target(
     } else {
         w.fire_clock == 0 && data.fire_state != 1 && ammo && !(w.silo.is_some() && w.fired_at_target)
     };
-    if enabled && !took_target && in_range && w.on_target && water_ok && ready {
+    // Not while the unit is `Busy` (moho's `CanFire`, FAF's
+    // `engine/Sim/UnitWeapon.lua`): FAF's firing state holds it through a
+    // salvo (unless `NotExclusive`) and the ready state clears it, so the
+    // next `OnFire` waits for the script to be ready for it instead of
+    // landing mid-salvo and being dropped. `probe_wpn_aa_hold`: Aeon T1 AA
+    // (`uab2104`, reload 6 ticks, 3 shots 2 ticks apart) fires every 7
+    // ticks, every salvo whole; on the reload clock alone every other
+    // salvo was lost (-40% damage).
+    static BUSY: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("Busy").expect("state"));
+    let busy = !overcharging && data.states.contains(*BUSY);
+    if enabled && !took_target && in_range && w.on_target && water_ok && ready && !busy {
         w.fired_at_target = true;
         w.fire_clock = w.reload_ticks();
         push(&mut events, WeaponEventKind::Fire);

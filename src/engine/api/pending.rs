@@ -60,7 +60,7 @@ pub const UNUSED: &[(&str, &[&str], &str)] = &[
         &[
             "CanConsiderFormingPlatoon", "Destroy", "DisbandOnIdle", "FerryToLocation", "FindClosestUnitToBase", "FindFurthestUnit",
             "FindHighestValueUnit", "GetAIPlan", "GetFactionIndex", "GetFerryBeacons", "GetPersonality", "GetPlatoonLifetimeStats",
-            "SwitchAIPlan", "UnloadUnitsAtLocation", "UseTeleporter",
+            "SwitchAIPlan", "UseTeleporter",
         ],
         "scripts disband through the brain and ask the brain for its faction and personality",
     ),
@@ -90,7 +90,7 @@ pub const UNUSED: &[(&str, &[&str], &str)] = &[
     ),
     (
         "weapon_methods",
-        &["ChangeDamageRadius", "ChangeDamageType", "DoInstaHit", "TransferTarget"],
+        &["DoInstaHit", "TransferTarget"],
         "no script in FAF, the original game or the AI mods calls them",
     ),
     ("AimManipulator", &["OnTarget", "SetAimHeadingOffset"], "no script in FAF, the original game or the AI mods calls them"),
@@ -107,11 +107,7 @@ pub const UNUSED: &[(&str, &[&str], &str)] = &[
 /// here (a real registration replaces the stub either way). The user VM
 /// stubs its methods from FAF's annotations at run time
 /// (`ui::user_api::register_method_stubs`).
-pub const TO_REVIEW: &[(&str, &[&str])] = &[
-    // The campaign's transport platoons (ScenarioPlatoonAI); need platoon
-    // transport orders.
-    ("platoon_methods", &["LoadUnits", "UnloadAllAtLocation"]),
-];
+pub const TO_REVIEW: &[(&str, &[&str])] = &[];
 
 /// Registers [`UNUSED`]'s and [`TO_REVIEW`]'s stubs where the class has no
 /// such method yet. Run after the real methods are registered.
@@ -185,9 +181,11 @@ mod tests {
     #[test]
     fn calling_pending_method_errors_with_its_name() {
         let lua = crate::lua_api::dump::sim_vm().unwrap();
-        let (class, names) = super::TO_REVIEW[0];
-        let err = lua.load(format!("moho.{class}.{}({{}})", names[0])).exec().unwrap_err();
-        assert!(err.to_string().contains(&format!("'{class}:{}' is not implemented yet", names[0])), "{err}");
+        // (Empty while nothing waits on other work.)
+        if let Some(&(class, names)) = super::TO_REVIEW.first() {
+            let err = lua.load(format!("moho.{class}.{}({{}})", names[0])).exec().unwrap_err();
+            assert!(err.to_string().contains(&format!("'{class}:{}' is not implemented yet", names[0])), "{err}");
+        }
         let (class, names, _) = super::UNUSED[0];
         let err = lua.load(format!("moho.{class}.{}({{}})", names[0])).exec().unwrap_err();
         assert!(err.to_string().contains("no FAF script uses it"), "{err}");

@@ -10,7 +10,11 @@ ForkThread(function()
     WaitTicks(2)
     local ok, second = tank:CanPathTo({420, GetTerrainHeight(420, 610), 610})
     check(ok == true, 'a tank reaches open ground nearby')
-    check(second == nil, 'one result')
+    -- A second result: the goal's cell centre on the ground (the real game's
+    -- `true , {708.5, 18.545, 80.5}` for a goal at (708.x, 80.x), dev/probes
+    -- probe_unit_api).
+    check(type(second) == 'table' and second[1] == 420.5 and second[3] == 610.5, 'a second result, the goal cell centre')
+    check(type(second) == 'table' and math.abs(second[2] - GetTerrainHeight(420.5, 610.5)) < 0.01, 'on the ground')
     check(tank:CanPathTo(other) == true, 'and another unit on it')
     -- Deep water: a tank can't drive there.
     local wx, wz

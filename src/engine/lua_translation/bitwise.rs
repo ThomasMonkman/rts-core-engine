@@ -8,6 +8,7 @@
 //! | `~a`      | `bit32.bnot(a)`      |
 //! | `a << b`  | `bit32.lshift(a, b)` |
 //! | `a >> b`  | `bit32.rshift(a, b)` |
+//! | `a ^ b`   | `bit32.bxor(a, b)` (moho's `^` is XOR, see [`bit_fn`]) |
 //!
 //! Strategy: parse with `full_moon` (Lua 5.3 + Luau enabled together, so the
 //! same grammar accepts both bitwise operators *and* Luau's `continue`), find
@@ -46,15 +47,19 @@ pub fn rewrite(source: &str) -> String {
 
     let mut collector = Collector::default();
     collector.visit_ast(result.ast());
-    splice(source, collector.maximal())
+    let found = collector.found;
+    splice(source, 0, source.len(), &found)
 }
 
 // ─── AST collection ────────────────────────────────────────────────────────────
 
+/// `(start_byte, end_byte, expr)` of a bitwise-rooted expression.
+type Found = (usize, usize, Expression);
+
 #[derive(Default)]
 struct Collector {
-    /// `(start_byte, end_byte, expr)` for every bitwise-rooted expression.
-    found: Vec<(usize, usize, Expression)>,
+    /// Every bitwise-rooted expression, nested ones included.
+    found: Vec<Found>,
 }
 
 impl Visitor for Collector {
@@ -63,25 +68,6 @@ impl Visitor for Collector {
             && let Some((start, end)) = expr.range() {
             self.found.push((start.bytes(), end.bytes(), expr.clone()));
         }
-    }
-}
-
-impl Collector {
-    /// Keep only the outermost bitwise expressions — any range strictly
-    /// contained within another is rewritten recursively by [`render`], so
-    /// splicing it separately would double-rewrite.
-    fn maximal(self) -> Vec<(usize, usize, Expression)> {
-        let ranges: Vec<(usize, usize)> = self.found.iter().map(|(s, e, _)| (*s, *e)).collect();
-        self.found
-            .iter()
-            .enumerate()
-            .filter(|(i, (s, e, _))| {
-                !ranges.iter().enumerate().any(|(j, (os, oe))| {
-                    j != *i && os <= s && e <= oe && (os, oe) != (s, e)
-                })
-            })
-            .map(|(_, item)| item.clone())
-            .collect()
     }
 }
 
@@ -97,11 +83,18 @@ fn is_bitwise_root(expr: &Expression) -> bool {
 }
 
 /// The `bit32` function name for a bitwise binary operator, or `None`.
+///
+/// `^` is moho's XOR, not power: the real game gives `2 ^ 0.5` = 2, `2 ^ 3`
+/// = 1, `-2 ^ 2` = 0 (`^` binds tighter than unary minus, as power did),
+/// operands truncated to unsigned 32 bits like the other bit operators, and
+/// FAF's `DebugFunction.lua` notes `OPCODE.POW` "also BXOR". FAF relies on
+/// it: `x ^ 0` truncates (`NavUtils.lua`, the Brackman pegs' launch delay).
+/// Power is `math.pow`.
 fn bit_fn(op: &BinOp) -> Option<&'static str> {
     match op {
         BinOp::Ampersand(_) => Some("band"),
         BinOp::Pipe(_) => Some("bor"),
-        BinOp::Tilde(_) => Some("bxor"),
+        BinOp::Tilde(_) | BinOp::Caret(_) => Some("bxor"),
         BinOp::DoubleLessThan(_) => Some("lshift"),
         BinOp::DoubleGreaterThan(_) => Some("rshift"),
         _ => None,
@@ -111,44 +104,57 @@ fn bit_fn(op: &BinOp) -> Option<&'static str> {
 // ─── rendering ───────────────────────────────────────────────────────────────
 
 /// Renders an expression to its Luau form. Bitwise operations become `bit32.*`
-/// calls; every non-bitwise sub-expression is copied verbatim from the original
-/// source so its formatting and comments survive unchanged.
-fn render(src: &str, expr: &Expression) -> String {
+/// calls; every non-bitwise sub-expression is copied from the original source
+/// (formatting and comments survive), with any bitwise expression nested
+/// inside it rewritten in place (`a & (b + (c | d))`).
+fn render(src: &str, expr: &Expression, found: &[Found]) -> String {
     match expr {
-        Expression::BinaryOperator { lhs, binop, rhs } => match bit_fn(binop) {
-            Some(f) => format!("bit32.{}({}, {})", f, render(src, lhs), render(src, rhs)),
-            None => verbatim(src, expr),
-        },
+        Expression::BinaryOperator { lhs, binop, rhs } if bit_fn(binop).is_some() => format!(
+            "bit32.{}({}, {})",
+            bit_fn(binop).unwrap_or_default(),
+            render(src, lhs, found),
+            render(src, rhs, found)
+        ),
         Expression::UnaryOperator { unop: UnOp::Tilde(_), expression } => {
-            format!("bit32.bnot({})", render(src, expression))
+            format!("bit32.bnot({})", render(src, expression, found))
         }
         // Drop redundant parens around a bitwise op — `bit32.*(…)` is already a
         // single atomic term, so the parens are never needed for precedence.
         Expression::Parentheses { expression, .. } if is_bitwise_root(expression) => {
-            render(src, expression)
+            render(src, expression, found)
         }
-        _ => verbatim(src, expr),
+        _ => match expr.range() {
+            Some((s, e)) => splice(src, s.bytes(), e.bytes(), found),
+            None => expr.to_string(),
+        },
     }
 }
 
-/// The exact original source text of an expression (positions exclude trivia).
-fn verbatim(src: &str, expr: &Expression) -> String {
-    match expr.range() {
-        Some((s, e)) => src[s.bytes()..e.bytes()].to_owned(),
-        None => expr.to_string(),
+/// The source in `start..end` with each outermost bitwise expression strictly
+/// inside it replaced by its `bit32.*` rendering (nested ones are rendered by
+/// [`render`] recursively, so splicing them separately would double-rewrite).
+fn splice(src: &str, start: usize, end: usize, found: &[Found]) -> String {
+    let candidates: Vec<&Found> = found
+        .iter()
+        .filter(|(s, e, _)| start <= *s && *e <= end && (*s, *e) != (start, end))
+        .collect();
+    let mut outer: Vec<&Found> = candidates
+        .iter()
+        .filter(|(s, e, _)| {
+            !candidates.iter().any(|(os, oe, _)| os <= s && e <= oe && (os, oe) != (s, e))
+        })
+        .copied()
+        .collect();
+    outer.sort_by_key(|f| f.0);
+    outer.dedup_by_key(|f| (f.0, f.1));
+    let mut out = String::with_capacity(end - start);
+    let mut at = start;
+    for (s, e, expr) in outer {
+        out.push_str(&src[at..*s]);
+        out.push_str(&render(src, expr, found));
+        at = *e;
     }
-}
-
-/// Splices each maximal bitwise expression's `bit32.*` rendering over its byte
-/// range. Applied right-to-left so earlier offsets stay valid; maximal ranges
-/// are disjoint, so the order is otherwise irrelevant.
-fn splice(src: &str, mut items: Vec<(usize, usize, Expression)>) -> String {
-    items.sort_by_key(|i| std::cmp::Reverse(i.0));
-    let mut out = src.to_owned();
-    for (start, end, expr) in items {
-        let replacement = render(src, &expr);
-        out.replace_range(start..end, &replacement);
-    }
+    out.push_str(&src[at..end]);
     out
 }
 
@@ -166,7 +172,7 @@ fn scan_for_bitwise(src: &str) -> bool {
                 if lvl >= 0 { i = skip_long_bracket(b, i, lvl as usize); } else { i += 1; }
             }
             b'-' if b.get(i + 1) == Some(&b'-') => i = skip_comment(b, i),
-            b'&' | b'|' => return true,
+            b'&' | b'|' | b'^' => return true,
             b'<' if b.get(i + 1) == Some(&b'<') => return true,
             b'>' if b.get(i + 1) == Some(&b'>') => return true,
             b'~' if b.get(i + 1) != Some(&b'=') => return true,
@@ -288,6 +294,21 @@ mod tests {
     #[test]
     fn nested_in_call_args() {
         assert_eq!(rewrite("foo(a & b, c)"), "foo(bit32.band(a, b), c)");
+    }
+
+    #[test]
+    fn caret_is_xor() {
+        assert_eq!(rewrite("for k = 1, (0.5 * head) ^ 0 do end"), "for k = 1, bit32.bxor((0.5 * head), 0) do end");
+        // Binds tighter than unary minus: `-(2 ^ 2)`.
+        assert_eq!(rewrite("r = -2 ^ 2"), "r = -bit32.bxor(2, 2)");
+        assert_eq!(rewrite("r = 2 ^ 3 ^ 2"), "r = bit32.bxor(2, bit32.bxor(3, 2))");
+        assert_eq!(rewrite(r#"s = string.find(x, "^a")"#), r#"s = string.find(x, "^a")"#);
+    }
+
+    #[test]
+    fn nested_inside_plain_expression() {
+        assert_eq!(rewrite("r = x & (y + (a | b))"), "r = bit32.band(x, (y + bit32.bor(a, b)))");
+        assert_eq!(rewrite("r = f(a ^ 1, g(b | c))"), "r = f(bit32.bxor(a, 1), g(bit32.bor(b, c)))");
     }
 
     #[test]

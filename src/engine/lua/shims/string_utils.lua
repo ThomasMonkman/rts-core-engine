@@ -53,3 +53,20 @@ function STR_xtoi(str)
     local digits = string.match(str, "^%s*(%x+)")
     return digits and tonumber(digits, 16) or 0
 end
+
+-- Lua 5.0's _TRACEBACK(...) (ldblib's errorfb, moho keeps it as a global):
+-- the arguments concatenated, then the stack traceback. A first argument
+-- that isn't a string or number is handed back unchanged. FAF passes a level
+-- first (`WARN(_TRACEBACK(2, msg))`); 5.0's errorfb doesn't read one.
+function _TRACEBACK(...)
+    local n = select('#', ...)
+    local first = ...
+    if n > 0 and type(first) ~= "string" and type(first) ~= "number" then
+        return (select(n, ...))
+    end
+    local parts = {}
+    for i = 1, n do
+        parts[i] = tostring((select(i, ...)))
+    end
+    return debug.traceback(table.concat(parts) .. "\nstack traceback:", 2)
+end

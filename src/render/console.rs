@@ -448,12 +448,15 @@ fn console_bool(v: &str) -> Option<bool> {
 }
 
 /// The player's units (any army's when observing), with their blueprints.
+/// As the real game's `UISelectionByCategory('ALLUNITS')` (`probe_ui_units`):
+/// structures still being built count, cargo in a transport and units still
+/// inside their factory don't.
 fn own_units(s: &RenderState) -> Vec<(u32, String, [f32; 3])> {
     let Some(blueprints) = s.world.blueprints.as_ref() else { return Vec::new() };
     s.world
         .entities()
         .iter()
-        .filter(|e| matches!(e.kind, ViewKind::Unit | ViewKind::Structure) && e.build >= 1.0)
+        .filter(|e| matches!(e.kind, ViewKind::Unit | ViewKind::Structure) && !e.attached && !e.in_builder)
         .filter(|e| s.player.player.is_none_or(|a| a == e.army))
         .filter_map(|e| Some((e.id, blueprints.get(e.blueprint as usize)?.clone(), e.position)))
         .collect()

@@ -1165,14 +1165,16 @@ fn build_restrictions_lock_tech_tabs() {
 }
 
 /// `GetUnitCommandData` over a mixed selection: the union of the
-/// blueprints' command and toggle caps (sorted, each once) and of what each
-/// can build; a dead unit adds nothing, and no units build nothing.
+/// blueprints' command and toggle caps (sorted, each once), and what every
+/// one of them can build (the real game: engineer + tank or engineer +
+/// factory build nothing, `probe_ui_hover` build); a dead unit adds nothing,
+/// and no units build nothing.
 #[test]
 fn unit_command_data_unions_the_selection() {
     use rts_core_engine::ui::UnitInfo;
     let Some(vm) = vm() else { return };
     let info = |id, bp: &str| UnitInfo { id, blueprint: bp.into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: None };
-    vm.update_units(&[info(1, "uel0201"), info(2, "uel0201"), info(3, "uea0102"), info(4, "uel0105"), info(5, "uel0105")]).unwrap();
+    vm.update_units(&[info(1, "uel0201"), info(2, "uel0201"), info(3, "uea0102"), info(4, "uel0105"), info(5, "uel0105"), info(6, "ueb0101"), info(7, "uel0105")]).unwrap();
     vm.remove_units(&[5]).unwrap();
     let (ok, why): (bool, String) = vm
         .lua()
@@ -1204,7 +1206,12 @@ fn unit_command_data_unions_the_selection() {
             if table.concat(orders, ',') ~= caps(ids, 'CommandCaps') then return false, 'orders ' .. table.concat(orders, ',') end
             if table.concat(toggles, ',') ~= caps(ids, 'ToggleCaps') then return false, 'toggles ' .. table.concat(toggles, ',') end
             local _, _, engineer = GetUnitCommandData({ __engine_unit(4) })
-            if not (buildable == engineer and EntityCategoryContains(buildable, 'ueb1101')) then return false, 'buildable' end
+            if not EntityCategoryContains(engineer, 'ueb1101') then return false, 'engineer' end
+            if EntityCategoryContains(buildable, 'ueb1101') then return false, 'engineer + tank builds' end
+            local _, _, both = GetUnitCommandData({ __engine_unit(4), __engine_unit(7) })
+            if not (both == engineer) then return false, 'two engineers' end
+            local _, _, mixed = GetUnitCommandData({ __engine_unit(4), __engine_unit(6) })
+            if EntityCategoryContains(mixed, 'ueb1101') or EntityCategoryContains(mixed, 'uel0105') then return false, 'engineer + factory builds' end
             local o, t, none = GetUnitCommandData({})
             if table.getn(o) ~= 0 or table.getn(t) ~= 0 or EntityCategoryContains(none, 'ueb1101') then return false, 'empty' end
             return true, ''
@@ -1577,7 +1584,8 @@ fn second_quick_press_is_a_double_click() {
 
 /// The control with the keyboard focus gets key presses as `KeyDown`
 /// (moho's `KeyCode`, Windows' `RawKeyCode`); one that blocks keeps them
-/// from the key map, one that doesn't shares them.
+/// from the key map. There is one holder: when the blocker abandons the
+/// focus, the earlier taker doesn't get it back (`probe_ui_controls` focus).
 #[test]
 fn keyboard_focus_gets_key_downs() {
     let Some(vm) = vm() else { return };
@@ -1609,7 +1617,7 @@ fn keyboard_focus_gets_key_downs() {
     vm.lua().load("Sharing:Destroy()").exec().unwrap();
     vm.key("Esc", false, false, false).unwrap();
     let keys: Vec<String> = vm.lua().load("return Keys").eval().unwrap();
-    assert_eq!(keys, ["342/112/true", "83/83/false"], "F1 to the blocker, S to the next; nothing once it's gone");
+    assert_eq!(keys, ["342/112/true"], "F1 to the blocker; S to nobody once it abandons");
 }
 
 /// FAF's `Edit`: a click focuses it, typed characters go in at the caret,
@@ -1866,7 +1874,7 @@ fn range_styles_from_faf() {
 }
 
 /// PNG interface textures (FAF's hotbuild key label background) decode and
-/// size their bitmaps, as DDS ones do.
+/// size their bitmaps, as DDS ones do (less the 1-pixel border).
 #[test]
 fn png_ui_textures_load() {
     let Some(vm) = vm() else { return };
@@ -1875,8 +1883,8 @@ fn png_ui_textures_load() {
     let vfs = vm.lua().app_data_ref::<Arc<std::sync::RwLock<rts_core_engine::engine::vfs::Vfs>>>().unwrap().clone();
     let bytes = vfs.read().unwrap().read("/textures/ui/bg.png").unwrap();
     let t = rts_core_engine::engine::assets::dds::read_image(&bytes).expect("decodes");
-    assert_eq!((t.width, t.height), (w, h));
-    assert_eq!(t.levels[0].len(), (w * h * 4) as usize, "one RGBA level");
+    assert_eq!((t.width - 2, t.height - 2), (w, h));
+    assert_eq!(t.levels[0].len(), (t.width * t.height * 4) as usize, "one RGBA level");
 }
 
 /// Moho's `OnHide`: returning true keeps it from that control's own
@@ -2508,4 +2516,321 @@ fn sim_build_rate_and_names_reach_the_interface() {
     assert_eq!(got, (45.0, "Brick".to_string()));
     let renamed: String = vm.lua().load(format!("local u = GetUnitById('{acu}') u:SetCustomName('Mine') return u:GetCustomName()")).eval().unwrap();
     assert_eq!(renamed, "Mine");
+}
+
+/// `SelectUnits` and `UISelectionByCategory` are synchronous, as in moho
+/// (`probe_ui_units` X, C): `GetSelectedUnits()` on the next line sees the new
+/// selection, and FAF's select / order / reselect in one frame
+/// (construction.lua, hotbuild.lua) gives the order to the unit selected
+/// when it was issued, not the one selected at the end of the frame.
+#[test]
+fn selecting_from_lua_is_synchronous() {
+    use rts_core_engine::ui::UnitInfo;
+    let Some(vm) = vm() else { return };
+    vm.set_focus_army(1).unwrap();
+    vm.start_hud().expect("game interface");
+    vm.frame(1.0 / 60.0).unwrap();
+    let unit = |id, blueprint: &str| UnitInfo { id, blueprint: blueprint.into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None };
+    let units = [unit(3, "uel0201"), unit(5, "ueb0101")];
+    vm.update_units(&units).unwrap();
+    vm.set_world(units.to_vec());
+    vm.set_selection(&[3]).unwrap();
+    vm.take_orders().unwrap();
+    let (same_frame, same_object): (u32, bool) = vm
+        .lua()
+        .load(
+            r#"
+            local tank, fac = GetUnitById(3), GetUnitById(5)
+            SelectUnits({ fac })
+            local now = GetSelectedUnits()
+            IssueBlueprintCommand('UNITCOMMAND_BuildFactory', 'uel0106', 1)
+            SelectUnits({ tank })
+            return table.getn(now), now[1] == fac
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!((same_frame, same_object), (1, true), "GetSelectedUnits() on the next line");
+    let orders = vm.take_orders().unwrap();
+    assert_eq!(orders.len(), 1, "{orders:?}");
+    assert_eq!(orders[0].units, Some(vec![5]), "the build goes to the factory selected when it was issued");
+    assert_eq!(vm.take_selection_request().unwrap(), Some(vec![3]), "the frame ends with the tank selected");
+    let by_category: String = vm
+        .lua()
+        .load("UISelectionByCategory('FACTORY', false, false, false, false) local s = GetSelectedUnits() return s[1]:GetUnitId() .. ' ' .. table.getn(s)")
+        .eval()
+        .unwrap();
+    assert_eq!(by_category, "ueb0101 1", "UISelectionByCategory: seen on the next line");
+    assert_eq!(vm.take_selection_request().unwrap(), Some(vec![5]));
+    let cleared: bool = vm.lua().load("SelectUnits(nil) return GetSelectedUnits() == nil").eval().unwrap();
+    assert!(cleared, "SelectUnits(nil): nil at once");
+}
+
+/// `UISelectionByCategory('ALLUNITS')` takes a structure still being built
+/// and leaves out cargo in a transport, as the real game does
+/// (`probe_ui_units` A, B).
+#[test]
+fn select_by_category_takes_construction_sites_not_cargo() {
+    use rts_core_engine::ui::UnitInfo;
+    let Some(vm) = vm() else { return };
+    vm.set_focus_army(1).unwrap();
+    vm.start_hud().expect("game interface");
+    vm.frame(1.0 / 60.0).unwrap();
+    let unit = |id, blueprint: &str, army, build| UnitInfo { id, blueprint: blueprint.into(), army, health: 1.0, max_health: 100.0, build_rate: 0.0, build, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None };
+    // A tank, a factory half built, cargo (id 9) and an enemy tank.
+    vm.set_world(vec![unit(3, "uel0201", 1, 1.0), unit(5, "ueb0101", 1, 0.5), unit(9, "uel0106", 1, 1.0), unit(11, "uel0201", 2, 1.0)]);
+    vm.set_unselectable(vec![9]);
+    let ids: String = vm
+        .lua()
+        .load("UISelectionByCategory('ALLUNITS', false, false, false, false) local out = {} for _, u in GetSelectedUnits() do table.insert(out, u:GetEntityId()) end return table.concat(out, ',')")
+        .eval()
+        .unwrap();
+    assert_eq!(ids, "3,5");
+}
+
+/// `UserUnit:GetFocus()` is the unit a builder works on although the
+/// interface has no data for it yet (a structure still being built), and an
+/// upgrading structure's rollover has `focusUpgrade` (`probe_ui_units` A,
+/// `probe_ui_hover` orders).
+#[test]
+fn builders_focus_the_unit_they_build() {
+    use rts_core_engine::engine::sim::command::CommandKind;
+    use rts_core_engine::engine::snapshot::UnitDetail;
+    use rts_core_engine::ui::UnitInfo;
+    let Some(vm) = vm() else { return };
+    vm.start_hud().expect("game interface");
+    let unit = |id, blueprint: &str, build, detail| UnitInfo { id, blueprint: blueprint.into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail };
+    let engineer = unit(7, "uel0105", 1.0, Some(UnitDetail { id: 7, commands: vec![(CommandKind::BuildMobile as u8, Some("ueb0101".into()), 1, [410.0, 20.0, 600.0])], focus: Some(9), ..Default::default() }));
+    let radar = unit(8, "ueb3101", 1.0, Some(UnitDetail { id: 8, commands: vec![(CommandKind::Upgrade as u8, Some("ueb3201".into()), 1, [400.0, 20.0, 600.0])], focus: Some(10), ..Default::default() }));
+    // The sites: only in the frame's units.
+    vm.set_world(vec![unit(9, "ueb0101", 0.2, None), unit(10, "ueb3201", 0.1, None)]);
+    vm.update_units(&[engineer, radar]).unwrap();
+    let got: (String, String, String) = vm
+        .lua()
+        .load(
+            r#"
+            local f = __engine_unit(7):GetFocus()
+            rawset(_G, '__engine_rollover', 7)
+            local eng = GetRolloverInfo()
+            rawset(_G, '__engine_rollover', 8)
+            local radar = GetRolloverInfo()
+            return f and f:GetUnitId() or 'nil', eng.focus and eng.focus.blueprintId or 'nil', radar.focusUpgrade and radar.focusUpgrade.blueprintId or 'nil'
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(got, ("ueb0101".into(), "ueb0101".into(), "ueb3201".into()));
+}
+
+/// `Hide` / `Show` / `SetHidden` set the flag down the tree, calling
+/// `OnHide` each time, except below a child whose `OnHide` returns true;
+/// `EnableHitTest()` isn't recursive (`probe_ui_controls` ctl, real game).
+#[test]
+fn hidden_flag_goes_down_the_tree() {
+    let Some(vm) = vm() else { return };
+    let got: Vec<String> = vm
+        .lua()
+        .load(
+            r#"
+            local Group = import('/lua/maui/group.lua').Group
+            local g = Group(GetFrame(0))
+            local child = Group(g)
+            local grand = Group(child)
+            local out, hides = {}, ''
+            local function flags() return tostring(g:IsHidden()) .. ' ' .. tostring(child:IsHidden()) .. ' ' .. tostring(grand:IsHidden()) end
+            child.OnHide = function(self, hidden) hides = hides .. 'child:' .. tostring(hidden) .. ';' end
+            grand.OnHide = function(self, hidden) hides = hides .. 'grand:' .. tostring(hidden) .. ';' end
+            g:Hide()
+            table.insert(out, flags() .. ' ' .. hides) hides = ''
+            child:Show()
+            table.insert(out, flags() .. ' ' .. hides) hides = ''
+            g:Show() hides = ''
+            g:SetHidden(true) g:SetHidden(true)
+            table.insert(out, flags() .. ' ' .. hides) hides = ''
+            child.OnHide = function(self, hidden) hides = hides .. 'veto;' return true end
+            g:Show()
+            table.insert(out, flags() .. ' ' .. hides)
+            child.OnHide = nil
+            g:Show()
+            g:DisableHitTest(true)
+            g:EnableHitTest()
+            table.insert(out, tostring(g:IsHitTestDisabled()) .. ' ' .. tostring(child:IsHitTestDisabled()) .. ' ' .. tostring(grand:IsHitTestDisabled()))
+            return out
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(
+        got,
+        [
+            "true true true child:true;grand:true;",
+            "true false false child:false;grand:false;",
+            "true true true child:true;grand:true;child:true;grand:true;",
+            "false true true veto;",
+            "false true true",
+        ]
+    );
+}
+
+/// A bitmap is its texture less the 1-pixel border (moho; `probe_ui_controls`
+/// bmp: a 64 x 64 icon is 62 x 62, the 4 x 32 economy strip 2 x 30), it draws
+/// the texture's inner pixels, and `GetTextureDimensions` agrees.
+#[test]
+fn bitmaps_leave_out_the_texture_border() {
+    let Some(vm) = vm() else { return };
+    vm.set_screen(1280.0, 720.0).unwrap();
+    let sizes: Vec<f64> = vm
+        .lua()
+        .load(
+            r#"
+            local Bitmap = import('/lua/maui/bitmap.lua').Bitmap
+            local LayoutHelpers = import('/lua/maui/layouthelpers.lua')
+            local icon = Bitmap(GetFrame(0), '/textures/ui/common/icons/units/uel0001_icon.dds')
+            LayoutHelpers.AtLeftTopIn(icon, GetFrame(0), 10, 20)
+            local strip = Bitmap(GetFrame(0), '/textures/ui/common/game/economic-overlay/econ_bmp_m.dds')
+            local w, h = GetTextureDimensions('/textures/ui/common/game/economic-overlay/econ_bmp_m.dds')
+            return { icon.BitmapWidth(), icon.BitmapHeight(), strip.BitmapWidth(), strip.BitmapHeight(), w, h }
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(sizes, [62.0, 62.0, 2.0, 30.0, 2.0, 30.0]);
+    let quad = vm.draw_list().unwrap().into_iter().find_map(|i| match i {
+        DrawItem::Quad { rect, texture: Some(t), uv, .. } if t.contains("uel0001_icon") => Some((rect, uv)),
+        _ => None,
+    });
+    let (rect, uv) = quad.expect("the icon draws");
+    assert_eq!(rect, [10.0, 20.0, 72.0, 82.0]);
+    assert_eq!(uv, [1.0 / 64.0, 1.0 / 64.0, 63.0 / 64.0, 63.0 / 64.0], "its inner 62 x 62 pixels");
+}
+
+/// Text measures in whole pixels as moho does (`probe_ui_controls` text):
+/// the `hdmx` / `VDMX` tables where the font has them, full-hinted advances
+/// where it doesn't (Arial 14, 18), no kerning, control characters take no
+/// room, "Arial Gras" is plain Arial and size 0 is a 20-pixel em.
+#[test]
+fn text_measures_like_moho() {
+    let Some(vm) = vm() else { return };
+    let got: Vec<String> = vm
+        .lua()
+        .load(
+            r#"
+            local Text = import('/lua/maui/text.lua').Text
+            local t = Text(GetFrame(0))
+            local out = {}
+            local function m(family, size)
+                t:SetFont(family, size)
+                t:SetText('Hello World')
+                table.insert(out, string.format('%s %g: %d %d %d M%d AV%d long%d', family, size, t.FontAscent(), t.FontDescent(), t.TextAdvance(),
+                    t:GetStringAdvance('M'), t:GetStringAdvance('AV'), t:GetStringAdvance('The quick brown fox jumps over the lazy dog')))
+            end
+            m('Arial', 12) m('Arial', 14)
+            table.insert(out, string.format('%d %d %d', t:GetStringAdvance('a\nb'), t:GetStringAdvance('a\tb'), t:GetStringAdvance('ab')))
+            m('Arial', 18) m('Arial', 24) m('Arial Bold', 14) m('Arial Gras', 14) m('Butterbelly', 14)
+            t:SetFont('Arial', 0)
+            table.insert(out, string.format('size 0: %d %d', t.FontAscent(), t.TextAdvance()))
+            return out
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(
+        got,
+        [
+            "Arial 12: 12 3 64 M9 AV14 long239",
+            "Arial 14: 13 3 72 M11 AV18 long279",
+            "16 16 16",
+            "Arial 18: 17 4 93 M15 AV22 long354",
+            "Arial 24: 21 6 126 M19 AV30 long480",
+            "Arial Bold 14: 13 3 81 M13 AV18 long313",
+            "Arial Gras 14: 13 3 72 M11 AV18 long279",
+            "Butterbelly 14: 11 3 68 M10 AV12 long243",
+            "size 0: 19 101",
+        ]
+    );
+}
+
+/// One keyboard focus holder, which `GetCurrentFocusControl` returns on any
+/// control; when it abandons nobody has the focus (`probe_ui_controls`
+/// focus).
+#[test]
+fn keyboard_focus_has_one_holder() {
+    let Some(vm) = vm() else { return };
+    let got: Vec<bool> = vm
+        .lua()
+        .load(
+            r#"
+            local Group = import('/lua/maui/group.lua').Group
+            local Edit = import('/lua/maui/edit.lua').Edit
+            local g, t = Group(GetFrame(0)), Group(GetFrame(0))
+            local e = Edit(GetFrame(0))
+            local out = { g:GetCurrentFocusControl() == nil }
+            g:AcquireKeyboardFocus(false)
+            table.insert(out, t:GetCurrentFocusControl() == g)
+            t:AcquireKeyboardFocus(true)
+            table.insert(out, g:GetCurrentFocusControl() == t)
+            t:AbandonKeyboardFocus()
+            table.insert(out, g:GetCurrentFocusControl() == nil)
+            e:AcquireFocus()
+            table.insert(out, g:GetCurrentFocusControl() == e)
+            g:AbandonKeyboardFocus()
+            table.insert(out, g:GetCurrentFocusControl() == e)
+            e:AbandonFocus()
+            table.insert(out, g:GetCurrentFocusControl() == nil)
+            return out
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(got, [true; 7]);
+}
+
+/// `Edit:SetText` and `ClearText` call `OnTextChanged(new, old)` when the
+/// text changes (`probe_ui_controls` edit: `>abcdef;`, then `123>;`).
+#[test]
+fn edit_set_text_calls_on_text_changed() {
+    let Some(vm) = vm() else { return };
+    let log: String = vm
+        .lua()
+        .load(
+            r#"
+            local Edit = import('/lua/maui/edit.lua').Edit
+            local e = Edit(GetFrame(0))
+            local log = ''
+            e.OnTextChanged = function(self, new, old) log = log .. old .. '>' .. new .. ';' end
+            e:SetText('abcdef')
+            e:SetText('abcdef')
+            e:SetMaxChars(3)
+            e:SetText('123456')
+            e:ClearText()
+            return log
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(log, ">abcdef;abcdef>123;123>;");
+}
+
+/// `GetFireState(units)` is the units' shared state, or -1 when one has no
+/// retaliate toggle or they differ (`probe_ui_units` A: engineer, radar,
+/// transport and `{tank, factory}` give -1).
+#[test]
+fn fire_state_of_units_without_the_toggle_is_minus_one() {
+    use rts_core_engine::engine::snapshot::UnitDetail;
+    use rts_core_engine::ui::UnitInfo;
+    let Some(vm) = vm() else { return };
+    let info = |id, bp: &str, fire_state| UnitInfo { id, blueprint: bp.into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: Some(UnitDetail { id, fire_state, ..Default::default() }) };
+    vm.update_units(&[info(1, "uel0201", 1), info(2, "uel0105", 0), info(3, "ueb0101", 2), info(4, "ueb3101", 2), info(5, "uea0107", 0), info(6, "uel0201", 1)]).unwrap();
+    let got: Vec<i32> = vm
+        .lua()
+        .load(
+            r#"
+            local u = __engine_unit
+            return { GetFireState({ u(1) }), GetFireState({ u(2) }), GetFireState({ u(3) }), GetFireState({ u(4) }), GetFireState({ u(5) }),
+                GetFireState({ u(1), u(3) }), GetFireState({ u(1), u(6) }), GetFireState({}) }
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(got, [1, -1, 2, -1, -1, -1, 1, -1]);
 }

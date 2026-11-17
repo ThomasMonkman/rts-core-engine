@@ -246,7 +246,6 @@ signatures! {
     }
     moho::Control {
         Dump();
-        GetCurrentFocusControl() -> Option<Obj<moho::Control>>;
     }
     moho::Edit {
         SetNewHighlightBackgroundColor(color: Color);

@@ -13,6 +13,34 @@ use mlua::prelude::*;
 
 use crate::engine::watchdog::{Phase, Watchdog};
 
+/// Set by the test suites ([`set_strict_stage_errors`]): a stage error ends
+/// the run instead of being logged and passed over.
+static STRICT_STAGE_ERRORS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(cfg!(test));
+
+/// Makes a stage error end the run (`true`) or be logged and passed over
+/// (`false`, the default outside tests). Process-wide; `test_data::require`
+/// turns it on, so every test that loads the game stops at the first error.
+pub fn set_strict_stage_errors(strict: bool) {
+    STRICT_STAGE_ERRORS.store(strict, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// An error out of a stage (a native error: script errors are caught where
+/// the scripts are called and logged as moho does) is logged and the beat
+/// goes on, rather than ending the game: every peer hits the same error at
+/// the same point, so carrying on stays in lockstep. Logged at `ERROR`, so
+/// the test suites that watch the log still see it. Under the test suites
+/// the error is returned instead, so a failing stage stops the run at its
+/// cause.
+fn contain(lua: &Lua, tick: u64, r: LuaResult<()>) -> LuaResult<()> {
+    if let Err(e) = r {
+        if STRICT_STAGE_ERRORS.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(e);
+        }
+        tracing::error!(target: "lua", tick, "sim stage error (beat continues): {}", crate::lua_api::errors::Explained(lua, &e));
+    }
+    Ok(())
+}
+
 /// Advances the sim by one tick.
 pub fn step(lua: &Lua) -> LuaResult<()> {
     // The game ended (`EndGame`) in an earlier tick: moho's `AdvanceBeat`
@@ -58,11 +86,11 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
     };
     // Player commands due this tick, before anything acts on orders.
     enter(Phase::Input);
-    crate::engine::api::player_input::tick(lua)?;
+    contain(lua, tick, crate::engine::api::player_input::tick(lua))?;
     enter(Phase::Economy);
     economy(lua);
-    crate::engine::api::army::stat_triggers_tick(lua)?;
-    crate::engine::api::economy_event::tick(lua)?;
+    contain(lua, tick, crate::engine::api::army::stat_triggers_tick(lua))?;
+    contain(lua, tick, crate::engine::api::economy_event::tick(lua))?;
     regen(lua);
     enter(Phase::Threat);
     crate::engine::api::threat::tick(lua);
@@ -70,28 +98,28 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
         m.step(&w);
     }
     enter(Phase::Orders);
-    crate::engine::api::orders::tick(lua)?;
+    contain(lua, tick, crate::engine::api::orders::tick(lua))?;
     crate::engine::api::transport::surface_tasks(lua);
     enter(Phase::Construction);
-    crate::engine::api::construction::tick(lua)?;
+    contain(lua, tick, crate::engine::api::construction::tick(lua))?;
     crate::engine::api::manipulator::builder_arms_tick(lua);
-    crate::engine::api::manipulator::collision_detectors_tick(lua)?;
-    crate::engine::api::silo::tick(lua)?;
-    crate::engine::api::teleport::tick(lua)?;
-    crate::engine::api::script_task::tick(lua)?;
-    crate::engine::api::transport::tick(lua)?;
+    contain(lua, tick, crate::engine::api::manipulator::collision_detectors_tick(lua))?;
+    contain(lua, tick, crate::engine::api::silo::tick(lua))?;
+    contain(lua, tick, crate::engine::api::teleport::tick(lua))?;
+    contain(lua, tick, crate::engine::api::script_task::tick(lua))?;
+    contain(lua, tick, crate::engine::api::transport::tick(lua))?;
     enter(Phase::Reclaim);
-    crate::engine::api::reclaim::tick(lua)?;
-    crate::engine::api::capture::tick(lua)?;
-    crate::engine::api::sacrifice::tick(lua)?;
-    crate::engine::api::special_action::tick(lua)?;
+    contain(lua, tick, crate::engine::api::reclaim::tick(lua))?;
+    contain(lua, tick, crate::engine::api::capture::tick(lua))?;
+    contain(lua, tick, crate::engine::api::sacrifice::tick(lua))?;
+    contain(lua, tick, crate::engine::api::special_action::tick(lua))?;
     enter(Phase::Weapons);
-    crate::engine::api::overcharge::tick(lua)?;
-    crate::engine::api::weapon::tick(lua)?;
-    crate::engine::api::beam::tick(lua)?;
+    contain(lua, tick, crate::engine::api::overcharge::tick(lua))?;
+    contain(lua, tick, crate::engine::api::weapon::tick(lua))?;
+    contain(lua, tick, crate::engine::api::beam::tick(lua))?;
     enter(Phase::LuaThreads);
-    crate::engine::api::entity::end_emptied_platoons(lua)?;
-    crate::engine::api::threads::run_due(lua)?;
+    contain(lua, tick, crate::engine::api::entity::end_emptied_platoons(lua))?;
+    contain(lua, tick, crate::engine::api::threads::run_due(lua))?;
     // Moho's motion stage runs after the script stage (`Sim::AdvanceBeat`
     // 0x1031911e..0x10319134: command dispatch +0x968, script +0x954, motion
     // +0x940): every entity's motion task (`Entity::StandardInit` 0x1025cee3
@@ -101,8 +129,8 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
     // refresh, 0x1031913b).
     enter(Phase::Movement);
     crate::engine::api::orders::hold_new(lua);
-    crate::engine::api::movement::tick(lua)?;
-    crate::engine::api::movement::fuel_tick(lua)?;
+    contain(lua, tick, crate::engine::api::movement::tick(lua))?;
+    contain(lua, tick, crate::engine::api::movement::fuel_tick(lua))?;
     // Attached entities (cargo, shields, effect entities) follow their parent.
     // On parent bones as posed (sliders, aims, clips) when the parent has
     // manipulators; the rest pose otherwise.
@@ -127,26 +155,26 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
         crate::engine::sim::fall_down::tick(&mut w, &mut m);
     }
     enter(Phase::Projectiles);
-    crate::engine::api::projectile::tick(lua)?;
-    crate::engine::api::unit::health_changes_tick(lua)?;
+    contain(lua, tick, crate::engine::api::projectile::tick(lua))?;
+    contain(lua, tick, crate::engine::api::unit::health_changes_tick(lua))?;
     enter(Phase::Intel);
     intel(lua);
-    crate::engine::api::blip::intel_callbacks(lua)?;
+    contain(lua, tick, crate::engine::api::blip::intel_callbacks(lua))?;
     // Last in the beat, as moho's `Sim::AdvanceBeat` (0x103194a1): the
     // `OnDestroy` of everything destroyed this tick, in order.
     enter(Phase::Destroy);
-    crate::engine::api::entity::run_destroy_queue(lua)?;
+    contain(lua, tick, crate::engine::api::entity::run_destroy_queue(lua))?;
     enter(Phase::Sync);
-    sync_beat(lua)?;
+    contain(lua, tick, sync_beat(lua))?;
     // An `EndGame` this tick: the game is over from the next tick on.
     crate::engine::api::sim_time::latch(lua);
     // Last: entities freed this tick are gone from the next tick on
     // (effects attached to them end first, while their final transform
     // is still known).
     enter(Phase::Compact);
-    crate::engine::api::construction::targets_destroyed(lua)?;
+    contain(lua, tick, crate::engine::api::construction::targets_destroyed(lua))?;
     crate::engine::api::effect::expire(lua);
-    crate::engine::api::entity::compact(lua)?;
+    contain(lua, tick, crate::engine::api::entity::compact(lua))?;
     let now = crate::engine::api::sim_time::current_tick(lua);
     if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
         p.expire_decals(now);
@@ -155,7 +183,7 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
     if crate::engine::sim::gc::due(now) {
         enter(Phase::LuaGc);
     }
-    crate::engine::sim::gc::tick(lua, now)?;
+    contain(lua, tick, crate::engine::sim::gc::tick(lua, now))?;
     // Renderer attached (windowed only): hand it this tick's state.
     enter(Phase::Snapshot);
     crate::engine::snapshot::publish(lua, started.elapsed());

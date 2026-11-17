@@ -161,6 +161,7 @@ pub fn register_safe(lua: &mlua::Lua) -> mlua::Result<()> {
     construction::register(lua)?;
     reclaim::register(lua)?;
     capture::register(lua)?;
+    sacrifice::register(lua)?;
     manipulator::register(lua)?;
     destroyed::register(lua)?;
     // Last: only where no real method was registered.

@@ -524,21 +524,33 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::Weapon,
         /// Fires now, whatever the fire clock and target say: runs `OnFire` (FAF's
         /// fire beetle detonates through it, the Seraphim energy ball fires its
-        /// beam at the target it just set). True if it fired (inferred: false
-        /// when the unit is gone).
+        /// beam at the target it just set). Returns nothing (`probe_wpn_ctrl`
+        /// `manual`: `tostring(w:FireWeapon())` raised in the real game); a
+        /// unit that's gone doesn't fire.
         FireWeapon = |lua, this: Obj<moho::Weapon>| {
         let WeaponHandle { unit, .. } = handle(&this)?;
-        if !entity::world(lua).get(unit).is_some_and(|e| !e.destroyed) {
-            return Ok(false);
+        if entity::world(lua).get(unit).is_some_and(|e| !e.destroyed) {
+            WeaponCallbacks::on_fire(lua, &this, "weapon")?;
         }
-        WeaponCallbacks::on_fire(lua, &this, "weapon")?;
-        Ok(true)
+        Ok(())
     })?;
     lua_method!(lua, moho::Weapon,
         /// Overrides the weapon's damage.
         ChangeDamage = |lua, (this, damage): (Obj<moho::Weapon>, f64)| {
         with_state(lua, &this, |w| w.damage = Some(crate::engine::sim::math::from_lua(damage)))
     })?;
+    lua_method!(lua, moho::Weapon,
+        /// Sets the engine weapon's damage radius. Moho keeps it and nothing
+        /// reads it (FAF's `engine/Sim/UnitWeapon.lua`: non-functional; FAF's
+        /// projectiles take their radius from Lua), so it does nothing here.
+        /// It exists: `probe_wpn_ctrl` `dmg`, `ChangeDamageRadius=true`.
+        ChangeDamageRadius = |_lua, (_this, _radius): (Obj<moho::Weapon>, f64)| Ok(())
+    )?;
+    lua_method!(lua, moho::Weapon,
+        /// Sets the engine weapon's damage type: as `ChangeDamageRadius`,
+        /// kept by moho and read by nothing (`probe_wpn_ctrl` `dmg`).
+        ChangeDamageType = |_lua, (_this, _kind): (Obj<moho::Weapon>, String)| Ok(())
+    )?;
     lua_method!(lua, moho::Weapon,
         /// Sets the firing spread (degrees, gaussian); nil is 0.
         SetFiringRandomness = |lua, (this, r): (Obj<moho::Weapon>, Option<f64>)| {
@@ -594,7 +606,19 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// Targets a ground position (an `{x, y, z}` table).
         SetTargetGround = |lua, (this, loc): (Obj<moho::Weapon>, shapes::Vector)| {
         let p = FxVec3::from_f64(loc.raw_get(1)?, loc.raw_get(2)?, loc.raw_get(3)?);
-        with_state(lua, &this, |w| w.target = Some(WeaponTarget::Ground(p)))
+        // A script's target isn't the attack order's: left marked as the
+        // order's, the next tick read it as the order re-pointing and
+        // halted fire, which ended a salvo in flight. FAF's UEF carpet
+        // bomb calls this before every bomb after the first
+        // (`TIFCarpetBombWeapon.CreateProjectileAtMuzzle`), so it dropped 2
+        // of its 4. The order takes the weapon back without a halt.
+        with_state(lua, &this, |w| {
+            let target = Some(WeaponTarget::Ground(p));
+            if w.target != target {
+                w.target = target;
+                w.target_from_order = false;
+            }
+        })
     })?;
     lua_method!(lua, moho::Weapon,
         /// Progress of the reload, 1 = ready.
@@ -605,9 +629,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         })
     })?;
     lua_method!(lua, moho::Weapon,
-        /// True if the weapon is enabled and its fire clock has run out.
+        /// True if the weapon is enabled and aimed on its target, whatever
+        /// its reload: moho's `CanFire` (stunned / busy / layer / aim, no
+        /// reload term; FAF's `engine/Sim/UnitWeapon.lua`). `probe_wpn_ctrl`
+        /// `fireclock`: false before the first shot, then true every tick
+        /// while `GetFireClockPct` runs 0.0..0.9. FAF's counted-projectile
+        /// weapons (`DefaultProjectileWeapon` and the SMD scripts) read it
+        /// in the middle of a reload.
         CanFire = |lua, this: Obj<moho::Weapon>| {
-        with_state(lua, &this, |w| w.enabled && w.fire_clock == 0)
+        with_state(lua, &this, |w| w.enabled && w.on_target)
     })?;
     lua_method!(lua, moho::Weapon,
         /// The projectile blueprint table, or nil when the weapon has none.
@@ -645,7 +675,12 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         };
         let (position, direction, distance) = {
             let w = entity::world(lua);
-            let Some(u) = w.get(h.unit).filter(|u| !u.destroyed) else { return Ok(None) };
+            // A unit destroyed this beat still fires: it exists until the
+            // destroy queue drains, and its weapons' `OnDestroy` (FAF's
+            // `DeadState`) is what ends a salvo. A script that destroyed a
+            // unit mid-salvo otherwise left its salvo thread a nil
+            // projectile (FAF's `weapon.lua:551` raised on it).
+            let Some(u) = w.get(h.unit) else { return Ok(None) };
             // From the muzzle as posed now (recoil, walk cycle); flying
             // along the weapon's aim. Silo missiles never aim, nor do homing
             // missiles from fixed tubes: they leave along the muzzle bone

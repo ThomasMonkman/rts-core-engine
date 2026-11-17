@@ -196,12 +196,23 @@ pub struct ProjectileState {
     pub reports_to: Option<u32>,
 }
 
-/// Seconds -> whole ticks (rounded up, so a lifetime never ends early).
+/// Seconds -> whole ticks (rounded up, so a wait never ends early).
 pub fn seconds_to_ticks(seconds: Fx) -> u32 {
     if seconds <= Fx::ZERO {
         return 0;
     }
     (seconds * Fx::from_num(TICKS_PER_SECOND)).ceil().saturating_to_num::<u32>()
+}
+
+/// Seconds -> ticks a projectile lifetime lasts: ceil(10 L + 0.5), so the expiry
+/// impact comes half a tick or more after the time is up (`probe_wpn_proj`,
+/// `probe_wpn_misc2`: `SetLifetime(1.0)` ends at tick 11, 2.5 s at 26, 0.25 s
+/// at 3, 0 at 1; a weapon shot of 0.854 s at 10).
+pub fn lifetime_to_ticks(seconds: Fx) -> u32 {
+    if seconds < Fx::ZERO {
+        return 0;
+    }
+    (seconds * Fx::from_num(TICKS_PER_SECOND) + Fx::from_num(0.5)).ceil().saturating_to_num::<u32>()
 }
 
 impl ProjectileState {
@@ -215,7 +226,7 @@ impl ProjectileState {
     }
 
     pub fn set_lifetime(&mut self, seconds: Option<Fx>) {
-        self.lifetime_ticks = seconds.map(seconds_to_ticks);
+        self.lifetime_ticks = seconds.map(lifetime_to_ticks);
     }
 
     pub fn new(id: EntityId, launcher: Option<EntityId>, t: &ProjectileTemplate, velocity: FxVec3) -> Self {
@@ -227,7 +238,7 @@ impl ProjectileState {
             acceleration: t.acceleration,
             ballistic_acceleration: if t.use_gravity { default_gravity() } else { Fx::ZERO },
             max_speed: t.max_speed,
-            lifetime_ticks: t.lifetime.map(seconds_to_ticks),
+            lifetime_ticks: t.lifetime.map(lifetime_to_ticks),
             collide_entity: t.collide_entity,
             collide_surface: t.collide_surface,
             destroy_on_water: t.destroy_on_water,
@@ -514,6 +525,8 @@ pub struct ShieldSphere {
     /// another's shape, not one inside it when it appears: FAF's flares make
     /// three sizes for that).
     pub moved: Option<FxVec3>,
+    /// The bubble's army: an enemy bubble also stops shots leaving it.
+    pub army: Option<u32>,
 }
 
 /// Where (fraction 0..1) the segment `from -> to` enters the sphere from
@@ -538,9 +551,33 @@ pub fn segment_enters_sphere(from: FxVec3, to: FxVec3, center: FxVec3, radius: F
     (Fx::ZERO..=Fx::ONE).contains(&t).then_some(t)
 }
 
-/// The earliest shield bubble the segment `from -> to` enters from outside
-/// (shots fired from inside get out): fraction along it (0 at the latest)
-/// and shield id; ties go to the lowest id.
+/// Where (fraction 0..1) the segment `from -> to` leaves the sphere from
+/// inside; `None` if it starts outside or stays in.
+fn segment_leaves_sphere(from: FxVec3, to: FxVec3, center: FxVec3, radius: Fx) -> Option<Fx> {
+    let sq = |v: FxVec3| v.x.saturating_mul(v.x).saturating_add(v.y.saturating_mul(v.y)).saturating_add(v.z.saturating_mul(v.z));
+    let r2 = radius.saturating_mul(radius);
+    let (d, f) = (to - from, from - center);
+    let c = sq(f) - r2;
+    if c > Fx::ZERO || sq(to - center) <= r2 {
+        return None;
+    }
+    let a = sq(d);
+    let b = (f.x.saturating_mul(d.x).saturating_add(f.y.saturating_mul(d.y)).saturating_add(f.z.saturating_mul(d.z))).saturating_mul(Fx::from_num(2));
+    let disc = (b.saturating_mul(b) - a.saturating_mul(c).saturating_mul(Fx::from_num(4))).max(Fx::ZERO);
+    let t = (-b + crate::engine::sim::math::sqrt(disc)) / (a * Fx::from_num(2));
+    Some(t.clamp(Fx::ZERO, Fx::ONE))
+}
+
+/// The earliest shield bubble the segment `from -> to` enters from outside,
+/// or leaves from inside when the bubble is an enemy's (`exits`: the
+/// projectile's army and the alliances; `None` for script spheres): fraction
+/// along it (0 at the latest) and shield id; ties go to the lowest id.
+///
+/// A shot launched inside an enemy bubble hits it from the inside on its
+/// way out (`probe_wpn_shield` `geo.insideout`: `type Shield ... dist
+/// 12.84`). Friendly bubbles let it out without asking: FAF's
+/// `Shield:OnCollisionCheck` refuses any shot that isn't an enemy's, and a
+/// refusal would hold the shot a tick.
 ///
 /// The test line starts 1% of the step behind the projectile: moho's
 /// collision line for entities starts behind it by a share of its velocity
@@ -550,7 +587,21 @@ pub fn segment_enters_sphere(from: FxVec3, to: FxVec3, center: FxVec3, radius: F
 /// the bubble hit it, not what's under it (FAF probe probe_splashwater:
 /// three Lobos took a mobile shield's bubble from 3000 to 1500 in one
 /// volley, the tank and the carrier under it untouched).
-fn first_shield_hit(p: &ProjectileState, from: FxVec3, to: FxVec3, shields: &[ShieldSphere]) -> Option<(Fx, EntityId)> {
+fn first_shield_hit(
+    p: &ProjectileState,
+    from: FxVec3,
+    to: FxVec3,
+    shields: &[ShieldSphere],
+    exits: Option<(Option<u32>, Option<&crate::engine::sim::army::Armies>)>,
+) -> Option<(Fx, EntityId)> {
+    use crate::engine::sim::army::Alliance;
+    let enemy = |other: Option<u32>| match exits {
+        Some((Some(a), armies)) => other.is_some_and(|b| match armies {
+            Some(armies) => armies.alliance(a, b) == Alliance::Enemy,
+            None => a != b,
+        }),
+        _ => false,
+    };
     let back = (to - from) * (Fx::ONE / Fx::from_num(100));
     let from = from - back;
     let d = to - from;
@@ -571,7 +622,11 @@ fn first_shield_hit(p: &ProjectileState, from: FxVec3, to: FxVec3, shields: &[Sh
         if f.x.abs() > s.radius + seg || f.y.abs() > s.radius + seg || f.z.abs() > s.radius + seg {
             continue;
         }
-        let Some(t) = segment_enters_sphere(from, to, s.center, s.radius) else { continue };
+        let Some(t) = segment_enters_sphere(from, to, s.center, s.radius)
+            .or_else(|| if enemy(s.army) { segment_leaves_sphere(from, to, s.center, s.radius) } else { None })
+        else {
+            continue;
+        };
         // Back to a fraction of the real step (the line is 1.01 steps).
         let t = (t * Fx::from_num(101) / Fx::from_num(100) - Fx::ONE / Fx::from_num(100)).max(Fx::ZERO);
         if best.is_none_or(|(bt, bid)| (t, s.id) < (bt, bid)) {
@@ -811,11 +866,21 @@ fn advance(
         return Motion { live: true, turned, position: at, orientation: q, impact: Some(ImpactKind::Air), target: None, water: None, entered: None };
     }
 
-    // Units and shield bubbles first: anything hit along this tick's path,
-    // earliest wins.
+    // The surface first: where along this tick's path the projectile meets
+    // the water (coming down, `DestroyOnWater`) or the ground.
+    let surface = match terrain {
+        Some(t) if p.collide_surface => surface_hit(p, position, next, t),
+        _ => None,
+    };
+    if let (Some(_), Some(t)) = (surface.filter(|s| s.1 == ImpactKind::Terrain && p.bounces_left > 0), terrain) {
+        return bounce(p, position, next, t, q, turned);
+    }
+
+    // Units and shield bubbles: anything hit along this tick's path before
+    // the surface, earliest wins.
     if p.collide_entity {
         let unit = first_unit_hit(p, position, next, army, world, env, buf);
-        let shield = first_shield_hit(p, position, next, env.shields);
+        let shield = first_shield_hit(p, position, next, env.shields, Some((army, env.armies)));
         let under_water = |t: Fx| terrain.and_then(|tr| tr.water_surface).is_some_and(|w| (position + (next - position) * t).y < w);
         let mut hit = match (unit, shield) {
             (Some((tu, u, layer)), Some((ts, s))) => Some(if ts < tu { (ts, s, ImpactKind::Shield) } else { (tu, u, ImpactKind::for_unit(layer, under_water(tu))) }),
@@ -832,28 +897,18 @@ fn advance(
             && hit.is_none_or(|(t, ..)| tp < t) {
             hit = Some((tp, target, ImpactKind::Projectile));
         }
-        if let Some((t, target, kind)) = hit {
+        if let Some((t, target, kind)) = hit
+            && surface.is_none_or(|(ts, _)| t <= ts) {
             let at = position + (next - position) * t;
             return Motion { live: true, turned, position: at, orientation: q, impact: Some(kind), target: Some(target), water: None, entered: None };
         }
     }
 
     let mut impact = None;
-    if p.collide_surface
-        && let Some(t) = terrain {
-        let ground = t.height_at(next.x, next.z);
-        match t.water_surface {
-            // Hits the surface coming down, if it's `DestroyOnWater`
-            // (default off); else it only enters the water
-            // (`OnEnterWater`) and goes on, to the seabed or its target
-            // (moho's `Projectile::CheckCollision`, MohoEngine.dll
-            // 0x1027e570: the water impact needs blueprint physics
-            // +0x78, copied to the projectile's +0x29f).
-            Some(w) if p.destroy_on_water && w > ground && next.y <= w && position.y > w => impact = Some(ImpactKind::Water),
-            _ if next.y <= ground && p.bounces_left > 0 => return bounce(p, position, next, t, q, turned),
-            _ if next.y <= ground => impact = Some(ImpactKind::Terrain),
-            _ => {}
-        }
+    let mut end = next;
+    if let Some((t, kind)) = surface {
+        impact = Some(kind);
+        end = position + (next - position) * t;
     }
     if impact.is_none()
         && let Some(ticks) = p.lifetime_ticks.as_mut() {
@@ -876,8 +931,78 @@ fn advance(
         };
         (w > t.height_at(next.x, next.z)).then_some(crossed)
     });
-    let entered = if p.collide_entity && !env.script_spheres.is_empty() { first_shield_hit(p, position, next, env.script_spheres).map(|(_, id)| id) } else { None };
-    Motion { live: true, turned, position: next, orientation: q, impact, target: None, water, entered }
+    let entered = if p.collide_entity && !env.script_spheres.is_empty() { first_shield_hit(p, position, next, env.script_spheres, None).map(|(_, id)| id) } else { None };
+    Motion { live: true, turned, position: end, orientation: q, impact, target: None, water, entered }
+}
+
+/// Where (fraction 0..1 of the step `from -> to`) the path first meets the
+/// surface, and as what: the water plane coming down through it when the
+/// projectile is `DestroyOnWater` and the sea is deeper than the ground
+/// there (else it only enters the water and goes on to the seabed: moho's
+/// `Projectile::CheckCollision`, MohoEngine.dll 0x1027e570, needs blueprint
+/// physics +0x78, copied to the projectile's +0x29f), or the ground.
+///
+/// The impact is at the contact point, not the step's end (FAF's `OnImpact`
+/// centres its `DamageArea` there): `probe_wpn_proj` `imp.terrain ... pos
+/// 6.02,-0.02,6.02`, `sea.water ... pos 9.00,0.00,0.00` (ours had put them
+/// up to a step on, below the surface). The ground is sampled about once a
+/// unit along the step, so a ridge between the ends stops the shot, and the
+/// crossing is refined by bisection. A path that starts at or under the
+/// ground hits it where it starts if it ends under it too (`kin.laserup
+/// ... pos 0.00,1.00,-32.00`, the launch point), and not at all if it comes
+/// out (a muzzle a little under a steep slope still fires out).
+fn surface_hit(p: &ProjectileState, from: FxVec3, to: FxVec3, terrain: &Terrain) -> Option<(Fx, ImpactKind)> {
+    let lerp = |t: Fx| from + (to - from) * t;
+    let above = |t: Fx| {
+        let at = lerp(t);
+        at.y - terrain.height_at(at.x, at.z)
+    };
+    let water = match terrain.water_surface {
+        Some(w) if p.destroy_on_water && from.y > w && to.y <= w => {
+            let t = ((from.y - w) / (from.y - to.y)).clamp(Fx::ZERO, Fx::ONE);
+            let at = lerp(t);
+            (w > terrain.height_at(at.x, at.z)).then_some(t)
+        }
+        _ => None,
+    };
+    let f0 = from.y - terrain.height_at(from.x, from.z);
+    let f1 = to.y - terrain.height_at(to.x, to.z);
+    let ground = if f0 <= Fx::ZERO {
+        (f1 <= Fx::ZERO).then_some(Fx::ZERO)
+    } else {
+        let span = (to.x - from.x).abs() + (to.z - from.z).abs();
+        // Well clear of the ground at both ends: no slope climbs 8 in 1
+        // between them.
+        if f1 > Fx::ZERO && f0.min(f1) > span * 8 {
+            None
+        } else {
+            let steps = span.ceil().to_num::<i64>().clamp(1, 64);
+            let step = Fx::ONE / Fx::from_num(steps);
+            let mut lo = Fx::ZERO;
+            let mut hit = None;
+            for i in 1..=steps {
+                let (t, f) = if i == steps { (Fx::ONE, f1) } else { let t = step * Fx::from_num(i); (t, above(t)) };
+                if f <= Fx::ZERO {
+                    hit = Some(t);
+                    break;
+                }
+                lo = t;
+            }
+            hit.map(|mut hi| {
+                for _ in 0..10 {
+                    let mid = (lo + hi) / 2;
+                    if above(mid) <= Fx::ZERO { hi = mid } else { lo = mid }
+                }
+                hi
+            })
+        }
+    };
+    match (water, ground) {
+        (Some(w), Some(g)) if g < w => Some((g, ImpactKind::Terrain)),
+        (Some(w), _) => Some((w, ImpactKind::Water)),
+        (None, Some(g)) => Some((g, ImpactKind::Terrain)),
+        (None, None) => None,
+    }
 }
 
 /// Where a homing projectile at `position` steers this tick, if anywhere.
@@ -891,7 +1016,10 @@ fn tracking_aim(p: &ProjectileState, position: FxVec3, world: &EntityWorld, env:
     let terrain = env.terrain;
     let aim = match p.target {
         Some(ProjectileTarget::Entity(id)) => world.get(id).filter(|e| !e.destroyed).map(|e| {
-            let at = e.position();
+            // The centre of its collision volume, not its origin
+            // (`probe_wpn_proj` `trk.*`: a wall's target position is 0.25
+            // above its origin and the hits land there).
+            let at = crate::engine::sim::weapon::aim_point(e);
             let v = match (p.lead_target, e.kind) {
                 (false, _) => FxVec3::default(),
                 (true, crate::engine::sim::entity::EntityKind::Projectile) => {
@@ -1089,6 +1217,9 @@ mod tests {
         // the mean (1.5 u/s), then 2 u/s for 3 ticks.
         let z = w.get(id).unwrap().position().z;
         assert!((z.to_num::<f64>() - 0.75).abs() < 1e-6, "{z}");
+        // 0.5 s lasts ceil(5 + 0.5) = 6 ticks: nothing on the 5th.
+        step(&mut ps, &mut w, Env::default(), &mut out);
+        assert!(out.is_empty());
         step(&mut ps, &mut w, Env::default(), &mut out);
         assert_eq!(out, vec![Impact { id, kind: ImpactKind::Air, target: None }]);
     }
@@ -1407,7 +1538,12 @@ mod tests {
     #[test]
     fn lifetime_rounds_up_to_whole_ticks() {
         assert_eq!(seconds_to_ticks(Fx::from_num(32)), 320);
-        assert_eq!(seconds_to_ticks(Fx::from_num(0.05)), 1);
         assert_eq!(seconds_to_ticks(Fx::ZERO), 0);
+        assert_eq!(lifetime_to_ticks(Fx::from_num(32)), 321);
+        assert_eq!(lifetime_to_ticks(Fx::from_num(1)), 11);
+        assert_eq!(lifetime_to_ticks(Fx::from_num(0.25)), 3);
+        assert_eq!(lifetime_to_ticks(Fx::from_num(0.854)), 10);
+        assert_eq!(lifetime_to_ticks(Fx::from_num(0.04)), 1);
+        assert_eq!(lifetime_to_ticks(Fx::ZERO), 1);
     }
 }

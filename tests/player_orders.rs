@@ -119,6 +119,34 @@ fn plain_move_from_the_command_stream_arrives() {
     }
 }
 
+/// The player's patrol to one point loops: the interface's leg back to
+/// where the unit started follows it (`Command::patrol_home`), where a
+/// script's single `IssuePatrol` point just ends (tests/scenarios
+/// patrol_single).
+#[test]
+fn players_single_point_patrol_loops_back() {
+    if !have_data() {
+        return;
+    }
+    let (mut engine, tanks, _) = setup(None);
+    let t = tick_now(&engine) + 1;
+    let start = position(&engine, tanks[0]);
+    send(&engine, t, 0, PlayerCommand { kind: CommandKind::Patrol, ..move_to(1, &tanks[..1], 405.0, 580.0) });
+    let (mut back, mut given) = (false, false);
+    for _ in 0..400 {
+        engine.tick().unwrap();
+        let c = engine.sim_lua().app_data_ref::<Commands>().unwrap();
+        let q: Vec<_> = c.queue(tanks[0]).map(|x| (x.kind, x.target)).collect();
+        given |= !q.is_empty();
+        assert!(!given || !q.is_empty(), "the patrol never ends");
+        if let [(CommandKind::Patrol, CommandTarget::Ground(p))] = q[..] {
+            let (x, _, z) = p.to_f64();
+            back |= (x - start.0).abs() < 1.0 && (z - start.1).abs() < 1.0;
+        }
+    }
+    assert!(given && back, "a leg back to the start followed the first");
+}
+
 #[test]
 fn commands_only_move_the_senders_units() {
     if !have_data() {
@@ -919,8 +947,11 @@ fn loads_a_transport_cant_carry_are_refused() {
     engine.tick().unwrap();
     engine.tick().unwrap();
     assert_eq!(current(&engine, acu), Some((CommandKind::TransportLoadUnits, CommandTarget::Entity(t2))), "the commander boards the T2 transport");
-    assert_eq!(current(&engine, t1), None, "the transport won't pick up an aircraft");
+    // (It keeps the load order it joined to fetch the tank, nothing more.)
+    assert_eq!(current(&engine, t1), Some((CommandKind::TransportLoadUnits, CommandTarget::Entity(t1))), "the transport comes for the tank");
+    assert_eq!(engine.sim_lua().app_data_ref::<Commands>().unwrap().queue_len(t1), 1, "the transport won't pick up an aircraft");
     // A ferry route: only for a transport (0x102ca420 case 17).
+    engine.sim_lua().load(format!("IssueClearCommands({{ GetEntityById({t1}) }})")).exec().unwrap();
     engine.sim_lua().load(format!("IssueFerry({{ GetEntityById({}), GetEntityById({}) }}, {{ 380, 0, 560 }})", tanks[3], t1)).exec().unwrap();
     assert_eq!(current(&engine, tanks[3]), None, "a tank takes no ferry route");
     assert_eq!(current(&engine, t1).map(|c| c.0), Some(CommandKind::Ferry), "the transport does");
@@ -1379,6 +1410,69 @@ fn kennel_drone_repairs_what_is_near_and_comes_home() {
     assert!(engine.sim_lua().app_data_ref::<Commands>().unwrap().is_idle(d), "then went idle");
     let (dp, kp) = (position(&engine, d), position(&engine, kennel));
     assert!((dp.0 - kp.0).hypot(dp.1 - kp.1) < 2.0, "back over the Kennel: {dp:?} vs {kp:?}");
+}
+
+/// A player's load order brings the transport: it drops the move it was on
+/// (the order isn't queued), flies to the tanks, they board together, and a
+/// player's unload order then sets them down at the point. Queued (Shift),
+/// the load waits behind what the transport was doing.
+#[test]
+fn load_order_brings_the_transport() {
+    if !have_data() {
+        return;
+    }
+    let (mut engine, tanks, _) = setup(None);
+    let transport: u32 = engine
+        .sim_lua()
+        .load("return tonumber(CreateUnitHPR('uea0107', 'ARMY_1', 440, GetTerrainHeight(440, 560) + 8, 560, 0, 0, 0):GetEntityId())")
+        .eval()
+        .expect("transport");
+    let current = |e: &engine::Engine, id: u32| e.sim_lua().app_data_ref::<Commands>().unwrap().current(id).map(|c| (c.kind, c.target));
+    let queue = |e: &engine::Engine, id: u32| e.sim_lua().app_data_ref::<Commands>().unwrap().queue(id).map(|c| c.kind).collect::<Vec<_>>();
+    let aboard = |e: &engine::Engine| {
+        let w = e.sim_lua().app_data_ref::<EntityWorld>().unwrap();
+        tanks.iter().filter(|&&t| w.get(t).is_some_and(|x| x.attachment.is_some_and(|a| a.parent == transport))).count()
+    };
+    let load = |queue: bool| PlayerCommand { kind: CommandKind::TransportLoadUnits, units: tanks.clone(), target: CommandTarget::Entity(transport), queue, ..move_to(1, &[], 0.0, 0.0) };
+    // Queued behind a move: the transport finishes the move first.
+    send(&engine, tick_now(&engine) + 1, 0, move_to(1, &[transport], 470.0, 560.0));
+    send(&engine, tick_now(&engine) + 1, 1, load(true));
+    engine.tick().unwrap();
+    engine.tick().unwrap();
+    assert_eq!(queue(&engine, transport), vec![CommandKind::Move, CommandKind::TransportLoadUnits], "a queued load waits its turn");
+    // Not queued: it drops the move and comes.
+    send(&engine, tick_now(&engine) + 1, 0, load(false));
+    engine.tick().unwrap();
+    engine.tick().unwrap();
+    assert_eq!(current(&engine, transport), Some((CommandKind::TransportLoadUnits, CommandTarget::Entity(transport))), "the load order replaces the move");
+    assert_eq!(queue(&engine, transport).len(), 1, "and is all it has");
+    let start = position(&engine, tanks[0]);
+    let mut first = None;
+    for i in 0..300 {
+        engine.tick().unwrap();
+        if first.is_none() && aboard(&engine) > 0 {
+            first = Some((i, aboard(&engine)));
+        }
+        if aboard(&engine) == tanks.len() {
+            break;
+        }
+    }
+    assert_eq!(aboard(&engine), tanks.len(), "every tank boarded");
+    assert_eq!(first.map(|f| f.1), Some(tanks.len()), "all on the same tick");
+    let at = position(&engine, tanks[0]);
+    assert!((at.0 - start.0).hypot(at.1 - start.1) < 15.0, "the transport came to them: the tank moved {:?} -> {:?}", start, at);
+    assert!(engine.sim_lua().app_data_ref::<Commands>().unwrap().is_idle(transport), "the load order is done");
+    // The player's unload order sets them down at the point.
+    send(&engine, tick_now(&engine) + 1, 0, PlayerCommand { kind: CommandKind::TransportUnloadUnits, target: ground(470.0, 560.0), ..move_to(1, &[transport], 0.0, 0.0) });
+    for _ in 0..300 {
+        engine.tick().unwrap();
+        if aboard(&engine) == 0 && engine.sim_lua().app_data_ref::<EntityWorld>().unwrap().get(tanks[0]).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.layer == rts_core_engine::engine::sim::layer::Layer::Land) {
+            break;
+        }
+    }
+    assert_eq!(aboard(&engine), 0, "unloaded");
+    let down = position(&engine, tanks[0]);
+    assert!((down.0 - 470.0).hypot(down.1 - 560.0) < 6.0, "at the drop point: {down:?}");
 }
 
 /// A passenger ordered out of its transport (`DetachFromTransport`, as the

@@ -21,9 +21,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         r#"
         local load = ...
         local function doscript(path, env)
-            local chunk, err = load(path, env)
+            local chunk, err, level = load(path, env)
             if chunk == nil then
-                if err ~= nil then error(err, 2) end
+                if err ~= nil then error(err, level or 2) end
                 return
             end
             return chunk()
@@ -38,7 +38,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     // can't be re-entered by a nested script without stacking Rust frames);
     // recorded here so they appear in the API.
     for (name, doc) in [
-        ("doscript", "Runs a script from the VFS, optionally in the environment `env`; returns what it returns. A missing file does nothing; one that doesn't compile is skipped with a warning."),
+        ("doscript", "Runs a script from the VFS, optionally in the environment `env`; returns what it returns. A missing file raises `Unable to find file <path>`; one that doesn't compile is skipped with a warning."),
         ("dofile", "Same as `doscript`."),
     ] {
         crate::lua_api::registry::record(
@@ -99,13 +99,14 @@ fn traced_doscript(lua: &Lua) -> LuaResult<()> {
 }
 
 /// Loads `path` (compiled bytecode from the [`ScriptCache`]) into a function,
-/// optionally bound to `env`. Returns `(nil, nil)` for a missing file or one
-/// that doesn't compile (warned), `(nil, message)` if the bytecode won't load.
+/// optionally bound to `env`. Returns `(nil, nil)` for one that doesn't
+/// compile (warned), `(nil, message, level)` for an error `doscript` raises:
+/// a missing file, or bytecode that won't load.
 fn load_file_from_vfs(
     lua: &Lua,
     path: &str,
     env: Option<LuaTable>,
-) -> LuaResult<(Option<LuaFunction>, Option<String>)> {
+) -> LuaResult<(Option<LuaFunction>, Option<String>, Option<u8>)> {
     let cache = lua
         .app_data_ref::<Arc<ScriptCache>>()
         .expect("ScriptCache not in app_data")
@@ -123,12 +124,14 @@ fn load_file_from_vfs(
         // Luau's error is `line: message`, so the file is named here.
         Ok(Err(message)) => {
             warn!(target: "lua", "SCR_LuaDoFileConcat: Loading \"{path}\" failed: [string \"{path}\"]:{message}");
-            return Ok((None, None));
+            return Ok((None, None, None));
         }
-        Err(_) => {
-            debug!(path = path, "doscript: skip missing");
-            return Ok((None, None));
-        }
+        // A missing file raises, with no position, as the real `doscript`
+        // does (`Unable to find file /lua/nosuch_file.lua`, probed). FAF's
+        // `import` turns it into `Error importing '<path>'`, so a
+        // `pcall(import, optional)` takes its fallback; FAF tests optional
+        // files with `exists` / `DiskGetFileInfo` before `doscript`.
+        Err(_) => return Ok((None, Some(format!("Unable to find file {path}")), Some(0))),
     };
 
     debug!(path = path, "doscript: exec");
@@ -141,9 +144,9 @@ fn load_file_from_vfs(
             if crate::engine::lua::debugger::enabled() {
                 crate::engine::lua::debugger::on_chunk(lua, path, &f);
             }
-            Ok((Some(f), None))
+            Ok((Some(f), None, None))
         }
-        Err(e) => Ok((None, Some(e.to_string()))),
+        Err(e) => Ok((None, Some(e.to_string()), None)),
     }
 }
 
@@ -234,6 +237,23 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(after, 1);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A missing file raises `Unable to find file <path>` (no position), so
+    /// FAF's `import` of a missing module raises too, as in the real game.
+    #[test]
+    fn missing_file_raises() {
+        let dir = std::env::temp_dir().join(format!("doscript_missing_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vfs = Vfs::new(vec![MountPoint { source: dir.clone(), mountpoint: "/".into() }], vec![]).unwrap();
+        let lua = Lua::new();
+        lua.set_app_data(Arc::new(ScriptCache::new(Arc::new(RwLock::new(vfs)))));
+        register(&lua).unwrap();
+
+        let (ok, msg): (bool, String) = lua.load("return pcall(doscript, '/lua/nosuch_file.lua')").eval().unwrap();
+        assert!(!ok);
+        assert_eq!(msg, "Unable to find file /lua/nosuch_file.lua");
         std::fs::remove_dir_all(dir).ok();
     }
 }

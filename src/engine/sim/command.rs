@@ -82,9 +82,9 @@ impl CommandKind {
         Self::ALL.get((v as usize).checked_sub(1)?).copied()
     }
 
-    /// A transport load/unload order: while one is active the transport
-    /// flies at its `TransportHoverHeight` (it lowers for the tractor /
-    /// drop and climbs back once the order ends).
+    /// A transport load/unload order: on one the transport lowers to its
+    /// `TransportHoverHeight` over the order's point (for the tractor /
+    /// drop) and climbs back once the order ends.
     pub fn is_transport_load_unload(self) -> bool {
         matches!(self, Self::TransportLoadUnits | Self::TransportReverseLoadUnits | Self::TransportUnloadUnits | Self::TransportUnloadSpecificUnits)
     }
@@ -132,6 +132,19 @@ pub struct Command {
     /// at +0xe4): [`Commands::repeat_to_back`].
     #[serde(default)]
     pub repeat_count: u32,
+    /// A patrol the player gave (`api::player_input`): left alone in the
+    /// queue, it's followed by a leg back to where the unit started, so
+    /// one point patrols between there and here. Moho's interface adds that
+    /// leg; a script's lone `IssuePatrol` point just ends on arrival
+    /// (dev/probes probe_unit_orders O3). Copied to units joining a
+    /// factory's patrol rally.
+    #[serde(default)]
+    pub patrol_home: bool,
+    /// A load order an air transport joined (`api::transport`'s pick-up):
+    /// where its units gather for the transport to come to them. `None`:
+    /// they go to the transport.
+    #[serde(default)]
+    pub gather: Option<FxVec3>,
 }
 
 /// A unit's place in a formation order: its goal is the target plus
@@ -288,7 +301,7 @@ impl Commands {
         }
         // A command nobody received is done at once.
         if !members.is_empty() {
-            self.map.insert(id, Command { id, kind, target, blueprint, count, issued: members.len() as u32, units: members.clone(), formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count });
+            self.map.insert(id, Command { id, kind, target, blueprint, count, issued: members.len() as u32, units: members.clone(), formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count, patrol_home: false, gather: None });
         }
         for u in members {
             self.sync(u);
@@ -457,7 +470,7 @@ impl Commands {
         let id = self.next_id;
         self.next_id += 1;
         self.queues.entry(unit).or_default().push_front(id);
-        self.map.insert(id, Command { id, kind, target, blueprint, count, issued: 1, units: vec![unit], formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count });
+        self.map.insert(id, Command { id, kind, target, blueprint, count, issued: 1, units: vec![unit], formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count, patrol_home: false, gather: None });
         self.sync(unit);
         id
     }
@@ -658,7 +671,7 @@ impl Commands {
             }
             self.factory_queues.entry(f).or_default().push(id);
         }
-        self.map.insert(id, Command { id, kind, target, blueprint: None, count: 0, issued: 1, units: members, formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: 0 });
+        self.map.insert(id, Command { id, kind, target, blueprint: None, count: 0, issued: 1, units: members, formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: 0, patrol_home: false, gather: None });
         id
     }
 
@@ -718,6 +731,19 @@ impl Commands {
             self.add_to_queue(unit, id, kind);
         }
         self.sync(unit);
+    }
+
+    /// `unit` joins command `id` as one more of its units, at the back of
+    /// its queue (an air transport joining the load order onto it,
+    /// `api::transport`). False: no such command, or it has it already.
+    pub fn join(&mut self, id: CommandId, unit: EntityId) -> bool {
+        let Some(c) = self.map.get_mut(&id) else { return false };
+        let Err(i) = c.units.binary_search(&unit) else { return false };
+        c.units.insert(i, unit);
+        let kind = c.kind;
+        self.add_to_queue(unit, id, kind);
+        self.sync(unit);
+        true
     }
 
     /// Units with a non-empty queue, ascending.

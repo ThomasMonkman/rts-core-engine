@@ -7,18 +7,23 @@
 //!    `Reclaiming` state and the target `BeingReclaimed`.
 //! 2. Progress: `time, energy, mass` from the reclaimer's
 //!    `GetReclaimCosts(target)` (recomputed every tick, as FAF's Lua
-//!    expects); the target's fraction complete drops by `dt / time`, and the
-//!    reclaimer's army gains that fraction of `mass` / `energy`. A unit's
-//!    health goes down with its fraction (at most max health x fraction),
-//!    and a damaged unit's reclaim starts from its health share (its
-//!    fraction drops to it), as moho's reclaim task does (MohoEngine.dll
-//!    0x10209e95, 0x1020a06b); one broken off partway stays, see-through
-//!    and as weak as it looks. Shown as
-//!    the reclaimer's work progress (the share of the target consumed, as
-//!    builders mirror their site's fraction).
+//!    expects); a prop's or unfinished unit's fraction complete drops by
+//!    `dt / time`, and the reclaimer's army gains that fraction of `mass` /
+//!    `energy`. An unfinished unit's health goes down with its fraction (at
+//!    most max health x fraction), and a damaged one's reclaim starts from
+//!    its health share (its fraction drops to it), as moho's reclaim task
+//!    does (MohoEngine.dll 0x10209e95, 0x1020a06b; not checked against the
+//!    real game). Shown as the reclaimer's work progress (the share of the
+//!    target consumed, as builders mirror their site's fraction).
+//!    A finished unit instead loses max health x `dt / time` a tick, keeps
+//!    its fraction and pays nothing ([`drain`]); one broken off partway
+//!    stays with the health it has left.
 //! 3. Finish (fraction 0): `OnReclaimed(reclaimer)` on the target (FAF's
 //!    script destroys it), `OnStopReclaim(nil)` on the reclaimer; a Reclaim
-//!    order pops, a move order carries on.
+//!    order pops, a move order carries on. A finished unit is done when no
+//!    more than a tick's drain is left: `OnReclaimed(reclaimer)`, its
+//!    script's `CreateWreckageProp(0)`, and the reclaimer goes on to the
+//!    wreck under the same order (dev/probes `probe_unit_reclaim2`).
 //! A job belongs to the order that started it: when the reclaimer's current
 //! order changes, or the target leaves range, it stops with
 //! `OnStopReclaim(target)`. Units marked `SetReclaimable(false)` end a
@@ -268,6 +273,10 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         let (Some(r_obj), Some(t_obj)) = (entity::object(lua, reclaimer)?, entity::object(lua, job.target)?) else { continue };
         let (time, energy, mass) = costs(&r_obj, &t_obj)?;
         let step = if time > Fx::ZERO { dt / time } else { Fx::ONE };
+        if finished_unit(&entity::world(lua), job.target) {
+            drain(lua, reclaimer, job, step, &r_obj, &t_obj)?;
+            continue;
+        }
         let (taken, left) = {
             let mut w = entity::world(lua);
             let Some(t) = w.get_mut(job.target) else { continue };
@@ -303,14 +312,76 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
+/// A finished unit: reclaiming drains its health and pays nothing.
+fn finished_unit(world: &EntityWorld, target: EntityId) -> bool {
+    world.get(target).is_some_and(|t| t.unit.is_some() && t.fraction_complete >= Fx::ONE)
+}
+
+/// One tick of reclaiming a finished unit: its health drops by max health x
+/// `step` and the army gains nothing (the fraction stays 1). When no more
+/// than a step is left, the unit is reclaimed: `OnReclaimed(reclaimer)`,
+/// then its script's `CreateWreckageProp(0)`, then the engine destroys it,
+/// and a Reclaim order goes on to the wreck, without a new
+/// `OnStartReclaim` (MohoEngine.dll 0x10209a86..0x10209b9c). From the real
+/// game (dev/probes `probe_unit_reclaim2`): a T1 tank drains 11.28 a tick
+/// with nothing gained, its full wreck (45.36 mass) is left whatever its
+/// health was, and the engineer reclaims that under the same order.
+fn drain(lua: &Lua, reclaimer: EntityId, mut job: Job, step: Fx, r_obj: &LuaTable, t_obj: &LuaTable) -> LuaResult<()> {
+    let reclaimed = {
+        let mut w = entity::world(lua);
+        let Some(t) = w.get_mut(job.target) else { return Ok(()) };
+        let take = t.max_health.saturating_mul(step);
+        if t.health > take {
+            t.health -= take;
+            false
+        } else {
+            true
+        }
+    };
+    if !reclaimed {
+        return Ok(());
+    }
+    EntityCallbacks::on_reclaimed(lua, t_obj, "entity", Obj::new(r_obj.clone()))?;
+    let wreck = match t_obj.get::<Option<LuaFunction>>("CreateWreckageProp")? {
+        Some(f) => match f.call::<LuaValue>((t_obj.clone(), 0.0)) {
+            Ok(LuaValue::Table(prop)) => entity::entity_id(&Obj::<crate::engine::api::moho::Entity>::new(prop)).ok(),
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!(target: "lua", "Error running CreateWreckageProp script in unit: {e}");
+                None
+            }
+        },
+        None => None,
+    };
+    let old = job.target;
+    entity::destroy(lua, &Obj::new(t_obj.clone()))?;
+    set_state(lua, old, "BeingReclaimed", false);
+    let wreck = wreck.filter(|&p| entity::world(lua).get(p).is_some_and(|e| !e.destroyed));
+    let Some(prop) = wreck else {
+        stop(lua, reclaimer, true)?;
+        if job.ordered {
+            pop_order(lua, reclaimer, job.command);
+        }
+        return Ok(());
+    };
+    // On to the wreck, under the same order.
+    job.target = prop;
+    if job.ordered {
+        lua.app_data_mut::<Commands>().expect("Commands").set_target(job.command, CommandTarget::Entity(prop));
+    }
+    lua.app_data_mut::<Reclaims>().expect("Reclaims").0.insert(reclaimer, job);
+    crate::engine::api::unit::set_focus(lua, reclaimer, Some(prop))
+}
+
 /// Starts a job: states, focus, work progress (the target's consumed
 /// share), `OnStartReclaim(target)`.
 fn start(lua: &Lua, reclaimer: EntityId, job: Job) -> LuaResult<()> {
     let (Some(r_obj), Some(t_obj)) = (entity::object(lua, reclaimer)?, entity::object(lua, job.target)?) else { return Ok(()) };
     lua.app_data_mut::<Reclaims>().expect("Reclaims").0.insert(reclaimer, job);
-    // A damaged unit is reclaimed from its health share: its fraction drops
-    // to it first (moho's reclaim task, MohoEngine.dll 0x10209e95).
-    if let Some(t) = entity::world(lua).get_mut(job.target).filter(|t| t.unit.is_some() && t.max_health > Fx::ZERO) {
+    // A damaged unfinished unit is reclaimed from its health share: its
+    // fraction drops to it first (moho's reclaim task, MohoEngine.dll
+    // 0x10209e95). A finished one keeps its fraction (`drain`).
+    if let Some(t) = entity::world(lua).get_mut(job.target).filter(|t| t.unit.is_some() && t.max_health > Fx::ZERO && t.fraction_complete < Fx::ONE) {
         t.fraction_complete = t.fraction_complete.min(t.health / t.max_health);
     }
     let done = entity::world(lua).get(job.target).map_or(Fx::ZERO, |t| Fx::ONE - t.fraction_complete);

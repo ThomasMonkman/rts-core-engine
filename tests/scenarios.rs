@@ -169,6 +169,11 @@ fn blip_identity() {
 }
 
 #[test]
+fn jammer_fakes() {
+    scenario("jammer_fakes", 500);
+}
+
+#[test]
 fn blueprint_regen() {
     scenario("blueprint_regen", 60);
 }
@@ -176,6 +181,31 @@ fn blueprint_regen() {
 #[test]
 fn max_health() {
     scenario("max_health", 30);
+}
+
+#[test]
+fn platoon_transport() {
+    scenario("platoon_transport", 800);
+}
+
+#[test]
+fn brain_platoon_shapes() {
+    scenario("brain_platoon_shapes", 40);
+}
+
+#[test]
+fn blocking_terrain() {
+    scenario("blocking_terrain", 20);
+}
+
+#[test]
+fn platoon_find_intel() {
+    scenario("platoon_find_intel", 60);
+}
+
+#[test]
+fn threat_external_factory() {
+    scenario("threat_external_factory", 60);
 }
 
 #[test]
@@ -240,6 +270,26 @@ fn reclaim() {
 
 /// Reclaiming a unit takes its health down with its fraction, so
 /// one broken off partway is left as weak as it is see-through.
+#[test]
+fn blueprint_defaults() {
+    scenario("blueprint_defaults", 10);
+}
+
+#[test]
+fn spawn_height() {
+    scenario("spawn_height", 20);
+}
+
+#[test]
+fn order_states() {
+    scenario("order_states", 40);
+}
+
+#[test]
+fn arity_lenient() {
+    scenario("arity_lenient", 10);
+}
+
 #[test]
 fn reclaim_unit() {
     scenario("reclaim_unit", 1200);
@@ -313,6 +363,11 @@ fn formation() {
 #[test]
 fn bomber() {
     scenario("bomber", 600);
+}
+
+#[test]
+fn strategic_bomber_drop() {
+    scenario("strategic_bomber_drop", 200);
 }
 
 #[test]
@@ -599,8 +654,8 @@ fn decay() {
     scenario("decay", 400);
 }
 
-/// `ChangeUnitArmy` past the receiver's unit cap: refused, the giver hears
-/// `OnFailedUnitTransfer`.
+/// `ChangeUnitArmy` past the receiver's unit cap: refused, the receiver
+/// hears `OnFailedUnitTransfer`; commanders with `noRestrictions`.
 #[test]
 fn failed_transfer() {
     scenario("failed_transfer", 60);
@@ -821,6 +876,21 @@ fn turret_reset() {
 #[test]
 fn transport_death() {
     scenario("transport_death", 300);
+}
+
+#[test]
+fn transport_pickup() {
+    scenario("transport_pickup", 800);
+}
+
+#[test]
+fn transport_flight_height() {
+    scenario("transport_flight_height", 600);
+}
+
+#[test]
+fn transport_killed_cargo() {
+    scenario("transport_killed_cargo", 400);
 }
 
 #[test]
@@ -1081,6 +1151,41 @@ fn rebuild_bonus_ids() {
 }
 
 #[test]
+fn bad_orders() {
+    scenario("bad_orders", 1100);
+}
+
+#[test]
+fn issue_stop() {
+    scenario("issue_stop", 500);
+}
+
+#[test]
+fn build_cancel() {
+    scenario("build_cancel", 300);
+}
+
+#[test]
+fn patrol_single() {
+    scenario("patrol_single", 400);
+}
+
+#[test]
+fn engineer_attack_move() {
+    scenario("engineer_attack_move", 900);
+}
+
+#[test]
+fn capture_shared() {
+    scenario("capture_shared", 900);
+}
+
+#[test]
+fn unit_counts() {
+    scenario("unit_counts", 700);
+}
+
+#[test]
 fn initial_rally() {
     scenario("initial_rally", 1700);
 }
@@ -1332,4 +1437,99 @@ fn mobile_placement() {
 #[test]
 fn dispatch_hold() {
     scenario("dispatch_hold", 1200);
+}
+
+#[test]
+fn cant_be_killed() {
+    scenario("cant_be_killed", 60);
+}
+
+#[test]
+fn shield_inside_out() {
+    scenario("shield_inside_out", 200);
+}
+
+#[test]
+fn shield_centre() {
+    scenario("shield_centre", 200);
+}
+
+#[test]
+fn damage_area_self() {
+    scenario("damage_area_self", 30);
+}
+
+#[test]
+fn ground_contact() {
+    scenario("ground_contact", 40);
+}
+
+#[test]
+fn projectile_lifetime() {
+    scenario("projectile_lifetime", 200);
+}
+
+#[test]
+fn can_fire_reload() {
+    scenario("can_fire_reload", 100);
+}
+
+#[test]
+fn salvo_busy() {
+    scenario("salvo_busy", 160);
+}
+
+#[test]
+fn child_projectile() {
+    scenario("child_projectile", 30);
+}
+
+#[test]
+fn homing_centre() {
+    scenario("homing_centre", 50);
+}
+
+#[test]
+fn weapon_api_returns() {
+    scenario("weapon_api_returns", 20);
+}
+
+#[test]
+fn destroyed_salvo() {
+    scenario("destroyed_salvo", 20);
+}
+
+#[test]
+fn speed_mult_law() {
+    scenario("speed_mult_law", 80);
+}
+
+#[test]
+fn warp_move() {
+    scenario("warp_move", 80);
+}
+
+#[test]
+fn plane_move_end() {
+    scenario("plane_move_end", 520);
+}
+
+#[test]
+fn staging_lands() {
+    scenario("staging_lands", 440);
+}
+
+#[test]
+fn formation_facing() {
+    scenario("formation_facing", 440);
+}
+
+#[test]
+fn slope_velocity() {
+    scenario("slope_velocity", 90);
+}
+
+#[test]
+fn immobile_halt() {
+    scenario("immobile_halt", 60);
 }

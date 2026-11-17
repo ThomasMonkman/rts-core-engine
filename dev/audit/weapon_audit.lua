@@ -250,15 +250,17 @@ ForkThread(function()
     -- ACU's Chrono Dampener stun); a weapon with neither projectile nor
     -- Damage field at all.
     local function non_attack_of(label, wbp)
+        -- '' is the engine's default `ProjectileId` (every blueprint has one).
+        local noProjectile = wbp.ProjectileId == nil or wbp.ProjectileId == ''
         if label == 'DeathWeapon' or string.find(label, 'Death') then
             return 'death weapon'
         elseif label == 'TeleportWeapon' then
             return 'teleport module: not an attack weapon'
         elseif string.find(label, 'Guidance') then
             return 'guidance system: aims other weapons, no damage of its own'
-        elseif string.find(label, 'Dummy') or (wbp.Damage == 0 and wbp.ProjectileId == nil) then
+        elseif string.find(label, 'Dummy') or (wbp.Damage == 0 and noProjectile) then
             return 'dummy weapon: Damage 0 and no projectile, or a Dummy label (target trackers, painters, effects)'
-        elseif wbp.Damage == nil and wbp.ProjectileId == nil then
+        elseif wbp.Damage == nil and noProjectile then
             return 'no projectile and no damage: not an attack weapon'
         end
         return nil
@@ -354,7 +356,7 @@ ForkThread(function()
         for wi, w in (sbp and sbp.Weapon) or {} do
             if type(w) == 'table' then
                 if w.CountedProjectile then return w, wi end
-                if not first and w.ProjectileId and not string.find(w.Label or '', 'Death') then first, firstI = w, wi end
+                if not first and w.ProjectileId and w.ProjectileId ~= '' and not string.find(w.Label or '', 'Death') then first, firstI = w, wi end
             end
         end
         return first, firstI
@@ -1513,10 +1515,12 @@ ForkThread(function()
                 elseif okT and tu then
                     -- An idle plane slows onto its point and lands (as in
                     -- the real game): keep winged targets flying a short
-                    -- beat round where they spawned.
+                    -- beat round where they spawned (two points: a
+                    -- script's single patrol point is a one-way trip).
                     local tbp = __blueprints[c.target]
                     if wantMed == 'any' and tbp.Air and tbp.Air.Winged then
                         IssuePatrol({ tu }, { tx + 12, y, tz })
+                        IssuePatrol({ tu }, { tx, y, tz })
                     end
                     tu:SetFireState(1)
                     tu:SetMaxHealth(1e7)

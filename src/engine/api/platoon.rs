@@ -194,7 +194,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// scripts already (it is destroyed at the tick's end): FAF follows a true `PlatoonExists`
         /// with `GetPlatoonPosition`, which would be nil.
         PlatoonExists = |lua, (_brain, platoon): (Obj<moho::AIBrain>, LuaValue)| {
-            let LuaValue::Table(t) = platoon else { return Ok(false) };
+            // Not a game object (nil, a plain table): the real game raises (dev/probes
+            // probe_ai_misc).
+            let expected = || LuaError::runtime("Expected a game object. (Did you call with '.' instead of ':'?)");
+            let LuaValue::Table(t) = platoon else { return Err(expected()) };
+            if t.raw_get::<LuaValue>(script_object::C_OBJECT)?.is_nil() {
+                return Err(expected());
+            }
             let Ok(id) = platoon_id(&t) else { return Ok(false) };
             // A platoon whose last unit died this tick is gone for scripts
             // already (it's destroyed at the tick's end): FAF follows a true
@@ -231,10 +237,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_method!(lua, moho::Platoon,
-        /// The live members of the named squad (case-insensitive), in insertion order.
+        /// The live members of the named squad (case-insensitive), in insertion order; nil for an
+        /// empty squad, as in the real game (dev/probes probe_ai_platoon), which FAF's
+        /// `if squadUnits then` guards rely on.
         GetSquadUnits = |lua, (this, squad): (Obj<moho::Platoon>, String)| {
             let ids = live_members(lua, &this, |s| s.eq_ignore_ascii_case(&squad))?;
-            crate::engine::api::entity::objects_table::<moho::Unit>(lua, &ids)
+            if ids.is_empty() {
+                return Ok(None);
+            }
+            crate::engine::api::entity::objects_table::<moho::Unit>(lua, &ids).map(Some)
         })?;
     lua_method!(lua, moho::Platoon,
         /// Mean member position (fixed-point), nil when empty.
@@ -331,9 +342,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(platoons(lua).get(id).and_then(|p| p.unique_name.clone()))
         })?;
     lua_method!(lua, moho::Platoon,
-        /// The nearest unit (to the squad's centre) of `category` with that
-        /// alliance to the platoon's army; ties to the lowest id.
-        FindClosestUnit = |lua, (this, squad, alliance, _can_attack, category): (Obj<moho::Platoon>, String, String, Option<bool>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>)| {
+        /// The nearest unit (to the squad's first unit) of `category` with that alliance to the
+        /// platoon's army that the army knows of ([`known_to`]); `'Ally'` means other allied
+        /// armies, not the platoon's own. With `canAttack`, only units a squad unit can fire at.
+        /// Ties to the lowest id.
+        FindClosestUnit = |lua, (this, squad, alliance, can_attack_only, category): (Obj<moho::Platoon>, String, String, Option<bool>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>)| {
             use crate::engine::sim::army::{Alliance, Armies};
             use crate::engine::sim::math::Fx;
             let want = Alliance::parse(&alliance).ok_or_else(|| LuaError::runtime(format!("unknown alliance '{alliance}'")))?;
@@ -343,22 +356,25 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             if members.is_empty() {
                 members = live_members(lua, &this, |_| true)?;
             }
-            let best = {
+            let mut found: Vec<(Fx, u32)> = {
                 let w = crate::engine::api::entity::world(lua);
                 let Some(centre) = members.first().and_then(|&m| w.get(m)).map(|e| e.position()) else { return Ok(None) };
                 let armies = lua.app_data_ref::<Armies>().expect("Armies");
+                let known = known_to(lua, army);
                 w.iter()
                     .filter(|e| e.kind == crate::engine::sim::entity::EntityKind::Unit && !e.destroyed)
                     .filter(|e| e.category_index.is_some_and(|c| category.0.contains(c)))
-                    .filter(|e| e.army.is_some_and(|a| armies.alliance(army, a) == want))
+                    .filter(|e| e.army.is_some_and(|a| armies.alliance(army, a) == want && !(want == Alliance::Ally && a == army)))
+                    .filter(|e| known(e))
                     .map(|e| {
                         let (dx, dz) = (e.position().x - centre.x, e.position().z - centre.z);
                         (dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)), e.id)
                     })
-                    .min_by_key(|&(d, id): &(Fx, u32)| (d, id))
-                    .map(|(_, id)| id)
+                    .collect()
             };
-            match best {
+            found.sort_unstable();
+            let can_attack_only = can_attack_only.unwrap_or(false);
+            match found.into_iter().map(|(_, u)| u).find(|&u| !can_attack_only || can_attack(lua, &members, u)) {
                 Some(id) => crate::engine::api::entity::object_as::<moho::Unit>(lua, id),
                 None => Ok(None),
             }
@@ -374,9 +390,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         })?;
     lua_method!(lua, moho::Platoon,
         /// The nearest unit (to `position`, within `radius`) with that alliance to
-        /// the platoon's army, trying the squad's `SetPrioritizedTargetList`
-        /// categories in order; ties to the lowest id. Without a priority list
-        /// nothing matches (inferred).
+        /// the platoon's army that the army knows of ([`known_to`]; `'Ally'` includes its own),
+        /// trying the squad's `SetPrioritizedTargetList` categories in order; ties to the lowest
+        /// id. Without a priority list nothing matches (inferred).
         FindPrioritizedUnit = |lua, (this, squad, alliance, can_attack_only, position, radius): (Obj<moho::Platoon>, String, String, Option<bool>, shapes::Vector, f64)| {
             use crate::engine::sim::army::{Alliance, Armies};
             use crate::engine::sim::math::{from_lua, Fx};
@@ -397,10 +413,12 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 let mut found: Vec<(Fx, u32)> = {
                     let w = crate::engine::api::entity::world(lua);
                     let armies = lua.app_data_ref::<Armies>().expect("Armies");
+                    let known = known_to(lua, army);
                     near.iter()
                         .filter_map(|&u| w.get(u))
                         .filter(|e| !e.destroyed && e.category_index.is_some_and(|c| cat.contains(c)))
                         .filter(|e| e.army.is_some_and(|a| armies.alliance(army, a) == want))
+                        .filter(|e| known(e))
                         .map(|e| {
                             let (dx, dz) = (e.position().x - cx, e.position().z - cz);
                             (dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)), e.id)
@@ -542,6 +560,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// `OnUnitsAddedToPlatoon`; nil if the template can't be filled.
         FormPlatoon = |lua, (this, template, multiplier, location, radius): (Obj<moho::Platoon>, shapes::PlatoonTemplate, Option<f64>, Option<shapes::Vector>, Option<f64>)| {
             let (name, plan, squads) = parse_template(lua, &template, multiplier.unwrap_or(1.0))?;
+            // A template with no unit lines raises in the real game (dev/probes probe_ai_misc).
+            if squads.is_empty() {
+                return Err(LuaError::runtime("get as string expected but got nil"));
+            }
             let Some(picked) = select_for_template(lua, &this, &squads, read_location(location.as_deref())?, radius)? else {
                 return Ok(None);
             };
@@ -599,11 +621,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(shapes::List::<Obj<moho::Platoon>>::new(out))
         })?;
     lua_method!(lua, moho::AIBrain,
-        /// Creates a platoon for the brain's army with the given label and plan (empty when nil) and
-        /// runs its `OnCreate`.
+        /// Creates a platoon for the brain's army with the given label and plan and runs its
+        /// `OnCreate`. As in the real game (dev/probes probe_ai_misc), no plan gives nil and no
+        /// arguments raise.
         MakePlatoon = |lua, (brain, label, plan): (Obj<moho::AIBrain>, Option<String>, Option<String>)| {
             let ArmyHandle(army) = script_object::handle(&brain)?;
-            make_platoon(lua, army, label.as_deref().unwrap_or(""), plan.as_deref().unwrap_or(""))
+            let Some(label) = label else { return Err(LuaError::runtime("CAiBrain:MakePlatoon()")) };
+            let Some(plan) = plan else { return Ok(None) };
+            make_platoon(lua, army, &label, &plan).map(Some)
         },
     )?;
     lua_method!(lua, moho::AIBrain,
@@ -651,6 +676,26 @@ pub fn destroy(lua: &Lua, id: PlatoonId) -> LuaResult<()> {
     result
 }
 
+
+/// Which units `army`'s target searches can find (the `Find*Unit` family):
+/// its own and allied units, others it detects now (any intel), and
+/// structures it has seen. In the real game an enemy mobile unit out of
+/// sight is never returned, a seen structure is (dev/probes probe_ai_find:
+/// the unseen ACU and generator 30-40 away never come back; after the scouts
+/// die the far ACU drops out, the scouted point defence and extractor stay).
+fn known_to(lua: &Lua, army: u32) -> impl Fn(&crate::engine::sim::entity::Entity) -> bool + '_ {
+    use crate::engine::sim::army::{Alliance, Armies};
+    let armies = lua.app_data_ref::<Armies>();
+    let grids = lua.app_data_ref::<crate::engine::sim::vision::IntelGrids>();
+    let structures = crate::engine::api::categories::domain(lua).ok().and_then(|d| d.named.get("STRUCTURE").cloned());
+    move |e| {
+        let (Some(owner), Some(armies), Some(grids)) = (e.army, armies.as_ref(), grids.as_ref()) else { return true };
+        if armies.alliance(army, owner) == Alliance::Ally {
+            return true;
+        }
+        grids.detect(army, e).any() || (structures.as_ref().zip(e.category_index).is_some_and(|(s, i)| s.contains(i)) && grids.ever_seen(army, e.id))
+    }
+}
 
 /// Any of `units` has an enabled weapon allowed to fire at `target`'s layer.
 fn can_attack(lua: &Lua, units: &[EntityId], target: EntityId) -> bool {

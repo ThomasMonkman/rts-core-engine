@@ -536,6 +536,19 @@ impl World {
         self.heads.iter().flat_map(|h| &h.views).any(|v| self.cameras.get(&v.camera).and_then(|c| v.project(c, p)).is_some_and(|[x, y]| x >= v.rect[0] && y >= v.rect[1] && x <= v.rect[2] && y <= v.rect[3]))
     }
 
+    /// [`Self::in_view`] as a test that outlives this frame's borrow (the
+    /// interface's `UISelectionByCategory`): a copy of the views and their
+    /// cameras.
+    pub fn in_view_test(&self) -> impl Fn(Vec3) -> bool + 'static {
+        let views: Vec<(crate::render::camera::View, crate::render::camera::Camera)> = self
+            .heads
+            .iter()
+            .flat_map(|h| &h.views)
+            .filter_map(|v| Some((crate::render::camera::View { camera: String::new(), rect: v.rect, shapes: None }, *self.cameras.get(&v.camera)?)))
+            .collect();
+        move |p| views.iter().any(|(v, c)| v.project(c, p).is_some_and(|[x, y]| x >= v.rect[0] && y >= v.rect[1] && x <= v.rect[2] && y <= v.rect[3]))
+    }
+
     /// The camera of the view under window pixel (x, y) (see `view_at`).
     pub fn camera_at_mut(&mut self, x: f32, y: f32) -> Option<&mut Camera> {
         let name = self.view_at(x, y)?.0.camera.clone();

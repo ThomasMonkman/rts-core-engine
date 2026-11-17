@@ -31,25 +31,39 @@ fn position(t: &LuaTable) -> LuaResult<FxVec3> {
     Ok(FxVec3::from_f64(t.raw_get(1)?, t.raw_get::<Option<f64>>(2)?.unwrap_or(0.0), t.raw_get(3)?))
 }
 
-/// Refreshes the threat map, with `brain`'s knowledge of other armies:
-/// allied units, enemy units it detects now, structures it has seen
-/// (`sim::vision`).
-pub(crate) fn refresh(lua: &Lua, map: &mut ThreatMap, brain: u32) {
+/// The map update ([`ThreatMap::update`]) with every brain's knowledge of
+/// other armies: allied units exactly, enemy units it detects now,
+/// structures it has seen (`sim::vision`); the rest from its memory.
+fn update(lua: &Lua, map: &mut ThreatMap) {
+    use crate::engine::sim::threat::Knowledge;
+    let now = crate::engine::api::sim_time::current_tick(lua);
     let world = entity::world(lua);
     let (Some(armies), Some(grids)) = (lua.app_data_ref::<Armies>(), lua.app_data_ref::<crate::engine::sim::vision::IntelGrids>()) else {
-        map.refresh(&world, None);
+        map.update(&world, now, &[], &|_, _| Knowledge::Exact);
         return;
     };
+    let brains: Vec<u32> = armies.list.iter().map(|a| a.index).collect();
     let structures = crate::engine::api::categories::domain(lua).ok().and_then(|d| d.named.get("STRUCTURE").cloned());
-    let knows = |e: &crate::engine::sim::entity::Entity| {
-        let Some(owner) = e.army else { return false };
+    let knows = |brain: u32, e: &crate::engine::sim::entity::Entity| {
+        let Some(owner) = e.army else { return Knowledge::Unknown };
         if armies.alliance(brain, owner) == Alliance::Ally {
-            return true;
+            return Knowledge::Exact;
+        }
+        if grids.detect(brain, e).any() {
+            return Knowledge::Detected;
         }
         let structure = structures.as_ref().zip(e.category_index).is_some_and(|(s, i)| s.contains(i));
-        grids.detect(brain, e).any() || (structure && grids.ever_seen(brain, e.id))
+        if structure && grids.ever_seen(brain, e.id) { Knowledge::SeenStructure } else { Knowledge::Unknown }
     };
-    map.refresh(&world, Some((brain, &knows)));
+    let fakes: Vec<_> = grids.fakes().iter().flat_map(|f| brains.iter().filter(|&&b| f.believed_by(b)).map(move |&b| (b, f.jammer, f.position))).collect();
+    map.update_with_fakes(&world, now, &brains, &knows, &fakes);
+}
+
+/// Makes sure the map has had an update (queries before the first one).
+pub(crate) fn refresh(lua: &Lua, map: &mut ThreatMap) {
+    if !map.is_built() {
+        update(lua, map);
+    }
 }
 
 /// Runs `f` on the (refreshed) threat map with the army filter for `brain`.
@@ -64,7 +78,7 @@ fn query<R>(
 ) -> LuaResult<R> {
     let ArmyHandle(me) = script_object::handle(brain)?;
     let mut map = lua.app_data_mut::<ThreatMap>().ok_or_else(|| LuaError::runtime("threat map: no map loaded"))?;
-    refresh(lua, &mut map, me);
+    refresh(lua, &mut map);
     let armies = lua.app_data_ref::<Armies>().expect("Armies");
     let alliance = |a: u32| armies.alliance(me, a);
     let counts = |a: u32| match army {
@@ -74,21 +88,16 @@ fn query<R>(
     Ok(f(&map, me, &counts))
 }
 
-fn surface(lua: &Lua, mut p: FxVec3) -> FxVec3 {
-    if let Some(t) = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>() {
-        p.y = t.surface_at(p.x, p.z);
-    }
-    p
-}
-
 pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::AIBrain,
-        /// Centre of the cell (plus `ring` neighbours) with the most threat, and
-        /// that threat; ties go to the first cell in row-major order.
+        /// Centre of the cell (plus `ring` neighbours) with the most threat (y = 0), and
+        /// that threat; ties (and an empty map) go to the cell nearest the brain's start.
         GetHighestThreatPosition = |lua, (brain, ring, _restriction, ty, army): (Obj<moho::AIBrain>, f64, Option<bool>, Option<String>, Option<u32>)| {
             let ty = threat_type(ty)?;
-            let (pos, t) = query(lua, &brain, army, true, |m, me, counts| m.highest(rings(ring), ty, me, counts))?;
-            Ok((entity::vector(lua, surface(lua, pos))?, t.to_num::<f64>()))
+            let ArmyHandle(me) = script_object::handle(&brain)?;
+            let start = lua.app_data_ref::<Armies>().and_then(|a| a.get(me).and_then(|a| a.start)).unwrap_or_default();
+            let (pos, t) = query(lua, &brain, army, true, |m, me, counts| m.highest(rings(ring), ty, me, counts, start))?;
+            Ok((entity::vector(lua, pos)?, t.to_num::<f64>()))
         },
     )?;
     lua_method!(lua, moho::AIBrain,
@@ -126,7 +135,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         },
     )?;
     lua_method!(lua, moho::AIBrain,
-        /// Threat the brain believes is at `pos`, decaying by `decay` per second.
+        /// Threat the brain believes is at `pos` from the next map update on, losing `decay` x
+        /// `threat` per update while positive (a negative amount stays and subtracts).
         AssignThreatAtPosition = |lua, (brain, pos, threat, decay, ty): (Obj<moho::AIBrain>, shapes::Vector, f64, Option<f64>, Option<String>)| {
             let ArmyHandle(me) = script_object::handle(&brain)?;
             let (ty, p) = (threat_type(ty)?, position(&pos)?);
@@ -139,10 +149,12 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
-/// Once per tick: stale snapshot, assigned threat ages.
+/// Once per tick: the map update on moho's 30-tick grid.
 pub fn tick(lua: &Lua) {
+    if !crate::engine::api::sim_time::current_tick(lua).is_multiple_of(crate::engine::sim::threat::UPDATE_TICKS) {
+        return;
+    }
     if let Some(mut m) = lua.app_data_mut::<ThreatMap>() {
-        m.invalidate();
-        m.decay_assigned();
+        update(lua, &mut m);
     }
 }

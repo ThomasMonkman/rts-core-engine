@@ -1306,6 +1306,19 @@ fn update_ui(s: &mut RenderState, dt: f32) {
         start_seek(s, request);
         return;
     }
+    // What this frame's `UISelectionByCategory` calls see of the view.
+    vm.set_select_scope(rts_core_engine::ui::SelectScope {
+        in_view: {
+            let test = s.world.in_view_test();
+            Box::new(move |p| test(p.into()))
+        },
+        from: s
+            .input
+            .cursor
+            .and_then(|(x, y)| s.world.ground_at(x as f32, y as f32))
+            .or_else(|| s.world.camera().map(|c| c.target))
+            .map(Into::into),
+    });
     if s.player.selection != s.ui_selection {
         let _s = rts_core_engine::prof_span!("interface selection");
         let _ = vm.update_units(&infos(&s.world, &s.player.selection));
@@ -1324,7 +1337,7 @@ fn update_ui(s: &mut RenderState, dt: f32) {
             s.player.selection = std::mem::take(&mut s.pending_select);
         }
         if let Some(code) = s.pending_ui_lua.take()
-            && let Err(e) = vm.lua().load(code.as_str()).set_name("=--ui-lua").exec() {
+            && let Err(e) = rts_core_engine::ui::run_source(vm.lua(), &code, "=--ui-lua") {
             tracing::warn!(target: "lua", "--ui-lua failed: {e}");
         }
     }
@@ -1347,7 +1360,7 @@ fn update_ui(s: &mut RenderState, dt: f32) {
                 }
                 // `IssueDockCommand`: the interface picks the platform.
                 if o.command == "UNITCOMMAND_Dock" {
-                    s.player.issue_dock(&s.world, !o.clear);
+                    s.player.issue_dock(&s.world, o.units.as_deref(), !o.clear);
                     continue;
                 }
                 match rts_core_engine::ui::command_kind(&o.command) {
@@ -1382,6 +1395,7 @@ fn update_ui(s: &mut RenderState, dt: f32) {
                 .collect(),
         );
         vm.set_busy(s.world.latest.as_ref().map_or(&[][..], |l| l.busy.as_slice()));
+        vm.set_unselectable(s.world.entities().iter().filter(|e| e.attached || e.in_builder).map(|e| e.id).collect());
         if let Some(d) = &s.world.deposits {
             vm.set_deposits(d.clone());
         }

@@ -462,7 +462,7 @@ fn find_place_to_build(
             Some(m) => m,
             None => return Ok(true),
         };
-        crate::engine::api::threat::refresh(lua, &mut map, army);
+        crate::engine::api::threat::refresh(lua, &mut map);
         let armies = lua.app_data_ref::<crate::engine::sim::army::Armies>().expect("Armies");
         let enemy = |a: u32| armies.alliance(army, a) == crate::engine::sim::army::Alliance::Enemy;
         let t = map.threat_at(p, 0, crate::engine::sim::threat::ThreatType::AntiSurface, army, &enemy);
@@ -688,9 +688,12 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// template's squads (`{ name, plan, { unitId, min, max, squad, formation }, ... }`);
         /// nil if none can. A template that isn't a table gives nil (LOUD
         /// passes `false` for a faction's empty template), as moho's
-        /// (MohoEngine.dll 0x1017d514: not `IsTable`, `PushNil`).
-        CanBuildPlatoon = |lua, (_brain, template, factories): (Obj<moho::AIBrain>, shapes::Loose<shapes::PlatoonTemplate>, shapes::List<Obj<moho::Unit>>)| {
+        /// (MohoEngine.dll 0x1017d514: not `IsTable`, `PushNil`). `factories`
+        /// is optional, as in the real game's binding (2..3 arguments,
+        /// dev/probes probe_api_arity); without it, nil (inferred).
+        CanBuildPlatoon = |lua, (_brain, template, factories): (Obj<moho::AIBrain>, shapes::Loose<shapes::PlatoonTemplate>, Option<shapes::List<Obj<moho::Unit>>>)| {
             let LuaValue::Table(template) = template.into_inner() else { return Ok(None) };
+            let Some(factories) = factories else { return Ok(None) };
             let mut ids = Vec::new();
             for line in template.sequence_values::<LuaValue>().skip(2) {
                 if let LuaValue::Table(line) = line?
@@ -724,13 +727,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             can_build(lua, entity::entity_id(&this)?, &bp)
         })?;
     lua_method!(lua, moho::AIBrain,
-        /// The first unit id listed for `buildingType` in the (faction's)
-        /// template that `builder` can build; nil if none.
-        DecideWhatToBuild = |lua, (_brain, builder, building_type, template): (Obj<moho::AIBrain>, Obj<moho::Unit>, String, shapes::List<Vec<String>>)| {
+        /// The first unit id listed for `buildingType` (ignoring case) in the (faction's)
+        /// template that `builder` can build; nil if none, or with no template (dev/probes
+        /// probe_ai_build / probe_ai_misc).
+        DecideWhatToBuild = |lua, (_brain, builder, building_type, template): (Obj<moho::AIBrain>, Obj<moho::Unit>, String, Option<shapes::List<Vec<String>>>)| {
             let builder = entity::entity_id(&builder)?;
+            let Some(template) = template else { return Ok(None) };
             for entry in template.into_inner().sequence_values::<LuaTable>() {
                 let entry = entry?;
-                if entry.raw_get::<Option<String>>(1)?.as_deref() != Some(building_type.as_str()) {
+                if !entry.raw_get::<Option<String>>(1)?.is_some_and(|t| t.eq_ignore_ascii_case(&building_type)) {
                     continue;
                 }
                 for id in entry.sequence_values::<LuaValue>().skip(1) {
