@@ -316,7 +316,11 @@ fn destroy_dying(lua: &Lua) -> LuaResult<()> {
 }
 
 /// What `army` knows of `unit` now, and whether it has ever seen it
-/// optically (`IsSeenEver`: omni doesn't count, probe_intel_jam).
+/// optically (`IsSeenEver`: omni doesn't count, probe_intel_jam). A mobile
+/// unit's blip is dropped once no intel covers it, so a blip held from
+/// before answers false for everything, `IsSeenEver` included; only a
+/// structure's blip is remembered (probe_re3_intel: a seen tank and
+/// Fatboy report `.....` after radar loss, the pgen and PD `..E..`).
 fn knowledge(lua: &Lua, army: u32, unit: EntityId) -> (Detection, bool) {
     let w = world(lua);
     let Some(e) = w.get(unit).filter(|e| !e.destroyed) else { return (Detection::default(), false) };
@@ -332,7 +336,12 @@ fn knowledge(lua: &Lua, army: u32, unit: EntityId) -> (Detection, bool) {
         return (Detection { seen: true, ..Default::default() }, true);
     };
     let now = grids.detect(army, e);
-    (now, now.seen || grids.ever_seen_optically(army, unit))
+    if now.seen {
+        return (now, true);
+    }
+    let ever = grids.ever_seen_optically(army, unit);
+    drop((grids, w));
+    (now, ever && (now.any() || is_structure(lua, unit)))
 }
 
 fn is_structure(lua: &Lua, unit: EntityId) -> bool {
