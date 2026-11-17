@@ -1275,6 +1275,8 @@ fn first_unit_hit(
         },
         _ => false,
     };
+    let lo = FxVec3 { x: from.x.min(to.x), y: from.y.min(to.y), z: from.z.min(to.z) };
+    let hi = FxVec3 { x: from.x.max(to.x), y: from.y.max(to.y), z: from.z.max(to.z) };
     let mut best: Option<(Fx, EntityId, crate::engine::sim::layer::Layer)> = None;
     for &id in buf.iter() {
         if Some(id) == p.launcher || Some(id) == p.last_hit || env.skip.contains(&id) {
@@ -1285,7 +1287,14 @@ fn first_unit_hit(
             continue;
         }
         let shape = e.collision_shape();
-        let Some(t) = crate::engine::sim::collision::segment_hit(from, to, e.position(), e.orientation, &shape) else { continue };
+        // Cheap rejection first (the candidate box is padded by the largest
+        // unit's reach): the segment's box, padded by this unit's reach,
+        // must hold its origin, or `segment_hit` misses anyway.
+        let (pos, r) = (e.position(), crate::engine::sim::collision::reach(&shape));
+        if pos.x < lo.x - r || pos.x > hi.x + r || pos.y < lo.y - r || pos.y > hi.y + r || pos.z < lo.z - r || pos.z > hi.z + r {
+            continue;
+        }
+        let Some(t) = crate::engine::sim::collision::segment_hit(from, to, pos, e.orientation, &shape) else { continue };
         // The layer the impact type goes by: an aircraft's is `Air`, landed or not.
         let layer = e.unit.as_deref().map(|u| if u.motion_params.kind == crate::engine::sim::movement::MotionKind::Air { crate::engine::sim::layer::Layer::Air } else { u.layer }).unwrap_or_default();
         if best.is_none_or(|(bt, bid, _)| (t, id) < (bt, bid)) {
