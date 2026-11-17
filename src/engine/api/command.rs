@@ -947,7 +947,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// free spot of the near-spot search in steps of 8, whatever the
         /// blueprint (the real game queues a generator asked on another at
         /// -8, -8 from the snapped site, and at -8, +8 with the north-west
-        /// taken too: dev/probes probe_re2_build BS). It returns false for
+        /// taken too: dev/probes probe_re2_build BS). An extractor or
+        /// hydrocarbon plant isn't moved (not probed). It returns false for
         /// an absolute site, built or moved alike; true for a relative one
         /// (probe_ai_build): what the value means isn't known.
         BuildStructure = |lua, (_brain, builder, bp, loc, relative): (Obj<moho::AIBrain>, Obj<moho::Unit>, String, shapes::Vector, Option<bool>)| {
@@ -972,7 +973,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             let mut site = crate::engine::api::construction::snap_site(lua, &bp, asked)?;
             let (fx, fz) = (site.x, site.z);
             let placement = Placement::of(lua, &bp)?;
-            if !placement.allows(lua, site, &[])? {
+            // An extractor or hydrocarbon plant stays on the site asked
+            // (its deposit, taken or not), as before the move was probed:
+            // the probe moved generators only, and a step-8 search can't
+            // land on another deposit except by chance, 160 away at worst.
+            // The AI asks for taken deposits thousands of times a game, and
+            // each full search is 1680 placement checks (about 0.5 ms).
+            if !placement.needs_deposit() && !placement.allows(lua, site, &[])? {
                 let step = Fx::from_num(8);
                 for (dx, dz) in near_spot_offsets(NEAR_SPOT_RINGS).into_iter().skip(1) {
                     let p = FxVec3 { x: fx + step * Fx::from_num(dx), y: Fx::ZERO, z: fz + step * Fx::from_num(dz) };

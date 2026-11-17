@@ -3,7 +3,8 @@
 -- 1x1 generator at an even 400.3 goes to 400.5, at an odd 403 to 402.5) and
 -- moves one blocked by a structure 8 to the north-west (then on through the
 -- near-spot search); it returns false for an absolute site (dev/probes
--- probe_re2_build BS). An extractor asked on an odd deposit stays on it.
+-- probe_re2_build BS). An extractor asked on an odd deposit stays on it,
+-- and one asked on a taken deposit isn't moved (not probed).
 rawset(_G, "ScenarioResult", { done = false, failures = {}, notes = {} })
 local function check(ok, msg) if not ok then table.insert(ScenarioResult.failures, msg) end end
 local function make(bp, x, z) return CreateUnitHPR(bp, 'ARMY_1', x, GetTerrainHeight(x, z), z, 0, 0, 0) end
@@ -28,5 +29,9 @@ ForkThread(function()
     local e4 = make('uel0105', 160, 650)
     brain:BuildStructure(e4, 'ueb1103', { 155.5, 659.5, 0 }, false)
     check(site(e4) == '155.5 659.5', 'an extractor stays on its deposit at odd 155.5 659.5: ' .. site(e4))
+    make('ueb1103', 155.5, 659.5)
+    local e5 = make('uel0105', 160, 652)
+    brain:BuildStructure(e5, 'ueb1103', { 155.5, 659.5, 0 }, false)
+    check(site(e5) == '155.5 659.5', 'an extractor on a taken deposit is not moved (no search): ' .. site(e5))
     ScenarioResult.done = true
 end)

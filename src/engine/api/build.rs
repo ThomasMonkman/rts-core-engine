@@ -180,6 +180,12 @@ pub struct Placement {
 }
 
 impl Placement {
+    /// Whether the structure must stand on a deposit (an extractor or a
+    /// hydrocarbon plant).
+    pub fn needs_deposit(&self) -> bool {
+        self.deposit.is_some()
+    }
+
     pub fn of(lua: &Lua, bp_id: &str) -> LuaResult<Self> {
         let bp = entity::blueprint_table(lua, BlueprintKind::Unit, &bp_id.to_lowercase())?;
         let half = half_footprint(&bp)?;
