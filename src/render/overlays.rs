@@ -361,7 +361,7 @@ pub fn icon_items(scene: &Sources, cache: &mut IconCache) -> (Vec<rts_core_engin
     let vfs = scene.scene.vfs().cloned();
     // Units (seen, or identified on radar: army colour); blips (a plain
     // contact shape, grey) and remembered structures (their own icon,
-    // grey); then the enemy jammers' fake contacts (no entity: the
+    // army colour); then the enemy jammers' fake contacts (no entity: the
     // jammer's contact shape).
     let fakes = scene.scene.latest.as_ref().map(|l| l.fake_blips.clone()).unwrap_or_default();
     let scale = input.ui_scale;
@@ -415,8 +415,10 @@ pub fn icon_items(scene: &Sources, cache: &mut IconCache) -> (Vec<rts_core_engin
             // (A contact's layer would give its kind away: the bottom one.)
             Some(match kind {
                 super::scene::IconKind::Blip => (id, pos, Some(CONTACT), *blip_names.get(&bp)?, alpha, 0),
-                // Greyed by the tint (no army), its real shape: scouted.
-                super::scene::IconKind::Remembered => (id, pos, Some(UNIDENTIFIED), name.as_str(), alpha, layer_of(bp)),
+                // Its real shape in its army's colour: scouted, so known
+                // (probe_re3_intel: remembered structures stay army-coloured
+                // after radar loss).
+                super::scene::IconKind::Remembered => (id, pos, Some(crate::render::scene::army_color(&input.army_rgb, army)), name.as_str(), alpha, layer_of(bp)),
                 super::scene::IconKind::Full => (id, pos, Some(crate::render::scene::army_color(&input.army_rgb, army)), name.as_str(), alpha, layer_of(bp)),
             })
         });
@@ -518,7 +520,7 @@ pub const UNIDENTIFIED: [f32; 3] = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0]
 /// A radar / sonar contact's tint over its generic shape: the real game draws
 /// the shape's fill (texel grey 123) as (94, 94, 94) (FAF probe
 /// `probe_intel_icons`, measured), so the tint is about 0.77 here, not FAF's
-/// `UnidentifiedColor` (which stays the remembered structures' grey).
+/// `UnidentifiedColor`.
 pub const CONTACT: [f32; 3] = [197.0 / 255.0, 197.0 / 255.0, 197.0 / 255.0];
 
 /// The land contact's shape (also when a contact's unit has no icon).

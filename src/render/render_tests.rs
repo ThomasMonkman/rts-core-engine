@@ -2958,10 +2958,10 @@ fn terrain_changes_queued_behind_one_another_end_at_the_newest() {
 
 /// A structure the view army scouted but can't see now keeps its last-seen
 /// look (the mesh at rest pose, darkened by the fog at its spot, no bar or
-/// ranges) and its strategic icon stays as the greyed blip; seen again, all
-/// of it comes back live.
+/// ranges) and its strategic icon stays, in its army's colour
+/// (probe_re3_intel); seen again, all of it comes back live.
 #[test]
-fn scouted_structure_keeps_its_last_seen_look_and_greyed_icon() {
+fn scouted_structure_keeps_its_last_seen_look_and_icon() {
     use super::scene::{IconKind, shows_bar};
     let Some(mut h) = Harness::new(None, false, None) else { return };
     let ids: mlua::Table = h
@@ -3019,14 +3019,14 @@ fn scouted_structure_keeps_its_last_seen_look_and_greyed_icon() {
     assert!(!shows_bar(&out), "out of sight, no bar");
     assert!(!h.scene.bars.contains(&(index(&h) as u32)), "not among the posed bars");
     // Zoomed in: the building remains as last seen (the fog's factor greys
-    // it); zoomed out: its icon, greyed. Never an army colour while it's
-    // out of sight.
+    // it); zoomed out: its remembered icon. Never a live (Full) icon while
+    // it's out of sight.
     inside(&mut h, 30.0);
     assert!(h.scene.mesh_drawn(factory), "the last-seen building still draws");
     assert!(h.scene.icons.iter().flatten().all(|i| i.0 != factory || i.4 == IconKind::Remembered), "never a full icon while it's out of sight");
     inside(&mut h, 400.0);
     assert!(h.scene.mesh_drawn(factory), "the last-seen building still draws, zoomed out");
-    assert_eq!(h.scene.icons.iter().flatten().filter(|i| i.0 == factory).map(|i| i.4).collect::<Vec<_>>(), vec![IconKind::Remembered], "zoomed out, one greyed icon");
+    assert_eq!(h.scene.icons.iter().flatten().filter(|i| i.0 == factory).map(|i| i.4).collect::<Vec<_>>(), vec![IconKind::Remembered], "zoomed out, one remembered icon");
     h.ticks(2);
     assert_eq!(at(&h).sighting, crate::engine::snapshot::Sighting::Remembered, "still there without a sighting");
 }
