@@ -824,7 +824,23 @@ fn goal(cmd: Option<&crate::engine::sim::command::Command>, world: &EntityWorld,
                     .map(|f| f.skirt_point(me)),
                 _ => None,
             });
-            building.or_else(|| touch(cmd.target)).map(|p| (p, build_range, false))
+            if let Some(p) = building {
+                return Some((p, build_range, false));
+            }
+            // Otherwise it settles by the unit it guards, centre to centre
+            // the two avoidance radii apart and at least 2: the real game's
+            // tanks and an engineer by a generator settled 1.7-2.8 away,
+            // frigates (6 long) 5.6-6.1; ours stood its build range off
+            // (5.35, 6.0, 6.95: dev/probes probe_re3_mov GD). (Aircraft
+            // keep the old reach: the real gunship circles, not modelled.)
+            let me_unit = world.get(unit).and_then(|e| e.unit.as_deref());
+            if me_unit.is_some_and(|u| u.motion_params.kind != MotionKind::Air)
+                && let CommandTarget::Entity(id) = cmd.target
+                && let Some(t) = world.get(id).filter(|e| !e.destroyed) {
+                let r = me_unit.map_or(Fx::ZERO, |u| u.radius) + t.unit.as_deref().map_or(Fx::ZERO, |u| u.radius);
+                return Some((t.position(), r.max(Fx::from_num(2)), false));
+            }
+            touch(cmd.target).map(|p| (p, build_range, false))
         }
         K::Repair | K::Reclaim | K::Capture => touch(cmd.target).map(|p| (p, build_range, false)),
         // Right up to it (`api::sacrifice::REACH`; the real engineer walks
@@ -3983,6 +3999,28 @@ mod tests {
         assert!(c.is_done(cmd), "arrived");
         assert!(max_z > Fx::from_num(28), "went round through the gap");
         assert!(w.get(tk).unwrap().unit.as_ref().unwrap().path.is_none(), "path dropped on arrival");
+    }
+
+    /// A ground guard settles by the unit it guards the two avoidance
+    /// radii apart, at least 2 (the real game's tanks 2.0-2.3, frigates
+    /// 5.6-6.1: dev/probes probe_re3_mov GD), not its build range off.
+    #[test]
+    fn ground_guards_settle_close_by() {
+        for (radius, near, far) in [(0.5, 1.5, 2.5), (3.0, 5.0, 6.5)] {
+            let mut w = EntityWorld::default();
+            let mut c = Commands::default();
+            let guarded = tank(&mut w, 30.0, 0.0);
+            let guard = tank(&mut w, 0.0, 0.0);
+            for id in [guarded, guard] {
+                let u = w.get_mut(id).unwrap().unit.as_mut().unwrap();
+                u.radius = Fx::from_num(radius);
+                u.build_range = Fx::from_num(5);
+            }
+            c.issue(&[guard], CommandKind::Guard, CommandTarget::Entity(guarded), None, 0);
+            run(&mut w, &mut c, 300, usize::MAX);
+            let d = (w.get(guarded).unwrap().position().x - w.get(guard).unwrap().position().x).to_num::<f64>();
+            assert!(d > near && d < far, "radius {radius}: settled {d} away");
+        }
     }
 
     #[test]
