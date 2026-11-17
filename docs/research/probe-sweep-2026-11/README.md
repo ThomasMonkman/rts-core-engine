@@ -13,14 +13,14 @@ Items are counted as bullets of the batches below. A bullet that was half fixed 
 | 1. Engine aborts and harness | 3 | 2 | 0 | 0 | 0 | 5 |
 | 2. Lua runtime | 9 | 19 | 0 | 0 | 1 | 29 |
 | 3. Orders and construction | 40 | 6 | 0 | 0 | 4 | 50 |
-| 4. Weapons, projectiles, shields | 25 | 10 | 0 | 0 | 4 | 39 |
+| 4. Weapons, projectiles, shields | 26 | 9 | 0 | 0 | 4 | 39 |
 | 5. Movement and transports | 15 | 9 | 0 | 2 | 3 | 29 |
 | 6. AI brain, platoons, threat | 28 | 14 | 0 | 1 | 1 | 44 |
 | 7. Blueprint defaults | 1 | 3 | 0 | 0 | 0 | 4 |
 | 8. Interface | 26 | 31 | 0 | 0 | 2 | 59 |
 | 9. API surface and arity | 10 | 18 | 0 | 0 | 1 | 29 |
-| 10. Intel: jamming and contact icons | 10 | 2 | 0 | 1 | 2 | 15 |
-| **Total** | 167 | 114 | 0 | 4 | 18 | 303 |
+| 10. Intel: jamming and contact icons | 11 | 2 | 0 | 1 | 2 | 16 |
+| **Total** | 169 | 113 | 0 | 4 | 18 | 304 |
 
 ### Decisions made (2026-11-16)
 
