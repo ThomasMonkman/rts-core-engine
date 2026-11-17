@@ -309,8 +309,12 @@ impl Engine {
             None => v.parse::<u64>().ok().map(|t| (t, t, false)),
         }).zip(std::env::var("RTS_DUMP_FILE").ok());
         let mut next = std::time::Instant::now();
-        // Paced (headless network tests): speed changes apply as in a window.
-        let pace = self.pace.map(snapshot::SimControl::new);
+        // Paced (a window's `--ticks`, headless network tests): speed
+        // changes apply as in a real-time game. A window's run shares its
+        // control, so the player's speed changes reach it and the
+        // interface hears the speed it really runs at.
+        let pace = self.pace.map(|p| self.control.clone().unwrap_or_else(|| snapshot::SimControl::new(p)));
+        let mut meter = snapshot::RateMeter::new(next);
         // Dev: `RTS_NET_SPEED_AT=tick:step` asks for game speed `step` at
         // `tick`, as a player pressing `+` / `-` would.
         let speed_at = std::env::var("RTS_NET_SPEED_AT").ok().and_then(|v| {
@@ -334,8 +338,14 @@ impl Engine {
             if let Some(control) = &pace {
                 self.sync_net_speed(control);
             }
-            if let Some(speed) = pace.as_ref().map(|c| c.shown()).filter(|&s| s != snapshot::SimControl::MAX) {
-                let speed = self.net_pace(speed);
+            let speed = pace.as_ref().map(|c| self.net_pace(c.shown()));
+            if let (Some(control), Some(speed)) = (&pace, speed) {
+                meter.tick(std::time::Instant::now());
+                if let Some(actual) = meter.actual(speed) {
+                    control.set_effective(actual);
+                }
+            }
+            if let Some(speed) = speed.filter(|&s| s != snapshot::SimControl::MAX) {
                 let factor = self.net_catch_up(speed);
                 next += std::time::Duration::from_micros(((100_000 * 100 / speed.max(1) as u64) as f64 * factor) as u64);
                 match next.checked_duration_since(std::time::Instant::now()) {
@@ -414,11 +424,9 @@ impl Engine {
     pub fn run_realtime(&mut self) -> LuaResult<()> {
         let control = self.control.clone().unwrap_or_else(|| snapshot::SimControl::new(100));
         let mut next = std::time::Instant::now();
-        // Ticks run since when, and the speed (percent) they came to: what
-        // the game really runs at when the machine can't keep up with the
-        // speed asked for (or runs flat out, "max").
-        let mut measured = (std::time::Instant::now(), 0u32);
-        let mut achieved: Option<u32> = None;
+        // What the game really runs at when the machine can't keep up with
+        // the speed asked for (or runs flat out, "max").
+        let mut meter = snapshot::RateMeter::new(next);
         // Ticks that took longer than their real-time slot (waiting for
         // players excluded: the lockstep logs that), for the log.
         let mut slow_ticks = crate::diagnostics::Hitches::new("sim tick");
@@ -456,7 +464,7 @@ impl Engine {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 next = std::time::Instant::now();
-                measured = (next, 0);
+                meter.restart(next);
                 continue;
             }
             let step_started = std::time::Instant::now();
@@ -470,20 +478,10 @@ impl Engine {
                 let cost = step_started.elapsed().as_secs_f64() * 1000.0 - waited;
                 slow_ticks.note(cost, 100.0 * 100.0 / speed.max(1) as f64, tick);
             }
-            // 10 ticks a second is 100%.
-            measured.1 += 1;
-            let secs = measured.0.elapsed().as_secs_f64();
-            if secs >= 0.5 {
-                achieved = Some((measured.1 as f64 * 10.0 / secs).round() as u32);
-                measured = (std::time::Instant::now(), 0);
+            meter.tick(std::time::Instant::now());
+            if let Some(actual) = meter.actual(speed) {
+                control.set_effective(actual);
             }
-            // The speed shown as actual: what the loop paces at, unless it
-            // measurably falls short (5% slack for timer jitter).
-            let actual = match achieved {
-                Some(a) if speed == snapshot::SimControl::MAX || (a as f64) < speed as f64 * 0.95 => a,
-                _ => speed,
-            };
-            control.set_effective(actual);
             if speed == snapshot::SimControl::MAX {
                 next = std::time::Instant::now();
                 continue;

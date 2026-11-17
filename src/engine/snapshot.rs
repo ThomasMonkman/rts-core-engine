@@ -402,14 +402,38 @@ impl SimControl {
         self.agreed().unwrap_or_else(|| self.speed())
     }
 
-    /// The speed the game actually runs at (percent), as the real-time
-    /// loop last paced or measured it; else the shown one.
+    /// The speed the game actually runs at (percent), as the sim loop last
+    /// paced or measured it; else the shown one (`MAX` only then: a
+    /// measured speed is a number).
     pub fn effective(&self) -> u32 {
-        Some(self.effective.load(std::sync::atomic::Ordering::Relaxed)).filter(|&p| p != 0).unwrap_or_else(|| self.shown())
+        self.measured().unwrap_or_else(|| self.shown())
     }
 
+    /// The speed the sim loop last paced or measured (percent), `None`
+    /// before it knows.
+    pub fn measured(&self) -> Option<u32> {
+        Some(self.effective.load(std::sync::atomic::Ordering::Relaxed)).filter(|&p| p != 0)
+    }
+
+    /// The sim loop's actual speed ([`RateMeter::actual`]): a number, never
+    /// `MAX` ("max" is a speed asked for, not one run at).
     pub fn set_effective(&self, percent: u32) {
-        self.effective.store(percent.max(1), std::sync::atomic::Ordering::Relaxed);
+        debug_assert_ne!(percent, Self::MAX, "an actual speed is measured, not max");
+        self.effective.store(percent.clamp(1, Self::MAX - 1), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The game speed as the interface sees it, in moho steps: the one
+    /// asked for (`GetGameSpeed`, FAF's clock's first number) and the one
+    /// the game runs at (`GetSimRate`, the second). "Max" is asked for as
+    /// [`Self::MOHO_MAX_STEP`], moho's fastest; the actual one is what the
+    /// sim loop measured (below 0 when slower than real time), and until
+    /// it has measured anything, the one asked for.
+    pub fn interface_steps(&self) -> (i32, i32) {
+        let asked = match self.shown() {
+            Self::MAX => Self::MOHO_MAX_STEP,
+            p => Self::step_of(p),
+        };
+        (asked, self.measured().map_or(asked, Self::step_of))
     }
 
     /// The session client (1-based) who changed the speed last.
@@ -487,6 +511,9 @@ impl SimControl {
     /// go): 10^(77/10) times normal no longer fits a percent.
     pub const MAX_STEP: i32 = 77;
 
+    /// Moho's fastest step (10x): how the interface sees "max".
+    pub const MOHO_MAX_STEP: i32 = 10;
+
     /// Moho's game speed step (0 normal) nearest `percent`: the rate is
     /// 10^(step/10) (`RATE_GameSpeedToRate`, MohoEngine.dll 0x1014a3d0), so
     /// +10 is 10x, +20 100x. Moho stops at -10..=10; we don't: "max" is
@@ -509,6 +536,58 @@ impl SimControl {
 
     pub fn label(percent: u32) -> String {
         if percent == Self::MAX { "max".into() } else { format!("{}x", percent as f32 / 100.0) }
+    }
+}
+
+/// The speed the sim really runs at, measured over at least
+/// [`Self::WINDOW`] of ticks (wall-clock time: it paces and reports, never
+/// reaches sim state).
+#[derive(Debug)]
+pub struct RateMeter {
+    since: std::time::Instant,
+    ticks: u32,
+    achieved: Option<u32>,
+}
+
+impl RateMeter {
+    pub const WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+    pub fn new(now: std::time::Instant) -> Self {
+        Self { since: now, ticks: 0, achieved: None }
+    }
+
+    /// A pause or hold: the time stopped doesn't count (the last
+    /// measurement stays).
+    pub fn restart(&mut self, now: std::time::Instant) {
+        (self.since, self.ticks) = (now, 0);
+    }
+
+    /// A tick ended at `now`.
+    pub fn tick(&mut self, now: std::time::Instant) {
+        self.ticks += 1;
+        let secs = now.saturating_duration_since(self.since).as_secs_f64();
+        if secs >= Self::WINDOW.as_secs_f64() {
+            // 10 ticks a second is 100%.
+            self.achieved = Some(((self.ticks as f64 * 10.0 / secs).round() as u32).clamp(1, SimControl::MAX - 1));
+            self.restart(now);
+        }
+    }
+
+    /// The last measured speed (percent).
+    pub fn achieved(&self) -> Option<u32> {
+        self.achieved
+    }
+
+    /// The actual speed (percent) while pacing at `speed`: the pace,
+    /// unless the sim measurably falls short of it (5% slack for timer
+    /// jitter), and as measured when running flat out ("max": `None`
+    /// until measured, never `MAX`).
+    pub fn actual(&self, speed: u32) -> Option<u32> {
+        match self.achieved {
+            Some(a) if speed == SimControl::MAX || (a as f64) < speed as f64 * 0.95 => Some(a),
+            _ if speed == SimControl::MAX => None,
+            _ => Some(speed),
+        }
     }
 }
 
@@ -2837,6 +2916,66 @@ mod speed_tests {
         for step in -15..=SimControl::MAX_STEP {
             assert_eq!(SimControl::step_of(SimControl::percent_of(step)), step);
         }
+    }
+
+    /// The interface's two numbers (`GetGameSpeed` / `GetSimRate`, FAF's
+    /// clock "+asked / +actual"): the actual one is the measured speed, so
+    /// below 0 when the sim can't keep real time, and "max" (77 inside)
+    /// never reaches the interface.
+    #[test]
+    fn interface_steps_show_the_measured_speed_and_never_max() {
+        let c = SimControl::new(100);
+        assert_eq!(c.interface_steps(), (0, 0), "nothing measured yet: as asked");
+        // A heavy scene at a quarter of real time.
+        c.set_effective(25);
+        assert_eq!(c.interface_steps(), (0, -6));
+        // Max asked: moho's fastest step, and the measured rate as actual.
+        c.set_speed(SimControl::MAX);
+        assert_eq!(c.interface_steps(), (SimControl::MOHO_MAX_STEP, -6));
+        c.set_effective(2000);
+        assert_eq!(c.interface_steps(), (SimControl::MOHO_MAX_STEP, 13));
+        // Max before anything was measured (a new session).
+        c.begin_session();
+        assert_eq!(c.interface_steps(), (SimControl::MOHO_MAX_STEP, SimControl::MOHO_MAX_STEP));
+        assert_eq!(c.measured(), None);
+    }
+
+    /// The real-time loop's measured speed: ticks over at least half a
+    /// second, the pace while it keeps up, the measured speed when it falls
+    /// short or runs flat out, and never "max".
+    #[test]
+    fn rate_meter_measures_what_the_sim_achieves() {
+        use super::RateMeter;
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut m = RateMeter::new(t0);
+        assert_eq!(m.actual(100), Some(100), "unmeasured: the pace");
+        assert_eq!(m.actual(SimControl::MAX), None, "unmeasured flat out: unknown, not max");
+        // 2.5 ticks a second (400 ms ticks): a quarter of normal speed.
+        for i in 1..=5 {
+            m.tick(t0 + Duration::from_millis(400 * i));
+        }
+        assert_eq!(m.achieved(), Some(25));
+        assert_eq!(m.actual(100), Some(25), "short of normal speed: measured");
+        assert_eq!(m.actual(SimControl::MAX), Some(25), "flat out: measured");
+        assert_eq!(m.actual(20), Some(20), "keeps up with a fifth: the pace");
+        // Keeping up within the timer slack shows the pace.
+        let mut m = RateMeter::new(t0);
+        for i in 1..=6 {
+            m.tick(t0 + Duration::from_millis(103 * i));
+        }
+        assert_eq!(m.achieved(), Some(97));
+        assert_eq!(m.actual(100), Some(100));
+        // A pause doesn't count as slow.
+        let mut m = RateMeter::new(t0);
+        m.restart(t0 + Duration::from_secs(60));
+        for i in 1..=5 {
+            m.tick(t0 + Duration::from_secs(60) + Duration::from_millis(100 * i));
+        }
+        assert_eq!(m.achieved(), Some(100));
+        let c = SimControl::new(100);
+        c.set_effective(m.actual(SimControl::MAX).unwrap());
+        assert_ne!(SimControl::step_of(c.effective()), SimControl::MAX_STEP);
     }
 }
 

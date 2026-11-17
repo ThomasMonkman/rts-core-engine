@@ -1134,8 +1134,7 @@ fn update_ui(s: &mut RenderState, dt: f32) {
     // really runs at (capped by the slowest machine, or measured flat out),
     // both as moho steps (FAF's clock shows "+asked / +actual", and its
     // `OnBeat` reads `GetSimRate() > 0` as sped up).
-    use rts_core_engine::engine::snapshot::SimControl;
-    let (asked, actual) = (SimControl::step_of(s.control.shown()), SimControl::step_of(s.control.effective()));
+    let (asked, actual) = s.control.interface_steps();
     let _ = vm.set_game_speed(asked, actual as f32, s.control.changed_by());
     if let Ok(Some(p)) = vm.take_pause_request() {
         s.control.set_paused(p);
