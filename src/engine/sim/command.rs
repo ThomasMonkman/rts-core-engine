@@ -287,6 +287,12 @@ impl Commands {
         }
     }
 
+    /// How many commands have been issued this game (ids are handed out in
+    /// order from 0): a deterministic measure of how busy the AI is.
+    pub fn issued(&self) -> CommandId {
+        self.next_id
+    }
+
     /// Creates a command and adds it to the queue of each unit in `units`
     /// (deduplicated; ids sorted in the command), at the back unless it's
     /// a patrol point joining a patrol loop ([`Self::add_to_queue`]).
