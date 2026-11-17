@@ -3,6 +3,9 @@
 // pass 0), and into the glow its alpha x 0.6 sin²(time - 10 R) (pass 1).
 import package::globals::{g, fog_tex};
 
+// `ui::STRATEGIC_ICON_BRIGHTNESS`.
+const BRIGHTNESS: f32 = 187.0 / 255.0;
+
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var smp: sampler;
 
@@ -39,7 +42,10 @@ struct Targets {
     if (t.a <= 0.0) { discard; }
     let s = sin(g.params.y - 10.0 * i.ripple);
     var o: Targets;
-    o.color = t;
+    // At the brightness the real game shows them: its (137, 216, 5) texels
+    // read (100, 158, 4), as the strategic icons' 187/255
+    // (`ui::STRATEGIC_ICON_BRIGHTNESS`; FAF probe `probe_re3_intel`).
+    o.color = vec4<f32>(t.rgb * BRIGHTNESS, t.a);
     o.glow = vec4<f32>(t.a * 0.6 * s * s, 0.0, 0.0, 1.0);
     return o;
 }
