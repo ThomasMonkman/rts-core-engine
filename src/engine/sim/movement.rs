@@ -1375,7 +1375,16 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     // fighters start each turn of a square of waypoints ~11 early at
     // speed, its gunship cuts the corner: dev/probes probe_turns).
     let moving = |k: CommandKind| matches!(k, CommandKind::Move | CommandKind::FormMove | CommandKind::AggressiveMove | CommandKind::FormAggressiveMove | CommandKind::Patrol | CommandKind::FormPatrol);
-    let through = p.kind == MotionKind::Air && cmd.is_some_and(|c| matches!(c.kind, CommandKind::Move | CommandKind::FormMove)) && commands.queue(unit).nth(1).is_some_and(|c| moving(c.kind));
+    // A hovering aircraft's patrol point the loop goes on from (anything
+    // queued after it, or a player's leg home to follow) is flown through
+    // the same way, done `StartTurnDistance` short: the real game's
+    // gunships (5) turned 3-7 short of each point and never braked (5-tick
+    // speed 1-5 at the turn, mean 4.8 on a +-6 leg; ours braked to a stop
+    // at each point and crawled at 1.6: dev/probes probe_re3_mov GP).
+    // (Winged patrols keep their turning-radius rule: not measured.)
+    let patrol_on = |c: &crate::engine::sim::command::Command| !p.winged && matches!(c.kind, CommandKind::Patrol | CommandKind::FormPatrol) && (c.patrol_home || commands.queue(unit).nth(1).is_some());
+    let through = p.kind == MotionKind::Air
+        && cmd.is_some_and(|c| (matches!(c.kind, CommandKind::Move | CommandKind::FormMove) && commands.queue(unit).nth(1).is_some_and(|c| moving(c.kind))) || patrol_on(c));
     let pace = if immobile || engaged { None } else { pace(cmd, unit, env.tick) };
     if pace.is_none()
         && let Some(cap) = cmd.and_then(|c| c.slot(unit)).map(|s| s.speed_cap) {
@@ -4175,6 +4184,41 @@ mod tests {
         let pos = w.get(p).unwrap().position();
         assert!(c.is_done(cmd), "the move completed: at {pos:?}");
         assert!((pos.x.to_num::<f64>() - 120.0).abs() <= 0.5, "within the arrival radius: {pos:?}");
+    }
+
+    /// A gunship on a two-point patrol carries its speed through each
+    /// point (done `StartTurnDistance` short) instead of braking to a stop
+    /// there: the real game's averaged 4.8 a second on +-6 legs, ours 1.6
+    /// when it braked (dev/probes probe_re3_mov GP).
+    #[test]
+    fn hovering_aircraft_fly_through_patrol_points() {
+        let mut w = EntityWorld::default();
+        let mut c = Commands::default();
+        let p = plane(&mut w, 100.0, 100.0);
+        {
+            let m = &mut w.get_mut(p).unwrap().unit.as_mut().unwrap().motion_params;
+            m.winged = false;
+            m.min_speed = Fx::ZERO;
+            m.air.k_move = Fx::from_num(0.8);
+            m.air.k_move_damping = Fx::from_num(2);
+            m.air.start_turn_distance = Fx::from_num(5);
+        }
+        for x in [94.0, 106.0] {
+            c.issue(&[p], CommandKind::Patrol, CommandTarget::Ground(FxVec3::from_f64(x, 0.0, 100.0)), None, 0);
+        }
+        let (mut cands, mut moved, mut events) = (Vec::new(), Vec::new(), Vec::new());
+        let mut sum = 0.0;
+        for t in 0..600 {
+            candidates(&w, &c, &mut cands);
+            step(&w, &c, Env::default(), &cands, usize::MAX, &mut moved);
+            apply(&mut w, &mut c, &moved, &mut events);
+            if t >= 100 {
+                sum += w.get(p).unwrap().unit.as_ref().unwrap().motion_state.speed.to_num::<f64>();
+            }
+        }
+        let mean = sum / 500.0;
+        assert!(!c.is_idle(p), "still patrolling");
+        assert!(mean > 3.0, "keeps its speed through the turns (braking at each point: 2.0): mean {mean}");
     }
 
     /// A hovering aircraft circles a target at the range of the weapon that
