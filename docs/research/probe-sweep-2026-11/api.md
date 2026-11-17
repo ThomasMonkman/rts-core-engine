@@ -103,7 +103,7 @@ Severity: **A** = raises or goes wrong in a path FAF's Lua takes; **B** = wrong 
 | <a id="u6"></a>U6 | `SetSolidColor('nosuchcolor')` and `('ff00')` raise | accepted | spot | C | high | `src/ui/controls.rs` | open |
 | <a id="u7"></a>U7 | `GetResourceSharing` takes 0 arguments; `IsAlly(1, 99)` raises `Invalid army`; `GetFrame()` raises, `GetFrame(5)` is nil; `SimCallback()` raises | all accepted; `GetFrame(5)` returns a frame | spot | C | high | `src/ui/user_api.rs` | open |
 | <a id="u8"></a>U8 | `GetSessionClients()[1]` has `maxSP`, `ping` (and more, line truncated); `SessionGetScenarioInfo()` has `PlayableAreaWidth/Height`, `PlayableRect` and none of the sim-side keys | no `maxSP` / `ping` (has `uid`); carries the sim's `ArmySetup`, `BuilderTable`, `Env`, `MapData`...; army entries have an extra `armyIndex` | spot | C | medium (key lists truncated at 110 chars) | `src/ui/` session tables | open |
-| <a id="u9"></a>U9 | `GetIdleEngineers()` returned one unit when only the commander existed | nil (`ENGINEER - COMMAND`) | spot | C | low (unit identity not logged) | `src/ui/user_api.rs:969` | open |
+| <a id="u9"></a>U9 | `GetIdleEngineers()` returned one unit when only the commander existed | nil (`ENGINEER - COMMAND`) | spot | C | low (unit identity not logged) | `src/ui/user_api.rs:969` | closed as same: `probe_re3_ui` (nil with only the ACU; then the SCU and the idle engineer in both). The earlier run probably had a start unit left alive |
 | <a id="u10"></a>U10 | `GetMouseScreenPos()` has a metatable | none | spot | C | high | - | open |
 
 ### Stubs: what the real ones return (ours raise "not implemented")
