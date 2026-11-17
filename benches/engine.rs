@@ -1909,6 +1909,8 @@ fn construction(c: &mut Criterion) {
 /// beat (a Luau port of FAF's `ResetSyncTable` over its default sync tables).
 fn sim_tick(c: &mut Criterion) {
     let lua = Lua::new();
+    // (The tick's destroy queue reads the entity world.)
+    lua.set_app_data(sim::entity::EntityWorld::default());
     api::threads::register(&lua).unwrap();
     lua.load(
         "SyncDefaults = { AIBrainData = true, UnitData = true, ReleaseIds = true, Reclaim = true }
