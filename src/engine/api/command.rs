@@ -938,8 +938,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// probe_ai_build: `{4, 6, 0}` queued at the start + (4, 6), not
         /// beside the builder). An unknown blueprint queues
         /// nothing and returns false, as in the real game (dev/probes
-        /// probe_ai_misc). The site goes to `2 * floor(v / 2) + 0.5` on
-        /// each axis; one where the structure can't be built (another
+        /// probe_ai_misc). The site snaps as every build order's does
+        /// (`construction::snap_site`: the footprint from round(v - size /
+        /// 2), halves to even, so a generator asked at an even 0 or 0.3
+        /// goes to 0.5, at an odd 3 to 2.5, and an extractor asked on its
+        /// deposit at 155.5 stays there); one where the structure can't be built (another
         /// structure's skirt: a unit doesn't count) moves to the first
         /// free spot of the near-spot search in steps of 8, whatever the
         /// blueprint (the real game queues a generator asked on another at
@@ -963,15 +966,17 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                     z += start.z.to_num::<f64>();
                 }
             }
-            use crate::engine::api::build::{can_build_at, near_spot_first, near_spot_offsets, NEAR_SPOT_RINGS};
+            use crate::engine::api::build::{near_spot_offsets, Placement, NEAR_SPOT_RINGS};
             use crate::engine::sim::math::{from_lua, Fx};
-            let (fx, fz) = (near_spot_first(from_lua(x)), near_spot_first(from_lua(z)));
-            let mut site = FxVec3 { x: fx, y: Fx::ZERO, z: fz };
-            if !can_build_at(lua, &bp, site)? {
+            let asked = FxVec3 { x: from_lua(x), y: Fx::ZERO, z: from_lua(z) };
+            let mut site = crate::engine::api::construction::snap_site(lua, &bp, asked)?;
+            let (fx, fz) = (site.x, site.z);
+            let placement = Placement::of(lua, &bp)?;
+            if !placement.allows(lua, site, &[])? {
                 let step = Fx::from_num(8);
                 for (dx, dz) in near_spot_offsets(NEAR_SPOT_RINGS).into_iter().skip(1) {
                     let p = FxVec3 { x: fx + step * Fx::from_num(dx), y: Fx::ZERO, z: fz + step * Fx::from_num(dz) };
-                    if can_build_at(lua, &bp, p)? {
+                    if placement.allows(lua, p, &[])? {
                         site = p;
                         break;
                     }

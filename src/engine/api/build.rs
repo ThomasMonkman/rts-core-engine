@@ -639,8 +639,9 @@ pub(crate) const NEAR_SPOT_RINGS: i32 = 20;
 /// and any unit's (inferred).
 const NEAR_SPOT_CLEARANCE: i32 = 2;
 
-/// Where moho's near-spot searches (`CreateUnitNearSpot`, a blocked
-/// `BuildStructure`) start: `2 * floor(v / 2) + 0.5` on each axis (the real
+/// Where moho's `CreateUnitNearSpot` search starts (`BuildStructure` snaps
+/// by `construction::snap_site` instead, which agrees for the even points
+/// probed but keeps an extractor on an odd deposit): `2 * floor(v / 2) + 0.5` on each axis (the real
 /// game queues a generator asked at 0, 0.3 or 0.7 at 0.5, at 3 at 2.5, at -5
 /// at -5.5, and makes one there: dev/probes probe_re2_build BS, NEAR).
 pub(crate) fn near_spot_first(v: Fx) -> Fx {
