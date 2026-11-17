@@ -1224,6 +1224,10 @@ fn advance_target(
     // 0x101c5e40, 0x102afd20; FAF probe probe_aimtiming: a tank keeps its
     // target and turns after it as it moves).
     let enabled = w.enabled;
+    // The stun ended this tick: the weapon fires at once on the target the
+    // stun took from it (`probe_re3_wpn_a` `stun.*`: real shots land on the
+    // tick `IsStunned` turns false).
+    let stun_ended = tick > 0 && data.stunned_until == tick;
     // Whether this update gave the weapon a new target: it fires on it from
     // the next update at the earliest (FAF probe probe_firsttick).
     let mut took_target = false;
@@ -1927,7 +1931,7 @@ fn advance_target(
     // salvo was lost (-40% damage).
     static BUSY: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("Busy").expect("state"));
     let busy = !overcharging && data.states.contains(*BUSY);
-    if enabled && !took_target && in_range && w.on_target && water_ok && ready && !busy {
+    if enabled && (!took_target || stun_ended) && in_range && w.on_target && water_ok && ready && !busy {
         w.fired_at_target = true;
         w.fire_clock = w.reload_ticks();
         push(&mut events, WeaponEventKind::Fire);
@@ -2514,6 +2518,29 @@ mod tests {
             step(&mut ws, &w, None, None, &mut out);
             assert_eq!(ws.get(me, 1).unwrap().target, Some(point));
         }
+    }
+
+    /// A stunned weapon holds fire, and fires on the tick its stun ends
+    /// (`probe_re3_wpn_a` `stun.*`), not the tick after.
+    #[test]
+    fn fires_on_the_tick_its_stun_ends() {
+        let mut w = EntityWorld::default();
+        let me = unit(&mut w, 1, 0.0, 0.0);
+        let _enemy = unit(&mut w, 2, 0.0, 5.0);
+        let mut ws = Weapons::default();
+        gun(&mut ws, me);
+        let mut out = Vec::new();
+        w.get_mut(me).unwrap().unit.as_mut().unwrap().stunned_until = 20;
+        let mut fired = Vec::new();
+        for tick in 1..=30 {
+            ws.tick = tick;
+            out.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            if out.iter().any(|e| e.kind == WeaponEventKind::Fire) {
+                fired.push(tick);
+            }
+        }
+        assert_eq!(fired, vec![20, 30], "first shot as the stun ends, then every reload");
     }
 
     #[test]
