@@ -353,7 +353,7 @@ fn draw_orders(
 /// cutoff) as their strategic icons (FA's
 /// `/textures/ui/common/game/strategicicons/<StrategicIconName>_rest.dds`,
 /// `_selected` when selected), at the texture's own pixel size, centred on
-/// the unit and tinted with its army's colour.
+/// the unit, its grey fill in its army's colour (`DrawItem::Icon`).
 pub fn icon_items(scene: &Sources, cache: &mut IconCache) -> (Vec<rts_core_engine::ui::controls::DrawItem>, Vec<(u32, [f32; 4])>) {
     let mut out = projectile_icon_items(scene, cache);
     let input = scene.input;
@@ -456,8 +456,8 @@ pub fn icon_items(scene: &Sources, cache: &mut IconCache) -> (Vec<rts_core_engin
         let (w, h) = info.sizes[state];
         let (cx, cy) = ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
         let (hw, hh) = icon_half_size((w, h), icon_scale, scale);
-        let Some((rect, uv)) = clip_quad([cx - hw, cy - hh, cx + hw, cy + hh], clip) else { continue };
-        out.push(rts_core_engine::ui::controls::DrawItem::Quad { rect, texture: Some(info.paths[state].clone()), uv, color: [r, g, b, alpha], tiled: false });
+        let Some((rect, uv)) = clip_quad(pixel_rect(cx, cy, hw, hh), clip) else { continue };
+        out.push(rts_core_engine::ui::controls::DrawItem::Icon { rect, texture: info.paths[state].clone(), uv, color: [r, g, b, alpha] });
     }
     let rects = laid.iter().filter(|l| l.0 != u32::MAX).filter_map(|l| Some((l.0, clip_quad(l.3, l.5)?.0))).collect();
     (cache.layers, cache.order) = (layered, order);
@@ -498,6 +498,14 @@ fn clip_quad(rect: [f32; 4], clip: [f32; 4]) -> Option<([f32; 4], [f32; 4])> {
     Some((out, [(out[0] - rect[0]) / w, (out[1] - rect[1]) / h, (out[2] - rect[0]) / w, (out[3] - rect[1]) / h]))
 }
 
+/// An icon's rectangle centred on (`cx`, `cy`), its corners on whole pixels:
+/// point sampled, each texel covers the same pixels (a 2x display: two by
+/// two) wherever the unit is.
+fn pixel_rect(cx: f32, cy: f32, hw: f32, hh: f32) -> [f32; 4] {
+    let (l, t) = ((cx - hw).round(), (cy - hh).round());
+    [l, t, l + (2.0 * hw).round(), t + (2.0 * hh).round()]
+}
+
 /// An icon texture's half width and height on screen: moho halves the
 /// texture's size in whole texels, then FAF's `ui_StrategicIconScale`
 /// multiplies it (FA-Binary-Patches `hooks/Strategic.hook`: every icon
@@ -509,7 +517,8 @@ fn icon_half_size((w, h): (u32, u32), icon_scale: f32, display: f32) -> (f32, f3
 
 /// Radar and sonar contacts' colour: FAF's `UnidentifiedColor` ("FF808080",
 /// `/lua/GameColors.lua`; moho reads it through `GetUnidentifiedColor`,
-/// MohoEngine.dll 0x100f2980).
+/// MohoEngine.dll 0x100f2980). On screen their fill reads (94, 94, 94): this
+/// at the icons' brightness (`ui::STRATEGIC_ICON_BRIGHTNESS`).
 pub const UNIDENTIFIED: [f32; 3] = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0];
 
 /// Jammer fakes have no unit: drawn as an unidentified land contact.
@@ -581,6 +590,13 @@ fn projectile_icon_items(scene: &Sources, cache: &mut IconCache) -> Vec<rts_core
 
 #[cfg(test)]
 mod icon_tests {
+    #[test]
+    fn icon_rects_sit_on_whole_pixels() {
+        assert_eq!(super::pixel_rect(100.3, 50.6, 8.0, 8.0), [92.0, 43.0, 108.0, 59.0]);
+        assert_eq!(super::pixel_rect(100.5, 50.5, 12.0, 6.0), [89.0, 45.0, 113.0, 57.0], "a half pixel rounds away; the size is kept");
+        assert_eq!(super::pixel_rect(10.0, 10.0, 7.5, 7.5), [3.0, 3.0, 18.0, 18.0]);
+    }
+
     /// Moho halves the texture in whole texels before the patch's scale.
     #[test]
     fn icon_half_size_scales_whole_texel_halves() {

@@ -461,6 +461,7 @@ fn to_physical(item: rts_core_engine::ui::controls::DrawItem, scale: f32) -> rts
         D::World { rect, camera, shapes } => D::World { rect: r(rect), camera, shapes },
         D::Text { rect, text, family, size, color, shadow, vertical } => D::Text { rect: r(rect), text, family, size: size * scale, color, shadow, vertical },
         D::Movie { rect, movie, frame, color } => D::Movie { rect: r(rect), movie, frame, color },
+        D::Icon { rect, texture, uv, color } => D::Icon { rect: r(rect), texture, uv, color },
     }
 }
 
