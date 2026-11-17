@@ -693,8 +693,8 @@ fn friendly_commander_offers_guard_not_attack() {
 /// Repro: right-clicking a transport with a loadable unit
 /// selected walks it aboard, and right-clicking a unit with a transport
 /// selected flies the transport out to pick it up (moho's
-/// `GetRightMouseButtonOrder` answers `RULEUCC_CallTransport` for the first;
-/// the reverse is the transport's own order onto the unit).
+/// `GetRightMouseButtonOrder` answers `RULEUCC_CallTransport` for the first
+/// and `RULEUCC_Transport` for the second, as probed in the real game).
 #[test]
 fn transport_hover_offers_load_both_ways() {
     use super::player::PlayerControl;
