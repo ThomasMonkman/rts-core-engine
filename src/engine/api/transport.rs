@@ -521,6 +521,8 @@ fn attach(lua: &Lua, transport: EntityId, unit: EntityId, bone: u32, hang: bool)
         }
     }
     set_state(lua, unit, "Attached", true);
+    // Down (on a pad, or picked up): no longer coming down.
+    set_state(lua, unit, "MovingDown", false);
     // Passengers ride in the air (FAF's drop logic waits for the change
     // back on landing).
     if !is_staging(lua, transport) {

@@ -3542,6 +3542,20 @@ pub fn candidates(world: &EntityWorld, commands: &Commands, out: &mut Vec<Entity
     out.dedup();
 }
 
+/// An aircraft's `MovingDown` unit state, from its move this tick: set
+/// while it comes down towards a touchdown or attach point, cleared on
+/// touching down (and on docking, `api::transport`). The real game's
+/// (dev/probes probe_re3_mov MS): a transport descending to its cargo or its
+/// drop point, an aircraft to an air staging pad, an idle one landing.
+/// (Its one-tick `MovingUp` on lifting off after a load or from a pad isn't
+/// modelled: ours' transports load hovering, and docked aircraft don't
+/// leave their pad on an order. Submarines' are set by their dive,
+/// `api::movement`.)
+fn air_vertical_states(u: &mut crate::engine::sim::entity::UnitData, task: bool, m: &Moved) {
+    static DOWN: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("MovingDown").expect("state"));
+    u.states.set(*DOWN, m.state.vertical == VerticalMotion::Down && (task || m.state.landing.is_some()));
+}
+
 /// Applies a pass's results: transforms, motion state, completed orders.
 /// Returns the motion events (unit, new, old) in id order.
 pub fn apply(world: &mut EntityWorld, commands: &mut Commands, moved: &[Moved], events: &mut Vec<(EntityId, HorzState, HorzState)>) {
@@ -3606,6 +3620,9 @@ pub fn apply(world: &mut EntityWorld, commands: &mut Commands, moved: &[Moved], 
             // on that pass (FAF's strategic bombers, 50, at a target 38 out).
             static RUN: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("MakingAttackRun").expect("state"));
             u.states.set(*RUN, matches!(m.state.combat, 1 | 2 | 6));
+            if u.motion_params.kind == MotionKind::Air {
+                air_vertical_states(u, commands.current(m.unit).is_some_and(|c| c.kind.is_transport_load_unload()), m);
+            }
         }
         if m.arrived && commands.dispatched(m.unit).is_some() {
             use crate::engine::sim::command::CommandKind as K;
