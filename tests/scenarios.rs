@@ -603,6 +603,11 @@ fn collision_check_timing() {
 }
 
 #[test]
+fn collision_check_friendly() {
+    scenario("collision_check_friendly", 120);
+}
+
+#[test]
 fn shield() {
     scenario("shield", 300);
 }

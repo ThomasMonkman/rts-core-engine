@@ -175,7 +175,9 @@ pub struct ProjectileState {
     pub detonate_below: Fx,
     pub stay_underwater: bool,
     pub target: Option<ProjectileTarget>,
-    /// Hits units allied to its army (weapon `CollideFriendly`).
+    /// Weapon `CollideFriendly`: a detonation-height burst counts allied
+    /// units as its target (other hits leave allies to their
+    /// `OnCollisionCheck`).
     pub collide_friendly: bool,
     /// Unit or shield whose collision check refused it: not hit again.
     pub last_hit: Option<EntityId>,
@@ -959,7 +961,7 @@ fn sweep(
     // burst with no unit on its step carries none).
     if (p.detonate_below > Fx::ZERO || p.detonate_above > Fx::ZERO)
         && let Some(at) = terrain.and_then(|t| detonation(p, position, next, t)) {
-        let unit = if p.collide_entity { first_unit_hit(p, position, next, army, world, env, buf).map(|(_, u, _)| u) } else { None };
+        let unit = if p.collide_entity { first_unit_hit(p, position, next, army, world, env, buf, p.collide_friendly).map(|(_, u, _)| u) } else { None };
         return Motion { live: true, turned, position: at, orientation: q, impact: Some(ImpactKind::Air), target: unit, water: None, entered: None, sweep: None };
     }
 
@@ -976,7 +978,9 @@ fn sweep(
     // Units and shield bubbles: anything hit along this tick's path before
     // the surface, earliest wins.
     if p.collide_entity {
-        let unit = first_unit_hit(p, position, next, army, world, env, buf);
+        // Own and allied units too: their `OnCollisionCheck` decides (FAF's
+        // stock one lets the shot through unless it collides with friends).
+        let unit = first_unit_hit(p, position, next, army, world, env, buf, true);
         let shield = first_shield_hit(p, position, next, env.shields, Some((army, env.armies)), env.skip);
         let under_water = |t: Fx| terrain.and_then(|tr| tr.water_surface).is_some_and(|w| (position + (next - position) * t).y < w);
         let mut hit = match (unit, shield) {
@@ -1241,9 +1245,15 @@ fn projectile_hit(from: FxVec3, to: FxVec3, target: EntityId, world: &EntityWorl
 }
 
 /// The earliest unit the segment `from -> to` touches (fraction along it,
-/// id, layer), skipping the launcher, the unit last hit, and allies of
-/// `army` unless the projectile collides with friendlies. Ties go to the
-/// lowest id, so candidate order doesn't matter.
+/// id, layer), skipping the launcher, the unit last hit, and, unless
+/// `friends`, units allied to `army`. Ties go to the lowest id, so
+/// candidate order doesn't matter.
+///
+/// A hit is asked `OnCollisionCheck` whatever its army (FAF probe
+/// `probe_re3_wpn_d`: an own or allied blocker is asked once per shot, and
+/// an override answering true stops it there; FAF's stock answer,
+/// `other.CollideFriendly`, lets it through), so collisions pass `friends`.
+#[allow(clippy::too_many_arguments)]
 fn first_unit_hit(
     p: &ProjectileState,
     from: FxVec3,
@@ -1252,6 +1262,7 @@ fn first_unit_hit(
     world: &EntityWorld,
     env: Env,
     buf: &mut Vec<EntityId>,
+    friends: bool,
 ) -> Option<(Fx, EntityId, crate::engine::sim::layer::Layer)> {
     use crate::engine::sim::army::Alliance;
     let reach = world.unit_reach();
@@ -1270,7 +1281,7 @@ fn first_unit_hit(
             continue;
         }
         let Some(e) = world.get(id).filter(|e| !e.destroyed) else { continue };
-        if !p.collide_friendly && friendly(e.army) {
+        if !friends && friendly(e.army) {
             continue;
         }
         let shape = e.collision_shape();
