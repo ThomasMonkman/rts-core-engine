@@ -45,6 +45,8 @@ fn update(lua: &Lua, map: &mut ThreatMap) {
     };
     let brains: Vec<u32> = armies.list.iter().map(|a| a.index).collect();
     let structures = crate::engine::api::categories::domain(lua).ok().and_then(|d| d.named.get("STRUCTURE").cloned());
+    // (Plain references: brains are updated in parallel.)
+    let (armies, grids, structures): (&Armies, &crate::engine::sim::vision::IntelGrids, Option<&_>) = (&armies, &grids, structures.as_ref());
     let knows = |brain: u32, e: &crate::engine::sim::entity::Entity| {
         let Some(owner) = e.army else { return Knowledge::Unknown };
         if armies.alliance(brain, owner) == Alliance::Ally {
@@ -53,7 +55,7 @@ fn update(lua: &Lua, map: &mut ThreatMap) {
         if grids.detect(brain, e).any() {
             return Knowledge::Detected;
         }
-        let structure = structures.as_ref().zip(e.category_index).is_some_and(|(s, i)| s.contains(i));
+        let structure = structures.zip(e.category_index).is_some_and(|(s, i)| s.contains(i));
         if structure && grids.ever_seen(brain, e.id) { Knowledge::SeenStructure } else { Knowledge::Unknown }
     };
     // The fakes each brain believes in, and those it knows are fake.
