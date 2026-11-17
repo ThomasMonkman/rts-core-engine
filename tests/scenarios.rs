@@ -608,6 +608,11 @@ fn collision_check_friendly() {
 }
 
 #[test]
+fn script_projectile_destroyed() {
+    scenario("script_projectile_destroyed", 10);
+}
+
+#[test]
 fn shield() {
     scenario("shield", 300);
 }

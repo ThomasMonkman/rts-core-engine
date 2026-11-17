@@ -157,6 +157,9 @@ pub struct Launch {
     pub target: Option<crate::engine::sim::projectile::ProjectileTarget>,
     /// The launcher's weapon (index) told whether the shot hit its target.
     pub reports_to: Option<u32>,
+    /// Made by a script's `Entity:CreateProjectile`, with no weapon and no
+    /// target: see [`spawn_projectile`].
+    pub script_made: bool,
 }
 
 /// Tells a followed shot's weapon ([`ProjectileState::reports_to`]) how it
@@ -383,6 +386,15 @@ pub fn spawn_projectile(lua: &Lua, launcher: EntityId, bp_path: &str, position: 
         .and_then(|t| t.water_surface)
         .is_some_and(|w| position.y < w);
     let obj = create_object(lua, id, &module, &class)?;
+    // A script-made projectile that can't live is destroyed at once, before
+    // its `OnCreate` (FAF probe `probe_re3_wpn_b`, `OnDestroy` at tick+0 and
+    // no `OnCreate`): one whose blueprint tracks a target (`TrackTarget`,
+    // and it has none), or one that dies on water made under the surface.
+    // No stock FAF script makes either with `CreateProjectile`.
+    if launch.script_made && (template.track_target || (template.destroy_on_water && in_water)) {
+        crate::engine::api::entity::destroy(lua, &Obj::new(obj.clone()))?;
+        return Ok(Obj::new(obj));
+    }
     ProjectileCallbacks::on_create(lua, &Obj::<moho::Projectile>::new(obj.clone()), &bp_id, in_water)?;
     // (Only a velocity the script changed: the launch one already has that
     // speed, and renormalizing it would only add rounding.)
@@ -654,7 +666,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 (Some(x), Some(y), Some(z)) => Some(FxVec3::from_f64(x, y, z)),
                 _ => None,
             };
-            spawn_projectile(lua, launcher, &bp, origin + offset, Launch { direction, ..Default::default() })
+            spawn_projectile(lua, launcher, &bp, origin + offset, Launch { direction, script_made: true, ..Default::default() })
         })?;
     lua_method!(lua, moho::Entity,
         /// At the bone's posed world position, flying along its posed facing

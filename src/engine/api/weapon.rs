@@ -771,6 +771,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             // Only shots at a unit are followed (MohoEngine.dll 0x102b27b9).
             reports_to: (st.retarget.is_some() && matches!(target, Some(ProjectileTarget::Entity(_)))).then_some(h.index),
             rescale_after_create: true,
+            script_made: false,
         };
         let projectile_id = st.projectile_id.clone();
         drop(weapons);
