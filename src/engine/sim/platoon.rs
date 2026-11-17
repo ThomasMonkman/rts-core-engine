@@ -24,6 +24,8 @@ pub struct Platoon {
     /// Formation its moves use (`AssignUnitsToPlatoon`'s formation,
     /// `SetPlatoonFormationOverride`); `None` = no formation.
     pub formation: Option<String>,
+    /// The tick it was made on (`MakePlatoon`).
+    pub created: u64,
 }
 
 /// All platoons, id-ordered.
@@ -42,7 +44,7 @@ impl Platoons {
     pub fn create(&mut self, army: u32, label: String, plan: String) -> PlatoonId {
         let id = self.next_id;
         self.next_id += 1;
-        self.map.insert(id, Platoon { id, army, label, plan, unique_name: None, units: Vec::new(), target_priorities: Vec::new(), formation: None });
+        self.map.insert(id, Platoon { id, army, label, plan, unique_name: None, units: Vec::new(), target_priorities: Vec::new(), formation: None, created: 0 });
         id
     }
 

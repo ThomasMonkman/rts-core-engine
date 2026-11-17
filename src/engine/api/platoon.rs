@@ -26,7 +26,7 @@ fn objects(lua: &Lua) -> LuaResult<LuaTable> {
     crate::engine::api::script_object::registry_table(lua, PLATOONS_KEY)
 }
 
-fn platoons(lua: &Lua) -> mlua::AppDataRefMut<'_, Platoons> {
+pub(crate) fn platoons(lua: &Lua) -> mlua::AppDataRefMut<'_, Platoons> {
     lua.app_data_mut::<Platoons>().expect("Platoons not in app_data")
 }
 
@@ -72,7 +72,15 @@ pub(crate) fn live_id(lua: &Lua, obj: &LuaTable) -> LuaResult<PlatoonId> {
 
 /// Creates a platoon for `army`, its Lua object, and runs `OnCreate(plan)`.
 pub fn make_platoon(lua: &Lua, army: u32, label: &str, plan: &str) -> LuaResult<Obj<moho::Platoon>> {
-    let id = platoons(lua).create(army, label.to_owned(), plan.to_owned());
+    let id = {
+        let tick = crate::engine::api::sim_time::current_tick(lua);
+        let mut ps = platoons(lua);
+        let id = ps.create(army, label.to_owned(), plan.to_owned());
+        if let Some(p) = ps.get_mut(id) {
+            p.created = tick;
+        }
+        id
+    };
     let import: LuaFunction = lua.globals().get("import")?;
     let class: LuaTable = import.call::<LuaTable>("/lua/platoon.lua")?.get("Platoon")?;
     let obj: LuaTable = class.call(())?;
