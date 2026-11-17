@@ -33,12 +33,15 @@ struct FileInfo {
 /// (inferred, not probed): FAF's lobby lists an AI mod's AIs only if
 /// `exists(mod.location .. '/lua/AI/CustomAIs_v2')` is true for the mod's
 /// mounted folder (`ui/lobby/aitypes.lua`, `system/Localization.lua`), and
-/// the `IsFolder` field would otherwise always be false.
+/// the `IsFolder` field would otherwise always be false; probe_re3_ui
+/// confirmed it with and without the trailing slash. A mount root named
+/// without its trailing slash (`/maps`, `/schook`) is not found, while
+/// `/maps/` is (probe_re3_ui): moho matches a mount by its `/maps/` prefix.
 pub(crate) fn lookup(vfs: &Vfs, path: &str) -> Option<crate::engine::vfs::FileInfo> {
     if !path.starts_with('/') || path.contains('\\') {
         return None;
     }
-    vfs.file_info(path).filter(|i| !(i.is_folder && i.read_only))
+    vfs.file_info(path).filter(|i| !(i.is_folder && i.read_only)).filter(|i| !(i.is_folder && !path.ends_with('/') && vfs.is_mount_point(path)))
 }
 
 pub fn register(lua: &Lua) -> LuaResult<()> {
@@ -94,7 +97,11 @@ mod tests {
         zip.write_all(b"x").unwrap();
         std::fs::write(dir.join("lua.scd"), zip.finish().unwrap().into_inner()).unwrap();
         let vfs = Vfs::new(
-            vec![MountPoint { source: dir.join("lua.scd"), mountpoint: "/".into() }, MountPoint { source: dir.join("loose"), mountpoint: "/".into() }],
+            vec![
+                MountPoint { source: dir.join("lua.scd"), mountpoint: "/".into() },
+                MountPoint { source: dir.join("loose"), mountpoint: "/".into() },
+                MountPoint { source: dir.join("loose/mods"), mountpoint: "/schook".into() },
+            ],
             vec![],
         )
         .unwrap();
@@ -106,6 +113,11 @@ mod tests {
         assert_eq!(found("lua/sim/unit.lua"), None, "relative");
         assert_eq!(found("\\lua\\sim\\unit.lua"), None, "backslashes");
         assert_eq!(found("/mods/m/lua/AI/CustomAIs_v2"), Some((true, false)), "a loose folder");
+        assert_eq!(found("/mods/m/lua/AI/CustomAIs_v2/"), Some((true, false)), "with the slash");
+        assert_eq!(found("/schook"), None, "a mount root without its slash (probe_re3_ui)");
+        assert_eq!(found("/SCHOOK"), None);
+        assert_eq!(found("/schook/"), Some((true, false)), "with it");
+        assert_eq!(found("/schook/m"), Some((true, false)), "a folder under the mount root");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

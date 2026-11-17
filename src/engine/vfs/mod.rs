@@ -412,6 +412,14 @@ impl Vfs {
         Ok(self.paths().filter(move |path| glob.is_match(path)))
     }
 
+    /// Whether `path` (normalised, without a trailing slash) is where a
+    /// mount other than the root is mounted, e.g. `/maps`.
+    pub fn is_mount_point(&self, path: &str) -> bool {
+        let key = normalise(path);
+        let key = key.trim_end_matches('/');
+        !key.is_empty() && self.index.mounts.iter().any(|m| normalise(&m.mountpoint).trim_end_matches('/') == key)
+    }
+
     /// Metadata for a file or (implicit) folder in the VFS, `None` if absent.
     pub fn file_info(&self, path: &str) -> Option<FileInfo> {
         let key = normalise(path);
