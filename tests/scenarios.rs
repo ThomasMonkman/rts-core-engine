@@ -711,7 +711,7 @@ fn unit_cap() {
 /// `OnDecayed` at none left.
 #[test]
 fn decay() {
-    scenario("decay", 400);
+    scenario("decay", 900);
 }
 
 /// `ChangeUnitArmy` past the receiver's unit cap: refused, the receiver

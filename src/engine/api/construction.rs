@@ -1474,13 +1474,18 @@ pub fn mark_unfinished(lua: &Lua, id: EntityId) {
 }
 
 /// Moho's natural decay: an unfinished unit nobody is building (no builder's
-/// job, no assister on it) loses build progress, and health with it, by
-/// [`decay_rate`] a tick; at none left it gets `OnDecayed` (FAF destroys
-/// it). Health stays at least 1, as a fresh construction's.
+/// job, no assister on it) loses [`decay_rate`] of build progress a tick
+/// (down to none) and that share of its max health; at no health left it
+/// gets `OnDecayed` (FAF destroys it). It is health that runs out, not
+/// progress: a construction abandoned before any progress (fraction 0,
+/// health 1) stands until its 1 health has decayed (real game, dev/probes
+/// `probe_t4_vanish`: an Ahwassa, 52000 health and 1920000 energy, lost
+/// 0.0027 a tick and heard `OnDecayed` 371 ticks after it was started and
+/// cleared; a T1 power generator, 0.08 a tick, after 14).
 ///
-/// Inferred, not verified against the binary: decay starts at once (no
-/// grace period), a paused builder's job still holds it off, and health
-/// drops in step with progress.
+/// Inferred, not verified against the binary: decay starts at once (the
+/// real game's starts a tick or so later), and a paused builder's job still
+/// holds it off.
 fn decay(lua: &Lua) -> LuaResult<()> {
     if lua.app_data_ref::<Unfinished>().is_none_or(|u| u.0.is_empty()) {
         return Ok(());
@@ -1501,11 +1506,9 @@ fn decay(lua: &Lua) -> LuaResult<()> {
         let gone = {
             let mut w = entity::world(lua);
             let Some(e) = w.get_mut(id) else { continue };
-            let old = e.fraction_complete;
-            let new = (old - rate).max(Fx::ZERO);
-            e.fraction_complete = new;
-            e.health = (e.health - e.max_health * (old - new)).max(Fx::ONE.min(e.max_health));
-            new == Fx::ZERO
+            e.fraction_complete = (e.fraction_complete - rate).max(Fx::ZERO);
+            e.health = (e.health - e.max_health * rate).max(Fx::ZERO);
+            e.health == Fx::ZERO
         };
         if gone
             && let Some(obj) = object(lua, id)? {
