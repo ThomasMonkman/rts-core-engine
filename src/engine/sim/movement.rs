@@ -2194,6 +2194,20 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
         // stayed closer than the real game's (dev/probes probe_dogfight).)
         let reach = steering.map_or(target_speed, |(_, d)| if through || combat_engaged { target_speed } else { target_speed.min(d) });
         let want = if combat <= 2 { reach.saturating_mul(ec.max(Fx::from_num(0.5))) } else { reach };
+        // Climbing to its height, D points up at it as much as along: its
+        // flat part is s x s / |(s, height still to climb)|, so a plane
+        // gathers speed slowly while it climbs (moho's winged forward is
+        // the 3D D; inferred from the real game's take-off curves: every
+        // winged plane's thrust along the ground is that share within 0.03
+        // on flat ground, the rest the followed ground's look-ahead,
+        // dev/probes probe_re9_takeoff). Climbs only: descents not measured.
+        let want = match surface_height(p.kind, terrain, pos.x, pos.z, p.elevation) {
+            Some(y) if state.landing.is_none() && y > pos.y && reach > Fx::ZERO => {
+                let up = y - pos.y;
+                want.saturating_mul(reach) / sqrt(reach.saturating_mul(reach).saturating_add(up.saturating_mul(up)))
+            }
+            _ => want,
+        };
         let (vs, vc) = match state.course {
             Some(h) => crate::engine::sim::math::sin_cos(h),
             None => (fx, fz),
@@ -2276,11 +2290,31 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
         None if p.kind == MotionKind::Water => data.depth,
         None => p.elevation,
     };
+    // A winged aircraft's true vertical speed when its lift controller flew
+    // it this tick (else its rise this tick).
+    let mut lift_speed = None;
     if let Some(y) = surface_height(p.kind, terrain, next.x, next.z, elevation) {
         surface = Some(y - elevation);
         // Aircraft climb / descend toward their elevation at `lift`; winged
         // ones climb only as fast as their wings are level allows.
-        next.y = if p.kind == MotionKind::Air && p.lift > Fx::ZERO {
+        next.y = if p.kind == MotionKind::Air && p.lift > Fx::ZERO && winged && elevation > Fx::ZERO && (y - pos.y > -Fx::ONE || state.climb > Fx::ZERO) {
+            // Climbing (and settling at its height): moho's lift controller,
+            // force KLift x D.y - KLiftDamping x vertical speed, D.y the
+            // height still to climb capped by `CalcWingedLift`, except on
+            // the take-off tick (still on the ground then: moho's layer is
+            // `Land`); position by the mean speed. The real game's planes
+            // fit it to 0.02 a second every tick from the ground up (UEF T1
+            // bomber 4.23, 4.67, 5.00 .. 5.85, its cap (up.y - 0.5) x 10
+            // easing with the pitch; LiftFactor 7 planes 5.6, 5.3 .. 4.2):
+            // dev/probes probe_re9_takeoff. Descents keep the rate rule below.
+            let take_off = state.vertical == VerticalMotion::Up && state.climb == Fx::ZERO;
+            let wanted = y - pos.y;
+            let d = if take_off { wanted } else { wanted.min(winged_lift(e.orientation, p.lift, elevation, pos.y - (y - elevation))) };
+            let ay = p.air.k_lift.saturating_mul(d) - p.air.k_lift_damping.saturating_mul(state.climb);
+            let new = state.climb + ay * dt;
+            lift_speed = Some(new);
+            pos.y + ((state.climb + new) / 2) * dt
+        } else if p.kind == MotionKind::Air && p.lift > Fx::ZERO {
             let step = p.lift * dt;
             let rise = if winged { winged_lift(e.orientation, p.lift, elevation, pos.y - (y - elevation)).min(p.lift) * dt } else { step };
             // Winged: down at half the climb rate (moho's followed ground,
@@ -2325,7 +2359,7 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     }
     // A winged aircraft touching the ground (`HandleGroundCollision`): its
     // climb is then the pushed-back velocity's, not its rise.
-    let mut climb = (next.y - pos.y) * 10;
+    let mut climb = lift_speed.unwrap_or((next.y - pos.y) * 10);
     // (The surface is the terrain or the water over it: at least the
     // terrain, so higher than the reach over it is higher over the terrain.)
     let low = surface.is_some_and(|g| next.y - g <= p.air.ground_collision_reach);
@@ -4352,6 +4386,62 @@ mod tests {
             let pos = w.get(p).unwrap().position();
             assert!(c.is_done(cmd), "winged={winged}: the move completed with a target in range: at {pos:?}");
         }
+    }
+
+    /// A landed UEF T1 bomber (`uea0103`: `Elevation` 14, `LiftFactor` 10,
+    /// KLift 3 / KLiftDamping 2.5, KMove 1, `MaxAirspeed` 10) takes off on
+    /// flat ground as the real game's does (dev/probes probe_re9_takeoff):
+    /// the take-off tick's climb uncapped (4.2), then the lift controller
+    /// toward 6 a second under the `CalcWingedLift` cap, its height in ~26
+    /// ticks; along the ground only the share of its thrust that isn't
+    /// climbing, 3.5 a second 8 ticks up (real 3.53; it used to be 6.1).
+    #[test]
+    fn winged_aircraft_climb_by_their_lift_controller_on_take_off() {
+        use crate::engine::assets::scmap::Heightmap;
+        let t = Terrain::from_heightmap(&Heightmap { width: 64, height: 64, scale: 1.0 / 128.0, samples: vec![0u16; 65 * 65] });
+        let mut w = EntityWorld::default();
+        let mut c = Commands::default();
+        let p = plane(&mut w, 32.0, 10.0);
+        {
+            let u = w.get_mut(p).unwrap().unit.as_mut().unwrap();
+            u.layer = crate::engine::sim::layer::Layer::Land;
+            u.motion_state.landing = Some(FxVec3::from_f64(32.0, 0.0, 10.0));
+            let m = &mut u.motion_params;
+            m.min_speed = Fx::from_num(10);
+            m.elevation = Fx::from_num(14);
+            m.lift = Fx::from_num(10);
+            m.air.k_lift = Fx::from_num(3);
+            m.air.k_lift_damping = Fx::from_num(2.5);
+            m.air.k_move_damping = Fx::from_num(2);
+        }
+        w.set_transform(p, FxVec3::from_f64(32.0, 0.0, 10.0), FxQuat::IDENTITY);
+        c.issue(&[p], CommandKind::Move, CommandTarget::Ground(FxVec3::from_f64(32.0, 0.0, 300.0)), None, 0);
+        let (mut cands, mut moved, mut events) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut climbs, mut heights, mut speeds) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..40 {
+            candidates(&w, &c, &mut cands);
+            step(&w, &c, Env { terrain: Some(&t), ..Env::default() }, &cands, usize::MAX, &mut moved);
+            apply(&mut w, &mut c, &moved, &mut events);
+            // (The layer change is the API layer's: `api::movement`.)
+            if moved.iter().any(|m| matches!(m.land, Some(LandEvent::TakeOff))) {
+                w.get_mut(p).unwrap().unit.as_mut().unwrap().layer = crate::engine::sim::layer::Layer::Air;
+                continue;
+            }
+            let e = w.get(p).unwrap();
+            let s = &e.unit.as_ref().unwrap().motion_state;
+            if e.unit.as_ref().unwrap().layer == crate::engine::sim::layer::Layer::Air {
+                climbs.push(s.climb.to_num::<f64>());
+                heights.push(e.position().y.to_num::<f64>());
+                speeds.push(s.speed.to_num::<f64>());
+            }
+        }
+        assert!((climbs[0] - 4.2).abs() < 0.1, "uncapped on the take-off tick: {climbs:?}");
+        assert!((climbs[1] - 4.65).abs() < 0.1, "then capped at 5 a second: {climbs:?}");
+        let peak = climbs.iter().cloned().fold(0.0, f64::max);
+        assert!((5.6..6.0).contains(&peak), "toward 1.2 x the cap (real 5.85): {climbs:?}");
+        let up = heights.iter().position(|&h| h >= 13.5).expect("reaches its height");
+        assert!((22..=30).contains(&up), "at its height in {up} ticks (real 26): {heights:?}");
+        assert!((3.0..4.2).contains(&speeds[8]), "slow along the ground while it climbs: {speeds:?}");
     }
 
     #[test]
