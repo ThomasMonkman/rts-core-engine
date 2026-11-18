@@ -266,11 +266,15 @@ pub fn object_as<C>(lua: &Lua, id: EntityId) -> LuaResult<Option<Obj<C>>> {
     Ok(object(lua, id)?.map(Obj::new))
 }
 
-/// Platoons whose last unit died end (killing their threads). Not inside
-/// `Destroy`, which may be running on one of those threads: before the Lua
-/// threads run (units killed by weapons and projectiles this tick: their
-/// platoons' threads would otherwise wake to an empty platoon) and again at
-/// compaction (units killed by Lua).
+/// Platoons emptied since the last call (their last unit died or was moved
+/// out) end, killing their threads, once a beat: just before the Lua
+/// threads run, so one emptied by a thread lasts to the next beat, as in
+/// the real game (`OnDestroy` the beat after; dev/probes probe_ai_platoon,
+/// probe-sweep AI D34). Not inside `Destroy` or between thread resumes:
+/// calls on a platoon raise once it has ended, and AI code goes on using a
+/// platoon it has just emptied in the same beat (RNGAI's air platoons merge
+/// by restarting the emptied platoon's state machine, whose first lines
+/// call it). One given units again meanwhile lives on.
 pub fn end_emptied_platoons(lua: &Lua) -> LuaResult<()> {
     let doomed = lua.app_data_mut::<crate::engine::sim::platoon::Platoons>().map(|mut p| p.take_doomed()).unwrap_or_default();
     for id in doomed {
@@ -282,7 +286,6 @@ pub fn end_emptied_platoons(lua: &Lua) -> LuaResult<()> {
 /// End of tick: drops destroyed entities from the world and releases what
 /// the engine holds for them (script object registry, weapons, manipulators).
 pub fn compact(lua: &Lua) -> LuaResult<()> {
-    end_emptied_platoons(lua)?;
     let removed = match lua.app_data_mut::<EntityWorld>() {
         Some(mut w) => w.compact(),
         None => return Ok(()),

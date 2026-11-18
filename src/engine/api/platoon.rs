@@ -61,7 +61,7 @@ pub fn platoon_id(obj: &LuaTable) -> LuaResult<PlatoonId> {
 /// The id of a platoon that still exists. Calls on a disbanded platoon raise
 /// `Game object has been destroyed` in the real game (dev/probes
 /// probe_ai_platoon, probe_ai_misc). A platoon emptied this tick still
-/// exists until the tick's end.
+/// exists, and takes calls, until the next beat's threads.
 pub(crate) fn live_id(lua: &Lua, obj: &LuaTable) -> LuaResult<PlatoonId> {
     let id = platoon_id(obj)?;
     if platoons(lua).get(id).is_none() {
@@ -223,7 +223,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
 
     lua_method!(lua, moho::AIBrain,
         /// Whether `platoon` is a live platoon. A platoon whose last unit died this tick is gone for
-        /// scripts already (it is destroyed at the tick's end): FAF follows a true `PlatoonExists`
+        /// scripts already (it ends before the next beat's threads): FAF follows a true `PlatoonExists`
         /// with `GetPlatoonPosition`, which would be nil.
         PlatoonExists = |lua, (_brain, platoon): (Obj<moho::AIBrain>, LuaValue)| {
             // Not a game object (nil, a plain table): the real game raises (dev/probes
@@ -235,7 +235,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             }
             let Ok(id) = platoon_id(&t) else { return Ok(false) };
             // A platoon whose last unit died this tick is gone for scripts
-            // already (it's destroyed at the tick's end): FAF follows a true
+            // already (it ends before the next beat's threads): FAF follows a true
             // `PlatoonExists` with `GetPlatoonPosition`, which would be nil.
             let ps = platoons(lua);
             Ok(ps.get(id).is_some() && !ps.is_doomed(id))
@@ -686,7 +686,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
 /// Disbands platoon `id`: units back to the army pool, `OnDestroy` on its
 /// script object (FAF's clears its trash, killing the platoon's threads),
 /// then the platoon gone. Also how platoons end when their last unit dies
-/// (`entity::compact`). `OnDestroy` runs while the platoon still exists, so
+/// (`entity::end_emptied_platoons`). `OnDestroy` runs while the platoon still exists, so
 /// `self:GetBrain()` there is its brain: FAF's `DoDestroyCallbacks` and
 /// LOUD's `OnDestroy` hand it to every destroy callback (LOUD releases its
 /// builders' instances with it). An `OnDestroy` that disbands the

@@ -33,7 +33,7 @@ pub struct Platoon {
 pub struct Platoons {
     next_id: PlatoonId,
     map: BTreeMap<PlatoonId, Platoon>,
-    /// Platoons emptied by unit deaths this tick, destroyed at its end.
+    /// Platoons emptied this beat, ended before the next beat's threads.
     doomed: Vec<PlatoonId>,
     /// Each member unit's platoon (a unit is in at most one): a death or
     /// reassignment touches only that platoon, not every army's pool.
@@ -84,7 +84,7 @@ impl Platoons {
     }
 
     /// Platoons emptied since the last call, in the order they emptied.
-    /// Emptied by unit deaths this tick (destroyed at its end): no longer
+    /// Emptied this beat (ended before the next beat's threads): no longer
     /// exists for scripts.
     pub fn is_doomed(&self, id: PlatoonId) -> bool {
         self.doomed.contains(&id)
@@ -114,6 +114,8 @@ impl Platoons {
         if let Some(p) = self.map.get_mut(&id) {
             p.units.push((unit, squad.to_owned()));
             self.home.insert(unit, id);
+            // Given units again before it ended: it lives on.
+            self.doomed.retain(|&d| d != id);
         }
     }
 

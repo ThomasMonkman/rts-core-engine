@@ -81,6 +81,11 @@ fn platoon_destroy_brain() {
 }
 
 #[test]
+fn platoon_emptied_next_beat() {
+    scenario("platoon_emptied_next_beat", 30);
+}
+
+#[test]
 fn water_targets_only() {
     scenario("water_targets_only", 400);
 }
