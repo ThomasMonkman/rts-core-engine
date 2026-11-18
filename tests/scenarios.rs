@@ -81,6 +81,11 @@ fn platoon_destroy_brain() {
 }
 
 #[test]
+fn platoon_named_pool_survives() {
+    scenario("platoon_named_pool_survives", 40);
+}
+
+#[test]
 fn platoon_emptied_next_beat() {
     scenario("platoon_emptied_next_beat", 30);
 }

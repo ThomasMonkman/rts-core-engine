@@ -66,17 +66,23 @@ impl Platoons {
         Some(p)
     }
 
-    /// Takes `unit` out of its platoon; returns it if that left it empty
-    /// (an army pool never counts as emptied).
+    /// Takes `unit` out of its platoon; returns it if that left it empty.
+    /// A uniquely named platoon never counts as emptied: the army's
+    /// `ArmyPool`, and the pools FAF's AI names and keeps for the game
+    /// (`TransportPool`, made once and empty whenever every transport is
+    /// out; `BusyFactories`, `<location>_LeftoverUnits`). The real game's
+    /// emptied platoons that ended (dev/probes probe_ai_platoon `P2`, `PK`)
+    /// were unnamed; that naming keeps one is inferred from FAF relying on
+    /// its pools (probe_re5_platoon asks).
     fn leave(&mut self, unit: EntityId) -> Option<PlatoonId> {
         let p = self.map.get_mut(&self.home.remove(&unit)?)?;
         let before = p.units.len();
         p.units.retain(|(u, _)| *u != unit);
-        (before > 0 && p.units.is_empty() && p.unique_name.as_deref() != Some("ArmyPool")).then_some(p.id)
+        (before > 0 && p.units.is_empty() && p.unique_name.is_none()).then_some(p.id)
     }
 
     /// A unit was destroyed: it leaves its platoon at once; a platoon it
-    /// empties (other than an army pool) is queued for `take_doomed`.
+    /// empties (other than a named pool) is queued for `take_doomed`.
     pub fn unit_destroyed(&mut self, unit: EntityId) {
         if let Some(p) = self.leave(unit) {
             self.doomed.push(p);
@@ -87,11 +93,13 @@ impl Platoons {
     /// Emptied this beat (ended before the next beat's threads): no longer
     /// exists for scripts.
     pub fn is_doomed(&self, id: PlatoonId) -> bool {
-        self.doomed.contains(&id)
+        self.doomed.contains(&id) && self.map.get(&id).is_some_and(|p| p.units.is_empty() && p.unique_name.is_none())
     }
 
+    /// (Leaves out any since named or given units again: they live on.)
     pub fn take_doomed(&mut self) -> Vec<PlatoonId> {
-        std::mem::take(&mut self.doomed)
+        let doomed = std::mem::take(&mut self.doomed);
+        doomed.into_iter().filter(|id| self.map.get(id).is_some_and(|p| p.units.is_empty() && p.unique_name.is_none())).collect()
     }
 
     pub fn by_unique_name(&self, army: u32, name: &str) -> Option<PlatoonId> {
@@ -103,10 +111,9 @@ impl Platoons {
 
     /// Puts `unit` in platoon `id` under `squad`, taking it out of whatever
     /// platoon it was in (a unit belongs to one platoon at a time).
-    /// Moves `unit` into platoon `id`. A platoon it leaves empty (other than
-    /// an army pool) ends like one emptied by deaths (inferred: moho drops
-    /// unit-less platoons; FAF's AI follows `PlatoonExists` with
-    /// `GetPlatoonPosition`).
+    /// Moves `unit` into platoon `id`. An unnamed platoon it leaves empty
+    /// ends like one emptied by deaths (dev/probes probe_ai_platoon `P2`:
+    /// `OnDestroy` the beat after); a named one is a pool and stays.
     pub fn assign(&mut self, unit: EntityId, id: PlatoonId, squad: &str) {
         if let Some(p) = self.leave(unit).filter(|&p| p != id && !self.doomed.contains(&p)) {
             self.doomed.push(p);
@@ -147,6 +154,21 @@ mod tests {
         assert!(ps.take_doomed().is_empty());
         assert_eq!(ps.map[&b].units.len(), 1);
         assert!(ps.map[&pool].units.is_empty());
+    }
+
+    #[test]
+    fn a_named_pool_outlives_being_emptied() {
+        let mut ps = Platoons::default();
+        let tp = ps.create(1, "TransportPool".into(), "none".into());
+        ps.map.get_mut(&tp).unwrap().unique_name = Some("TransportPool".into());
+        let out = ps.create(1, "out".into(), String::new());
+        ps.assign(1, tp, "Support");
+        ps.assign(2, tp, "Support");
+        ps.assign(1, out, "Attack");
+        ps.unit_destroyed(2);
+        assert!(ps.take_doomed().is_empty(), "the named pool lives on");
+        ps.assign(1, tp, "Support");
+        assert_eq!(ps.take_doomed(), vec![out], "the unnamed platoon it left ends");
     }
 
     /// Reassigning moves a unit between platoons (dooming the one it
