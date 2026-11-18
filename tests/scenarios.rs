@@ -1654,3 +1654,8 @@ fn immobile_halt() {
 fn brain_queries() {
     scenario("brain_queries", 40);
 }
+
+#[test]
+fn upgrade_on_slope() {
+    scenario("upgrade_on_slope", 60);
+}

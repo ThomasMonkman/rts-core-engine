@@ -736,9 +736,14 @@ fn start(lua: &Lua, builder: EntityId, order: BuildOrder, command: CommandId, gu
         Some(t) if order == BuildOrder::Mobile => FxVec3 { y: if floats { t.surface_at(site.x, site.z) } else { t.height_at(site.x, site.z) }, ..site },
         _ => site,
     };
-    // An upgrade keeps the old structure's facing.
+    // An upgrade keeps the old structure's heading, not its lean: FAF's
+    // `StructureUnit.OnCreate` tilts every `FlattenSkirt` structure to the
+    // ground's gradient on top of the orientation it is made with, so the
+    // old one's tilt carried over leaned each upgrade once more (a Cybran
+    // shield on a slope 20 degrees at T2, 41 at T3). (Inferred: FAF has no
+    // guard for upgrades, so moho must make them level.)
     let facing = match order {
-        BuildOrder::Upgrade => entity::world(lua).get(builder).map(|e| e.orientation).unwrap_or(FxQuat::IDENTITY),
+        BuildOrder::Upgrade => entity::world(lua).get(builder).map(|e| FxQuat::from_heading(e.orientation.heading()).0).unwrap_or(FxQuat::IDENTITY),
         _ => FxQuat::IDENTITY,
     };
     // Building on a wreck of the same unit: moho asks the builder for a
