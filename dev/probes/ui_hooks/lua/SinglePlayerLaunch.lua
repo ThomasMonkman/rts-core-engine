@@ -5,6 +5,9 @@
 --   /probeai <key>[,<key>...]  the AI of every army (a list is cycled by army)
 --   /probemod <uid>[,<uid>...] the sim mods the session runs (instead of the
 --                              active mods in the game prefs)
+--   /probeteams <n>            n teams by start spot, alternating (2 = odd
+--                              against even), as ours' `--teams`; default
+--                              free for all
 -- The session is set up as ours sets up `--session --ai`: the same options
 -- (and every other lobby option at its default, the mods' AI options
 -- included), the factions spread UEF, Aeon, Cybran, Seraphim by army, the
@@ -94,6 +97,9 @@ local function ProbeAllAISession(mapName, aiKeys)
         sessionInfo.RandomSeed = tonumber(seed[1])
     end
 
+    local teamArg = GetCommandLineArg("/probeteams", 1)
+    local teamCount = teamArg and tonumber(teamArg[1]) or 0
+
     local GetDefaultPlayerOptions = import("/lua/ui/lobby/lobbycomm.lua").GetDefaultPlayerOptions
     local armies = scenario.Configurations.standard.teams[1].armies
     local numColors = table.getn(import("/lua/gamecolors.lua").GameColors.PlayerColors)
@@ -109,6 +115,10 @@ local function ProbeAllAISession(mapName, aiKeys)
         opts.PlayerColor = math.mod(index, numColors)
         opts.ArmyColor = math.mod(index, numColors)
         opts.StartSpot = index
+        -- FAF's team numbers: 1 = no team, 2.. = teams.
+        if teamCount > 1 then
+            opts.Team = math.mod(index - 1, teamCount) + 2
+        end
         sessionInfo.teamInfo[index] = opts
     end
     local extras = MapUtil.GetExtraArmies(scenario)
