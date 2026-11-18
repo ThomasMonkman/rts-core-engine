@@ -703,6 +703,15 @@ fn start(lua: &Lua, builder: EntityId, order: BuildOrder, command: CommandId, gu
         if let Some(target) = shared.filter(|&t| entity::world(lua).get(t).is_some_and(|e| !e.destroyed && e.fraction_complete < Fx::ONE)) {
             return join(lua, builder, &builder_obj, order, command, target);
         }
+        // The same unit left unfinished on the site (an order cleared and
+        // given again, as FAF's AIs do): the builder takes it up again
+        // rather than starting a second one over it (real game, dev/probes
+        // `probe_t4_vanish` CBRE / THRE: `OnStartBuild` again with the same
+        // unit, which then went on being built).
+        if crate::engine::api::build::can_build(lua, builder, &bp)?
+            && let Some(target) = unfinished_at(lua, builder, &bp, site) {
+            return join(lua, builder, &builder_obj, order, command, target);
+        }
     }
     let site = match order {
         BuildOrder::Mobile | BuildOrder::Upgrade => site,
@@ -797,8 +806,29 @@ fn start(lua: &Lua, builder: EntityId, order: BuildOrder, command: CommandId, gu
     Ok(())
 }
 
+/// An unfinished unit of `bp` in `builder`'s army standing on `site` (its
+/// position within half a unit of it, flat), lowest id first.
+fn unfinished_at(lua: &Lua, builder: EntityId, bp: &str, site: FxVec3) -> Option<EntityId> {
+    let unfinished = lua.app_data_ref::<Unfinished>()?;
+    let w = entity::world(lua);
+    let army = w.get(builder).and_then(|e| e.army)?;
+    let near = Fx::from_num(1) / Fx::from_num(4);
+    unfinished.0.iter().copied().find(|&id| {
+        w.get(id).is_some_and(|e| {
+            let p = e.position();
+            let (dx, dz) = (p.x - site.x, p.z - site.z);
+            !e.destroyed
+                && e.fraction_complete < Fx::ONE
+                && e.army == Some(army)
+                && e.cold.blueprint_id.eq_ignore_ascii_case(bp)
+                && dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)) <= near
+        })
+    })
+}
+
 /// `builder` works on `target`, a structure its shared order already
-/// started: the same job as the builder that started it.
+/// started (or one left unfinished on its order's site): the same job as
+/// the builder that started it.
 fn join(lua: &Lua, builder: EntityId, builder_obj: &LuaTable, order: BuildOrder, command: CommandId, target: EntityId) -> LuaResult<()> {
     let Some(target_obj) = object(lua, target)? else { return Ok(()) };
     if let Some(u) = entity::world(lua).get_mut(builder).and_then(|e| e.unit.as_deref_mut()) {
@@ -1474,13 +1504,18 @@ pub fn mark_unfinished(lua: &Lua, id: EntityId) {
 }
 
 /// Moho's natural decay: an unfinished unit nobody is building (no builder's
-/// job, no assister on it) loses build progress, and health with it, by
-/// [`decay_rate`] a tick; at none left it gets `OnDecayed` (FAF destroys
-/// it). Health stays at least 1, as a fresh construction's.
+/// job, no assister on it) loses [`decay_rate`] of build progress a tick
+/// (down to none) and that share of its max health; at no health left it
+/// gets `OnDecayed` (FAF destroys it). It is health that runs out, not
+/// progress: a construction abandoned before any progress (fraction 0,
+/// health 1) stands until its 1 health has decayed (real game, dev/probes
+/// `probe_t4_vanish`: an Ahwassa, 52000 health and 1920000 energy, lost
+/// 0.0027 a tick and heard `OnDecayed` 371 ticks after it was started and
+/// cleared; a T1 power generator, 0.08 a tick, after 14).
 ///
-/// Inferred, not verified against the binary: decay starts at once (no
-/// grace period), a paused builder's job still holds it off, and health
-/// drops in step with progress.
+/// Inferred, not verified against the binary: decay starts at once (the
+/// real game's starts a tick or so later), and a paused builder's job still
+/// holds it off.
 fn decay(lua: &Lua) -> LuaResult<()> {
     if lua.app_data_ref::<Unfinished>().is_none_or(|u| u.0.is_empty()) {
         return Ok(());
@@ -1501,11 +1536,9 @@ fn decay(lua: &Lua) -> LuaResult<()> {
         let gone = {
             let mut w = entity::world(lua);
             let Some(e) = w.get_mut(id) else { continue };
-            let old = e.fraction_complete;
-            let new = (old - rate).max(Fx::ZERO);
-            e.fraction_complete = new;
-            e.health = (e.health - e.max_health * (old - new)).max(Fx::ONE.min(e.max_health));
-            new == Fx::ZERO
+            e.fraction_complete = (e.fraction_complete - rate).max(Fx::ZERO);
+            e.health = (e.health - e.max_health * rate).max(Fx::ZERO);
+            e.health == Fx::ZERO
         };
         if gone
             && let Some(obj) = object(lua, id)? {
