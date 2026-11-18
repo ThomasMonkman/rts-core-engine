@@ -30,10 +30,10 @@ ForkThread(function()
     local siteGuard = unit('uel0105', 404, 594)
     -- Guards that keep going: an engineer with nothing queued, and a tank
     -- with a move queued (only engineers let go).
-    local tank = unit('uel0201', 450, 640)
-    local idleGuard, tankGuard = unit('uel0105', 446, 640), unit('uel0201', 446, 644)
+    local tank = unit('uel0201', 400, 650)
+    local idleGuard, tankGuard = unit('uel0105', 396, 650), unit('uel0201', 396, 654)
     -- An engineer guarding a tank, a move queued behind: lets go at once.
-    local movingGuard = unit('uel0105', 454, 640)
+    local movingGuard = unit('uel0105', 404, 650)
     -- Non-queued: a build replaces the assist whatever.
     local other, replaced = unit('uel0105', 500, 600), unit('uel0105', 496, 600)
 
@@ -49,7 +49,7 @@ ForkThread(function()
     check(waitFor(100, function() return helper:GetFocusUnit() == built end), 'A helps with B\'s build')
     -- Queued behind the assist (Issue* appends, as shift-click does).
     IssueBuildMobile({ helper }, at(400.5, 614.5), 'ueb1101', {})
-    IssueMove({ tankGuard, movingGuard }, at(470, 660))
+    IssueMove({ tankGuard, movingGuard }, at(420, 670))
     WaitTicks(10)
     check(built:GetFractionComplete() < 1, 'B\'s build still unfinished: ' .. built:GetFractionComplete())
     check(helper:GetFocusUnit() == built, 'A keeps helping while B\'s build is unfinished, its own build queued')

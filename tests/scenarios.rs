@@ -1679,3 +1679,8 @@ fn brain_queries() {
 fn upgrade_on_slope() {
     scenario("upgrade_on_slope", 60);
 }
+
+#[test]
+fn drowning() {
+    scenario("drowning", 160);
+}

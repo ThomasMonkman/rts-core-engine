@@ -23,7 +23,7 @@ real game and what is inferred) are in the module comments of its file, listed b
 | Reclaim | reclaim, capture, sacrifice | `api/reclaim.rs`, `api/capture.rs` |
 | Weapons | targeting, aim and the fire clock; beams | `sim/weapon.rs`, `api/weapon.rs`, `api/beam.rs` |
 | LuaThreads | FAF's Lua threads due this tick | `sim/scheduler.rs`, `api/threads.rs` |
-| Movement | health regeneration; units move, air units fly, submarines dive; attached entities follow their parents | `sim/movement.rs`, `api/movement.rs` |
+| Movement | health regeneration; units move, land units under water drown, air units fly, submarines dive; attached entities follow their parents | `sim/movement.rs`, `api/movement.rs` |
 | Projectiles | flight, collisions, `OnImpact` | `sim/projectile.rs`, `sim/collision.rs` |
 | Intel | vision, radar, sonar and the rest are re-stamped; who sees what | `sim/vision.rs` |
 | Destroy | the destroy queue: the `OnDestroy` of everything destroyed this tick, first destroyed first (moho's end-of-beat drain) | `api/entity.rs` (`run_destroy_queue`) |

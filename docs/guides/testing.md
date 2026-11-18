@@ -77,7 +77,7 @@ checks. They cover what unit tests can't: the engine and FAF's Lua agreeing (upg
 capture, reclaim, formations, bombing runs, flight, fuel, armor, transports).
 
 Add one per new gameplay system: copy a file, keep the helper block at its top, and add a `#[test]`
-naming it. Use the land around (380-460, 560-640) on the default map; much of the rest is water.
+naming it. Use the land around (380-430, 560-670) on the default map (east of x 440 is water from z 600 down, where land units drown); much of the rest is water.
 Iterate with the binary first:
 
 ```sh

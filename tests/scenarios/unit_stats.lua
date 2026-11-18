@@ -55,7 +55,7 @@ ForkThread(function()
 
     -- Damage totals: dealt by the instigator's army and blueprint, received
     -- by the target's, after armour.
-    local target = CreateUnitHPR('uel0201', 'ARMY_2', 300, GetTerrainHeight(300, 420), 420, 0, 0, 0)
+    local target = CreateUnitHPR('uel0201', 'ARMY_2', 360, GetTerrainHeight(360, 560), 560, 0, 0, 0)
     local dealtBefore = stat(b1, 'DamageStats_TotalDamageDealt')
     local receivedBefore = stat(b2, 'DamageStats_TotalDamageReceived')
     Damage(tank, target:GetPosition(), target, 100, 'Normal')
