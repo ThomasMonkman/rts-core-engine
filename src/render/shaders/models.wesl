@@ -706,9 +706,11 @@ fn mesh_glow(i: MeshOut, shading: u32, fidelity: u32) -> f32 {
 
 // ---- Shield bubbles (mesh.fx `ShieldUEF` / `ShieldCybran` / `ShieldAeon` /
 // `ShieldSeraphim`) ---------------------------------------------------------
-// FAF scrolls four texture coordinate sets over time: (uv0 * s0, uv1 * s1,
-// uv0 * s2, uv1 * s3), each shifted by time * its rate
-// (`FourUVTexShiftScaleVS` / `ShieldNormalVS`). `team.a` is the shield's
+// FAF scrolls four texture coordinate sets over time: (uv0 * s0, uv0 * s1,
+// uv0 * s2, uv0 * s3), each shifted by time * its rate (`ShieldNormalVS`:
+// `texcoord0.zw = texcoord0 * texScale1` keeps the float4's xy, the first
+// UV; FAF's `Sphere01` has the constant (0, 1) as its second UV, which made
+// the whole dome one scrolling texel). `team.a` is the shield's
 // health fraction (`PARAM_FRACTIONHEALTH`, the `material.y` its colour
 // shifts with).
 
@@ -739,9 +741,9 @@ fn shield_uv(i: MeshOut, scale: vec4<f32>, shift0: vec4<f32>, shift1: vec4<f32>)
     let t = fa_time();
     var u: ShieldUv;
     u.a = i.uv * scale.x + t * shift0.xy;
-    u.b = i.uv1 * scale.y + t * shift0.zw;
+    u.b = i.uv * scale.y + t * shift0.zw;
     u.c = i.uv * scale.z + t * shift1.xy;
-    u.d = i.uv1 * scale.w + t * shift1.zw;
+    u.d = i.uv * scale.w + t * shift1.zw;
     return u;
 }
 

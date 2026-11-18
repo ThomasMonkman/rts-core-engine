@@ -3133,3 +3133,49 @@ fn fog_circles_frame() {
         }
     }
 }
+
+/// A shield bubble's surface scrolls its textures over the sphere's own
+/// UVs: FAF's `ShieldNormalVS` writes `texcoord0 * texScaleN` (a float4)
+/// into each float2 set, so all four sets come from the first UV channel.
+/// FAF's `Sphere01` has one constant second UV, (0, 1), on every vertex:
+/// read from it, the whole Aeon dome sampled a single scrolling texel, and
+/// the reflection of that one normal swept across the bubble every second
+/// (the bubble seemed to turn back and forth). Half a second apart, the
+/// frame now changes a quarter as much.
+#[test]
+fn shield_bubble_surface_holds_still() {
+    let Some(mut h) = Harness::new(None, false, None) else { return };
+    h.engine
+        .sim_lua()
+        .load(
+            r#"
+            local b = ArmyBrains[1]
+            b:__engine_SetStorage('ENERGY', 1e6) b:GiveResource('ENERGY', 1e6)
+            CreateUnitHPR('uab4202', 'ARMY_1', 668, GetTerrainHeight(668, 366), 366, 0, 0, 0)
+            "#,
+        )
+        .exec()
+        .expect("spawn");
+    h.ticks(80);
+    h.settle();
+    h.scene.record_all_bones = false;
+    if let Some(c) = h.world.camera_mut() {
+        c.target = Vec3::new(668.0, 18.0, 366.0);
+        c.zoom = 22.0;
+    }
+    let (w, ht) = (480, 360);
+    let mut frames = Vec::new();
+    for t in [0.0, 0.5, 1.0] {
+        h.scene.frozen_time = Some(t);
+        h.frame();
+        frames.push(render_rgba(&mut h, w, ht));
+    }
+    for pair in frames.windows(2) {
+        let sum: u64 = pair[0].chunks_exact(4).zip(pair[1].chunks_exact(4)).map(|(a, b)| (0..3).map(|i| (a[i] as i32 - b[i] as i32).unsigned_abs() as u64).sum::<u64>()).sum();
+        let mean = sum as f64 / (w * ht * 3) as f64;
+        eprintln!("shield frame diff {mean:.2}");
+        // Fixed: ~4.5 (the surface's slow drift, water, effects); the
+        // single-texel sampling swept the dome at ~18.
+        assert!(mean < 9.0, "the bubble's surface changed by {mean:.2} per channel in half a second");
+    }
+}
