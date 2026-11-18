@@ -2789,8 +2789,10 @@ fn keyboard_focus_has_one_holder() {
     assert_eq!(got, [true; 7]);
 }
 
-/// `Edit:SetText` and `ClearText` call `OnTextChanged(new, old)` when the
-/// text changes (`probe_ui_controls` edit: `>abcdef;`, then `123>;`).
+/// `Edit:SetText` and `ClearText` call `OnTextChanged(new, old)`
+/// (`probe_ui_controls` edit: `>abcdef;`, then `123>;`), even when the text
+/// is the same (retail exe 0x796910: FAF's key bindings dialog fills its
+/// list that way), but not from inside the edit's own `OnTextChanged`.
 #[test]
 fn edit_set_text_calls_on_text_changed() {
     let Some(vm) = vm() else { return };
@@ -2807,13 +2809,19 @@ fn edit_set_text_calls_on_text_changed() {
             e:SetMaxChars(3)
             e:SetText('123456')
             e:ClearText()
-            return log
+            -- A digits-only filter sets its own text from the handler.
+            e.OnTextChanged = function(self, new, old)
+                log = log .. old .. '>' .. new .. ';'
+                self:SetText(string.gsub(new, '[^0-9]', ''))
+            end
+            e:SetText('a1')
+            return log .. e:GetText()
             "#,
         )
         .eval()
         .unwrap();
     // `SetMaxChars(3)` already cut the text to `abc` (`probe_ui_controls` edit).
-    assert_eq!(log, ">abcdef;abc>123;123>;");
+    assert_eq!(log, ">abcdef;abcdef>abcdef;abc>123;123>;>a1;1");
 }
 
 /// `GetFireState(units)` is the units' shared state, or -1 when one has no

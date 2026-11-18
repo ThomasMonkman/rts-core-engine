@@ -135,11 +135,14 @@ pub struct Edit {
     pub caret_shown: bool,
     /// `SetCaretCycle(seconds, minAlpha, maxAlpha)`: the caret's blink.
     pub caret_cycle: Option<(f32, f32, f32)>,
+    /// Inside this edit's `OnTextChanged`: text set meanwhile doesn't call
+    /// it again (moho's byte at +0x190 of the edit).
+    pub notifying: bool,
 }
 
 impl Default for Edit {
     fn default() -> Self {
-        Self { text: Text::default(), background: [0.0, 0.0, 0.0, 0.0], show_background: false, max_chars: 1024, enabled: true, caret: 0, caret_color: [1.0; 4], caret_shown: true, caret_cycle: None }
+        Self { text: Text::default(), background: [0.0, 0.0, 0.0, 0.0], show_background: false, max_chars: 1024, enabled: true, caret: 0, caret_color: [1.0; 4], caret_shown: true, caret_cycle: None, notifying: false }
     }
 }
 
@@ -2691,27 +2694,49 @@ fn edit_text(lua: &Lua, id: ControlId, f: impl FnOnce(&mut Vec<char>, &mut usize
         (e.text.text != old).then(|| (e.text.text.clone(), old))
     };
     if let Some((new, old)) = change {
-        hook(lua, id, "OnTextChanged", (new, old))?;
+        text_changed(lua, id, new, old)?;
     }
     Ok(())
 }
 
 /// Sets edit `id`'s text from Lua (`SetText`, `ClearText`): cut to its
-/// `MaxChars`, the caret at the end, then `OnTextChanged(new, old)` if the
-/// text changed. Unlike typing it works on a disabled edit.
+/// `MaxChars`, the caret at the end, then `OnTextChanged(new, old)` even
+/// when the text is the same, as moho's `CMauiEdit::SetText` (retail exe
+/// 0x7969f8) and `ClearText` (0x796a9a) do: FAF's key bindings dialog
+/// fills its list from the `SetText('')` it ends with. Unlike typing it
+/// works on a disabled edit.
 fn set_edit_text(lua: &Lua, id: ControlId, text: &str) -> LuaResult<()> {
-    let change = {
+    let (new, old) = {
         let mut c = controls(lua);
         let Some(Control { kind: Kind::Edit(e), .. }) = c.map.get_mut(&id) else { return Ok(()) };
         let t: String = text.chars().take(e.max_chars.max(0) as usize).collect();
         e.caret = t.chars().count() as i64;
         let old = std::mem::replace(&mut e.text.text, t);
-        (e.text.text != old).then(|| (e.text.text.clone(), old))
+        (e.text.text.clone(), old)
     };
-    if let Some((new, old)) = change {
-        hook(lua, id, "OnTextChanged", (new, old))?;
+    text_changed(lua, id, new, old)
+}
+
+/// `OnTextChanged(new, old)` on edit `id`, unless the edit is already in
+/// it: text its handler sets doesn't call it again (moho's flag at +0x190;
+/// FAF's numbers-only edits set their own text from it).
+fn text_changed(lua: &Lua, id: ControlId, new: String, old: String) -> LuaResult<()> {
+    let set_flag = |on: bool| -> bool {
+        let mut c = controls(lua);
+        match c.map.get_mut(&id) {
+            Some(Control { kind: Kind::Edit(e), .. }) if e.notifying != on => {
+                e.notifying = on;
+                true
+            }
+            _ => false,
+        }
+    };
+    if !set_flag(true) {
+        return Ok(());
     }
-    Ok(())
+    let result = hook(lua, id, "OnTextChanged", (new, old));
+    set_flag(false);
+    result.map(|_| ())
 }
 
 /// A key pressed while edit `id` has the focus: editing keys edit,
