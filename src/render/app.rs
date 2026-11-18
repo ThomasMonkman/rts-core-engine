@@ -148,12 +148,8 @@ impl ApplicationHandler<UserEvent> for App {
 
         match &event {
             WindowEvent::CloseRequested => {
-                // Moho writes Game.prefs as it shuts down.
-                if let Some(vm) = &s.ui {
-                    frame::save_prefs(s.prefs.save.as_deref(), vm);
-                }
-                // The session ends too: its sim stops, even mid-wait for
-                // players' turns.
+                // The session ends: its sim stops, even mid-wait for
+                // players' turns (Game.prefs is written in `exiting`).
                 s.control.close();
                 exit_soon();
                 event_loop.exit();
@@ -326,6 +322,15 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Moho writes Game.prefs as it shuts down: however the game ends
+        // (the window closed, the interface's Exit, a `--ticks` run done,
+        // the app quit without a `CloseRequested`), key bindings and
+        // options set this run are kept.
+        if let Some(s) = &self.state
+            && let Some(vm) = &s.ui
+        {
+            frame::save_prefs(s.prefs.save.as_deref(), vm);
+        }
         rts_core_engine::ui::clipboard::release();
     }
 
@@ -348,8 +353,7 @@ impl ApplicationHandler<UserEvent> for App {
         s.make_second_head(event_loop);
         apply_cursor(s, event_loop);
         // The interface's Exit (`ExitApplication`).
-        if let Some(vm) = s.ui.as_ref().filter(|vm| vm.exit_requested().unwrap_or(false)) {
-            frame::save_prefs(s.prefs.save.as_deref(), vm);
+        if s.ui.as_ref().is_some_and(|vm| vm.exit_requested().unwrap_or(false)) {
             event_loop.exit();
             return;
         }
