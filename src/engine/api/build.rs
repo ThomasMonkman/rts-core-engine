@@ -37,6 +37,9 @@ pub struct Skirt {
     pub z0: Fx,
     pub x1: Fx,
     pub z1: Fx,
+    /// Half the footprint (x, z): placement snaps a position so the
+    /// footprint starts on a whole cell ([`Skirt::snapped`]).
+    pub half: (Fx, Fx),
 }
 
 impl Skirt {
@@ -50,7 +53,18 @@ impl Skirt {
             })
         };
         let (x0, z0) = (get("SkirtOffsetX", Fx::ZERO)? - hx, get("SkirtOffsetZ", Fx::ZERO)? - hz);
-        Ok(Self { x0, z0, x1: x0 + get("SkirtSizeX", hx * 2)?, z1: z0 + get("SkirtSizeZ", hz * 2)? })
+        Ok(Self { x0, z0, x1: x0 + get("SkirtSizeX", hx * 2)?, z1: z0 + get("SkirtSizeZ", hz * 2)?, half: (hx, hz) })
+    }
+
+    /// `at` moved so the footprint starts on a whole cell (its corner
+    /// rounded half to even, as moho's occupancy rounds): a 5x5 factory
+    /// at x 626 sits as if at 626.5, one at 671 as if at 670.5.
+    /// This is why a factory 5 east of a 2x2 generator is refused and one
+    /// 6 east is fine (dev/probes probe_ai_build: factory / generator pairs
+    /// 4..12 apart all agree).
+    fn snapped(&self, at: FxVec3) -> FxVec3 {
+        let snap = |v: Fx, half: Fx| Fx::from_num(crate::engine::sim::nav::round_half_even(v - half)) + half;
+        FxVec3 { x: snap(at.x, self.half.0), y: at.y, z: snap(at.z, self.half.1) }
     }
 
     /// Farthest any edge lies from the position.
@@ -58,7 +72,10 @@ impl Skirt {
         self.x0.abs().max(self.z0.abs()).max(self.x1.abs()).max(self.z1.abs())
     }
 
+    /// Whether the skirts, each at its snapped position, overlap (touching
+    /// edges don't).
     fn overlaps(&self, at: FxVec3, other: &Skirt, other_at: FxVec3) -> bool {
+        let (at, other_at) = (self.snapped(at), other.snapped(other_at));
         at.x + self.x0 < other_at.x + other.x1
             && other_at.x + other.x0 < at.x + self.x1
             && at.z + self.z0 < other_at.z + other.z1
@@ -163,6 +180,12 @@ pub struct Placement {
 }
 
 impl Placement {
+    /// Whether the structure must stand on a deposit (an extractor or a
+    /// hydrocarbon plant).
+    pub fn needs_deposit(&self) -> bool {
+        self.deposit.is_some()
+    }
+
     pub fn of(lua: &Lua, bp_id: &str) -> LuaResult<Self> {
         let bp = entity::blueprint_table(lua, BlueprintKind::Unit, &bp_id.to_lowercase())?;
         let half = half_footprint(&bp)?;
@@ -216,8 +239,13 @@ impl Placement {
     /// `RULEUMT_None`): only whether its footprint, from cell
     /// round(pos - size / 2), can stand there on a layer of its own
     /// (`OCCUPY_MobileCheck`): a ship on water, a tank on land, an aircraft
-    /// anywhere; no flatness, deposit or skirt check.
-    pub fn allows(&self, lua: &Lua, pos: FxVec3) -> LuaResult<bool> {
+    /// anywhere; no flatness or deposit check. Nor on a structure: a tank
+    /// blueprint over a generator is refused, a generator over a tank is not
+    /// (dev/probes probe_ai_build).
+    ///
+    /// `reserved`: sites of queued build orders ([`reserved_sites`]),
+    /// blocked as a structure there would block.
+    pub fn allows(&self, lua: &Lua, pos: FxVec3, reserved: &[(FxVec3, Skirt)]) -> LuaResult<bool> {
         let (hx, hz) = self.half;
         let terrain = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>();
         if let Some(t) = &terrain {
@@ -227,8 +255,16 @@ impl Placement {
             }
             if let Some((spec, size_x, size_z)) = &self.mobile {
                 let cell = |v: Fx, size: u32| crate::engine::sim::nav::round_half_even(v - Fx::from_num(size) / 2);
-                return Ok(crate::engine::sim::nav::mobile_layers(t, spec, cell(pos.x, *size_x), cell(pos.z, *size_z), *size_x, *size_z) != 0);
+                if crate::engine::sim::nav::mobile_layers(t, spec, cell(pos.x, *size_x), cell(pos.z, *size_z), *size_x, *size_z) == 0 {
+                    return Ok(false);
+                }
             }
+        }
+        if self.mobile.is_some() {
+            drop(terrain);
+            return self.clear_of_structures(lua, pos, reserved);
+        }
+        if let Some(t) = &terrain {
             let wet = t.water_surface.is_some_and(|w| t.height_at(pos.x, pos.z) < w);
             if let Some((land, water)) = self.layers
                 && !(if wet { water } else { land }) {
@@ -279,6 +315,16 @@ impl Placement {
                 return Ok(false);
             }
         }
+        drop(terrain);
+        self.clear_of_structures(lua, pos, reserved)
+    }
+
+    /// Whether the skirt at `pos` overlaps no live structure's skirt and no
+    /// site in `reserved`.
+    fn clear_of_structures(&self, lua: &Lua, pos: FxVec3, reserved: &[(FxVec3, Skirt)]) -> LuaResult<bool> {
+        if reserved.iter().any(|(at, other)| self.skirt.overlaps(pos, other, *at)) {
+            return Ok(false);
+        }
         let structure = crate::engine::api::categories::domain(lua)?.named.get("STRUCTURE").cloned();
         let blocked = with_skirts(lua, |skirts| {
             let w = entity::world(lua);
@@ -303,9 +349,46 @@ impl Placement {
     }
 }
 
-/// Could `bp_id` be built at `pos`? See [`Placement::allows`].
+/// Could `bp_id` be built at `pos`, by structures alone (a builder starting
+/// its own order)? See [`Placement::allows`].
 pub fn can_build_at(lua: &Lua, bp_id: &str, pos: FxVec3) -> LuaResult<bool> {
-    Placement::of(lua, bp_id)?.allows(lua, pos)
+    Placement::of(lua, bp_id)?.allows(lua, pos, &[])
+}
+
+/// Could `army` place `bp_id` at `pos`, its own queued build orders' sites
+/// counting as taken ([`reserved_sites`])? What the brain's
+/// `CanBuildStructureAt` asks (the build preview doesn't: what the real
+/// interface shows over a queued build isn't probed).
+pub fn can_place_at(lua: &Lua, army: Option<u32>, bp_id: &str, pos: FxVec3) -> LuaResult<bool> {
+    let placement = Placement::of(lua, bp_id)?;
+    let reserved = reserved_sites(lua, army)?;
+    placement.allows(lua, pos, &reserved)
+}
+
+/// The sites of `army`'s queued build orders (`BuildMobile`, current or
+/// further back), each with its blueprint's skirt: moho reserves them, so
+/// `CanBuildStructureAt` is false on the site of an engineer's first (not
+/// yet reached) and second (queued) build (dev/probes probe_ai_build), and
+/// the AI doesn't queue the same extractor twice. Which armies' orders
+/// count beyond the asker's own isn't probed; ours counts only its own.
+pub fn reserved_sites(lua: &Lua, army: Option<u32>) -> LuaResult<Vec<(FxVec3, Skirt)>> {
+    let Some(army) = army else { return Ok(Vec::new()) };
+    let sites: Vec<(FxVec3, String)> = {
+        let Some(commands) = lua.app_data_ref::<crate::engine::sim::command::Commands>() else { return Ok(Vec::new()) };
+        let w = entity::world(lua);
+        commands
+            .pending_builds()
+            .filter(|c| c.units.first().and_then(|&u| w.get(u)).is_some_and(|e| e.army == Some(army)))
+            .filter_map(|c| match (c.target, &c.blueprint) {
+                (crate::engine::sim::command::CommandTarget::Ground(p), Some(bp)) => Some((p, bp.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    if sites.is_empty() {
+        return Ok(Vec::new());
+    }
+    with_skirts(lua, |skirts| sites.into_iter().filter_map(|(p, bp)| skirts.by_id.get(&bp).map(|s| (p, *s))).collect())
 }
 
 impl Skirt {
@@ -322,29 +405,41 @@ impl Skirt {
     }
 }
 
-/// Live structures of `id`'s army whose build skirts touch `id`'s (moho's
-/// adjacency: storages ring an extractor two cells out and still count), in
-/// id order.
-pub fn adjacent_structures(lua: &Lua, id: crate::engine::sim::entity::EntityId) -> LuaResult<Vec<crate::engine::sim::entity::EntityId>> {
+/// Finished structures of `id`'s army whose build skirts touch `id`'s
+/// (moho's adjacency: storages ring an extractor two cells out and still
+/// count), in id order; none while `id` itself is unfinished (an unfinished
+/// structure never hears `OnAdjacentTo`, so destroying one parts from
+/// nothing: dev/probes probe_unit_build G4).
+///
+/// `dying`: `id` is being destroyed, and structures destroyed with it whose
+/// turn hasn't come yet still count (two made structures destroyed together
+/// part from each other once, probe_unit_build G1).
+pub fn adjacent_structures(lua: &Lua, id: crate::engine::sim::entity::EntityId, dying: bool) -> LuaResult<Vec<crate::engine::sim::entity::EntityId>> {
     let structure = crate::engine::api::categories::domain(lua)?.named.get("STRUCTURE").cloned();
-    let is_structure = |e: &crate::engine::sim::entity::Entity| match (&structure, e.category_index) {
-        (Some(s), Some(c)) => e.kind == EntityKind::Unit && s.contains(c),
-        _ => false,
+    let being_built = crate::engine::sim::unit_state::UnitStates::index("BeingBuilt").expect("unit state");
+    let is_finished_structure = |e: &crate::engine::sim::entity::Entity| {
+        let structure = match (&structure, e.category_index) {
+            (Some(s), Some(c)) => e.kind == EntityKind::Unit && s.contains(c),
+            _ => false,
+        };
+        structure && e.fraction_complete >= Fx::ONE && e.unit.as_deref().is_some_and(|u| !u.states.contains(being_built))
     };
     with_skirts(lua, |skirts| {
         let w = entity::world(lua);
-        let Some(me) = w.get(id).filter(|e| is_structure(e)) else { return Vec::new() };
+        let Some(me) = w.get(id).filter(|e| is_finished_structure(e)) else { return Vec::new() };
         let Some(mine) = skirts.by_id.get(&me.cold.blueprint_id) else { return Vec::new() };
         let (pos, army) = (me.position(), me.army);
         let r = mine.reach() + skirts.reach;
         let mut ids = Vec::new();
         w.unit_candidates(pos.x - r, pos.z - r, pos.x + r, pos.z + r, &mut ids);
+        let queued: Vec<crate::engine::sim::entity::EntityId> = if dying { w.queued_destroys().collect() } else { Vec::new() };
+        ids.extend(queued.iter().copied());
         ids.sort_unstable();
         ids.dedup();
         ids.into_iter()
             .filter(|&o| o != id)
             .filter(|&o| {
-                w.get(o).filter(|e| !e.destroyed && e.army == army && is_structure(e)).is_some_and(|e| {
+                w.get(o).filter(|e| (!e.destroyed || queued.contains(&o)) && e.army == army && is_finished_structure(e)).is_some_and(|e| {
                     skirts.by_id.get(&e.cold.blueprint_id).is_some_and(|theirs| mine.touches(pos, theirs, e.position()))
                 })
             })
@@ -454,6 +549,9 @@ fn find_place_to_build(
         (None, None) => start,
     };
     let placement = Placement::of(lua, structure)?;
+    // (Sites of the army's queued builds count as taken, as for
+    // `CanBuildStructureAt`; inferred for this call.)
+    let reserved = reserved_sites(lua, Some(army))?;
     let threat_ok = |p: FxVec3| -> LuaResult<bool> {
         if ignore_threat_over <= 0.0 {
             return Ok(true);
@@ -486,10 +584,10 @@ fn find_place_to_build(
             .map(|d| d.list.iter().enumerate().filter(|(_, dep)| dep.kind == kind).map(|(i, dep)| (dist2(dep.position.x, dep.position.z, start), i, dep.position)).collect())
             .unwrap_or_default();
         spots.sort_by_key(|&(d, i, _)| (d, i));
-        for (d, _, p) in spots {
-            if placement.allows(lua, p)? && threat_ok(p)? {
+        for (_, _, p) in spots {
+            if placement.allows(lua, p, &reserved)? && threat_ok(p)? {
                 let (x, z) = if relative { (p.x - start.x, p.z - start.z) } else { (p.x, p.z) };
-                return location(lua, x, z, d).map(|t| Some(shapes::List::new(t)));
+                return location(lua, x, z).map(|t| Some(shapes::List::new(t)));
             }
         }
         return Ok(None);
@@ -518,30 +616,118 @@ fn find_place_to_build(
         }
     }
     spots.sort_by_key(|&(d, i, ..)| (d, i));
-    for (d, _, (px, pz), p) in spots {
-        if placement.allows(lua, p)? && threat_ok(p)? {
+    for (_, _, (px, pz), p) in spots {
+        if placement.allows(lua, p, &reserved)? && threat_ok(p)? {
             // Template coordinates: relative to the start when `relative`.
-            return location(lua, crate::engine::sim::math::from_lua(px), crate::engine::sim::math::from_lua(pz), d).map(|t| Some(shapes::List::new(t)));
+            return location(lua, crate::engine::sim::math::from_lua(px), crate::engine::sim::math::from_lua(pz)).map(|t| Some(shapes::List::new(t)));
         }
     }
     Ok(None)
 }
 
-/// A `FindPlaceToBuild` result: `{x, z, dist}` (FAF's `BuildToNormalLocation`
-/// reads `[1]`/`[2]` and adds the reference point itself when `relative`).
-fn location(lua: &Lua, x: Fx, z: Fx, dist2: Fx) -> LuaResult<LuaTable> {
+/// A `FindPlaceToBuild` result: `{x, z, 0}`. The third element is always 0
+/// in the real game (dev/probes probe_ai_build, 17 positions), though
+/// `aibuildstructures.lua` calls it `{x, z, dist}`; FAF's
+/// `BuildToNormalLocation` reads `[1]`/`[2]` and adds the reference point
+/// itself when `relative`.
+fn location(lua: &Lua, x: Fx, z: Fx) -> LuaResult<LuaTable> {
     let t = lua.create_table_with_capacity(3, 0)?;
     t.raw_set(1, x.to_num::<f64>())?;
     t.raw_set(2, z.to_num::<f64>())?;
-    t.raw_set(3, crate::engine::sim::math::sqrt(dist2).to_num::<f64>())?;
+    t.raw_set(3, 0.0)?;
     Ok(t)
 }
 
-/// Cells searched each way from the spot by [`create_unit_near_spot`].
-const NEAR_SPOT_REACH: i32 = 40;
+/// Growths of the square [`near_spot_offsets`] searches by default (to
+/// 20 steps each way).
+pub(crate) const NEAR_SPOT_RINGS: i32 = 20;
 /// Gap [`create_unit_near_spot`] keeps between a new structure's footprint
 /// and any unit's (inferred).
 const NEAR_SPOT_CLEARANCE: i32 = 2;
+
+/// Where moho's `CreateUnitNearSpot` search starts (`BuildStructure` snaps
+/// by `construction::snap_site` instead, which agrees for the even points
+/// probed but keeps an extractor on an odd deposit): `2 * floor(v / 2) + 0.5` on each axis (the real
+/// game queues a generator asked at 0, 0.3 or 0.7 at 0.5, at 3 at 2.5, at -5
+/// at -5.5, and makes one there: dev/probes probe_re2_build BS, NEAR).
+pub(crate) fn near_spot_first(v: Fx) -> Fx {
+    (v / 2).floor() * 2 + Fx::ONE / 2
+}
+
+/// The order moho's near-spot searches try spots in, as (x, z) steps from
+/// the first: (0, 0), then a square grown a side at a time, the negative
+/// side first ({-1, 0}, {-1..1}, {-2..1}, {-2..2}, ...), each growth's new
+/// cells x-major (x ascending, then z). Fitted to the real game's choices
+/// (dev/probes probe_re2_build NEAR, BS: the generators' -1,-1, -1,0, 0,-1,
+/// -1,1, 0,1, 1,-1 ...; a blocked north-west goes to -1,1).
+pub(crate) fn near_spot_offsets(rings: i32) -> Vec<(i32, i32)> {
+    let side = (2 * rings + 1).max(1) as usize;
+    let mut out = Vec::with_capacity(side * side);
+    out.push((0, 0));
+    let (mut lo, mut hi) = (0, 0);
+    for g in 0..2 * rings {
+        let (plo, phi) = (lo, hi);
+        if g % 2 == 0 {
+            lo -= 1;
+        } else {
+            hi += 1;
+        }
+        for x in lo..=hi {
+            for z in lo..=hi {
+                if !(plo..=phi).contains(&x) || !(plo..=phi).contains(&z) {
+                    out.push((x, z));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `CreateUnitNearSpot`'s step between spots: 2 for a mobile unit; for a
+/// structure its skirt plus 2, rounded down to even, at most 8 (the real
+/// game's steps: wall 2, T1 generator 4, land factory 8, tank 2; dev/probes
+/// probe_re2_build NEAR). Fitted to those four; a request off the whole
+/// numbers steps the skirt plus 1 instead (`create_unit_near_spot`).
+fn near_spot_step(placement: &Placement) -> Fx {
+    if placement.mobile.is_some() {
+        return Fx::from_num(2);
+    }
+    let size = (placement.skirt.x1 - placement.skirt.x0).max(placement.skirt.z1 - placement.skirt.z0);
+    (((size + Fx::from_num(2)) / 2).floor() * 2).clamp(Fx::from_num(2), Fx::from_num(8))
+}
+
+/// `CreateUnitNearSpot`'s first spot on one axis: `floor(v) + 0.5` for a
+/// request off the whole numbers, else as [`near_spot_first`] (the real
+/// game's generator asked at +1.25, +1.5 or +1.75 from an even point went
+/// to +1.5, at +1.0 to +0.5, at +0.25..0.75 to +0.5: dev/probes probe_re3_ai
+/// NS2; the near-spot rule had put all of them at +0.5).
+fn near_unit_first(v: Fx) -> Fx {
+    if v.frac() == Fx::ZERO { near_spot_first(v) } else { v.floor() + Fx::ONE / 2 }
+}
+
+/// `CreateUnitNearSpot`'s search for a request off the whole numbers: the
+/// step is the structure's skirt plus 1 (2..8; a T1 generator 3, a wall 2,
+/// a land factory and a T3 generator 8), and the spots go a ring at a time
+/// round the first, each ring's cells x-major (x ascending, then z). The
+/// real game's generator asked at (0.3, 0.7) went to 0.5,0.5 -2.5,-2.5
+/// -2.5,0.5 -2.5,3.5 0.5,-2.5 0.5,3.5 (dev/probes probe_re3_ai NS). (An odd
+/// whole-number request gives patterns not decoded; it keeps the on-grid
+/// search.)
+fn near_unit_ring_offsets(rings: i32) -> Vec<(i32, i32)> {
+    let side = (2 * rings + 1).max(1) as usize;
+    let mut out = Vec::with_capacity(side * side);
+    out.push((0, 0));
+    for r in 1..=rings {
+        for x in -r..=r {
+            for z in -r..=r {
+                if x.abs() == r || z.abs() == r {
+                    out.push((x, z));
+                }
+            }
+        }
+    }
+    out
+}
 
 /// Spawns `bp` finished for `army` at `pos`, ground height, facing north.
 fn spawn_at(lua: &Lua, bp: &str, army: u32, x: Fx, z: Fx) -> LuaResult<Obj<moho::Unit>> {
@@ -572,7 +758,7 @@ fn create_resource_building_nearest(lua: &Lua, army: u32, bp: &str, x: Fx, z: Fx
         .unwrap_or_default();
     spots.sort_by_key(|&(d, i, _)| (d, i));
     for (_, _, p) in spots {
-        if placement.allows(lua, p)? {
+        if placement.allows(lua, p, &[])? {
             return spawn_at(lua, bp, army, p.x, p.z).map(Some);
         }
     }
@@ -585,30 +771,27 @@ fn is_structure(lua: &Lua, e: &crate::engine::sim::entity::Entity) -> bool {
 }
 
 /// `CAiBrain:CreateUnitNearSpot(bp, x, z)` (the prebuilt base's factory and
-/// generators): `bp` finished at the nearest footprint-aligned spot (within
-/// [`NEAR_SPOT_REACH`] cells, nearest first, ties north then west) where it
-/// can be built and no unit stands within [`NEAR_SPOT_CLEARANCE`] of its
+/// generators): `bp` finished at the first spot of moho's near-spot search
+/// ([`near_spot_first`], [`near_spot_offsets`], [`near_spot_step`]) where
+/// it can be built and no unit stands within [`NEAR_SPOT_CLEARANCE`] of its
 /// footprint (so the commander isn't walled in at the start spot); nil if
 /// none.
 fn create_unit_near_spot(lua: &Lua, army: u32, bp: &str, x: Fx, z: Fx) -> LuaResult<Option<Obj<moho::Unit>>> {
     let placement = Placement::of(lua, bp)?;
     let (hx, hz) = placement.half;
-    // Footprint-aligned centres: cell corners plus the half footprint.
-    let (bx, bz) = ((x - hx).floor(), (z - hz).floor());
-    let mut spots: Vec<(Fx, i32, i32)> = Vec::with_capacity(((2 * NEAR_SPOT_REACH + 1) * (2 * NEAR_SPOT_REACH + 1)) as usize);
-    for dz in -NEAR_SPOT_REACH..=NEAR_SPOT_REACH {
-        for dx in -NEAR_SPOT_REACH..=NEAR_SPOT_REACH {
-            let (cx, cz) = (bx + Fx::from_num(dx) + hx, bz + Fx::from_num(dz) + hz);
-            let (ex, ez) = (cx - x, cz - z);
-            spots.push((ex.saturating_mul(ex).saturating_add(ez.saturating_mul(ez)), dz, dx));
-        }
-    }
-    spots.sort_unstable();
+    let off_grid = x.frac() != Fx::ZERO || z.frac() != Fx::ZERO;
+    let (fx, fz) = (near_unit_first(x), near_unit_first(z));
+    let (step, offsets) = if off_grid && placement.mobile.is_none() {
+        let size = (placement.skirt.x1 - placement.skirt.x0).max(placement.skirt.z1 - placement.skirt.z0);
+        ((size + Fx::ONE).clamp(Fx::from_num(2), Fx::from_num(8)), near_unit_ring_offsets(NEAR_SPOT_RINGS))
+    } else {
+        (near_spot_step(&placement), near_spot_offsets(NEAR_SPOT_RINGS))
+    };
     let mut ids = Vec::new();
-    for (_, dz, dx) in spots {
-        let (cx, cz) = (bx + Fx::from_num(dx) + hx, bz + Fx::from_num(dz) + hz);
+    for (dx, dz) in offsets {
+        let (cx, cz) = (fx + step * Fx::from_num(dx), fz + step * Fx::from_num(dz));
         let p = FxVec3 { x: cx, y: Fx::ZERO, z: cz };
-        if !placement.allows(lua, p)? {
+        if !placement.allows(lua, p, &[])? {
             continue;
         }
         let occupied = {
@@ -618,8 +801,19 @@ fn create_unit_near_spot(lua: &Lua, army: u32, bp: &str, x: Fx, z: Fx) -> LuaRes
             ids.iter().filter_map(|&id| w.get(id)).any(|e| {
                 let r = e.unit.as_deref().map_or(Fx::ZERO, |u| u.radius);
                 let q = e.position();
+                if e.destroyed || e.kind != EntityKind::Unit || is_structure(lua, e) {
+                    return false;
+                }
+                // A mobile unit only keeps off another's centre: the real
+                // tanks skip the spots 2 from one and take the diagonals,
+                // 2.8 away (dev/probes probe_re2_build NEAR; the threshold
+                // between is inferred).
+                if placement.mobile.is_some() {
+                    let (ex, ez) = (q.x - cx, q.z - cz);
+                    return ex.saturating_mul(ex).saturating_add(ez.saturating_mul(ez)) < Fx::from_num(5);
+                }
                 let gap = r + Fx::from_num(NEAR_SPOT_CLEARANCE);
-                !e.destroyed && e.kind == EntityKind::Unit && !is_structure(lua, e) && (q.x - cx).abs() < hx + gap && (q.z - cz).abs() < hz + gap
+                (q.x - cx).abs() < hx + gap && (q.z - cz).abs() < hz + gap
             })
         };
         if !occupied {
@@ -684,39 +878,41 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         },
     )?;
     lua_method!(lua, moho::AIBrain,
-        /// Factories (from `factories`) that can build every unit id in the
-        /// template's squads (`{ name, plan, { unitId, min, max, squad, formation }, ... }`);
-        /// nil if none can. A template that isn't a table gives nil (LOUD
-        /// passes `false` for a faction's empty template), as moho's
-        /// (MohoEngine.dll 0x1017d514: not `IsTable`, `PushNil`). `factories`
-        /// is optional, as in the real game's binding (2..3 arguments,
-        /// dev/probes probe_api_arity); without it, nil (inferred).
+        /// For each line of the template's squads (`{ name, plan, { unitId,
+        /// min, max, squad, formation }, ... }`), the first factory of
+        /// `factories` that can build its unit: one factory per line
+        /// (dev/probes probe_ai_build: `{fac1, fac1}` for a two-line
+        /// template both factories can build); nil if any line has none.
+        /// A template that isn't a table gives nil (LOUD passes `false` for
+        /// a faction's empty template), as moho's (MohoEngine.dll
+        /// 0x1017d514: not `IsTable`, `PushNil`). `factories` is optional,
+        /// as in the real game's binding (2..3 arguments, dev/probes
+        /// probe_api_arity); without it, nil (inferred).
         CanBuildPlatoon = |lua, (_brain, template, factories): (Obj<moho::AIBrain>, shapes::Loose<shapes::PlatoonTemplate>, Option<shapes::List<Obj<moho::Unit>>>)| {
             let LuaValue::Table(template) = template.into_inner() else { return Ok(None) };
             let Some(factories) = factories else { return Ok(None) };
-            let mut ids = Vec::new();
-            for line in template.sequence_values::<LuaValue>().skip(2) {
-                if let LuaValue::Table(line) = line?
-                    && let Some(id) = line.raw_get::<Option<String>>(1)? {
-                    ids.push(id);
+            let mut candidates = Vec::new();
+            for f in factories.into_inner().sequence_values::<LuaTable>() {
+                let f = f?;
+                if let Ok(fid) = entity::entity_id(&f) {
+                    candidates.push((fid, f));
                 }
             }
             let out = lua.create_table()?;
             let mut n = 0;
-            for f in factories.into_inner().sequence_values::<LuaTable>() {
-                let f = f?;
-                let Ok(fid) = entity::entity_id(&f) else { continue };
-                let mut all = true;
-                for id in &ids {
-                    if !can_build(lua, fid, id)? {
-                        all = false;
+            for line in template.sequence_values::<LuaValue>().skip(2) {
+                let LuaValue::Table(line) = line? else { continue };
+                let Some(id) = line.raw_get::<Option<String>>(1)? else { continue };
+                let mut chosen = None;
+                for (fid, f) in &candidates {
+                    if can_build(lua, *fid, &id)? {
+                        chosen = Some(f.clone());
                         break;
                     }
                 }
-                if all {
-                    n += 1;
-                    out.raw_set(n, f)?;
-                }
+                let Some(f) = chosen else { return Ok(None) };
+                n += 1;
+                out.raw_set(n, f)?;
             }
             Ok(if n == 0 { None } else { Some(shapes::List::<Obj<moho::Unit>>::new(out)) })
         },
@@ -751,10 +947,49 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         },
     )?;
     lua_method!(lua, moho::AIBrain,
-        /// Whether blueprint `bp` can be placed at `pos`.
-        CanBuildStructureAt = |lua, (_brain, bp, pos): (Obj<moho::AIBrain>, String, shapes::Vector)| {
+        /// Whether blueprint `bp` can be placed at `pos`; the sites of the
+        /// army's queued builds count as taken.
+        CanBuildStructureAt = |lua, (brain, bp, pos): (Obj<moho::AIBrain>, String, shapes::Vector)| {
+            let crate::engine::api::army::ArmyHandle(army) = crate::engine::api::script_object::handle(&brain)?;
             let p = FxVec3::from_f64(pos.raw_get(1)?, pos.raw_get::<Option<f64>>(2)?.unwrap_or(0.0), pos.raw_get(3)?);
-            can_build_at(lua, &bp, p)
+            can_place_at(lua, Some(army), &bp, p)
         },
     )
+}
+
+#[cfg(test)]
+mod near_spot_tests {
+    use super::*;
+
+    #[test]
+    fn the_search_grows_negative_side_first_x_major() {
+        let o = near_spot_offsets(2);
+        assert_eq!(&o[..9], &[(0, 0), (-1, -1), (-1, 0), (0, -1), (-1, 1), (0, 1), (1, -1), (1, 0), (1, 1)]);
+        assert_eq!(&o[9..14], &[(-2, -2), (-2, -1), (-2, 0), (-2, 1), (-1, -2)]);
+        assert_eq!(o.len(), 25);
+    }
+
+    #[test]
+    fn the_first_spot_is_on_the_two_grid_plus_a_half() {
+        let f = |v: f64| near_spot_first(Fx::from_num(v)).to_num::<f64>();
+        assert_eq!((f(0.0), f(0.3), f(0.7), f(3.0), f(-5.0), f(657.0)), (0.5, 0.5, 0.5, 2.5, -5.5, 656.5));
+    }
+
+    /// dev/probes probe_re3_ai NS2: offsets from an even point.
+    #[test]
+    fn create_unit_near_spot_starts_at_the_floor_plus_a_half_off_the_whole_numbers() {
+        let f = |v: f64| near_unit_first(Fx::from_num(v)).to_num::<f64>();
+        let got: Vec<f64> = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.5, 3.0, -1.0].into_iter().map(f).collect();
+        assert_eq!(got, [0.5, 0.5, 0.5, 0.5, 1.5, 1.5, 1.5, 2.5, 2.5, -1.5]);
+    }
+
+    /// Off the whole numbers: rings x-major (the generator at (0.3, 0.7)
+    /// went 0,0 -1,-1 -1,0 -1,1 0,-1 0,1 in steps of 3).
+    #[test]
+    fn create_unit_near_spot_off_the_grid_rings_x_major() {
+        let o = near_unit_ring_offsets(2);
+        assert_eq!(&o[..9], &[(0, 0), (-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]);
+        assert_eq!(o[9], (-2, -2));
+        assert_eq!(o.len(), 25);
+    }
 }

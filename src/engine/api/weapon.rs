@@ -603,7 +603,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         with_state(lua, &this, |w| w.target = Some(WeaponTarget::Entity(id)))
     })?;
     lua_method!(lua, moho::Weapon,
-        /// Targets a ground position (an `{x, y, z}` table).
+        /// Targets a ground position (an `{x, y, z}` table) until the weapon's
+        /// next target scan, which puts an enemy back or clears it
+        /// (`probe_re3_wpn_c`); a script re-sets it to keep firing there.
         SetTargetGround = |lua, (this, loc): (Obj<moho::Weapon>, shapes::Vector)| {
         let p = FxVec3::from_f64(loc.raw_get(1)?, loc.raw_get(2)?, loc.raw_get(3)?);
         // A script's target isn't the attack order's: left marked as the
@@ -618,6 +620,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 w.target = target;
                 w.target_from_order = false;
             }
+            // A script's point, not an order's: kept through the next
+            // target scan only (`sim::weapon::advance_target`).
+            w.ground_set = !w.target_from_order;
         })
     })?;
     lua_method!(lua, moho::Weapon,
@@ -766,6 +771,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             // Only shots at a unit are followed (MohoEngine.dll 0x102b27b9).
             reports_to: (st.retarget.is_some() && matches!(target, Some(ProjectileTarget::Entity(_)))).then_some(h.index),
             rescale_after_create: true,
+            script_made: false,
         };
         let projectile_id = st.projectile_id.clone();
         drop(weapons);

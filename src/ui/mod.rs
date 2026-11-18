@@ -1815,16 +1815,37 @@ impl UserVm {
         let g = self.lua.globals();
         let old: LuaValue = g.raw_get("Sync")?;
         g.raw_set("PreviousSync", old)?;
-        g.raw_set("Sync", value.to_lua(&self.lua)?)?;
+        let sync = value.to_lua(&self.lua)?;
+        // The interface's own focus change (`SetFocusArmy`) since the last
+        // Sync: moho's sim driver would note it in this one.
+        if let Some(changed) = self.lua.named_registry_value::<Option<LuaTable>>("user.focus_changed")? {
+            self.lua.set_named_registry_value("user.focus_changed", LuaNil)?;
+            if let LuaValue::Table(t) = &sync
+                && changed.raw_get::<i64>("new")? != changed.raw_get::<i64>("old")?
+                && t.raw_get::<LuaValue>("FocusArmyChanged")?.is_nil() {
+                t.raw_set("FocusArmyChanged", changed)?;
+            }
+        }
+        g.raw_set("Sync", sync)?;
         if let Some(f) = g.raw_get::<Option<LuaFunction>>("OnSync")? {
             f.call::<()>(())?;
         }
         Ok(())
     }
 
-    /// The army the UI shows as (`--player`; observers: -1).
+    /// The army this client commands, and so first shows as (`--player`,
+    /// or the sim moved it; observers: -1). The interface's `SetFocusArmy`
+    /// then changes only what it shows, as far as that army's player may
+    /// (`user_api::request_focus_army`).
     pub fn set_focus_army(&self, army: i64) -> LuaResult<()> {
+        self.lua.set_named_registry_value("user.own_army", army)?;
         self.lua.set_named_registry_value("user.focus_army", army)
+    }
+
+    /// `SetFocusArmy(index)` from the engine (0-based, -1 every army), as
+    /// the interface asks it: true if the focus is now `index`.
+    pub fn request_focus_army(&self, index: i64) -> LuaResult<bool> {
+        user_api::request_focus_army(&self.lua, index)
     }
 
     /// The army the UI shows as, if any (observers: `None`): moho's sound
@@ -1893,14 +1914,17 @@ impl UserVm {
     /// not the orders (`engine/User/CUIWorldView.lua`: only the 8 contract
     /// names plus nil, e.g. `RULEUCC_CallTransport` hovering a transport
     /// with loadable units selected, `RULEUCC_Transport` hovering a drop
-    /// target with transports selected). Anything outside the contract
+    /// target or a loadable unit with transports selected: probed, a
+    /// transport over its own tank reads `RULEUCC_Transport`). Only the
+    /// cursor name changes: the click still issues the reverse load.
+    /// Anything outside the contract
     /// reads as nil, so the cursor falls back to default. Pure, so the
     /// contract is unit-tested.
     pub fn mouse_order_name(kind: Option<crate::engine::sim::command::CommandKind>) -> Option<String> {
         use crate::engine::sim::command::CommandKind as K;
         match kind {
-            Some(K::TransportLoadUnits | K::TransportReverseLoadUnits) => Some("RULEUCC_CallTransport".to_string()),
-            Some(K::TransportUnloadUnits | K::TransportUnloadSpecificUnits) => Some("RULEUCC_Transport".to_string()),
+            Some(K::TransportLoadUnits) => Some("RULEUCC_CallTransport".to_string()),
+            Some(K::TransportReverseLoadUnits | K::TransportUnloadUnits | K::TransportUnloadSpecificUnits) => Some("RULEUCC_Transport".to_string()),
             Some(K::Move) => Some("RULEUCC_Move".to_string()),
             Some(K::Attack) => Some("RULEUCC_Attack".to_string()),
             Some(K::Guard) => Some("RULEUCC_Guard".to_string()),
@@ -2166,6 +2190,13 @@ pub fn console(lua: &Lua, line: &str) -> LuaResult<()> {
             data.set("name", name)?;
             cm.get::<LuaFunction>("StartCommandMode")?.call::<()>((mode, data))?;
         }
+        // FAF's score board: an army's line, or the Observer line (-1).
+        "setfocusarmy" => match rest.parse::<i64>() {
+            Ok(index) => {
+                user_api::request_focus_army(lua, index)?;
+            }
+            Err(_) => tracing::warn!(target: "lua", line, "SetFocusArmy: expected an army index"),
+        },
         // Control groups live in FAF's selection.lua.
         "ui_makeselectionset" => {
             let sel: LuaTable = import()?.call("/lua/ui/game/selection.lua")?;
@@ -2226,8 +2257,9 @@ mod tests {
 
     /// The hover cursor only ever names caps moho answers with
     /// (`engine/User/CUIWorldView.lua` `GetRightMouseButtonOrder`, 8 names
-    /// plus nil): load orders read as `RULEUCC_CallTransport`, unload
-    /// orders as `RULEUCC_Transport`, anything else falls back to nil.
+    /// plus nil): units loading onto a transport read as
+    /// `RULEUCC_CallTransport`; a transport picking units up (reverse load)
+    /// or unloading reads as `RULEUCC_Transport`; anything else is nil.
     #[test]
     fn mouse_order_names_stay_inside_the_cursor_contract() {
         use std::collections::BTreeSet;
@@ -2241,7 +2273,8 @@ mod tests {
             let name = UserVm::mouse_order_name(Some(kind)).expect("a cursor");
             assert!(contract.contains(name.as_str()), "{kind:?} -> {name}");
         }
-        assert_eq!(UserVm::mouse_order_name(Some(K::TransportLoadUnits)), UserVm::mouse_order_name(Some(K::TransportReverseLoadUnits)));
+        assert_eq!(UserVm::mouse_order_name(Some(K::TransportLoadUnits)).as_deref(), Some("RULEUCC_CallTransport"));
+        assert_eq!(UserVm::mouse_order_name(Some(K::TransportReverseLoadUnits)).as_deref(), Some("RULEUCC_Transport"));
         assert_eq!(UserVm::mouse_order_name(Some(K::TransportUnloadUnits)), UserVm::mouse_order_name(Some(K::TransportUnloadSpecificUnits)));
         for kind in K::ALL {
             if !matches!(kind, K::Move | K::Attack | K::Guard | K::Reclaim | K::Repair | K::Capture | K::TransportLoadUnits | K::TransportReverseLoadUnits | K::TransportUnloadUnits | K::TransportUnloadSpecificUnits) {

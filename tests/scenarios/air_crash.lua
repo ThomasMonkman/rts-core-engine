@@ -1,5 +1,7 @@
 -- Scenario test (tests/scenarios.rs): ARMY_1 / ARMY_2 have no AI; checks go
 -- into ScenarioResult, which the test reads once `done` is set.
+-- GetPosition() is one table per entity, rewritten by each call: copy it to keep it.
+local function pos(e) local p = e:GetPosition() return Vector(p[1], p[2], p[3]) end
 rawset(_G, "ScenarioResult", { done = false, failures = {}, notes = {} })
 local function check(ok, msg) if not ok then table.insert(ScenarioResult.failures, msg) end end
 local function note(msg) table.insert(ScenarioResult.notes, msg) LOG('air_crash: ' .. msg) end
@@ -39,7 +41,7 @@ local function trial(t)
     WaitTicks(t.wait)
     -- Enemy tanks along the flight path, on hold fire, created on the tick it
     -- dies so they never shoot it.
-    local p = plane:GetPosition()
+    local p = pos(plane)
     local vx, vy, vz = plane:GetVelocity()
     local speed = 10 * math.sqrt(vx * vx + vz * vz)
     local dirx, dirz = vx / math.max(1e-6, math.sqrt(vx * vx + vz * vz)), vz / math.max(1e-6, math.sqrt(vx * vx + vz * vz))
@@ -57,7 +59,7 @@ local function trial(t)
     local oi = plane.OnImpact
     plane.OnImpact = function(self, with)
         if not impacted then
-            impacted, impactTick, impactPos, impactLayer = with, GetGameTick(), self:GetPosition(), self.Layer
+            impacted, impactTick, impactPos, impactLayer = with, GetGameTick(), pos(self), self.Layer
             -- How far it tumbled: the angle between the orientations.
             local o1 = self:GetOrientation()
             local dot = math.abs(o0[1] * o1[1] + o0[2] * o1[2] + o0[3] * o1[3] + o0[4] * o1[4])
@@ -70,13 +72,13 @@ local function trial(t)
     LOG(string.format('air_crash: %s killed at tick %d at (%.1f, %.1f, %.1f)', t.bp, start, p[1], p[2], p[3]))
     plane:Kill()
     -- Its fall starts from the last tick's displacement.
-    local deathPos, fallV = plane:GetPosition(), { plane:GetVelocity() }
+    local deathPos, fallV = pos(plane), { plane:GetVelocity() }
     local samples = {}
     for _ = 1, 200 do
         if impacted then break end
         WaitTicks(1)
         if plane:BeenDestroyed() then break end
-        local q = plane:GetPosition()
+        local q = pos(plane)
         table.insert(samples, string.format('%.1f,%.1f', VDist2(p[1], p[3], q[1], q[3]), q[2] - ground(q[1], q[3])))
     end
     WaitTicks(5)

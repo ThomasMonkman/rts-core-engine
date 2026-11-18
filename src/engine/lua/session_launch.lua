@@ -272,11 +272,17 @@ end
 local extras = scenario.Configurations.standard.customprops
     and scenario.Configurations.standard.customprops.ExtraArmies
 if extras then
-    for _, name in STR_GetTokens(extras, ' ') do
+    -- In written order (STR_GetTokens is 0-based, and `for k, v in` would
+    -- visit its first token last).
+    local names = STR_GetTokens(extras, ' ')
+    local i = 0
+    while names[i] do
+        local name = names[i]
         index = index + 1
         local opts = playerOptions('civilian')
         opts.ArmyName, opts.Civilian, opts.ArmyIndex = name, true, index
         armySetup[name] = opts
+        i = i + 1
     end
 end
 

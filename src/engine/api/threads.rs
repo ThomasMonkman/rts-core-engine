@@ -173,15 +173,14 @@ pub fn run_tick(lua: &Lua) -> LuaResult<()> {
 /// including forks created while draining.
 pub fn run_due(lua: &Lua) -> LuaResult<()> {
     // One at a time: a thread may `ResumeThread` another due later this tick.
-    // After each resume, platoons that thread emptied (AI managers move
-    // units between platoons from their threads) end before any other
-    // thread runs, so their own threads are killed instead of waking to a
-    // platoon with no units; never while a thread is running.
+    // Platoons emptied meanwhile end at the start of the next tick's pass
+    // (`end_emptied_platoons`), not between these resumes: a state machine
+    // restarted on a platoon its units just left (RNGAI's air merges) runs
+    // its first lines this pass, while calls on the platoon still work.
     loop {
         let next = lua.app_data_mut::<Scheduler>().expect("Scheduler not in app_data").next_due();
         let Some(id) = next else { break };
         resume(lua, id)?;
-        crate::engine::api::entity::end_emptied_platoons(lua)?;
     }
     loop {
         let next = lua
@@ -189,10 +188,7 @@ pub fn run_due(lua: &Lua) -> LuaResult<()> {
             .expect("Scheduler not in app_data")
             .next_pending();
         match next {
-            Some(id) => {
-                resume(lua, id)?;
-                crate::engine::api::entity::end_emptied_platoons(lua)?;
-            }
+            Some(id) => resume(lua, id)?,
             None => break,
         }
     }

@@ -15,8 +15,9 @@ ForkThread(function()
     check(brain:GetNumPlatoonsTemplateNamed('Missing') == 0, 'no platoon named Missing')
     check(brain:GetNumPlatoonsTemplateNamed(5) == 0, 'a non-string name counts nothing')
     check(other:GetNumPlatoonsTemplateNamed('EngineerReclaimT1') == 1, 'only the brain\'s own army counts')
+    -- Disbanding ends it at once; no wait (the others, made empty, end the
+    -- beat after).
     brain:DisbandPlatoon(a)
-    WaitTicks(1)
     check(brain:GetNumPlatoonsTemplateNamed('EngineerReclaimT1') == 1, 'a disbanded platoon no longer counts')
     ScenarioResult.done = true
 end)

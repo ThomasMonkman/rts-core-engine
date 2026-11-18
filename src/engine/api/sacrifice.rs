@@ -8,8 +8,12 @@
 //! SacrificeMassMult / targetMass, energy * SacrificeEnergyMult /
 //! targetEnergy)` (FAF's `CalculateSacrificeBonus`, blueprint costs),
 //! completing it if that reaches 1, then `OnStopSacrifice(target)` (FAF
-//! destroys the sacrificer). A target that is gone or already finished ends
-//! the order.
+//! destroys the sacrificer). A finished target that is damaged takes the
+//! same share of its health instead. A target that is gone, or finished at
+//! full health, ends the order (dev/probes probe_re2_orders SAC: on a
+//! damaged finished generator the order is kept, the engineer walks up and
+//! is consumed 9 ticks after it stops; on a full-health one it goes at
+//! once). What the damaged target gains wasn't logged: inferred.
 //!
 //! The walk and the 9 ticks are the real game's (dev/probes
 //! probe_unit_build G8: an Aeon engineer 4, 4 from a T1 generator's site
@@ -99,7 +103,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                 continue;
             };
             // (A little past the walk's goal, which it stops at.)
-            (t.in_build_range(u.position(), REACH + Fx::from_num(0.5)), t.fraction_complete < Fx::ONE)
+            (t.in_build_range(u.position(), REACH + Fx::from_num(0.5)), t.fraction_complete < Fx::ONE || t.health < t.max_health)
         };
         if !valid {
             pop(lua);
@@ -123,7 +127,11 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         let bonus = from_lua(ratio(mass * mass_mult, t_mass).min(ratio(energy * energy_mult, t_energy)).min(1.0));
         let completed = {
             let mut w = entity::world(lua);
-            match w.get_mut(target).filter(|t| !t.destroyed && t.fraction_complete < Fx::ONE) {
+            match w.get_mut(target).filter(|t| !t.destroyed) {
+                Some(t) if t.fraction_complete >= Fx::ONE => {
+                    t.health = (t.health + t.max_health * bonus).min(t.max_health);
+                    false
+                }
                 Some(t) => {
                     let old = t.fraction_complete;
                     let new = (old + bonus).min(Fx::ONE);

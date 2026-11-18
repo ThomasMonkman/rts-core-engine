@@ -19,10 +19,13 @@ mod tests {
         let lua = mlua::Lua::new();
         super::register(&lua).unwrap();
         let r: String = lua
-            .load("return table.concat(STR_GetTokens('  ARMY_9 NEUTRAL_CIVILIAN ', ' '), '|') .. ';' .. table.concat(STR_GetTokens('a.b%c', '.%'), '|')")
+            .load(
+                "local function join(t) local s, i = {}, 0 while t[i] ~= nil do table.insert(s, t[i]) i = i + 1 end return table.concat(s, '|') end
+                 return join(STR_GetTokens('  ARMY_9 NEUTRAL_CIVILIAN ', ' ')) .. ';' .. join(STR_GetTokens('a.b%c', '.%')) .. ';' .. join(STR_GetTokens('a b', ''))",
+            )
             .eval()
             .unwrap();
-        assert_eq!(r, "ARMY_9|NEUTRAL_CIVILIAN;a|b|c");
+        assert_eq!(r, "ARMY_9|NEUTRAL_CIVILIAN;a|b|c;a b", "0-based; an empty delimiter gives the whole string");
     }
 
     /// `_TRACEBACK` exists (FAF calls it on two warning paths) and returns
@@ -50,6 +53,50 @@ mod tests {
         assert_eq!(r, "5,x;3");
     }
 
+    /// Lua 5.0 table sizes as probed in the real game: `n` and `setn` win
+    /// over the array length, and insert / remove keep them up to date.
+    #[test]
+    fn table_sizes_honour_n_and_setn() {
+        let lua = mlua::Lua::new();
+        super::register(&lua).unwrap();
+        let r: String = lua
+            .load(
+                "local out = {}
+                 local function add(...) for i = 1, select('#', ...) do table.insert(out, tostring((select(i, ...)))) end end
+                 add(table.getn({ n = 5 }), table.getn({}), table.getn({ 1, 2, 3 }))
+                 local t = {} table.setn(t, 3) add(table.getn(t))
+                 t = { 1, 2, 3, 4 } table.setn(t, 2) table.insert(t, 'x') add(table.getn(t), t[3], t[4], t[5])
+                 t = { n = 0 } table.insert(t, 'a') add(t.n, t[1])
+                 t = { 'a', 'b', 'c', n = 3 } add(table.remove(t, 1), t.n, t[1], t[3])
+                 t = { 'a', 'b' } table.insert(t, 1, 'x') add(table.concat(t, ','), table.remove(t), table.getn(t))
+                 return table.concat(out, ' ')",
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(r, "5 0 3 3 3 x 4 nil 1 a a 2 b nil x,a,b b 2");
+    }
+
+    /// `gsub` with a function: only a string result replaces the match.
+    #[test]
+    fn gsub_function_non_string_deletes() {
+        let lua = mlua::Lua::new();
+        super::register(&lua).unwrap();
+        let r: String = lua
+            .load("local function g(f) return (string.gsub('abc', 'b', f)) end return table.concat({ g(function() return nil end), g(function() return false end), g(function() return 7 end), g(function(x) return x .. x end), (('abc'):gsub('b', function() end)) }, '|')")
+            .eval()
+            .unwrap();
+        assert_eq!(r, "ac|ac|ac|abbc|ac");
+    }
+
+    /// Moho's `__pow` is power (its `^` is XOR); `_LOADED` is a table.
+    #[test]
+    fn pow_and_loaded_globals() {
+        let lua = mlua::Lua::new();
+        super::register(&lua).unwrap();
+        let r: (f64, String) = lua.load("return __pow(2, 3), type(_LOADED)").eval().unwrap();
+        assert_eq!(r, (8.0, "table".into()));
+    }
+
     #[test]
     fn str_utf8_len_counts_characters() {
         let lua = mlua::Lua::new();
@@ -70,11 +117,11 @@ mod tests {
     }
 
     #[test]
-    fn str_itox_is_unsigned_hex() {
+    fn str_itox_is_unsigned_upper_case_hex() {
         let lua = mlua::Lua::new();
         super::register(&lua).unwrap();
         let r: String = lua.load("return table.concat({ STR_itox(0), STR_itox(255), STR_itox(-1) }, '|')").eval().unwrap();
-        assert_eq!(r, "0|ff|ffffffff");
+        assert_eq!(r, "0|FF|FFFFFFFF");
     }
 
     #[test]
@@ -83,6 +130,8 @@ mod tests {
         super::register(&lua).unwrap();
         let r: (i64, i64, i64, i64) = lua.load("return STR_xtoi('ff'), STR_xtoi('1A'), STR_xtoi('7fz'), STR_xtoi('zz')").eval().unwrap();
         assert_eq!(r, (255, 26, 127, 0));
+        let r: (i64, i64) = lua.load("return STR_xtoi('ffffffff'), STR_xtoi(' 1f')").eval().unwrap();
+        assert_eq!(r, (-1, 0));
     }
 
     #[test]

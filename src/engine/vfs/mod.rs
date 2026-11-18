@@ -412,6 +412,14 @@ impl Vfs {
         Ok(self.paths().filter(move |path| glob.is_match(path)))
     }
 
+    /// Whether `path` (normalised, without a trailing slash) is where a
+    /// mount other than the root is mounted, e.g. `/maps`.
+    pub fn is_mount_point(&self, path: &str) -> bool {
+        let key = normalise(path);
+        let key = key.trim_end_matches('/');
+        !key.is_empty() && self.index.mounts.iter().any(|m| normalise(&m.mountpoint).trim_end_matches('/') == key)
+    }
+
     /// Metadata for a file or (implicit) folder in the VFS, `None` if absent.
     pub fn file_info(&self, path: &str) -> Option<FileInfo> {
         let key = normalise(path);
@@ -430,10 +438,12 @@ impl Vfs {
         self.index.sorted_paths
             .get(i)
             .filter(|p| p.starts_with(prefix.as_str()))
-            .map(|_| FileInfo {
+            .map(|first| FileInfo {
                 size: 0,
                 is_folder: true,
-                read_only: false,
+                // Inside an archive (judged by its first file): moho finds
+                // no such folder (`api::disk_get_file_info::lookup`).
+                read_only: self.index.file_system.get(first).is_some_and(|loc| matches!(loc, FileLocation::Archive { .. })),
             })
     }
 
@@ -653,7 +663,11 @@ impl Vfs {
     /// Moho's script hooks: for each hook folder, in order, the file at
     /// `{folder}{key}` (first mount wins, as for any file) is appended to
     /// the script's text, so it runs after it, in the same chunk and
-    /// environment. Hook files themselves aren't hooked.
+    /// environment. Hook files themselves aren't hooked. A hook's leading
+    /// UTF-8 BOM is dropped: it marks the file's encoding, and left in the
+    /// middle of the chunk it fails the whole script (a mod's
+    /// `hook/loc/us/strings_db.lua`, as AI mods ship them, emptied the
+    /// strings database). The script's own BOM is stripped by the translation.
     fn append_hooks(&self, key: &str, raw: &mut Vec<u8>, extra: &[String]) -> io::Result<()> {
         if !matches!(extension(key), Some("lua" | "bp")) || self.index.hook_dirs.iter().chain(extra).any(|d| key.starts_with(d.as_str()) && key[d.len()..].starts_with('/')) {
             return Ok(());
@@ -663,7 +677,8 @@ impl Vfs {
             let Some(hook) = self.index.file_system.get(&hook_path) else { continue };
             debug!(hook = %hook_path, base = key, "vfs: applying hook");
             raw.push(b'\n');
-            raw.extend_from_slice(&hook.get_file(&self.index.archieves)?);
+            let hook = hook.get_file(&self.index.archieves)?;
+            raw.extend_from_slice(hook.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&hook));
         }
         Ok(())
     }
@@ -884,7 +899,7 @@ mod tests {
     /// Moho's hooks: each hook folder's file of the same path is appended
     /// to a script, in hook-folder order, the first mount's copy winning
     /// (an empty one shadows a later mount's); hook files aren't hooked and
-    /// non-scripts aren't either.
+    /// non-scripts aren't either; a hook's leading BOM is dropped.
     #[test]
     fn hooks_append_in_folder_order() {
         let base = std::env::temp_dir().join(format!("vfs_hooks_{}", std::process::id()));
@@ -895,6 +910,8 @@ mod tests {
             (&first, "schook/lua/a.lua", "-- shadow"),
             (&first, "engine_hook/lua/a.lua", "engine"),
             (&first, "engine_hook/lua/b.txt", "not hooked"),
+            (&first, "lua/c.lua", "\u{feff}base"),
+            (&first, "engine_hook/lua/c.lua", "\u{feff}engine"),
             (&second, "schook/lua/a.lua", "shadowed"),
         ] {
             let p = root.join(name);
@@ -906,6 +923,9 @@ mod tests {
         assert_eq!(&*vfs.read_processed("/lua/A.lua").unwrap(), b"base\n-- shadow\nengine");
         assert_eq!(vfs.read_processed_uncached("/lua/a.lua").unwrap(), b"base\n-- shadow\nengine");
         assert_eq!(&*vfs.read_processed("/lua/b.txt").unwrap(), b"text");
+        // A hook's BOM is dropped (mid-chunk it fails the script); the
+        // script's own is left to the translation.
+        assert_eq!(&*vfs.read_processed("/lua/c.lua").unwrap(), "\u{feff}base\nengine".as_bytes());
         assert_eq!(&*vfs.read_processed("/schook/lua/a.lua").unwrap(), b"-- shadow");
         assert_eq!(vfs.read("/lua/a.lua").unwrap(), b"base");
         std::fs::remove_dir_all(&base).ok();

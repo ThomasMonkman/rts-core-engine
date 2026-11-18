@@ -157,6 +157,9 @@ pub struct Launch {
     pub target: Option<crate::engine::sim::projectile::ProjectileTarget>,
     /// The launcher's weapon (index) told whether the shot hit its target.
     pub reports_to: Option<u32>,
+    /// Made by a script's `Entity:CreateProjectile`, with no weapon and no
+    /// target: see [`spawn_projectile`].
+    pub script_made: bool,
 }
 
 /// Tells a followed shot's weapon ([`ProjectileState::reports_to`]) how it
@@ -383,6 +386,15 @@ pub fn spawn_projectile(lua: &Lua, launcher: EntityId, bp_path: &str, position: 
         .and_then(|t| t.water_surface)
         .is_some_and(|w| position.y < w);
     let obj = create_object(lua, id, &module, &class)?;
+    // A script-made projectile that can't live is destroyed at once, before
+    // its `OnCreate` (FAF probe `probe_re3_wpn_b`, `OnDestroy` at tick+0 and
+    // no `OnCreate`): one whose blueprint tracks a target (`TrackTarget`,
+    // and it has none), or one that dies on water made under the surface.
+    // No stock FAF script makes either with `CreateProjectile`.
+    if launch.script_made && (template.track_target || (template.destroy_on_water && in_water)) {
+        crate::engine::api::entity::destroy(lua, &Obj::new(obj.clone()))?;
+        return Ok(Obj::new(obj));
+    }
     ProjectileCallbacks::on_create(lua, &Obj::<moho::Projectile>::new(obj.clone()), &bp_id, in_water)?;
     // (Only a velocity the script changed: the launch one already has that
     // speed, and renormalizing it would only add rounding.)
@@ -404,8 +416,18 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
     use crate::engine::sim::projectile;
     // Last step's impacts first: units have moved a step since.
     let pending = lua.app_data_mut::<Projectiles>().map(|mut ps| std::mem::take(&mut ps.pending_impacts)).unwrap_or_default();
-    run_impacts(lua, pending)?;
     {
+        // The projectiles' `OnImpact` scripts and the damage they deal
+        // (`OnDamage`, `OnKilled`).
+        let _lua = crate::prof_span!("lua projectile impacts");
+        run_impacts(lua, pending)?;
+    }
+    // This step's shield bubbles, script spheres and projectile velocities,
+    // kept for sweeping again past a refused collision check.
+    let (mut shields, mut script_spheres) = (Vec::new(), Vec::new());
+    let velocities: Vec<(u32, crate::engine::sim::math::FxVec3)>;
+    {
+        let _step = crate::prof_span!("projectiles step");
         let (Some(mut ps), Some(mut w)) = (lua.app_data_mut::<Projectiles>(), lua.app_data_mut::<crate::engine::sim::entity::EntityWorld>()) else {
             return Ok(());
         };
@@ -419,9 +441,9 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         // while on, `None` while down), and script entities with a sphere
         // (flares, missile redirectors, depth charges).
         use crate::engine::sim::entity::{CollisionShape, EntityKind};
-        let (mut shields, mut script_spheres) = (Vec::new(), Vec::new());
         let last = std::mem::take(&mut ps.script_sphere_centers);
-        for e in w.iter().filter(|e| !e.destroyed && matches!(e.kind, EntityKind::Shield | EntityKind::Script)) {
+        // (From the volume index: ascending id, live, with a shape.)
+        for e in w.volumes().filter(|e| !e.destroyed && matches!(e.kind, EntityKind::Shield | EntityKind::Script)) {
             if let CollisionShape::Sphere { center, radius } = e.collision_shape()
                 && radius > crate::engine::sim::math::Fx::ZERO {
                 let center = e.position() + e.orientation.rotate(center);
@@ -439,8 +461,8 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         ps.script_sphere_centers = centers;
         // Projectile velocities, when some projectile shoots at another.
         let chasing = ps.iter().any(|p| matches!(p.target, Some(projectile::ProjectileTarget::Entity(t)) if w.get(t).is_some_and(|e| e.kind == EntityKind::Projectile)));
-        let velocities: Vec<(u32, crate::engine::sim::math::FxVec3)> = if chasing { ps.iter().map(|p| (p.id, p.velocity())).collect() } else { Vec::new() };
-        let env = projectile::Env { terrain: terrain.as_deref(), shields: &shields, armies: armies.as_deref(), script_spheres: &script_spheres, projectile_velocities: &velocities };
+        velocities = if chasing { ps.iter().map(|p| (p.id, p.velocity())).collect() } else { Vec::new() };
+        let env = projectile::Env { terrain: terrain.as_deref(), shields: &shields, armies: armies.as_deref(), script_spheres: &script_spheres, projectile_velocities: &velocities, skip: &[], unit_hits: None };
         if let Some(mut rng) = lua.app_data_mut::<crate::engine::sim::rng::SimRng>() {
             projectile::roll_zigzags(&mut ps, &mut rng);
         }
@@ -448,9 +470,15 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         projectile::step(&mut ps, &mut w, env, &mut impacts);
         ps.pending_impacts = impacts;
     }
-    // The rest is the projectiles' scripts: water crossings, collision
-    // checks, impacts (and the damage they deal: `OnDamage`, `OnKilled`).
-    let _lua = crate::prof_span!("lua projectile impacts");
+    {
+        // `OnCollisionCheck` on what each projectile hit, and the sweeps on
+        // past a refusal.
+        let _lua = crate::prof_span!("lua projectile collision checks");
+        run_collision_checks(lua, &shields, &script_spheres, &velocities)?;
+    }
+    // The rest is the projectiles' scripts: water crossings and script
+    // spheres entered.
+    let _lua = crate::prof_span!("lua projectile crossings");
     // Splashes and torpedo behaviour, before impacts (a torpedo's script
     // retunes it on entering the water).
     // Moho runs these from `Projectile::CheckCollision` (MohoEngine.dll
@@ -500,9 +528,94 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
+/// Asks each entity this step's projectiles hit whether the collision counts
+/// (`OnCollisionCheck(projectile, firingWeapon)` on a unit or shield: dying
+/// or upgrading units, allied shots through shields; projectile against
+/// projectile, both are asked `OnCollisionCheck(other)`: FAF's missiles
+/// only accept the anti-missile shot aimed at them), in id order. Moho asks
+/// while it sweeps the step, so a refusal costs nothing: the projectile
+/// sweeps the rest of its step past the refusing entity at once
+/// ([`projectile::resweep`]), and may hit what lies behind, which is asked
+/// in turn. The refusing entity stays its `last_hit`, not hit again.
+fn run_collision_checks(
+    lua: &Lua,
+    shields: &[crate::engine::sim::projectile::ShieldSphere],
+    script_spheres: &[crate::engine::sim::projectile::ShieldSphere],
+    velocities: &[(u32, crate::engine::sim::math::FxVec3)],
+) -> LuaResult<()> {
+    use crate::engine::sim::projectile::{self, ImpactKind};
+    // A refusal per entity it passes; a bound for safety only.
+    const MAX_REFUSALS: usize = 16;
+    let checks = std::mem::take(&mut projectiles(lua).checks);
+    // Impacts swept away by a refusal (each projectile has one check
+    // chain, so none is looked up again): taken out at the end.
+    let mut gone: Vec<crate::engine::sim::entity::EntityId> = Vec::new();
+    for first in checks {
+        let mut check = Some(first);
+        let mut refused: Vec<crate::engine::sim::entity::EntityId> = Vec::new();
+        while let Some(c) = check.take() {
+            let impact = {
+                let ps = projectiles(lua);
+                let i = ps.pending_impacts.binary_search_by_key(&c.id, |i| i.id).ok();
+                i.map(|i| ps.pending_impacts[i])
+            };
+            let Some(impact) = impact else { break };
+            if !matches!(impact.kind, ImpactKind::Unit | ImpactKind::UnitAir | ImpactKind::UnitUnderwater | ImpactKind::Shield | ImpactKind::Projectile) {
+                break;
+            }
+            let (Some(obj), Some(target)) = (
+                crate::engine::api::entity::object(lua, impact.id)?,
+                match impact.target { Some(t) => crate::engine::api::entity::object(lua, t)?, None => None },
+            ) else {
+                break;
+            };
+            let accepted = if impact.kind == ImpactKind::Projectile {
+                ask_collision(&target, (target.clone(), obj.clone()))? && ask_collision(&obj, (obj.clone(), target.clone()))?
+            } else {
+                ask_collision(&target, (target.clone(), obj.clone(), LuaNil))?
+            };
+            if accepted || refused.len() >= MAX_REFUSALS {
+                break;
+            }
+            let Some(target_id) = impact.target else { break };
+            // Refused: on past it, from the step's start, skipping all this
+            // step's refusals and the one before.
+            let (Some(mut ps), Some(mut w)) = (lua.app_data_mut::<Projectiles>(), lua.app_data_mut::<crate::engine::sim::entity::EntityWorld>()) else { break };
+            let Some(p) = ps.get_mut(c.id) else { break };
+            if refused.is_empty()
+                && let Some(before) = p.last_hit {
+                refused.push(before);
+            }
+            p.last_hit = Some(target_id);
+            refused.push(target_id);
+            let terrain = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>();
+            let armies = lua.app_data_ref::<crate::engine::sim::army::Armies>();
+            // The step's unit hits still hold if no unit changed since
+            // (the scripts asked may have moved or killed some).
+            let unit_hits = (w.unit_epoch() == ps.checks_epoch).then_some(&c.hits);
+            let env = projectile::Env { terrain: terrain.as_deref(), shields, armies: armies.as_deref(), script_spheres, projectile_velocities: velocities, skip: &refused, unit_hits };
+            let (next_impact, next_check) = projectile::resweep(&mut ps, &mut w, env, c.id, c.from, c.to);
+            let i = ps.pending_impacts.binary_search_by_key(&c.id, |i| i.id);
+            match (i, next_impact) {
+                (Ok(i), Some(n)) => ps.pending_impacts[i] = n,
+                (Ok(_), None) => gone.push(c.id),
+                (Err(i), Some(n)) => ps.pending_impacts.insert(i, n),
+                (Err(_), None) => {}
+            }
+            check = next_check;
+        }
+    }
+    if !gone.is_empty() {
+        gone.sort_unstable();
+        projectiles(lua).pending_impacts.retain(|i| gone.binary_search(&i.id).is_err());
+    }
+    Ok(())
+}
+
 /// Runs `OnImpact(targetType, target)` for each impact, in id order (see
 /// [`Projectiles::pending_impacts`]). A projectile destroyed since its
-/// impact was found gets none.
+/// impact was found gets none. (Their collision checks were asked in the
+/// step that found them: [`run_collision_checks`].)
 fn run_impacts(lua: &Lua, impacts: Vec<crate::engine::sim::projectile::Impact>) -> LuaResult<()> {
     use crate::engine::sim::projectile::ImpactKind;
     for impact in impacts {
@@ -514,51 +627,21 @@ fn run_impacts(lua: &Lua, impacts: Vec<crate::engine::sim::projectile::Impact>) 
             Some(t) => crate::engine::api::entity::object(lua, t)?.map_or(LuaNil, LuaValue::Table),
             None => LuaNil,
         };
-        // Moho asks the unit or shield hit whether the collision counts
-        // (`OnCollisionCheck(projectile, firingWeapon)`): dying or upgrading
-        // units, allied shots through shields. Refused: fly on past it.
-        // Projectile against projectile: both are asked
-        // (`OnCollisionCheck(other)`; FAF's missiles only accept the
-        // anti-missile shot aimed at them).
-        if matches!(impact.kind, ImpactKind::Unit | ImpactKind::UnitAir | ImpactKind::UnitUnderwater | ImpactKind::Shield | ImpactKind::Projectile)
-            && let LuaValue::Table(t) = &target {
-            let accepted = if impact.kind == ImpactKind::Projectile {
-                ask_collision(t, (t.clone(), obj.clone()))? && ask_collision(&obj, (obj.clone(), t.clone()))?
-            } else {
-                ask_collision(t, (t.clone(), obj.clone(), LuaNil))?
-            };
-            if !accepted {
-                if let Some(p) = projectiles(lua).get_mut(impact.id) {
-                    p.last_hit = impact.target;
-                }
-                continue;
-            }
-        }
         report_shot(lua, &impact);
         ProjectileCallbacks::on_impact(lua, &Obj::<moho::Projectile>::new(obj.clone()), "projectile", impact.kind.as_str(), crate::lua_api::shapes::Loose::new(target))?;
         let alive = world(lua).get(impact.id).is_some_and(|e| !e.destroyed);
         if !alive {
             continue;
         }
-        match impact.kind {
-            ImpactKind::Air | ImpactKind::Underwater => crate::engine::api::entity::destroy(lua, &Obj::new(obj.clone()))?,
-            // Still flying after hitting the ground: no more surface hits.
-            ImpactKind::Terrain => {
-                if let Some(p) = projectiles(lua).get_mut(impact.id) {
-                    p.collide_surface = false;
-                }
-            }
-            // Through the water surface (`DestroyOnWater = false`): it can
-            // still hit the seabed (FAF's sinker, which drags a hover unit
-            // dead over water down, destroys it there; the surface itself
-            // is only hit coming down through it, so not again).
-            ImpactKind::Water => {}
-            // Passed through (DestroyOnImpact off): don't hit that unit again.
-            ImpactKind::Unit | ImpactKind::UnitAir | ImpactKind::UnitUnderwater | ImpactKind::Shield | ImpactKind::Projectile => {
-                if let Some(p) = projectiles(lua).get_mut(impact.id) {
-                    p.last_hit = impact.target;
-                }
-            }
+        // Survived it: rests a tick, then the same impact comes again (see
+        // `ProjectileState::resting`). Through the water surface
+        // (`DestroyOnWater = false`) it goes on: it can still hit the
+        // seabed (FAF's sinker, which drags a hover unit dead over water
+        // down, destroys it there; the surface itself is only hit coming
+        // down through it, so not again).
+        if impact.kind != ImpactKind::Water
+            && let Some(p) = projectiles(lua).get_mut(impact.id) {
+            p.resting = true;
         }
     }
     Ok(())
@@ -603,7 +686,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 (Some(x), Some(y), Some(z)) => Some(FxVec3::from_f64(x, y, z)),
                 _ => None,
             };
-            spawn_projectile(lua, launcher, &bp, origin + offset, Launch { direction, ..Default::default() })
+            spawn_projectile(lua, launcher, &bp, origin + offset, Launch { direction, script_made: true, ..Default::default() })
         })?;
     lua_method!(lua, moho::Entity,
         /// At the bone's posed world position, flying along its posed facing

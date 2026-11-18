@@ -50,7 +50,7 @@ pub fn is_destroyed(lua: &Lua, v: &LuaValue) -> LuaResult<bool> {
     }
     if let Ok(h) = ud.borrow::<PlatoonHandle>() {
         // A platoon whose last unit left is gone for scripts already, though
-        // it ends between thread resumes / at compaction.
+        // it ends before the next beat's threads.
         return Ok(lua.app_data_ref::<Platoons>().is_none_or(|p| p.get(h.0).is_none() || p.is_doomed(h.0)));
     }
     if let Ok(h) = ud.borrow::<EffectHandle>() {

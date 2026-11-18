@@ -41,7 +41,7 @@ use crate::engine::sim::intel::IntelMap;
 
 use crate::engine::api::blueprints::BlueprintKind;
 use crate::engine::sim::math::{Fx, FxQuat, FxVec3};
-use crate::engine::sim::spatial::SpatialGrid;
+use crate::engine::sim::spatial::{CellRect, SpatialGrid};
 
 pub type EntityId = u32;
 
@@ -86,6 +86,40 @@ pub enum CollisionShape {
     Sphere { center: FxVec3, radius: Fx },
     /// `half` = half-extents per axis.
     Box { center: FxVec3, half: FxVec3 },
+}
+
+/// The edge of moho's rect-query cells (`GetUnitsInRect`,
+/// `GetReclaimablesInRect`).
+const QUERY_CELL: i32 = 4;
+/// How far past a query's cells a box centre may lie and still reach them.
+const CELL_QUERY_MARGIN: Fx = Fx::const_from_int(16);
+
+fn query_cell(v: Fx) -> i32 {
+    (v / Fx::from_num(QUERY_CELL)).floor().to_num::<i32>()
+}
+
+/// The world bounds of the query cells under a rectangle.
+fn cell_bounds(min_x: Fx, min_z: Fx, max_x: Fx, max_z: Fx) -> (Fx, Fx, Fx, Fx) {
+    let c = |v: Fx| Fx::from_num(query_cell(v) * QUERY_CELL);
+    (c(min_x), c(min_z), c(max_x) + Fx::from_num(QUERY_CELL), c(max_z) + Fx::from_num(QUERY_CELL))
+}
+
+/// Whether `e`'s box (its collision box or sphere, unrotated; a point
+/// without one) touches a query cell the rectangle overlaps, edges
+/// inclusive. The real game lists an object in every 4x4 cell its box
+/// touches and a rect returns everything in the cells it overlaps, with no
+/// exact test after: a tank half a unit long at z 336.5 shows in rects
+/// over z 332..340, a wall at 880 in 876..884 (dev/probes probe_re2_build
+/// RECT).
+fn touches_cells(e: &Entity, min_x: Fx, min_z: Fx, max_x: Fx, max_z: Fx) -> bool {
+    let p = e.position;
+    let (cx, cz, hx, hz) = match e.collision_shape() {
+        CollisionShape::Box { center, half } => (p.x + center.x, p.z + center.z, half.x, half.z),
+        CollisionShape::Sphere { center, radius } => (p.x + center.x, p.z + center.z, radius, radius),
+        CollisionShape::None => (p.x, p.z, Fx::ZERO, Fx::ZERO),
+    };
+    let overlaps = |lo: Fx, hi: Fx, qlo: Fx, qhi: Fx| query_cell(lo) <= query_cell(qhi) && query_cell(qlo) <= query_cell(hi);
+    overlaps(cx - hx, cx + hx, min_x, max_x) && overlaps(cz - hz, cz + hz, min_z, max_z)
 }
 
 /// When an army group sees an entity's mesh (`SetVizTo*`).
@@ -485,6 +519,11 @@ pub struct EntityWorld {
     /// Dense indices of the units (ascending, so in id order): passes over
     /// units skip the props (most of a big map's entities).
     unit_slots: Vec<u32>,
+    /// The same per army (`army_units[a]`, ascending): an AI brain's
+    /// queries (`GetListOfUnits`, `GetCurrentUnits`, ...) read only its own
+    /// army's units. A unit's army is set when it's spawned and never
+    /// changes (capture makes a new unit).
+    army_units: Vec<Vec<u32>>,
     /// Freed entities still in `dense` (lets `compact` skip quiet ticks).
     destroyed: usize,
     /// Entities `destroy`ed whose `OnDestroy` hasn't run yet, in the order
@@ -494,6 +533,17 @@ pub struct EntityWorld {
     grid: SpatialGrid,
     /// Live props by map cell (kept apart so unit queries never scan trees).
     prop_grid: SpatialGrid,
+    /// Live shield bubbles and script entities (flares, missile
+    /// redirectors, depth charges) that have a collision shape, listed in
+    /// every cell their shape can reach (position +- `collision::reach`,
+    /// on XZ): bubbles are big and few, so a query looks only at the cells
+    /// it covers instead of widening by the biggest bubble. Kept in sync by
+    /// [`EntityWorld::index_volume`] wherever a position, a shape or the
+    /// destroyed flag changes.
+    volume_grid: SpatialGrid,
+    /// The cells each entity in `volume_grid` is listed in, by id (so the
+    /// listed volumes in id order, too).
+    volume_cells: BTreeMap<EntityId, CellRect>,
     /// Props that may have changed (spawned, destroyed, moved, or reached
     /// mutably through [`EntityWorld::get_mut`]) since snapshots last took
     /// them, so a snapshot sends only those props' views. Recorded only once
@@ -512,6 +562,16 @@ pub struct EntityWorld {
     /// by clearing `attachment`); destroy re-checks each child. Ids are
     /// never reused, so a stale pair can't match a new entity.
     children: std::collections::BTreeSet<(EntityId, EntityId)>,
+    /// The follow pass's list of attached entities, reused.
+    #[serde(skip)]
+    follow_scratch: Vec<u32>,
+    /// Bumped by anything that may change a unit (any mutable access to
+    /// one, a unit spawned, the grids rebuilt): a unit query cached earlier
+    /// in a tick is still right while this is unchanged
+    /// ([`EntityWorld::unit_epoch`]). Bookkeeping only, never read by the
+    /// sim's results.
+    #[serde(skip)]
+    unit_epoch: u64,
 }
 
 /// Which spatial index a query reads.
@@ -545,6 +605,14 @@ impl EntityWorld {
         self.slot.push(self.dense.len() as u32);
         if kind == EntityKind::Unit {
             self.unit_slots.push(self.dense.len() as u32);
+            if let Some(a) = army {
+                let a = a as usize;
+                if self.army_units.len() <= a {
+                    self.army_units.resize_with(a + 1, Vec::new);
+                }
+                self.army_units[a].push(self.dense.len() as u32);
+            }
+            self.unit_epoch += 1;
         }
         self.dense.push(Entity {
             id,
@@ -596,7 +664,57 @@ impl EntityWorld {
         if kind == EntityKind::Prop {
             self.note_prop(id);
         }
+        self.index_volume(self.dense.len() - 1);
         id
+    }
+
+    /// Whether the volume index ([`EntityWorld::volumes_in`]) covers
+    /// entities of this kind.
+    fn volume_kind(kind: EntityKind) -> bool {
+        matches!(kind, EntityKind::Shield | EntityKind::Script)
+    }
+
+    /// Re-lists entity `i` (dense index) in the volume index: in every cell
+    /// its collision shape can reach if it is a live shield or script
+    /// entity with a shape, else nowhere. Cheap when nothing changed.
+    fn index_volume(&mut self, i: usize) {
+        let e = &self.dense[i];
+        if !Self::volume_kind(e.kind) {
+            return;
+        }
+        let want = match e.collision_shape() {
+            _ if e.destroyed => None,
+            CollisionShape::None => None,
+            shape => {
+                let (p, r) = (e.position, crate::engine::sim::collision::reach(&shape));
+                Some(self.volume_grid.rect_of(p.x - r, p.z - r, p.x + r, p.z + r))
+            }
+        };
+        let id = e.id;
+        let have = self.volume_cells.get(&id).copied();
+        if want == have {
+            return;
+        }
+        if let Some(r) = have {
+            self.volume_grid.remove_rect(id, r);
+            self.volume_cells.remove(&id);
+        }
+        if let Some(r) = want {
+            self.volume_grid.insert_rect(id, r);
+            self.volume_cells.insert(id, r);
+        }
+    }
+
+    fn index_volume_id(&mut self, id: EntityId) {
+        if let Some(i) = self.index(id) {
+            self.index_volume(i);
+        }
+    }
+
+    /// Changes whenever a unit may have changed (see the field): equal
+    /// values mean every unit's state is as it was.
+    pub fn unit_epoch(&self) -> u64 {
+        self.unit_epoch
     }
 
     /// See `unit_reach`.
@@ -619,6 +737,7 @@ impl EntityWorld {
             e.cold.base_collision = shape;
         }
         self.note_reach(id);
+        self.index_volume_id(id);
     }
 
     pub fn set_collision_override(&mut self, id: EntityId, shape: Option<CollisionShape>) {
@@ -626,6 +745,7 @@ impl EntityWorld {
             e.cold.collision = shape;
         }
         self.note_reach(id);
+        self.index_volume_id(id);
     }
 
     fn grid(&self, which: Indexed) -> &SpatialGrid {
@@ -638,8 +758,14 @@ impl EntityWorld {
     /// Sizes the spatial grids to the map and re-indexes every live unit
     /// and prop.
     pub fn set_bounds(&mut self, width: u32, height: u32) {
+        self.unit_epoch += 1;
         self.grid = SpatialGrid::new(width, height);
         self.prop_grid = SpatialGrid::new(width, height);
+        self.volume_grid = SpatialGrid::new(width, height);
+        self.volume_cells.clear();
+        for i in 0..self.dense.len() {
+            self.index_volume(i);
+        }
         for e in self.dense.iter_mut() {
             e.grid_cell = NOT_INDEXED;
             let Some(which) = Indexed::of(e.kind).filter(|_| !e.destroyed) else { continue };
@@ -654,8 +780,10 @@ impl EntityWorld {
 
     /// Moves entity `i` (dense index), re-celling it if indexed.
     fn move_to(&mut self, i: usize, p: FxVec3) {
-        if self.dense[i].kind == EntityKind::Prop {
-            self.note_prop(self.dense[i].id);
+        match self.dense[i].kind {
+            EntityKind::Prop => self.note_prop(self.dense[i].id),
+            EntityKind::Unit => self.unit_epoch += 1,
+            _ => {}
         }
         let e = &mut self.dense[i];
         e.position = p;
@@ -671,6 +799,7 @@ impl EntityWorld {
                 e.grid_cell = cell;
             }
         }
+        self.index_volume(i);
     }
 
     pub fn set_position(&mut self, id: EntityId, p: FxVec3) {
@@ -681,6 +810,7 @@ impl EntityWorld {
 
     pub fn set_transform(&mut self, id: EntityId, p: FxVec3, q: FxQuat) {
         if let Some(i) = self.index(id) {
+            // (`move_to` bumps `unit_epoch` for a unit.)
             self.dense[i].orientation = q;
             self.move_to(i, p);
         }
@@ -746,6 +876,23 @@ impl EntityWorld {
         });
         ids.sort_unstable();
         ids
+    }
+
+    /// The live shield bubbles and script entities with a collision shape
+    /// listed in a cell the XZ box overlaps: every one whose shape reaches
+    /// into the box, and some near it (callers apply the exact test). Into
+    /// `out` (cleared first), ascending id.
+    pub fn volumes_in(&self, min_x: Fx, min_z: Fx, max_x: Fx, max_z: Fx, out: &mut Vec<EntityId>) {
+        out.clear();
+        self.volume_grid.candidates(min_x, min_z, max_x, max_z, out);
+        out.sort_unstable();
+        out.dedup();
+    }
+
+    /// Every live shield bubble and script entity with a collision shape,
+    /// ascending id (what the volume index lists).
+    pub fn volumes(&self) -> impl Iterator<Item = &Entity> {
+        self.volume_cells.keys().filter_map(|&id| self.get(id))
     }
 
     /// Every live unit in a grid cell overlapping the XZ box (unsorted, no
@@ -819,6 +966,31 @@ impl EntityWorld {
         ids.sort_unstable();
     }
 
+    /// Live units listed by moho's rect query for the XZ rectangle: those
+    /// whose box touches a 4x4 cell (aligned to multiples of 4) the
+    /// rectangle overlaps, box edges inclusive ([`touches_cells`]), in id
+    /// order.
+    pub fn units_in_cells(&self, min_x: Fx, min_z: Fx, max_x: Fx, max_z: Fx) -> Vec<EntityId> {
+        let mut ids = Vec::new();
+        let (x0, z0, x1, z1) = cell_bounds(min_x, min_z, max_x, max_z);
+        self.grid.candidates(x0 - CELL_QUERY_MARGIN, z0 - CELL_QUERY_MARGIN, x1 + CELL_QUERY_MARGIN, z1 + CELL_QUERY_MARGIN, &mut ids);
+        ids.retain(|&id| self.get(id).is_some_and(|e| touches_cells(e, min_x, min_z, max_x, max_z)));
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Live props listed by moho's rect query ([`EntityWorld::units_in_cells`]).
+    pub fn props_in_cells(&self, min_x: Fx, min_z: Fx, max_x: Fx, max_z: Fx) -> Vec<EntityId> {
+        let mut ids = Vec::new();
+        let (x0, z0, x1, z1) = cell_bounds(min_x, min_z, max_x, max_z);
+        self.prop_grid.candidates(x0 - CELL_QUERY_MARGIN, z0 - CELL_QUERY_MARGIN, x1 + CELL_QUERY_MARGIN, z1 + CELL_QUERY_MARGIN, &mut ids);
+        ids.retain(|&id| self.get(id).is_some_and(|e| !e.destroyed && touches_cells(e, min_x, min_z, max_x, max_z)));
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
     /// Live units inside the XZ rectangle (inclusive), in id order.
     pub fn units_in_rect(&self, min_x: Fx, min_z: Fx, max_x: Fx, max_z: Fx) -> Vec<EntityId> {
         let mut ids = Vec::new();
@@ -844,8 +1016,10 @@ impl EntityWorld {
 
     pub fn get_mut(&mut self, id: EntityId) -> Option<&mut Entity> {
         let i = self.index(id)?;
-        if self.dense[i].kind == EntityKind::Prop {
-            self.note_prop(id);
+        match self.dense[i].kind {
+            EntityKind::Prop => self.note_prop(id),
+            EntityKind::Unit => self.unit_epoch += 1,
+            _ => {}
         }
         Some(&mut self.dense[i])
     }
@@ -896,6 +1070,13 @@ impl EntityWorld {
         self.unit_slots.iter().map(|&i| &self.dense[i as usize])
     }
 
+    /// Army `army`'s units (destroyed ones too until compaction), in id
+    /// order: what `units().filter(army == Some(army))` gives without
+    /// reading other armies' units.
+    pub fn units_of(&self, army: u32) -> impl Iterator<Item = &Entity> {
+        self.army_units.get(army as usize).map_or(&[][..], |v| v.as_slice()).iter().map(|&i| &self.dense[i as usize]).filter(move |e| e.army == Some(army))
+    }
+
     /// The units' indices into [`EntityWorld::as_slice`], in id order (for
     /// parallel passes over the units).
     pub fn unit_indices(&self) -> &[u32] {
@@ -904,6 +1085,7 @@ impl EntityWorld {
 
     /// [`EntityWorld::units`], mutably.
     pub fn for_each_unit_mut(&mut self, mut f: impl FnMut(&mut Entity)) {
+        self.unit_epoch += 1;
         for &i in &self.unit_slots {
             f(&mut self.dense[i as usize]);
         }
@@ -914,6 +1096,7 @@ impl EntityWorld {
     /// goes through [`EntityWorld::get_mut`] / `set_*`, which tell snapshots
     /// (`prop_changes`). The per-tick users touch unit state only.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Entity> {
+        self.unit_epoch += 1;
         self.dense.iter_mut()
     }
 
@@ -944,6 +1127,7 @@ impl EntityWorld {
         if self.destroyed == 0 {
             return Vec::new();
         }
+        self.unit_epoch += 1;
         let mut removed = Vec::with_capacity(self.destroyed);
         self.dense.retain(|e| {
             if e.gone {
@@ -955,10 +1139,17 @@ impl EntityWorld {
             self.slot[id as usize] = REMOVED;
         }
         self.unit_slots.clear();
+        self.army_units.iter_mut().for_each(Vec::clear);
         for (i, e) in self.dense.iter().enumerate() {
             self.slot[e.id as usize] = i as u32;
             if e.kind == EntityKind::Unit {
                 self.unit_slots.push(i as u32);
+                if let Some(a) = e.army.map(|a| a as usize) {
+                    if self.army_units.len() <= a {
+                        self.army_units.resize_with(a + 1, Vec::new);
+                    }
+                    self.army_units[a].push(i as u32);
+                }
             }
         }
         self.destroyed = 0;
@@ -990,9 +1181,16 @@ impl EntityWorld {
                 _ => self.grid.remove(id, cell),
             }
         }
+        self.index_volume_id(id);
         self.destroyed_log.push(id);
         self.destroy_queue.push_back(id);
         true
+    }
+
+    /// Destroyed entities whose `OnDestroy` is still due, first destroyed
+    /// first.
+    pub fn queued_destroys(&self) -> impl Iterator<Item = EntityId> + '_ {
+        self.destroy_queue.iter().copied()
     }
 
     /// The next destroyed entity whose `OnDestroy` is due (first destroyed
@@ -1054,6 +1252,15 @@ impl EntityWorld {
             .collect()
     }
 
+    /// Every entity attached to something now, ascending id (from the attach
+    /// index, each re-checked), into `out` (cleared first).
+    pub fn attached_into(&self, out: &mut Vec<EntityId>) {
+        out.clear();
+        out.extend(self.children.iter().filter(|&&(p, c)| self.get(c).is_some_and(|e| e.attachment.is_some_and(|a| a.parent == p))).map(|&(_, c)| c));
+        out.sort_unstable();
+        out.dedup();
+    }
+
     /// Whether a unit is attached to `parent` now (cargo), without
     /// collecting them.
     pub fn carries_units(&self, parent: EntityId) -> bool {
@@ -1066,6 +1273,9 @@ impl EntityWorld {
     /// (manipulators applied: sliders, aims, clips), else its rest pose.
     pub fn attach_posed(&mut self, child: EntityId, attachment: Attachment, posed: impl Fn(&Entity, u32) -> Option<FxVec3>) {
         let Some(i) = self.index(child) else { return };
+        if self.dense[i].kind == EntityKind::Unit {
+            self.unit_epoch += 1;
+        }
         self.dense[i].attachment = Some(attachment);
         if let Some(u) = self.dense[i].unit.as_deref_mut() {
             u.on_ground = false;
@@ -1085,6 +1295,9 @@ impl EntityWorld {
             bone => bone.and_then(|b| posed(p, b)).unwrap_or_else(|| p.bone_world_position(bone)),
         };
         let target = bone_at + orientation.rotate(offset);
+        if self.dense[i].kind == EntityKind::Unit {
+            self.unit_epoch += 1;
+        }
         let c = &mut self.dense[i];
         c.orientation = orientation;
         let bone = c.bone_world_position(a.self_bone);
@@ -1117,16 +1330,40 @@ impl EntityWorld {
 
     /// [`EntityWorld::follow_attachments`] onto parent bones as `posed`
     /// places them (FA's tractor claw reels its victim in on a slid bone).
+    ///
+    /// Walks the attach index, not every entity, and drops its stale pairs
+    /// (a child detached by script, or since removed), so it stays the size
+    /// of the live attachments.
     pub fn follow_attachments_posed(&mut self, posed: impl Fn(&Entity, u32) -> Option<FxVec3>) {
-        for i in 0..self.dense.len() {
-            let e = &self.dense[i];
+        if self.children.is_empty() {
+            return;
+        }
+        // The attached entities' dense indices (a child has one parent, so
+        // no repeats), sorted: id order.
+        let mut kids = std::mem::take(&mut self.follow_scratch);
+        kids.clear();
+        let mut stale = false;
+        for &(p, c) in &self.children {
+            match self.index(c) {
+                Some(i) if self.dense[i].attachment.is_some_and(|a| a.parent == p) => kids.push(i as u32),
+                _ => stale = true,
+            }
+        }
+        if stale {
+            let (slot, dense) = (&self.slot, &self.dense);
+            self.children.retain(|&(p, c)| matches!(slot.get(c as usize), Some(&i) if i != REMOVED && dense[i as usize].attachment.is_some_and(|a| a.parent == p)));
+        }
+        kids.sort_unstable();
+        for &i in &kids {
+            let e = &self.dense[i as usize];
             if e.destroyed {
                 continue;
             }
             if let Some(a) = e.attachment {
-                self.snap(i, a, &posed);
+                self.snap(i as usize, a, &posed);
             }
         }
+        self.follow_scratch = kids;
     }
 }
 
@@ -1250,6 +1487,19 @@ mod tests {
         let f = crate::engine::sim::math::from_lua;
         w.get_mut(id).unwrap().unit.as_mut().unwrap().build_skirt = (f(skirt.0), f(skirt.1), f(skirt.2), f(skirt.3));
         id
+    }
+
+    /// probe_re2_build RECT: a tank 0.55 long each way at z 336.5 shows in
+    /// thin rects anywhere over z 332..340, nowhere else.
+    #[test]
+    fn rect_queries_match_whole_four_unit_cells() {
+        let mut w = EntityWorld::default();
+        let id = w.spawn(EntityKind::Unit, BlueprintKind::Unit, String::new(), None, FxVec3::from_f64(800.5, 0.0, 336.5), FxQuat::IDENTITY);
+        w.get_mut(id).unwrap().cold.base_collision = CollisionShape::Box { center: FxVec3::default(), half: FxVec3::from_f64(0.4, 0.3, 0.55) };
+        let hits = |z: f64| !w.units_in_cells(Fx::from_num(799), Fx::from_num(z), Fx::from_num(802), Fx::from_num(z + 0.1)).is_empty();
+        assert!(!hits(331.5) && hits(332.0) && hits(339.5) && !hits(340.0));
+        let hx = |x: f64| !w.units_in_cells(Fx::from_num(x), Fx::from_num(336), Fx::from_num(x + 0.1), Fx::from_num(337)).is_empty();
+        assert!(!hx(799.5) && hx(800.0) && hx(803.5) && !hx(804.0));
     }
 
     #[test]
@@ -1495,6 +1745,183 @@ mod tests {
                 assert_eq!(w.in_shell(which, center, min_r, r), brute);
             }
         }
+    }
+
+    /// The volume index against a brute-force pass over every entity: the
+    /// live shields and script entities with a shape whose reach box
+    /// overlaps the query box are all found, in id order.
+    fn volumes_brute(w: &EntityWorld, min_x: Fx, min_z: Fx, max_x: Fx, max_z: Fx) -> Vec<EntityId> {
+        w.iter()
+            .filter(|e| matches!(e.kind, EntityKind::Shield | EntityKind::Script) && !e.destroyed)
+            .filter(|e| {
+                let shape = e.collision_shape();
+                let r = crate::engine::sim::collision::reach(&shape);
+                let p = e.position();
+                shape != CollisionShape::None && p.x + r >= min_x && p.x - r <= max_x && p.z + r >= min_z && p.z - r <= max_z
+            })
+            .map(|e| e.id)
+            .collect()
+    }
+
+    /// Every brute-force hit is in the index's answer, which is in id order
+    /// with no repeats, and nothing in it lacks a shape or is destroyed.
+    fn check_volumes(w: &EntityWorld, rng: &mut crate::engine::sim::rng::SimRng) {
+        let coord = |rng: &mut crate::engine::sim::rng::SimRng| Fx::from_num((rng.next_u64() % 1200) as i32 - 100);
+        let mut got = Vec::new();
+        for _ in 0..60 {
+            let (x, z, r) = (coord(rng), coord(rng), Fx::from_num((rng.next_u64() % 120) as i32));
+            w.volumes_in(x - r, z - r, x + r, z + r, &mut got);
+            let want = volumes_brute(w, x - r, z - r, x + r, z + r);
+            assert!(want.iter().all(|id| got.binary_search(id).is_ok()), "missed: want {want:?} got {got:?}");
+            assert!(got.windows(2).all(|p| p[0] < p[1]), "id order, no repeats");
+            assert!(got.iter().all(|&id| w.get(id).is_some_and(|e| !e.destroyed && e.collision_shape() != CollisionShape::None)));
+        }
+        let listed: Vec<EntityId> = w.volumes().map(|e| e.id).collect();
+        let all = volumes_brute(w, Fx::MIN / 2, Fx::MIN / 2, Fx::MAX / 2, Fx::MAX / 2);
+        assert_eq!(listed, all, "volumes() is every indexed entity, ascending");
+    }
+
+    /// Shields (bubbles spanning many cells) and script spheres stay
+    /// indexed through spawn, moves, shape changes (a bubble going down and
+    /// up), destroys, compaction and a save / load.
+    #[test]
+    fn volume_index_stays_in_sync() {
+        use crate::engine::sim::rng::SimRng;
+        let mut rng = SimRng::new(11);
+        let coord = |rng: &mut SimRng| Fx::from_num((rng.next_u64() % 1200) as i32 - 100);
+        let mut w = EntityWorld::default();
+        w.set_bounds(1024, 1024);
+        let mut ids = Vec::new();
+        for i in 0..120 {
+            let kind = [EntityKind::Shield, EntityKind::Script, EntityKind::Unit, EntityKind::Projectile][i % 4];
+            let p = FxVec3 { x: coord(&mut rng), y: Fx::ZERO, z: coord(&mut rng) };
+            let id = w.spawn(kind, BlueprintKind::Unit, String::new(), Some(1), p, FxQuat::IDENTITY);
+            let radius = Fx::from_num((rng.next_u64() % 90) as i32 + 1);
+            let shape = if i % 5 == 0 {
+                CollisionShape::Box { center: FxVec3::from_f64(0.0, 1.0, 2.0), half: FxVec3 { x: radius, y: radius, z: radius } }
+            } else {
+                CollisionShape::Sphere { center: FxVec3::from_f64(0.0, -1.75, 0.0), radius }
+            };
+            w.set_collision_override(id, Some(shape));
+            ids.push(id);
+        }
+        // Spawned without a shape: not listed.
+        w.spawn(EntityKind::Shield, BlueprintKind::Unit, String::new(), None, FxVec3::default(), FxQuat::IDENTITY);
+        check_volumes(&w, &mut rng);
+        for round in 0..6 {
+            for (i, &id) in ids.iter().enumerate() {
+                match (i + round) % 7 {
+                    0 | 1 => w.set_position(id, FxVec3 { x: coord(&mut rng), y: Fx::ZERO, z: coord(&mut rng) }),
+                    // Small steps (a bubble on a moving unit).
+                    2 => {
+                        let p = w.get(id).unwrap().position();
+                        w.set_transform(id, p + FxVec3::from_f64(7.0, 0.0, -5.0), FxQuat::from_heading(Fx::from_num(round)).0);
+                    }
+                    // Down and back up.
+                    3 => w.set_collision_override(id, Some(CollisionShape::None)),
+                    4 => w.set_collision_override(id, None),
+                    5 => w.set_base_collision(id, CollisionShape::Sphere { center: FxVec3::default(), radius: Fx::from_num(40) }),
+                    _ => {}
+                }
+            }
+            check_volumes(&w, &mut rng);
+        }
+        for &id in ids.iter().step_by(3) {
+            w.destroy(id);
+        }
+        check_volumes(&w, &mut rng);
+        w.finish_destroys();
+        assert!(!w.compact_now().is_empty());
+        check_volumes(&w, &mut rng);
+        // Attached bubbles follow their parent and stay listed where they are.
+        let parent = ids[1];
+        let shield = ids[4];
+        w.attach(shield, Attachment { parent, parent_bone: None, self_bone: None });
+        w.set_position(parent, FxVec3::from_f64(900.0, 0.0, 30.0));
+        w.follow_attachments();
+        check_volumes(&w, &mut rng);
+        // A save and load keeps the index.
+        let bytes = postcard::to_allocvec(&w).unwrap();
+        let mut loaded: EntityWorld = postcard::from_bytes(&bytes).unwrap();
+        check_volumes(&loaded, &mut rng);
+        let id = ids[2];
+        loaded.set_position(id, FxVec3::from_f64(10.0, 0.0, 10.0));
+        check_volumes(&loaded, &mut rng);
+        // Re-sizing the grids re-lists everything.
+        loaded.set_bounds(2048, 2048);
+        check_volumes(&loaded, &mut rng);
+    }
+
+    /// Each army's unit list matches filtering every entity, through
+    /// spawns (props and armyless entities mixed in), destroys, compaction
+    /// and a save / load.
+    #[test]
+    fn army_unit_lists_stay_in_sync() {
+        let mut w = EntityWorld::default();
+        let mut ids = Vec::new();
+        for i in 0..200u32 {
+            let (kind, army) = match i % 5 {
+                0 => (EntityKind::Prop, None),
+                1 => (EntityKind::Projectile, Some(i % 3)),
+                _ => (EntityKind::Unit, Some(i % 7)),
+            };
+            ids.push(w.spawn(kind, BlueprintKind::Unit, String::new(), army, FxVec3::default(), FxQuat::IDENTITY));
+        }
+        let check = |w: &EntityWorld| {
+            for army in 0..9 {
+                let got: Vec<EntityId> = w.units_of(army).map(|e| e.id).collect();
+                let want: Vec<EntityId> = w.iter().filter(|e| e.kind == EntityKind::Unit && e.army == Some(army)).map(|e| e.id).collect();
+                assert_eq!(got, want, "army {army}");
+            }
+        };
+        check(&w);
+        for &id in ids.iter().step_by(4) {
+            w.destroy(id);
+        }
+        check(&w);
+        w.finish_destroys();
+        assert!(!w.compact_now().is_empty());
+        check(&w);
+        w.spawn(EntityKind::Unit, BlueprintKind::Unit, String::new(), Some(12), FxVec3::default(), FxQuat::IDENTITY);
+        check(&w);
+        let loaded: EntityWorld = postcard::from_bytes(&postcard::to_allocvec(&w).unwrap()).unwrap();
+        check(&loaded);
+        assert_eq!(loaded.units_of(12).count(), 1);
+    }
+
+    /// The attach index lists what's attached now, in id order, and the
+    /// follow pass drops pairs a script detach or a removal left behind.
+    #[test]
+    fn attach_index_lists_live_attachments() {
+        let mut w = EntityWorld::default();
+        let (p, q) = (spawn(&mut w), spawn(&mut w));
+        let kids: Vec<EntityId> = (0..6).map(|_| spawn(&mut w)).collect();
+        let to = |parent| Attachment { parent, parent_bone: None, self_bone: None };
+        for (i, &k) in kids.iter().enumerate() {
+            w.attach(k, to(if i % 2 == 0 { p } else { q }));
+        }
+        let mut out = Vec::new();
+        w.attached_into(&mut out);
+        assert_eq!(out, kids);
+        // A script detach, a re-attach elsewhere, a destroyed child removed.
+        w.get_mut(kids[0]).unwrap().attachment = None;
+        w.attach(kids[2], to(q));
+        w.destroy(kids[5]);
+        w.finish_destroys();
+        w.compact_now();
+        w.attached_into(&mut out);
+        assert_eq!(out, vec![kids[1], kids[2], kids[3], kids[4]]);
+        assert_eq!(w.attached_to(p), vec![kids[4]]);
+        assert_eq!(w.attached_to(q), vec![kids[1], kids[2], kids[3]]);
+        // Following moves the live children and prunes the stale pairs.
+        w.set_position(p, FxVec3::from_f64(5.0, 0.0, 5.0));
+        w.follow_attachments();
+        assert_eq!(w.children.len(), 4, "stale pairs dropped");
+        assert_eq!(w.get(kids[4]).unwrap().position(), FxVec3::from_f64(5.0, 0.0, 5.0));
+        assert_eq!(w.get(kids[0]).unwrap().position(), FxVec3::default(), "detached: stays");
+        let loaded: EntityWorld = postcard::from_bytes(&postcard::to_allocvec(&w).unwrap()).unwrap();
+        loaded.attached_into(&mut out);
+        assert_eq!(out, vec![kids[1], kids[2], kids[3], kids[4]]);
     }
 
     #[test]

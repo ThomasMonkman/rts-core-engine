@@ -433,11 +433,24 @@ fn special_file_info(lua: &Lua, profile: &str, name: &str, kind: &str) -> LuaRes
     Ok(Some(Shaped::new(t)))
 }
 
+/// Moho's front-end data (`GetFrontEndData` / `SetFrontEndData`): kept by
+/// the engine, not a Lua state, so it outlives the interface that set it
+/// (FAF's campaign briefing, the replay a game restarts from). Interface
+/// only: the sim never sees it.
+static FRONT_END_DATA: std::sync::Mutex<BTreeMap<String, crate::engine::sim::lua_data::LuaData>> = std::sync::Mutex::new(BTreeMap::new());
+
+fn front_end_data() -> std::sync::MutexGuard<'static, BTreeMap<String, crate::engine::sim::lua_data::LuaData>> {
+    FRONT_END_DATA.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// moho `LaunchReplaySession(filename)`: from the main menu, leaves the
 /// recording for the renderer to start (`__engine_launch_replay`, taken by
 /// `UserVm::take_replay_request`) and returns true; false (FAF says it
 /// can't launch it) for a file that isn't one of our recordings with a
 /// header, or during a game (a session can't be swapped for another yet).
+/// Moho keeps the recording it launched as front-end data
+/// `replay_filename`, which FAF's restart reads (`tabs.lua`
+/// `RestartReplay`, `misckeyactions.lua` `RestartSessionOrReplay`).
 fn launch_replay_session(lua: &Lua, filename: &str) -> LuaResult<bool> {
     if lua.globals().raw_get::<Option<String>>("__engine_ui_state")?.as_deref() != Some("frontend") {
         tracing::warn!(target: "lua", filename, "LaunchReplaySession: only from the main menu for now");
@@ -461,6 +474,7 @@ fn launch_replay_session(lua: &Lua, filename: &str) -> LuaResult<bool> {
         return Ok(false);
     }
     lua.globals().raw_set("__engine_launch_replay", path.to_string_lossy())?;
+    front_end_data().insert("replay_filename".into(), crate::engine::sim::lua_data::LuaData::string(filename));
     Ok(true)
 }
 
@@ -645,6 +659,89 @@ fn unit_command_data(lua: &Lua, units: &[Obj<moho::UserUnit>]) -> LuaResult<(Vec
     Ok((orders.into_iter().collect(), toggles.into_iter().collect(), EntityCategory(buildable.unwrap_or(empty))))
 }
 
+/// `loadstring`, on its own so it can be tested without the whole layer.
+fn register_loadstring(lua: &Lua) -> LuaResult<()> {
+    lua_fn!(lua, global,
+        /// Compiles `code` (SupCom Lua, translated as every game script is)
+        /// into a function, or returns nil and the compile error. Text only:
+        /// moho also loads its own bytecode, which Luau can't. FAF removes
+        /// it from the sim (`SimHooks.lua`); interface mods use it.
+        loadstring = |lua, (code, name): (LuaString, Option<String>)| {
+            let code = code.to_string_lossy();
+            let translated = crate::engine::lua_translation::translate(&code);
+            match lua.load(translated).set_name(name.unwrap_or(code)).set_mode(mlua::ChunkMode::Text).into_function() {
+                Ok(f) => Ok((Some(f), None)),
+                Err(e) => Ok((None, Some(e.to_string()))),
+            }
+        })
+}
+
+/// `SetFocusArmy(index)` (the user function and the console command, which
+/// FAF's score board sends): view the game as army `index` (0-based; -1 every
+/// army). As moho's `CWldSession::RequestFocusArmy` (MohoEngine.dll
+/// 0x10458d20): an index outside -1 .. armies - 1 is refused; then
+/// `ValidateFocusArmyRequest` (0x10458da0) allows it when the session is a
+/// replay (no command source), cheats are on, the army is one this client
+/// commands, the game is over, or this client commands no army still in the
+/// game (an observer, or a defeated player; moho also wants the session to
+/// allow observers, which ours always do). So a player in a live game keeps
+/// their own army's view.
+///
+/// It's the view's alone: the sim, its Lua and the command stream don't
+/// hear of it (moho tells its sim driver, whose `NoteFocusArmyChanged` only
+/// fills the local `Sync`). The next `Sync` the interface gets carries
+/// `FocusArmyChanged` (`UserVm::sync`), as moho's would, so FAF's panels
+/// refresh. True if the focus is now `index`.
+pub fn request_focus_army(lua: &Lua, index: i64) -> LuaResult<bool> {
+    let g = lua.globals();
+    let armies = g.raw_get::<Option<LuaTable>>("__engine_armies")?;
+    let count = armies.as_ref().map_or(0, |a| a.raw_len() as i64);
+    if index < -1 || index >= count {
+        tracing::warn!(target: "lua", index, count, "SetFocusArmy: no such army");
+        return Ok(false);
+    }
+    let new = if index < 0 { -1 } else { index + 1 };
+    let old = lua.named_registry_value::<Option<i64>>("user.focus_army")?.unwrap_or(-1);
+    let flag = |name: &str| -> LuaResult<bool> { Ok(g.raw_get::<Option<bool>>(name)?.unwrap_or(false)) };
+    let cheats = || -> LuaResult<bool> {
+        let Some(session) = g.raw_get::<Option<LuaTable>>("__engine_session")? else { return Ok(false) };
+        let Some(options) = session.raw_get::<Option<LuaTable>>("Options")? else { return Ok(false) };
+        Ok(match options.raw_get::<LuaValue>("CheatsEnabled")? {
+            LuaValue::Boolean(b) => b,
+            LuaValue::String(s) => s.to_str().is_ok_and(|s| s.eq_ignore_ascii_case("true")),
+            _ => false,
+        })
+    };
+    let own = lua.named_registry_value::<Option<i64>>("user.own_army")?.unwrap_or(-1);
+    let own_in_game = || -> LuaResult<bool> {
+        if own < 1 {
+            return Ok(false);
+        }
+        let army = armies.as_ref().map(|a| a.raw_get::<Option<LuaTable>>(own)).transpose()?.flatten();
+        Ok(army.is_some_and(|a| !a.raw_get::<Option<bool>>("outOfGame").ok().flatten().unwrap_or(false)))
+    };
+    let allowed = flag("__engine_replay")? || cheats()? || (new >= 1 && new == own) || flag("__engine_game_over")? || !own_in_game()?;
+    if !allowed {
+        tracing::info!(target: "lua", index, "SetFocusArmy: refused (a player in a live game keeps their army's view)");
+        return Ok(false);
+    }
+    if new != old {
+        lua.set_named_registry_value("user.focus_army", new)?;
+        // The first change since the last Sync keeps its `old`.
+        let pending = match lua.named_registry_value::<Option<LuaTable>>("user.focus_changed")? {
+            Some(t) => t,
+            None => {
+                let t = lua.create_table()?;
+                t.raw_set("old", old)?;
+                lua.set_named_registry_value("user.focus_changed", &t)?;
+                t
+            }
+        };
+        pending.raw_set("new", new)?;
+    }
+    Ok(true)
+}
+
 pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
         /// The selection's orders, toggles and buildable categories
@@ -665,6 +762,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
         /// Same clock as `CurrentTime`.
         GetSystemTimeSeconds = |lua, ()| Ok(lua.named_registry_value::<Option<f64>>("user.time")?.unwrap_or(0.0)))?;
+    register_loadstring(lua)?;
+    lua_fn!(lua, global,
+        /// Seconds of the `CurrentTime` clock since `origin` (FAF's binary
+        /// patch, for timings that would lose precision as one big float).
+        GetTimeForProfile = |lua, origin: Option<f64>| Ok(lua.named_registry_value::<Option<f64>>("user.time")?.unwrap_or(0.0) - origin.unwrap_or(0.0)))?;
     lua_fn!(lua, global,
         /// Wall-clock seconds since the Unix epoch.
         GetSystemTime = |_, ()| Ok(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())))?;
@@ -724,6 +826,23 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_fn!(lua, global, LaunchReplaySession = |lua, filename: String| launch_replay_session(lua, &filename))?;
+    lua_fn!(lua, global,
+        /// A copy of what `SetFrontEndData` kept under `key` (nil if nothing).
+        GetFrontEndData = |lua, key: String| match front_end_data().get(&key) {
+            Some(data) => data.to_lua(lua),
+            None => Ok(LuaNil),
+        })?;
+    lua_fn!(lua, global,
+        /// Keeps a copy of `data` under `key` for the rest of the program,
+        /// across the front end's and each game's interface (nil forgets it).
+        SetFrontEndData = |_, (key, data): (String, LuaValue)| {
+            let mut all = front_end_data();
+            match data {
+                LuaNil => all.remove(&key),
+                data => all.insert(key, crate::engine::sim::lua_data::LuaData::from_lua(&data)),
+            };
+            Ok(())
+        })?;
     lua_fn!(lua, global,
         /// Saved games aren't supported: every load fails as moho's does for a
         /// file it can't open, which FAF reports in its own dialog.
@@ -790,8 +909,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// The army the player sees as, 1-based (`--player`, else observer: -1).
         GetFocusArmy = |lua, ()| lua.named_registry_value::<i64>("user.focus_army"))?;
     lua_fn!(lua, global,
-        /// `index` is 0-based (-1: observer); `GetFocusArmy` is 1-based.
-        SetFocusArmy = |lua, a: i64| lua.set_named_registry_value("user.focus_army", if a < 0 { -1 } else { a + 1 }))?;
+        /// `index` is 0-based (-1: observer); `GetFocusArmy` is 1-based. A
+        /// request, allowed only as moho allows it ([`request_focus_army`]).
+        SetFocusArmy = |lua, a: i64| request_focus_army(lua, a).map(|_| ()))?;
     crate::lua_api::script::exec(
         lua,
         r#"
@@ -1157,12 +1277,22 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         function ExitApplication() rawset(_G, '__engine_exit_request', true) end
         -- Session control: the engine keeps `__engine_paused` current; pause
         -- requests are taken by the renderer (`UserVm::take_pause_request`).
+        -- A request not yet taken shows in `SessionIsPaused` at once, as the
+        -- real game's does in the same frame (dev/probes probe_ui_globals,
+        -- probe_re2_ui).
         rawset(_G, '__engine_paused', false)
-        function SessionIsPaused() return rawget(_G, '__engine_paused') end
+        function SessionIsPaused()
+            local asked = rawget(_G, '__engine_pause_request')
+            if asked ~= nil then return asked end
+            return rawget(_G, '__engine_paused')
+        end
         function SessionRequestPause() rawset(_G, '__engine_pause_request', true) end
         function SessionResume() rawset(_G, '__engine_pause_request', false) end
-        function SessionIsBeingRecorded() return false end
-        function SessionIsObservingAllowed() return true end
+        -- Every game played in the window is recorded (a replay being
+        -- watched isn't); observing reads false, as in the real game's
+        -- single-player session (`probe_api_spot` ui.session3).
+        function SessionIsBeingRecorded() return not SessionIsReplay() end
+        function SessionIsObservingAllowed() return false end
         -- In-game chat (`net::core`): `SessionSendChatMessage([clients,]
         -- message)`; received messages go to FAF's gamemain.ReceiveChat.
         -- FAF's disconnect dialog's Eject button (a vote; `net::lockstep`).
@@ -1225,8 +1355,6 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             if on == nil then return true end
             return on
         end
-        function GetFrontEndData(key) return nil end
-        function SetFrontEndData(key, data) end
         -- Unit toggles as the panels query them (defaults until they're
         -- bridged to the sim: return fire, not paused, script bits off).
         -- Unit toggles and lists over the units' details (selected units).
@@ -1292,7 +1420,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         -- Unit settings (the order panel's toggles), sent like orders.
         local fireStates = { ReturnFire = 0, HoldFire = 1, HoldGround = 2 }
         function SetFireState(units, state) table.insert(orders, { units = units, toggle = 'fire', value = fireStates[state] or tonumber(state) or 0 }) end
-        ToggleFireState = SetFireState
+        -- `state` is the units' current fire state (FAF's cycle hotkey passes
+        -- `GetFireState`, -1 for a mix): they move on to the next of the
+        -- three, as the sim's `Unit:ToggleFireState` (probe_ui_units C).
+        function ToggleFireState(units, state)
+            local current = fireStates[state] or tonumber(state) or -1
+            table.insert(orders, { units = units, toggle = 'fire', value = math.mod(current + 1, 3) })
+        end
         function SetPaused(units, paused) table.insert(orders, { units = units, toggle = 'pause', value = paused and 1 or 0 }) end
         function SetPausedOfUnit(unit, paused) SetPaused({ unit }, paused) end
         -- `state` is the bit's current state: it flips.
@@ -1518,5 +1652,23 @@ mod special_file_tests {
         assert!(launch_replay_session(&lua, &ours).unwrap());
         assert_eq!(lua.globals().raw_get::<String>("__engine_launch_replay").unwrap(), ours);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod loadstring_tests {
+    use super::*;
+
+    /// The interface's `loadstring` takes SupCom Lua and returns nil and
+    /// the message for code that doesn't compile, as in the real game.
+    #[test]
+    fn compiles_supcom_lua() {
+        let lua = Lua::new();
+        register_loadstring(&lua).unwrap();
+        let r: (i64, bool, bool, i64) = lua
+            .load("local f = loadstring('return probe_x, 1 != 2') setfenv(f, { probe_x = 7 }) local x, ne = f() local bad, err = loadstring('return +') return x, ne, bad == nil and type(err) == 'string', loadstring(5) == nil and 1 or 0")
+            .eval()
+            .unwrap();
+        assert_eq!(r, (7, true, true, 1));
     }
 }

@@ -1014,13 +1014,14 @@ fn update_ui(s: &mut RenderState, dt: f32) {
                 cam.revert_rotation();
             }
             if r.reset {
-                // The default view faces north at the zoom's pitch.
+                // The default view faces north over the map's middle from
+                // this camera's farthest zoom (its `SetMaxZoomMult` applied,
+                // so straight down), as moho's (`probe_ui_controls` cam:
+                // zoom = `GetMaxZoom()`, pitch 1.57).
                 cam.clear_rotation();
                 if let Some((w, h)) = s.world.map_size {
-                    let mut fresh = crate::render::camera::Camera::new(w, h);
-                    fresh.aspect = cam.aspect;
-                    fresh.fit_map(w, h);
-                    (x, z, zoom) = (fresh.target.x, fresh.target.z, fresh.max_zoom);
+                    let fresh = crate::render::camera::Camera::new(w, h);
+                    (x, z, zoom) = (fresh.target.x, fresh.target.z, cam.max_zoom);
                 }
             }
             if let Some(f) = r.focus {
@@ -1133,8 +1134,7 @@ fn update_ui(s: &mut RenderState, dt: f32) {
     // really runs at (capped by the slowest machine, or measured flat out),
     // both as moho steps (FAF's clock shows "+asked / +actual", and its
     // `OnBeat` reads `GetSimRate() > 0` as sped up).
-    use rts_core_engine::engine::snapshot::SimControl;
-    let (asked, actual) = (SimControl::step_of(s.control.shown()), SimControl::step_of(s.control.effective()));
+    let (asked, actual) = s.control.interface_steps();
     let _ = vm.set_game_speed(asked, actual as f32, s.control.changed_by());
     if let Ok(Some(p)) = vm.take_pause_request() {
         s.control.set_paused(p);
@@ -1214,6 +1214,9 @@ fn update_ui(s: &mut RenderState, dt: f32) {
             tracing::warn!("UI focus army: {e}");
         }
     }
+    // An observer seeing the game as one army (the score board's
+    // `SetFocusArmy`) commands nothing.
+    s.player.view_only = s.player.player.is_none() && vm.focus_army().is_some();
     // Alliances changed in the sim (FAF's SetAlliance: teams, sharing).
     if let Some(a) = &s.world.alliances
         && !s.ui_alliances.as_ref().is_some_and(|u| std::sync::Arc::ptr_eq(u, a)) {
@@ -1396,7 +1399,7 @@ fn update_ui(s: &mut RenderState, dt: f32) {
                 .collect(),
         );
         vm.set_busy(s.world.latest.as_ref().map_or(&[][..], |l| l.busy.as_slice()));
-        vm.set_unselectable(s.world.entities().iter().filter(|e| e.attached || e.in_builder).map(|e| e.id).collect());
+        vm.set_unselectable(s.world.entities().iter().filter(|e| e.attached || e.in_builder || s.world.unselectable(e)).map(|e| e.id).collect());
         if let Some(d) = &s.world.deposits {
             vm.set_deposits(d.clone());
         }

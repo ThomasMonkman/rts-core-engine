@@ -89,7 +89,8 @@ pub struct AimArc {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WeaponTarget {
     Entity(EntityId),
-    /// Attack-ground point (`SetTargetGround`); never dropped automatically.
+    /// Ground point: an attack-ground order's (kept while the order lasts),
+    /// or a script's `SetTargetGround` (dropped at the next target scan).
     Ground(FxVec3),
 }
 
@@ -319,6 +320,10 @@ pub struct WeaponState {
     /// The current target came from the unit's attack order (dropped when
     /// the order stops forcing it).
     pub target_from_order: bool,
+    /// The script set a ground point (`SetTargetGround`) since the last
+    /// update: it survives that update's target scan.
+    #[serde(default)]
+    pub ground_set: bool,
     /// The unit's attack-order target as this weapon last saw it: a new one
     /// resets the weapon's target ([`advance_target`]).
     pub order_seen: Option<WeaponTarget>,
@@ -474,6 +479,7 @@ impl WeaponState {
             collide_friendly: false,
             firing_randomness: Fx::ZERO,
             target_from_order: false,
+            ground_set: false,
             order_seen: None,
             damage: None,
         }
@@ -1218,6 +1224,10 @@ fn advance_target(
     // 0x101c5e40, 0x102afd20; FAF probe probe_aimtiming: a tank keeps its
     // target and turns after it as it moves).
     let enabled = w.enabled;
+    // The stun ended this tick: the weapon fires at once on the target the
+    // stun took from it (`probe_re3_wpn_a` `stun.*`: real shots land on the
+    // tick `IsStunned` turns false).
+    let stun_ended = tick > 0 && data.stunned_until == tick;
     // Whether this update gave the weapon a new target: it fires on it from
     // the next update at the earliest (FAF probe probe_firsttick).
     let mut took_target = false;
@@ -1240,7 +1250,10 @@ fn advance_target(
     // Blueprint target restrictions.
     let allowed = |cat: Option<u32>| restrictions_allow(&w.only_allow, &w.disallow, cat);
     let water_targets = (w.above_water_targets_only, w.below_water_targets_only);
-    let targetable = |e: &crate::engine::sim::entity::Entity| {
+    // A target it may take, leaving intel aside. `ordered`: a target an attack
+    // order names. `SetDoNotTarget` keeps a unit out of target searches only:
+    // an attack order on it keeps firing (dev/probes probe_unit_orders O5).
+    let takes_as = |e: &crate::engine::sim::entity::Entity, ordered: bool| {
         e.kind == EntityKind::Unit
             && !w.targets_projectiles
             && !e.destroyed
@@ -1250,14 +1263,24 @@ fn advance_target(
             && hostile(e.army)
             && allowed(e.category_index)
             && e.unit.as_deref().is_some_and(|d| {
-                !d.do_not_target
+                (ordered || !d.do_not_target)
                     && w.fire_target_layers.contains(d.layer.mask())
                     && seabed_target_ok(water_targets, e, d, water)
-                    && match (intel, army) {
-                        (Some(g), Some(a)) => g.detect(a, e).any(),
-                        _ => true,
-                    }
             })
+    };
+    let takes = |e: &crate::engine::sim::entity::Entity| takes_as(e, true);
+    // One it may take from a search: its army must detect it too. An attack
+    // order's target needs no intel (`probe_firsttick`: a target ordered at
+    // tick 0 is taken at beat 2, before the army's first sighting at 11;
+    // `probe_re_wpn` `air.wpn`: a uel0205 ordered onto a gunship 24 away,
+    // beyond its vision of 20 and with nothing else of its army near, fires
+    // within a second).
+    let targetable = |e: &crate::engine::sim::entity::Entity| {
+        takes_as(e, false)
+            && match (intel, army) {
+                (Some(g), Some(a)) => g.detect(a, e).any(),
+                _ => true,
+            }
     };
 
     // The turret's turning limits (whether it turns all the way round).
@@ -1393,7 +1416,7 @@ fn advance_target(
         } else {
             world.get(t).is_some_and(|e| {
                 let d = dist2_xz(e.position(), at);
-                targetable(e) && d <= reach.saturating_mul(reach) && (w.target_from_order || accepts(range_at(e.position(), d)))
+                (if w.target_from_order { takes(e) } else { targetable(e) }) && d <= reach.saturating_mul(reach) && (w.target_from_order || accepts(range_at(e.position(), d)))
             })
         };
         if !keep {
@@ -1410,7 +1433,7 @@ fn advance_target(
     let order = ordered.get(&w.unit);
     let overcharging = order.is_some_and(|o| o.overcharge == Some(w.index));
     let forced = order.filter(|o| enabled && !order_reset && o.overcharge.map_or(o.silo == w.silo, |i| i == w.index) && from_primary.is_none()).map(|o| o.target).filter(|t| match *t {
-        WeaponTarget::Entity(id) => world.get(id).is_some_and(|e| targetable(e) && dist2_xz(e.position(), at) <= reach.saturating_mul(reach)),
+        WeaponTarget::Entity(id) => world.get(id).is_some_and(|e| takes(e) && dist2_xz(e.position(), at) <= reach.saturating_mul(reach)),
         WeaponTarget::Ground(p) => !w.cannot_attack_ground && dist2_xz(p, at) <= reach.saturating_mul(reach),
     });
     if enabled && w.target_from_order && w.target.is_some() && forced != w.target && from_primary.is_none() {
@@ -1455,7 +1478,23 @@ fn advance_target(
     // `AlwaysRecheckTarget` weapons search with a target too (not one their
     // order forces, nor the primary weapon's); finding nothing, they keep
     // it. (FAF's blueprint pass turns it off for anti-missile weapons.)
-    let rechecks = w.always_recheck && !w.target_from_order && from_primary.is_none() && !w.targets_projectiles && w.target.is_some();
+    // A script's ground point (`SetTargetGround`, not an attack order's)
+    // lasts only until the weapon's next target scan, which puts an enemy
+    // back or leaves it with no target (`probe_re3_wpn_c`: a point set at
+    // T40 is gone at T42 and never fired on). A point the script set again
+    // since the last update survives the scan: re-set every tick, it's
+    // fired on at every reload (`ueb2101` every 3 ticks through scans every
+    // 4), as FAF's carpet bomb does before every bomb. Dropped quietly:
+    // setting it ran no `OnLostTarget` for the target it replaced either.
+    let ground_set = std::mem::take(&mut w.ground_set);
+    if enabled && !order_reset && !w.target_from_order && !w.manual_fire && matches!(w.target, Some(WeaponTarget::Ground(_))) {
+        if w.check_countdown > 0 {
+            w.check_countdown -= 1;
+        } else if !ground_set {
+            w.target = None;
+        }
+    }
+    let rechecks = w.always_recheck && !w.target_from_order && from_primary.is_none() && !w.targets_projectiles && matches!(w.target, Some(WeaponTarget::Entity(_)));
     // Hold fire (the unit's fire state 1): no search, and the target task
     // drops the weapon's target (MohoEngine.dll 0x101c6324: with no attack
     // order's target it sets an empty target, 0x101c65ec -> `SetTarget`
@@ -1892,7 +1931,7 @@ fn advance_target(
     // salvo was lost (-40% damage).
     static BUSY: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("Busy").expect("state"));
     let busy = !overcharging && data.states.contains(*BUSY);
-    if enabled && !took_target && in_range && w.on_target && water_ok && ready && !busy {
+    if enabled && (!took_target || stun_ended) && in_range && w.on_target && water_ok && ready && !busy {
         w.fired_at_target = true;
         w.fire_clock = w.reload_ticks();
         push(&mut events, WeaponEventKind::Fire);
@@ -2216,6 +2255,31 @@ mod tests {
         assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "seen: targeted");
     }
 
+    /// An attack order's target needs no intel (FAF probes `probe_firsttick`,
+    /// `probe_re_wpn` `air.wpn`).
+    #[test]
+    fn ordered_target_needs_no_intel() {
+        use crate::engine::sim::vision::IntelGrids;
+        let mut w = EntityWorld::default();
+        w.set_bounds(256, 256);
+        let me = unit(&mut w, 1, 100.0, 100.0);
+        let enemy = unit(&mut w, 2, 110.0, 100.0);
+        let mut ws = Weapons::default();
+        gun(&mut ws, me);
+        let mut grids = IntelGrids::new(256, 256);
+        grids.set_alliances(2, |_, _| false);
+        grids.update(&w, |_| None);
+        let mut out = Vec::new();
+        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(enemy), silo: None, overcharge: None });
+        step(&mut ws, &w, None, Some(&grids), &mut out);
+        assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "blind, ordered: taken");
+        step(&mut ws, &w, None, Some(&grids), &mut out);
+        assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "and kept");
+        ws.ordered.clear();
+        step(&mut ws, &w, None, Some(&grids), &mut out);
+        assert!(ws.get(me, 1).unwrap().target.is_none(), "the order gone, dropped");
+    }
+
     /// On hold fire a weapon searches for nothing (real game: `probe_sight`
     /// observers on hold fire never got a target), but takes an ordered
     /// target; off hold fire it searches at once.
@@ -2416,6 +2480,67 @@ mod tests {
             step(&mut ws, &w, None, None, &mut out);
         }
         assert_eq!(out.iter().map(|e| e.kind).collect::<Vec<_>>(), vec![WeaponEventKind::LostTarget], "a dying unit drops its target and never fires");
+    }
+
+    /// A script's `SetTargetGround` point lasts until the next target scan,
+    /// which puts the enemy back (`probe_re3_wpn_c`), unless the script set
+    /// it again since the last update.
+    #[test]
+    fn script_ground_target_lasts_until_the_next_scan() {
+        let mut w = EntityWorld::default();
+        let me = unit(&mut w, 1, 0.0, 0.0);
+        let enemy = unit(&mut w, 2, 5.0, 0.0);
+        let mut ws = Weapons::default();
+        gun(&mut ws, me);
+        ws.get_mut(me, 1).target_check_ticks = 5;
+        let mut out = Vec::new();
+        step(&mut ws, &w, None, None, &mut out);
+        assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)));
+        let point = WeaponTarget::Ground(FxVec3::from_f64(0.0, 0.0, 10.0));
+        // As `SetTargetGround`: once, then the scan 4 updates on.
+        let s = ws.get_mut(me, 1);
+        (s.target, s.target_from_order, s.ground_set) = (Some(point), false, true);
+        s.check_countdown = 3;
+        let mut held = 0;
+        while ws.get(me, 1).unwrap().target == Some(point) {
+            out.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            held += 1;
+            assert!(held < 10, "never dropped");
+        }
+        assert_eq!(held, 4, "dropped at the scan");
+        assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "the scan puts the enemy back");
+        assert!(!out.iter().any(|e| e.kind == WeaponEventKind::LostTarget), "dropped quietly");
+        // Set again before every update: kept through the scans.
+        for _ in 0..20 {
+            let s = ws.get_mut(me, 1);
+            (s.target, s.ground_set) = (Some(point), true);
+            step(&mut ws, &w, None, None, &mut out);
+            assert_eq!(ws.get(me, 1).unwrap().target, Some(point));
+        }
+    }
+
+    /// A stunned weapon holds fire, and fires on the tick its stun ends
+    /// (`probe_re3_wpn_a` `stun.*`), not the tick after.
+    #[test]
+    fn fires_on_the_tick_its_stun_ends() {
+        let mut w = EntityWorld::default();
+        let me = unit(&mut w, 1, 0.0, 0.0);
+        let _enemy = unit(&mut w, 2, 0.0, 5.0);
+        let mut ws = Weapons::default();
+        gun(&mut ws, me);
+        let mut out = Vec::new();
+        w.get_mut(me).unwrap().unit.as_mut().unwrap().stunned_until = 20;
+        let mut fired = Vec::new();
+        for tick in 1..=30 {
+            ws.tick = tick;
+            out.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            if out.iter().any(|e| e.kind == WeaponEventKind::Fire) {
+                fired.push(tick);
+            }
+        }
+        assert_eq!(fired, vec![20, 30], "first shot as the stun ends, then every reload");
     }
 
     #[test]

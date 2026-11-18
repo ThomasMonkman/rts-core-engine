@@ -125,8 +125,9 @@ pub type Icon = (u32, [f32; 3], u32, u32, IconKind, f32);
 
 /// How an icon draws: at the unit, in its army's colour (`Full`); an
 /// unidentified radar / sonar contact (`Blip`: a generic shape, grey); or
-/// a scouted structure now out of sight (`Remembered`: its own icon
-/// greyed; the mesh keeps its last-seen look, darkened by the fog).
+/// a scouted structure now out of sight (`Remembered`: its own icon in its
+/// army's colour, as the real game draws it after radar loss; the mesh
+/// keeps its last-seen look, darkened by the fog).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IconKind {
     Full,
@@ -819,8 +820,8 @@ impl Stage {
                 What::Skip => {}
                 // A blip: its generic shape, grey, at any zoom. The icon
                 // standing alone (past the mesh's last LOD cutoff, or a
-                // remembered scouted structure): its own icon, greyed for
-                // the remembered structure, full colour otherwise.
+                // remembered scouted structure): its own icon in its army's
+                // colour.
                 What::Blip => {
                     for icons in &mut self.icons {
                         icons.push((e.id, e.position, e.army, e.blueprint, IconKind::Blip, 1.0));
@@ -863,7 +864,7 @@ impl Stage {
             }
             for (icons, &alpha) in self.icons.iter_mut().zip(&p.icons) {
                 if alpha != NO_ICON {
-                    // A remembered structure's icon stays greyed.
+                    // A remembered structure keeps its icon (army colour).
                     let kind = if e.sighting == crate::engine::snapshot::Sighting::Remembered { IconKind::Remembered } else { IconKind::Full };
                     icons.push((e.id, e.position, e.army, e.blueprint, kind, alpha));
                 }

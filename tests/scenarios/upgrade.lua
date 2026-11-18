@@ -20,6 +20,16 @@ ForkThread(function()
     local full = CreateUnitHPR('ueb1103', 'ARMY_1', 400, ground(400, 600), 600, 0, 0, 0)
     local cancel = CreateUnitHPR('ueb1103', 'ARMY_1', 420, ground(420, 600), 600, 0, 0, 0)
     local kill = CreateUnitHPR('ueb1103', 'ARMY_1', 440, ground(440, 600), 600, 0, 0, 0)
+    -- The upgrade and the structure it upgrades never hear of each other
+    -- as neighbours (dev/probes probe_unit_build G4).
+    local paired = {}
+    for _, cb in { 'OnAdjacentTo', 'OnNotAdjacentTo' } do
+        local base = full[cb]
+        full[cb] = function(self, other, ...)
+            if other and other.UnitId == 'ueb1202' then table.insert(paired, cb) end
+            return base(self, other, unpack(arg))
+        end
+    end
     WaitTicks(5)
     IssueUpgrade({full}, 'ueb1202')
     IssueUpgrade({cancel}, 'ueb1202')
@@ -49,6 +59,7 @@ ForkThread(function()
     check(full:BeenDestroyed(), 'the old T1 is removed once the upgrade completes')
     local t2 = t2s()
     check(table.getn(t2) == 1 and t2[1]:GetFractionComplete() == 1, 'one finished T2 extractor')
+    check(table.getn(paired) == 0, 'no adjacency callbacks between the T1 and its T2: ' .. table.concat(paired, ','))
     note('upgrade done at tick ' .. GetGameTick())
     done()
 end)

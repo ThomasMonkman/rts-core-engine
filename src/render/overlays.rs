@@ -361,7 +361,7 @@ pub fn icon_items(scene: &Sources, cache: &mut IconCache) -> (Vec<rts_core_engin
     let vfs = scene.scene.vfs().cloned();
     // Units (seen, or identified on radar: army colour); blips (a plain
     // contact shape, grey) and remembered structures (their own icon,
-    // grey); then the enemy jammers' fake contacts (no entity: the
+    // army colour); then the enemy jammers' fake contacts (no entity: the
     // jammer's contact shape).
     let fakes = scene.scene.latest.as_ref().map(|l| l.fake_blips.clone()).unwrap_or_default();
     let scale = input.ui_scale;
@@ -414,13 +414,15 @@ pub fn icon_items(scene: &Sources, cache: &mut IconCache) -> (Vec<rts_core_engin
             let name = names.get(bp as usize).filter(|n| !n.is_empty())?;
             // (A contact's layer would give its kind away: the bottom one.)
             Some(match kind {
-                super::scene::IconKind::Blip => (id, pos, Some(CONTACT), *blip_names.get(&bp)?, alpha, 0),
-                // Greyed by the tint (no army), its real shape: scouted.
-                super::scene::IconKind::Remembered => (id, pos, Some(UNIDENTIFIED), name.as_str(), alpha, layer_of(bp)),
+                super::scene::IconKind::Blip => (id, pos, Some(UNIDENTIFIED), *blip_names.get(&bp)?, alpha, 0),
+                // Its real shape in its army's colour: scouted, so known
+                // (probe_re3_intel: remembered structures stay army-coloured
+                // after radar loss).
+                super::scene::IconKind::Remembered => (id, pos, Some(crate::render::scene::army_color(&input.army_rgb, army)), name.as_str(), alpha, layer_of(bp)),
                 super::scene::IconKind::Full => (id, pos, Some(crate::render::scene::army_color(&input.army_rgb, army)), name.as_str(), alpha, layer_of(bp)),
             })
         });
-        let fake = fakes.iter().map(|f| (u32::MAX, f.position, Some(CONTACT), blip_names.get(&f.blueprint).copied().unwrap_or(LAND_CONTACT), 1.0, 0));
+        let fake = fakes.iter().map(|f| (u32::MAX, f.position, Some(UNIDENTIFIED), blip_names.get(&f.blueprint).copied().unwrap_or(LAND_CONTACT), 1.0, 0));
         let [l, t, r, b] = view.rect;
         for (id, pos, army, name, alpha, layer) in shown.chain(fake) {
             let Some([x, y]) = view.project(cam, glam::Vec3::from_array(pos)) else { continue };
@@ -520,18 +522,15 @@ fn icon_half_size((w, h): (u32, u32), icon_scale: f32, display: f32) -> (f32, f3
 
 /// Radar and sonar contacts' colour: FAF's `UnidentifiedColor` ("FF808080",
 /// `/lua/GameColors.lua`; moho reads it through `GetUnidentifiedColor`,
-/// MohoEngine.dll 0x100f2980). On screen their fill reads (94, 94, 94): this
-/// at the icons' brightness (`ui::STRATEGIC_ICON_BRIGHTNESS`).
+/// MohoEngine.dll 0x100f2980). On screen their fill reads (128, 128, 128)
+/// running; (94, 94, 94) under FAF's pause overlay.
 pub const UNIDENTIFIED: [f32; 3] = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0];
-
-/// A radar / sonar contact's tint over its generic shape: the real game draws
-/// the shape's fill (texel grey 123) as (94, 94, 94) (FAF probe
-/// `probe_intel_icons`, measured), so the tint is about 0.77 here, not FAF's
-/// `UnidentifiedColor` (which stays the remembered structures' grey).
-pub const CONTACT: [f32; 3] = [197.0 / 255.0, 197.0 / 255.0, 197.0 / 255.0];
 
 /// The land contact's shape (also when a contact's unit has no icon).
 const LAND_CONTACT: &str = "icon_land_generic";
+
+/// Every aircraft's contact shape (FAF's `GenericIcons.Air`).
+const AIR_CONTACT: &str = "icon_fighter_generic";
 
 /// The draw layer of aircraft icons (`snapshot::icon_layer`).
 const AIR_LAYER: u8 = 1;
@@ -541,18 +540,18 @@ const AIR_LAYER: u8 = 1;
 /// `/lua/ui/game/strategicIcons.lua`, the plain grey `icon_*_generic`
 /// textures): a diamond for every land unit (commanders, bots and land
 /// experimentals included), a square for structures and factories, a
-/// half-dome for ships and subs alike (FAF probe `probe_intel_icons`). An
-/// aircraft's contact while flying isn't confirmed: ours keeps its own
-/// generic air shape (fighter, bomber, gunship), and an air experimental's.
+/// half-dome for ships and subs alike (FAF probe `probe_intel_icons`), and
+/// the fighter's triangle for every aircraft (`GenericIcons.Air`): probe_re3_intel
+/// shows a gunship's contact as the triangle, never `icon_gunship_generic`
+/// (an upside-down trapezoid that reads as a half-dome). The shape follows the
+/// blueprint, not the surface under the unit.
 fn unidentified_icon(name: &str, air: bool) -> &'static str {
     let shape = name.strip_prefix("icon_").and_then(|r| r.split('_').next()).map(|s| s.trim_end_matches(|c: char| c.is_ascii_digit())).unwrap_or("");
     match shape {
         "structure" | "factory" | "factoryhq" => "icon_structure_generic",
         "ship" | "sub" => "icon_ship_generic",
-        "fighter" => "icon_fighter_generic",
-        "bomber" => "icon_bomber_generic",
-        "gunship" => "icon_gunship_generic",
-        "experimental" if air => "icon_experimental_generic",
+        "fighter" | "bomber" | "gunship" => AIR_CONTACT,
+        "experimental" if air => AIR_CONTACT,
         _ => LAND_CONTACT,
     }
 }
@@ -608,6 +607,7 @@ fn projectile_icon_items(scene: &Sources, cache: &mut IconCache) -> Vec<rts_core
 
 #[cfg(test)]
 mod icon_tests {
+    /// Moho halves the texture in whole texels before the patch's scale.
     #[test]
     fn icon_rects_sit_on_whole_pixels() {
         assert_eq!(super::pixel_rect(100.3, 50.6, 8.0, 8.0), [92.0, 43.0, 108.0, 59.0]);
@@ -615,7 +615,6 @@ mod icon_tests {
         assert_eq!(super::pixel_rect(10.0, 10.0, 7.5, 7.5), [3.0, 3.0, 18.0, 18.0]);
     }
 
-    /// Moho halves the texture in whole texels before the patch's scale.
     #[test]
     fn icon_half_size_scales_whole_texel_halves() {
         assert_eq!(super::icon_half_size((16, 16), 1.0, 1.0), (8.0, 8.0));
@@ -698,8 +697,8 @@ mod bar_tests {
     }
 
     /// probe_intel_icons: a never-seen contact is one of four plain shapes,
-    /// giving away no class beyond land / structure / naval (aircraft keep
-    /// theirs: unconfirmed).
+    /// giving away no class beyond land / structure / naval / air
+    /// (probe_re3_intel: a gunship over water is the air triangle).
     #[test]
     fn contacts_show_the_plain_generic_shapes() {
         use super::unidentified_icon as shape;
@@ -712,7 +711,10 @@ mod bar_tests {
         assert_eq!(shape("icon_ship2_directfire", false), "icon_ship_generic");
         assert_eq!(shape("icon_sub2_antinavy", false), "icon_ship_generic", "subs as ships");
         assert_eq!(shape("icon_fighter1_antiair", true), "icon_fighter_generic");
-        assert_eq!(shape("icon_experimental_generic", true), "icon_experimental_generic", "an air experimental");
+        for air in ["icon_bomber2_directfire", "icon_gunship2_directfire", "icon_gunship3_antinavy"] {
+            assert_eq!(shape(air, true), "icon_fighter_generic", "{air}");
+        }
+        assert_eq!(shape("icon_experimental_generic", true), "icon_fighter_generic", "an air experimental");
     }
 
     #[test]

@@ -275,19 +275,32 @@ const BRAINS_KEY: &str = "engine.brains";
 #[lua(name = "ArmyStat", write_only, rename_all = "PascalCase")]
 #[allow(dead_code)]
 struct ArmyStat {
+    name: String,
+    /// `"Integer"`, `"Float"` or `"String"`.
+    r#type: String,
     /// A number or a string.
     value: LuaValue,
 }
+
+/// The first tick stat triggers are checked on. The real game's first
+/// check is at tick 11 and then every tick: FAF's `EnergyDepleted` trigger
+/// (set in `CreateBrainShared`) first fires at 11 on an army whose radar
+/// had nothing stored from tick 2, and a `GiveResource` at tick 2 or 3 is
+/// in time (dev/probes probe_re2_misc E). Why 11 isn't known.
+pub const FIRST_STAT_TRIGGER_TICK: u64 = 11;
 
 fn brains(lua: &Lua) -> LuaResult<LuaTable> {
     crate::engine::api::script_object::registry_table(lua, BRAINS_KEY)
 }
 
-/// The brain script object of army `index` (nil if none).
-/// Once a tick after the economy: each army's stat triggers whose condition
-/// holds fire once (`brain:OnStatsTrigger(name)`, army then (stat, name)
-/// order) and are removed.
+/// Once a tick after the economy, from tick [`FIRST_STAT_TRIGGER_TICK`]:
+/// each army's stat triggers whose condition holds fire once
+/// (`brain:OnStatsTrigger(name)`, army then (stat, name) order) and are
+/// removed.
 pub fn stat_triggers_tick(lua: &Lua) -> LuaResult<()> {
+    if crate::engine::api::sim_time::current_tick(lua) < FIRST_STAT_TRIGGER_TICK {
+        return Ok(());
+    }
     let fired: Vec<(u32, Vec<String>)> = {
         let Some(mut armies) = lua.app_data_mut::<Armies>() else { return Ok(()) };
         armies.list.iter_mut().filter(|a| !a.stat_triggers.is_empty()).map(|a| (a.index, a.fire_stat_triggers())).filter(|(_, f)| !f.is_empty()).collect()
@@ -301,6 +314,7 @@ pub fn stat_triggers_tick(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
+/// The brain script object of army `index` (nil if none).
 pub fn brain(lua: &Lua, index: u32) -> LuaResult<LuaValue> {
     brains(lua)?.raw_get(index)
 }
@@ -329,7 +343,7 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
         lua: &Lua,
         name: &'static str,
         doc: &'static str,
-        value: fn(&crate::engine::sim::economy::ResourceState) -> Fx,
+        value: fn(&crate::engine::sim::economy::Economy, Resource) -> Fx,
     ) -> LuaResult<()> {
         crate::lua_api::add_class_fn(
             lua,
@@ -342,16 +356,19 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
                 let ArmyHandle(index) = script_object::handle(&brain)?;
                 let r = parse_resource(&kind)?;
                 let armies = lua.app_data_ref::<Armies>().expect("Armies");
-                Ok(armies.get(index).map_or(0.0, |a| value(a.economy.get(r)).to_num::<f64>()))
+                Ok(armies.get(index).map_or(0.0, |a| value(&a.economy, r).to_num::<f64>()))
             },
         )
     }
-    econ_getter(lua, "GetEconomyStoredRatio", "Stored / capacity of `resource` (`'MASS'` or `'ENERGY'`), 0 without capacity.", |r| if r.capacity > Fx::ZERO { r.stored.saturating_div(r.capacity) } else { Fx::ZERO })?;
-    econ_getter(lua, "GetEconomyStored", "Stored amount of `resource` (`'MASS'` or `'ENERGY'`).", |r| r.stored)?;
-    econ_getter(lua, "GetEconomyIncome", "Income of `resource` (`'MASS'` or `'ENERGY'`) per tick.", |r| r.income)?;
-    econ_getter(lua, "GetEconomyRequested", "Requested amount of `resource` (`'MASS'` or `'ENERGY'`).", |r| r.requested)?;
-    econ_getter(lua, "GetEconomyUsage", "Expense of `resource` (`'MASS'` or `'ENERGY'`).", |r| r.expense)?;
-    econ_getter(lua, "GetEconomyTrend", "Income minus expense of `resource` (`'MASS'` or `'ENERGY'`).", |r| r.income - r.expense)?;
+    econ_getter(lua, "GetEconomyStoredRatio", "Stored / capacity of `resource` (`'MASS'` or `'ENERGY'`), 0 without capacity.", |e, r| {
+        let r = e.get(r);
+        if r.capacity > Fx::ZERO { r.stored.saturating_div(r.capacity) } else { Fx::ZERO }
+    })?;
+    econ_getter(lua, "GetEconomyStored", "Stored amount of `resource` (`'MASS'` or `'ENERGY'`).", |e, r| e.get(r).stored)?;
+    econ_getter(lua, "GetEconomyIncome", "Income of `resource` (`'MASS'` or `'ENERGY'`) per tick.", |e, r| e.get(r).income)?;
+    econ_getter(lua, "GetEconomyRequested", "Requested amount of `resource` (`'MASS'` or `'ENERGY'`).", |e, r| e.get(r).requested)?;
+    econ_getter(lua, "GetEconomyUsage", "Usage of `resource` (`'MASS'` or `'ENERGY'`): in a stall, consumers of it alone count in full.", |e, r| e.usage(r))?;
+    econ_getter(lua, "GetEconomyTrend", "Income minus usage of `resource` (`'MASS'` or `'ENERGY'`).", |e, r| e.get(r).income - e.usage(r))?;
     lua_method!(lua, moho::AIBrain,
         /// Gives `amount` (clamped to at least 0) of `kind`: it's stored on
         /// the army's next economy tick, up to its storage (what doesn't fit
@@ -370,15 +387,18 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_method!(lua, moho::AIBrain,
-        /// Takes at most what is stored; returns the amount actually taken.
+        /// Takes at most what is stored; returns the amount actually taken. A negative amount
+        /// adds to the store and is returned as given (`TakeResource('MASS', -5)` returns -5 and
+        /// stores 5 more: dev/probes probe_ai_brain).
         TakeResource = |lua, (brain, kind, amount): (Obj<moho::AIBrain>, String, f64)| {
             let ArmyHandle(index) = script_object::handle(&brain)?;
             let r = parse_resource(&kind)?;
             let mut armies = lua.app_data_mut::<Armies>().expect("Armies");
             let Some(a) = armies.get_mut(index) else { return Ok(0.0) };
             let res = a.economy.get_mut(r);
-            let taken = crate::engine::sim::math::from_lua(amount.max(0.0)).min(res.stored);
-            res.stored -= taken;
+            let amount = crate::engine::sim::math::from_lua(amount);
+            let taken = amount.min(res.stored);
+            res.stored = res.stored.saturating_sub(taken);
             Ok(taken.to_num::<f64>())
         })?;
     lua_method!(lua, moho::AIBrain,
@@ -395,8 +415,8 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
         )| {
             let ArmyHandle(index) = script_object::handle(&brain)?;
             let ids: Vec<u32> = crate::engine::api::entity::world(lua)
-                .iter()
-                .filter(|e| e.unit.is_some() && !e.destroyed && e.army == Some(index))
+                .units_of(index)
+                .filter(|e| e.unit.is_some() && !e.destroyed)
                 .filter(|e| e.category_index.is_some_and(|i| category.0.contains(i)))
                 .map(|e| e.id)
                 .collect();
@@ -429,8 +449,8 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             };
             let commands = lua.app_data_ref::<crate::engine::sim::command::Commands>();
             let ids: Vec<u32> = crate::engine::api::entity::world(lua)
-                .iter()
-                .filter(|e| !e.destroyed && e.army == Some(index) && e.fraction_complete >= Fx::ONE)
+                .units_of(index)
+                .filter(|e| !e.destroyed && e.fraction_complete >= Fx::ONE)
                 .filter(|e| e.category_index.is_some_and(|i| factory.contains(i) && !mobile.is_some_and(|m| m.contains(i))))
                 .filter(|e| e.unit.as_deref().is_some_and(|u| !busy.is_some_and(|b| u.states.contains(b))))
                 .filter(|e| commands.as_ref().is_none_or(|c| c.queue(e.id).next().is_none()))
@@ -460,8 +480,8 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             let in_category = |id: u32, cat: &crate::engine::api::categories::EntityCategory| {
                 w.get(id).is_some_and(|e| e.unit.is_some() && e.category_index.is_some_and(|i| cat.0.contains(i)))
             };
-            Ok(w.iter()
-                .filter(|e| !e.destroyed && e.army == Some(index) && e.fraction_complete >= Fx::ONE)
+            Ok(w.units_of(index)
+                .filter(|e| !e.destroyed && e.fraction_complete >= Fx::ONE)
                 .filter(|e| e.category_index.is_some_and(|i| builder_category.0.contains(i)))
                 .filter_map(|e| e.unit.as_deref())
                 .filter(|u| busy.iter().flatten().any(|&s| u.states.contains(s)))
@@ -484,8 +504,8 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             let (Some(engineer), Some(building)) = (domain.named.get("ENGINEER"), UnitStates::index("Building")) else { return Ok(false) };
             let w = crate::engine::api::entity::world(lua);
             let focus_in_category = |id: u32| w.get(id).is_some_and(|e| e.unit.is_some() && e.category_index.is_some_and(|i| category.0.contains(i)));
-            Ok(w.iter()
-                .filter(|e| !e.destroyed && e.army == Some(index) && e.fraction_complete >= Fx::ONE)
+            Ok(w.units_of(index)
+                .filter(|e| !e.destroyed && e.fraction_complete >= Fx::ONE)
                 .filter(|e| e.category_index.is_some_and(|i| engineer.contains(i)))
                 .filter_map(|e| e.unit.as_deref())
                 .any(|u| u.states.contains(building) && u.focus.is_some_and(focus_in_category)))
@@ -498,10 +518,12 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             Ok(units_around(lua, &brain, &category.0, &position, radius, alliance)?.len())
         })?;
     /// Units around a point for `GetUnitsAroundPoint` / `GetNumUnitsAroundPoint`:
-    /// within an XZ circle, matching `category`, optionally only those with
+    /// strictly within an XZ circle, matching `category`, optionally only those with
     /// the given alliance to this brain; in entity id order. Takes intel into
     /// account (FAF's docs): units of other non-allied armies count only
-    /// while this brain detects them (seen or on radar / sonar / omni).
+    /// while this brain detects them (seen or on radar / sonar / omni), and
+    /// structures it has ever seen, which keep a blip once sight is lost
+    /// (dev/probes probe_unit_intel observer-gone; the threat map's rule).
     fn units_around(lua: &Lua, brain: &LuaTable, category: &crate::engine::sim::category::CategorySet, position: &LuaTable, radius: f64, alliance: Option<String>) -> LuaResult<Vec<u32>> {
         let ArmyHandle(index) = script_object::handle(brain)?;
         let alliance = alliance
@@ -512,10 +534,23 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
         let world = crate::engine::api::entity::world(lua);
         let armies = lua.app_data_ref::<Armies>().expect("Armies");
         let intel = lua.app_data_ref::<crate::engine::sim::vision::IntelGrids>();
+        let structures = crate::engine::api::categories::domain(lua)?.named.get("STRUCTURE").cloned();
+        let remembered = |g: &crate::engine::sim::vision::IntelGrids, e: &crate::engine::sim::entity::Entity| {
+            structures.as_ref().zip(e.category_index).is_some_and(|(s, i)| s.contains(i)) && g.ever_seen(index, e.id)
+        };
+        // Strictly inside: a unit exactly `radius` away is out, and r = 0
+        // finds nothing (dev/probes probe_ai_brain).
+        let r2 = r.saturating_mul(r);
+        let inside = |e: &crate::engine::sim::entity::Entity| {
+            let p = e.position();
+            let (dx, dz) = (p.x - cx, p.z - cz);
+            dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)) < r2
+        };
         Ok(world
             .units_in_circle(cx, cz, r)
             .into_iter()
             .filter_map(|id| world.get(id))
+            .filter(|e| inside(e))
             .filter(|e| e.category_index.is_some_and(|i| category.contains(i)))
             .filter(|e| match (alliance, e.army) {
                 (None, _) => true,
@@ -523,7 +558,7 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
                 (Some(_), None) => false,
             })
             .filter(|e| match (e.army, &intel) {
-                (Some(army), Some(g)) if e.unit.is_some() && army != index && armies.alliance(index, army) != Alliance::Ally => g.detect(index, e).any(),
+                (Some(army), Some(g)) if e.unit.is_some() && army != index && armies.alliance(index, army) != Alliance::Ally => g.detect(index, e).any() || remembered(g, e),
                 _ => true,
             })
             .map(|e| e.id)
@@ -533,7 +568,8 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
         /// Units around `position` (within `radius` on the XZ plane) matching
         /// `category`, optionally only those with the given alliance to this
         /// brain; in entity id order. Units of other non-allied armies are
-        /// listed only while this brain detects them.
+        /// listed only while this brain detects them, or, for structures,
+        /// once it has seen them.
         GetUnitsAroundPoint = |lua,
          (brain, category, position, radius, alliance): (Obj<moho::AIBrain>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>, shapes::Vector, f64, Option<String>)| {
             let ids = units_around(lua, &brain, &category.0, &position, radius, alliance)?;
@@ -617,14 +653,20 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
                 .sum::<f64>())
         })?;
     lua_method!(lua, moho::AIBrain,
-        /// Returns the stat as `{ Value = v }` (FAF reads `.Value`), creating
-        /// it with `default` (0 if absent) on first use. The stats moho keeps
-        /// itself (economy, unit cap) come from the army's live state.
+        /// Returns the stat as `{ Name, Type, Value }` (FAF reads `.Value`),
+        /// creating it on first use: a numeric `default` only types it, the
+        /// value starts at 0 (`GetArmyStat('X', 3).Value` is 0, dev/probes
+        /// probe_unit_api); a string default is kept as given (not probed).
+        /// The stats moho keeps itself (economy, unit cap) come from the
+        /// army's live state.
         GetArmyStat = |lua, (brain, name, default): (Obj<moho::AIBrain>, String, LuaValue)| {
             let ArmyHandle(index) = script_object::handle(&brain)?;
+            let number_type = |v: f64| if v.fract() == 0.0 { "Integer" } else { "Float" };
             let value = {
                 if let Some(v) = engine_army_stat(lua, index, &name) {
-                    let t = lua.create_table_with_capacity(0, 1)?;
+                    let t = lua.create_table_with_capacity(0, 3)?;
+                    t.raw_set("Name", name)?;
+                    t.raw_set("Type", number_type(v))?;
                     t.raw_set("Value", v)?;
                     return Ok(Some(Shaped::<ArmyStat>::new(t)));
                 }
@@ -633,18 +675,67 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
                 match a.stats.get(&name) {
                     Some(v) => v.clone(),
                     None => {
-                        let v = if default.is_nil() { StatValue::Number(0.0) } else { stat_value(&default)? };
-                        a.stats.insert(name, v.clone());
+                        let v = match &default {
+                            LuaValue::String(_) => stat_value(&default)?,
+                            _ => StatValue::Number(0.0),
+                        };
+                        a.stats.insert(name.clone(), v.clone());
                         v
                     }
                 }
             };
-            let t = lua.create_table_with_capacity(0, 1)?;
+            let t = lua.create_table_with_capacity(0, 3)?;
+            t.raw_set("Name", name)?;
             match value {
-                StatValue::Number(n) => t.raw_set("Value", n)?,
-                StatValue::Text(s) => t.raw_set("Value", s)?,
+                StatValue::Number(n) => {
+                    t.raw_set("Type", number_type(n))?;
+                    t.raw_set("Value", n)?;
+                }
+                StatValue::Text(s) => {
+                    t.raw_set("Type", "String")?;
+                    t.raw_set("Value", s)?;
+                }
             }
             Ok(Some(Shaped::<ArmyStat>::new(t)))
+        })?;
+    lua_method!(lua, moho::AIBrain,
+        /// The army's first live unit (lowest id) in `category`, only an idle one (nothing queued)
+        /// with `needIdle`; nil when none. The real game answers so (dev/probes probe_ai_brain: a
+        /// busy engineer is not found with `needIdle`). FAF's `AIGetBuilder` asks.
+        FindUnit = |lua, (brain, category, need_idle): (Obj<moho::AIBrain>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>, Option<bool>)| {
+            let ArmyHandle(index) = script_object::handle(&brain)?;
+            let found = {
+                let w = crate::engine::api::entity::world(lua);
+                let commands = lua.app_data_ref::<crate::engine::sim::command::Commands>();
+                let need_idle = need_idle.unwrap_or(false);
+                w.units_of(index)
+                    .filter(|e| !e.destroyed)
+                    .filter(|e| e.category_index.is_some_and(|c| category.0.contains(c)))
+                    .filter(|e| !need_idle || commands.as_ref().is_none_or(|c| c.is_idle(e.id)))
+                    .map(|e| e.id)
+                    .min()
+            };
+            match found {
+                Some(id) => crate::engine::api::entity::object_as::<moho::Unit>(lua, id),
+                None => Ok(None),
+            }
+        })?;
+    lua_method!(lua, moho::AIBrain,
+        /// Raises a script-kept army stat to `value` if it is lower (or unset): 5 stays 5 for 3,
+        /// becomes 9 for 9 (dev/probes probe_ai_brain).
+        SetGreaterOf = |lua, (brain, name, value): (Obj<moho::AIBrain>, String, f64)| {
+            let ArmyHandle(index) = script_object::handle(&brain)?;
+            if let Some(a) = lua.app_data_mut::<Armies>().expect("Armies").get_mut(index) {
+                let raise = match a.stats.get(&name) {
+                    Some(StatValue::Number(n)) => *n < value,
+                    Some(StatValue::Text(_)) => false,
+                    None => true,
+                };
+                if raise {
+                    a.stats.insert(name, StatValue::Number(value));
+                }
+            }
+            Ok(())
         })?;
     lua_method!(lua, moho::AIBrain,
         /// Live, finished units of this army in `category` (a unit under
@@ -652,8 +743,8 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
         GetCurrentUnits = |lua, (brain, category): (Obj<moho::AIBrain>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>)| {
             let ArmyHandle(index) = script_object::handle(&brain)?;
             let w = crate::engine::api::entity::world(lua);
-            Ok(w.iter()
-                .filter(|e| e.kind == crate::engine::sim::entity::EntityKind::Unit && !e.destroyed && e.army == Some(index))
+            Ok(w.units_of(index)
+                .filter(|e| !e.destroyed)
                 .filter(|e| e.fraction_complete >= crate::engine::sim::math::Fx::ONE)
                 .filter(|e| e.category_index.is_some_and(|c| category.0.contains(c)))
                 .count())
@@ -720,18 +811,28 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_method!(lua, moho::AIBrain,
-        /// Sets a script-kept army stat to a number or string.
+        /// Sets a script-kept army stat to a number or string. A stat it
+        /// makes with a number is an integer: the real game's
+        /// `SetArmyStat('x', 10.5)` read back 10 (dev/probes probe_re3_ai
+        /// ST1; what an existing float stat takes isn't measured, so it's
+        /// stored as given).
         SetArmyStat = |lua, (brain, name, value): (Obj<moho::AIBrain>, String, LuaValue)| {
             let ArmyHandle(index) = script_object::handle(&brain)?;
             let value = stat_value(&value)?;
             if let Some(a) = lua.app_data_mut::<Armies>().expect("Armies").get_mut(index) {
+                let value = match value {
+                    StatValue::Number(n) if !a.stats.contains_key(&name) => StatValue::Number(n.trunc()),
+                    v => v,
+                };
                 a.stats.insert(name, value);
             }
             Ok(())
         })?;
     lua_method!(lua, moho::AIBrain,
         /// Calls `brain:OnStatsTrigger(name)` once when `stat` compares true
-        /// against `value`. The category argument is ignored.
+        /// against `value`. On a stat that doesn't exist yet
+        /// (`Army::stat_exists`) the trigger is dead: it never fires, as
+        /// in the real game. The category argument is ignored.
         SetArmyStatsTrigger = |lua,
          (brain, stat, name, compare, value, _category): (
             Obj<moho::AIBrain>,
@@ -744,8 +845,10 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             let ArmyHandle(index) = script_object::handle(&brain)?;
             let compare = Comparator::parse(&compare)
                 .ok_or_else(|| LuaError::runtime(format!("unknown comparator '{compare}'")))?;
-            if let Some(a) = lua.app_data_mut::<Armies>().expect("Armies").get_mut(index) {
-                a.stat_triggers.insert((stat, name), StatTrigger { compare, value });
+            let tick = crate::engine::api::sim_time::current_tick(lua);
+            if let Some(a) = lua.app_data_mut::<Armies>().expect("Armies").get_mut(index)
+                && a.stat_exists(&stat, tick) {
+                a.add_stat_trigger(StatTrigger { stat, name, compare, value });
             }
             Ok(())
         })?;
@@ -757,7 +860,7 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
         RemoveArmyStatsTrigger = |lua, (brain, _stat, name): (Obj<moho::AIBrain>, String, String)| {
             let ArmyHandle(index) = script_object::handle(&brain)?;
             if let Some(a) = lua.app_data_mut::<Armies>().expect("Armies").get_mut(index) {
-                a.stat_triggers.retain(|(_, n), _| *n != name);
+                a.stat_triggers.retain(|t| t.name != name);
             }
             Ok(())
         })?;
@@ -805,8 +908,8 @@ fn engine_army_stat(lua: &Lua, index: u32, name: &str) -> Option<f64> {
         "UnitCap_Current" => {
             drop(armies);
             let used = crate::engine::api::entity::world(lua)
-                .iter()
-                .filter(|e| !e.destroyed && e.army == Some(index))
+                .units_of(index)
+                .filter(|e| !e.destroyed)
                 .filter_map(|e| e.unit.as_deref().map(|u| u.cap_cost))
                 .fold(Fx::ZERO, |a, b| a.saturating_add(b));
             Some(used.to_num::<f64>())

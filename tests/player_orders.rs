@@ -491,7 +491,7 @@ fn move_order_to_a_factory_sets_its_rally_point() {
             local b = ArmyBrains[1]
             b:__engine_SetStorage('MASS', 50000) b:__engine_SetStorage('ENERGY', 500000)
             b:GiveResource('MASS', 50000) b:GiveResource('ENERGY', 500000)
-            local fac = CreateUnitHPR('ueb0101', 'ARMY_1', 440, GetTerrainHeight(440, 640), 640, 0, 0, 0)
+            local fac = CreateUnitHPR('ueb0101', 'ARMY_1', 380, GetTerrainHeight(380, 640), 640, 0, 0, 0)
             return tonumber(fac:GetEntityId())
             "#,
         )
@@ -500,21 +500,21 @@ fn move_order_to_a_factory_sets_its_rally_point() {
     let t = tick_now(&engine) + 1;
     let build = PlayerCommand { kind: CommandKind::BuildFactory, units: vec![fac], target: CommandTarget::None, queue: true, formation: None, facing: None, blueprint: Some("uel0201".into()), count: 1, army: 1, toggle: None, script: Vec::new(), callback: None, category: None, retarget: None };
     send(&engine, t, 0, build);
-    send(&engine, t + 1, 0, PlayerCommand { formation: None, facing: None, ..move_to(1, &[fac], 470.0, 660.0) });
+    send(&engine, t + 1, 0, PlayerCommand { formation: None, facing: None, ..move_to(1, &[fac], 410.0, 660.0) });
     engine.tick().unwrap();
     engine.tick().unwrap();
     engine.tick().unwrap();
     let queued = engine.sim_lua().app_data_ref::<Commands>().unwrap().queue(fac).map(|c| c.kind).collect::<Vec<_>>();
     assert_eq!(queued, vec![CommandKind::BuildFactory], "the move didn't replace the build");
     let rally: Vec<f64> = engine.sim_lua().load("local p = GetEntityById(...):GetRallyPoint() return p and { p[1], p[3] } or {}").call(fac).unwrap();
-    assert_eq!(rally, vec![470.0, 660.0]);
+    assert_eq!(rally, vec![410.0, 660.0]);
     let tank = |e: &engine::Engine| e.sim_lua().app_data_ref::<EntityWorld>().unwrap().iter().find(|x| !x.destroyed && x.cold.blueprint_id == "uel0201" && x.army == Some(1) && x.fraction_complete >= rts_core_engine::engine::sim::math::Fx::ONE && x.id > fac).map(|x| x.id);
     let mut arrived = false;
     for _ in 0..1500 {
         engine.tick().unwrap();
         if let Some(id) = tank(&engine) {
             let (x, z) = position(&engine, id);
-            if (x - 470.0).abs() < 4.0 && (z - 660.0).abs() < 4.0 {
+            if (x - 410.0).abs() < 4.0 && (z - 660.0).abs() < 4.0 {
                 arrived = true;
                 break;
             }
@@ -542,7 +542,7 @@ fn factory_rally_orders_queue_and_pass_to_what_it_builds() {
             local b = ArmyBrains[1]
             b:__engine_SetStorage('MASS', 50000) b:__engine_SetStorage('ENERGY', 500000)
             b:GiveResource('MASS', 50000) b:GiveResource('ENERGY', 500000)
-            local fac = CreateUnitHPR('ueb0101', 'ARMY_1', 440, GetTerrainHeight(440, 640), 640, 0, 0, 0)
+            local fac = CreateUnitHPR('ueb0101', 'ARMY_1', 380, GetTerrainHeight(380, 640), 640, 0, 0, 0)
             return tonumber(fac:GetEntityId())
             "#,
         )
@@ -550,9 +550,9 @@ fn factory_rally_orders_queue_and_pass_to_what_it_builds() {
         .unwrap();
     let t = tick_now(&engine) + 1;
     let patrol = |x: f64, z: f64| PlayerCommand { kind: CommandKind::Patrol, queue: true, ..move_to(1, &[fac], x, z) };
-    send(&engine, t, 0, move_to(1, &[fac], 470.0, 640.0));
-    send(&engine, t, 1, patrol(490.0, 640.0));
-    send(&engine, t, 2, patrol(490.0, 670.0));
+    send(&engine, t, 0, move_to(1, &[fac], 410.0, 640.0));
+    send(&engine, t, 1, patrol(430.0, 640.0));
+    send(&engine, t, 2, patrol(430.0, 670.0));
     let build = PlayerCommand { kind: CommandKind::BuildFactory, units: vec![fac], target: CommandTarget::None, queue: true, formation: None, facing: None, blueprint: Some("uel0201".into()), count: 1, army: 1, toggle: None, script: Vec::new(), callback: None, category: None, retarget: None };
     send(&engine, t, 3, build);
     engine.tick().unwrap();
@@ -569,7 +569,7 @@ fn factory_rally_orders_queue_and_pass_to_what_it_builds() {
     let factory_orders = rally_orders(&engine, fac);
     assert_eq!(
         factory_orders.iter().map(|o| (o.1, o.2)).collect::<Vec<_>>(),
-        vec![(CommandKind::Move, (470, 640)), (CommandKind::Patrol, (490, 640)), (CommandKind::Patrol, (490, 670))],
+        vec![(CommandKind::Move, (410, 640)), (CommandKind::Patrol, (430, 640)), (CommandKind::Patrol, (430, 670))],
         "the move and both shift-queued patrol points are kept, in order"
     );
     {
@@ -578,7 +578,7 @@ fn factory_rally_orders_queue_and_pass_to_what_it_builds() {
         assert!(c.is_idle(fac) || c.current(fac).is_some_and(|x| x.kind == CommandKind::BuildFactory));
     }
     let rally: Vec<f64> = engine.sim_lua().load("local p = GetEntityById(...):GetRallyPoint() return p and { p[1], p[3] } or {}").call(fac).unwrap();
-    assert_eq!(rally, vec![470.0, 640.0], "GetRallyPoint: the first rally order");
+    assert_eq!(rally, vec![410.0, 640.0], "GetRallyPoint: the first rally order");
 
     // The first tank out takes all three, sharing the factory's commands.
     let tank = |e: &engine::Engine| e.sim_lua().app_data_ref::<EntityWorld>().unwrap().iter().find(|x| !x.destroyed && x.cold.blueprint_id == "uel0201" && x.army == Some(1) && x.fraction_complete >= rts_core_engine::engine::sim::math::Fx::ONE && x.id > fac).map(|x| x.id);
@@ -607,14 +607,14 @@ fn factory_rally_orders_queue_and_pass_to_what_it_builds() {
     for _ in 0..3000 {
         engine.tick().unwrap();
         let p = position(&engine, first);
-        if near(p, 490.0, 640.0) {
+        if near(p, 430.0, 640.0) {
             if at_b {
                 back_at_a = true;
                 break;
             }
             at_a = true;
         }
-        if at_a && near(p, 490.0, 670.0) {
+        if at_a && near(p, 430.0, 670.0) {
             at_b = true;
         }
     }
@@ -623,10 +623,10 @@ fn factory_rally_orders_queue_and_pass_to_what_it_builds() {
 
     // A move without Shift replaces them; clearing empties them.
     let t = tick_now(&engine) + 1;
-    send(&engine, t, 0, move_to(1, &[fac], 460.0, 690.0));
+    send(&engine, t, 0, move_to(1, &[fac], 400.0, 690.0));
     engine.tick().unwrap();
     engine.tick().unwrap();
-    assert_eq!(rally_orders(&engine, fac).iter().map(|o| (o.1, o.2)).collect::<Vec<_>>(), vec![(CommandKind::Move, (460, 690))]);
+    assert_eq!(rally_orders(&engine, fac).iter().map(|o| (o.1, o.2)).collect::<Vec<_>>(), vec![(CommandKind::Move, (400, 690))]);
     {
         let c = engine.sim_lua().app_data_ref::<Commands>().unwrap();
         assert!(c.queue(first).any(|x| x.kind == CommandKind::Patrol), "the tank already out keeps its patrol");
@@ -1133,7 +1133,7 @@ fn upgraded_factory_keeps_its_rally_orders() {
             local b = ArmyBrains[1]
             b:__engine_SetStorage('MASS', 50000) b:__engine_SetStorage('ENERGY', 500000)
             b:GiveResource('MASS', 50000) b:GiveResource('ENERGY', 500000)
-            return tonumber(CreateUnitHPR('ueb0101', 'ARMY_1', 440, GetTerrainHeight(440, 640), 640, 0, 0, 0):GetEntityId())
+            return tonumber(CreateUnitHPR('ueb0101', 'ARMY_1', 380, GetTerrainHeight(380, 640), 640, 0, 0, 0):GetEntityId())
             "#,
         )
         .eval()
@@ -1141,9 +1141,9 @@ fn upgraded_factory_keeps_its_rally_orders() {
     let t = tick_now(&engine) + 1;
     let order = |kind, bp: &str| PlayerCommand { kind, units: vec![fac], target: CommandTarget::None, queue: true, formation: None, facing: None, blueprint: Some(bp.into()), count: 1, army: 1, toggle: None, script: Vec::new(), callback: None, category: None, retarget: None };
     let patrol = |x: f64, z: f64| PlayerCommand { kind: CommandKind::Patrol, queue: true, ..move_to(1, &[fac], x, z) };
-    send(&engine, t, 0, move_to(1, &[fac], 470.0, 640.0));
-    send(&engine, t, 1, patrol(490.0, 640.0));
-    send(&engine, t, 2, patrol(490.0, 670.0));
+    send(&engine, t, 0, move_to(1, &[fac], 410.0, 640.0));
+    send(&engine, t, 1, patrol(430.0, 640.0));
+    send(&engine, t, 2, patrol(430.0, 670.0));
     send(&engine, t, 3, order(CommandKind::BuildFactory, "uel0201"));
     send(&engine, t, 4, order(CommandKind::Upgrade, "ueb0201"));
     send(&engine, t, 5, order(CommandKind::BuildFactory, "uel0202"));
@@ -1168,7 +1168,7 @@ fn upgraded_factory_keeps_its_rally_orders() {
     let t1_tank = built(&engine, "uel0201").expect("the tank built before the upgrade");
     assert_eq!(rally_ids(&engine, t2_factory), ids, "the upgraded factory has the same rally orders");
     let rally: Vec<f64> = engine.sim_lua().load("local p = GetEntityById(...):GetRallyPoint() return p and { p[1], p[3] } or {}").call(t2_factory).unwrap();
-    assert_eq!(rally, vec![470.0, 640.0]);
+    assert_eq!(rally, vec![410.0, 640.0]);
     {
         let c = engine.sim_lua().app_data_ref::<Commands>().unwrap();
         let tank_queue: Vec<(u32, CommandKind)> = c.queue(t1_tank).map(|x| (x.id, x.kind)).collect();
@@ -1363,6 +1363,53 @@ fn engineer_assisting_a_silo_shows_the_missiles_progress() {
     assert_eq!(unit(&engine, alone).1, 0, "the engineer's help built it sooner than a silo alone");
     engine.tick().unwrap();
     assert_eq!(unit(&engine, eng).0, 0.0, "the engineer keeps no progress once the missile is built");
+}
+
+/// A tactical launcher building a missile shows the missile's drain as its
+/// economy and one missile in progress in its details (`GetEconData`,
+/// `GetMissileInfo`: `probe_ui_units` A reads 120 energy, 8.33 mass a
+/// second and `tacticalSiloBuildCount` 1).
+#[test]
+fn a_silo_building_a_missile_shows_its_drain() {
+    if !have_data() {
+        return;
+    }
+    let (mut engine, _tanks, _) = setup(None);
+    let silo: u32 = engine
+        .sim_lua()
+        .load(
+            r#"
+            local b = ArmyBrains[1]
+            b:__engine_SetStorage('MASS', 50000) b:__engine_SetStorage('ENERGY', 500000)
+            b:GiveResource('MASS', 50000) b:GiveResource('ENERGY', 500000)
+            local silo = CreateUnitHPR('ueb2108', 'ARMY_1', 426, GetTerrainHeight(426, 620), 620, 0, 0, 0)
+            IssueSiloBuildTactical({silo}, 1)
+            return tonumber(silo:GetEntityId())
+            "#,
+        )
+        .eval()
+        .unwrap();
+    let (sink, rx, request) = engine::snapshot::channel();
+    engine.set_snapshot_sink(sink);
+    {
+        let mut r = request.lock().unwrap();
+        r.view_army = Some(1);
+        r.selection = vec![silo];
+    }
+    let mut last = None;
+    for _ in 0..20 {
+        engine.tick().unwrap();
+        while let Ok(mut s) = rx.try_recv() {
+            drop(s.ticket.take());
+            if let Some(d) = s.debug.units.iter().find(|d| d.id == silo) {
+                last = Some(d.clone());
+            }
+        }
+    }
+    let d = last.expect("its details");
+    assert_eq!(d.missiles[3], 1.0, "one tactical missile in progress");
+    assert!((d.econ[4] - 8.33).abs() < 0.01 && (d.econ[5] - 120.0).abs() < 0.01, "the missile's drain: {:?}", d.econ);
+    assert_eq!(d.econ[0], d.econ[4], "fully served");
 }
 
 /// A Kennel's drone assists and repairs by itself: it repairs a

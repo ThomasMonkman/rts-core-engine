@@ -198,23 +198,23 @@ pub fn unit_destroyed(lua: &Lua, unit: EntityId) -> LuaResult<()> {
         kept.raw_set(unit, LuaNil)?;
     }
     let structure = is_structure(lua, unit);
-    let (fates, at) = {
+    let (army_list, at) = {
         let w = world(lua);
         let Some(e) = w.get(unit) else { return Ok(()) };
-        let (Some(armies), grids) = (lua.app_data_ref::<Armies>(), lua.app_data_ref::<IntelGrids>()) else { return Ok(()) };
-        let fates: Vec<(u32, AtDeath)> = armies
-            .list
-            .iter()
-            .map(|a| {
-                let friendly = e.army.is_some_and(|owner| owner == a.index || armies.alliance(a.index, owner) == Alliance::Ally);
-                let known = friendly || grids.as_ref().is_none_or(|g| g.detect(a.index, e).any());
-                (a.index, if known { AtDeath::Destroyed } else if structure { AtDeath::MaybeDead } else { AtDeath::Stays })
-            })
-            .collect();
-        (fates, e.position())
+        let Some(armies) = lua.app_data_ref::<Armies>() else { return Ok(()) };
+        (armies.list.iter().map(|a| a.index).collect::<Vec<u32>>(), e.position())
+    };
+    // An army's fate is worked out only when it has a blip (most destroyed
+    // entities, projectiles above all, have none: no detection test each).
+    let fate = |army: u32| {
+        let w = world(lua);
+        let (Some(e), Some(armies), grids) = (w.get(unit), lua.app_data_ref::<Armies>(), lua.app_data_ref::<IntelGrids>()) else { return AtDeath::Stays };
+        let friendly = e.army.is_some_and(|owner| owner == army || armies.alliance(army, owner) == Alliance::Ally);
+        let known = friendly || grids.as_ref().is_none_or(|g| g.detect(army, e).any());
+        if known { AtDeath::Destroyed } else if structure { AtDeath::MaybeDead } else { AtDeath::Stays }
     };
     let cache = blips(lua)?;
-    for (army, fate) in fates {
+    for army in army_list {
         let kept_blip = match &held {
             Some(h) => h.raw_get::<Option<LuaTable>>(army)?,
             None => None,
@@ -225,7 +225,7 @@ pub fn unit_destroyed(lua: &Lua, unit: EntityId) -> LuaResult<()> {
         }) else {
             continue;
         };
-        match fate {
+        match fate(army) {
             AtDeath::Destroyed if kept_blip.is_some() => {
                 let dying = script_object::registry_table(lua, DYING_KEY)?;
                 dying.raw_set(dying.raw_len() + 1, blip)?;
@@ -316,7 +316,11 @@ fn destroy_dying(lua: &Lua) -> LuaResult<()> {
 }
 
 /// What `army` knows of `unit` now, and whether it has ever seen it
-/// optically (`IsSeenEver`: omni doesn't count, probe_intel_jam).
+/// optically (`IsSeenEver`: omni doesn't count, probe_intel_jam). A mobile
+/// unit's blip is dropped once no intel covers it, so a blip held from
+/// before answers false for everything, `IsSeenEver` included; only a
+/// structure's blip is remembered (probe_re3_intel: a seen tank and
+/// Fatboy report `.....` after radar loss, the pgen and PD `..E..`).
 fn knowledge(lua: &Lua, army: u32, unit: EntityId) -> (Detection, bool) {
     let w = world(lua);
     let Some(e) = w.get(unit).filter(|e| !e.destroyed) else { return (Detection::default(), false) };
@@ -332,7 +336,12 @@ fn knowledge(lua: &Lua, army: u32, unit: EntityId) -> (Detection, bool) {
         return (Detection { seen: true, ..Default::default() }, true);
     };
     let now = grids.detect(army, e);
-    (now, now.seen || grids.ever_seen_optically(army, unit))
+    if now.seen {
+        return (now, true);
+    }
+    let ever = grids.ever_seen_optically(army, unit);
+    drop((grids, w));
+    (now, ever && (now.any() || is_structure(lua, unit)))
 }
 
 fn is_structure(lua: &Lua, unit: EntityId) -> bool {

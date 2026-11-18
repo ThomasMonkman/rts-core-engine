@@ -4,11 +4,13 @@
 -- velocity, falls and gets OnImpact('Terrain') after changing layer (the
 -- real game: dev/probes probe_mov_air TR3, 16 ticks from h 8.8; ours left
 -- the dead cargo hanging in the air with no callbacks).
+-- GetPosition() is one table per entity, rewritten by each call: copy it to keep it.
+local function pos(e) local p = e:GetPosition() return Vector(p[1], p[2], p[3]) end
 rawset(_G, "ScenarioResult", { done = false, failures = {}, notes = {} })
 local function check(ok, msg) if not ok then table.insert(ScenarioResult.failures, msg) end end
 local function note(msg) table.insert(ScenarioResult.notes, msg) end
 local function ground(x, z) return GetTerrainHeight(x, z) end
-local function height(u) local p = u:GetPosition() return p[2] - ground(p[1], p[3]) end
+local function height(u) local p = pos(u) return p[2] - ground(p[1], p[3]) end
 ForkThread(function()
     local ok, err = pcall(function()
         WaitTicks(2)
@@ -42,14 +44,14 @@ ForkThread(function()
             hook(u, 'OnImpact', 'impact' .. i, function(with) impact[i] = { tick = GetGameTick(), with = with } end)
         end
         local killed = GetGameTick()
-        local before, high = tanks[1]:GetPosition(), height(tanks[1])
+        local before, high = pos(tanks[1]), height(tanks[1])
         local y = before[2]
         t:Kill()
         local got = table.concat(seq, ' ')
         check(got == 'detach off1 dead1 detach off2 dead2 killed', 'the kill detaches the cargo first: ' .. got)
         check(not tanks[1]:IsUnitState('Attached'), 'the cargo is off the transport')
         WaitTicks(5)
-        local p = tanks[1]:GetPosition()
+        local p = pos(tanks[1])
         check(p[1] - before[1] > 3, 'it flies on with the speed it had: ' .. (p[1] - before[1]))
         check(p[2] < y - 0.3, 'and falls: ' .. p[2] .. ' from ' .. y)
         for _ = 1, 40 do

@@ -135,6 +135,7 @@ fn maui_layout_comes_out_in_the_draw_list() {
 #[test]
 fn resource_sharing_is_the_focus_armys() {
     let Some(vm) = vm() else { return };
+    vm.set_armies(&two_armies(false)).unwrap();
     let econ = |army, resource_sharing| rts_core_engine::engine::snapshot::ArmyEconomy { army, mass: [0.0; 6], energy: [0.0; 6], resource_sharing };
     vm.beat(1, &[econ(1, true), econ(2, false)]).expect("beat");
     let ask = |focus: i64| -> bool {
@@ -339,6 +340,7 @@ fn pause_reaches_both_sides() {
     vm.set_screen(1280.0, 720.0).unwrap();
     vm.start_hud().expect("game interface");
     vm.lua().load("SessionRequestPause()").exec().unwrap();
+    assert!(vm.lua().load("return SessionIsPaused()").eval::<bool>().unwrap(), "the request shows at once");
     assert_eq!(vm.take_pause_request().unwrap(), Some(true));
     assert_eq!(vm.take_pause_request().unwrap(), None, "taken once");
     vm.set_paused(true).expect("FAF's OnPause / OnUserPause run");
@@ -751,7 +753,10 @@ fn unit_stats_read_back_through_get_stat() {
         .load("local u = __engine_unit(3) return u:GetStat('VetLevel', 0).Value, u:GetStat('VetExperience', 0).Value, u:GetStat('Nope', 42).Value")
         .eval()
         .unwrap();
-    assert_eq!((level, exp, missing), (1.0, 112.0, 42.0));
+    // A missing stat is 0 whatever the default, as moho's (`probe_ui_units` A).
+    assert_eq!((level, exp, missing), (1.0, 112.0, 0.0));
+    let shape: String = vm.lua().load("local s = __engine_unit(3):GetStat('VetLevel') return s.Name .. ' ' .. s.Type").eval().unwrap();
+    assert_eq!(shape, "VetLevel Integer");
 }
 
 /// The sim's Sync reaches FAF's OnSync: a `PrintText` entry is printed on
@@ -1748,6 +1753,9 @@ fn combo_drop_downs_open_pick_and_close() {
     let Some(vm) = vm() else { return };
     vm.set_screen(1280.0, 720.0).unwrap();
     vm.start_hud().expect("game interface"); // (the skin's colours)
+    // FAF's first frame (`OnFirstUpdate`) lifts the input lock the HUD
+    // starts with (`worldview.LockInput`, an input capture).
+    vm.frame(0.1).unwrap();
     vm.lua()
         .load(
             r#"
@@ -1987,6 +1995,127 @@ fn front_end_escape_and_the_lobby_changelog() {
 }
 
 /// `GetArmyAvatars`: the focus army's units whose blueprint has
+/// The main menu's Change Profile, then Create: the name dialog
+/// (`profile.lua` `CreationDialog`, depth `GetFrame(0).Depth() + 10`) is
+/// under the menu's full-screen `topLevelGroup` (depth 100), but it is the
+/// input capture (`MakeInputModal`), so its OK button takes the click and
+/// the profile is made. Returns the profiles' names afterwards.
+fn create_profile_from_the_main_menu(vm: &UserVm) -> Vec<String> {
+    use rts_core_engine::ui::controls::{Modifiers, MouseEvent};
+    vm.set_screen(1024.0, 768.0).unwrap();
+    vm.start_front_end().expect("main menu");
+    let run = |seconds: f32| {
+        for _ in 0..(seconds * 60.0) as u32 {
+            vm.frame(1.0 / 60.0).unwrap();
+        }
+    };
+    // The centre of the topmost text reading `label`.
+    let text_at = |label: &str| -> (f32, f32) {
+        let items = vm.draw_list().unwrap();
+        items
+            .iter()
+            .rev()
+            .find_map(|i| match i {
+                DrawItem::Text { rect, text, .. } if text == label => Some(((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no '{label}' drawn"))
+    };
+    let click = |(x, y): (f32, f32)| {
+        vm.mouse(MouseEvent::Move, x, y, Modifiers::default()).unwrap();
+        vm.mouse(MouseEvent::Press(1), x, y, Modifiers { left: true, ..Default::default() }).unwrap();
+        vm.mouse(MouseEvent::Release(1), x, y, Modifiers::default()).unwrap();
+    };
+    run(7.0);
+    click(text_at("Change Profile"));
+    run(3.0);
+    let modal: bool = vm.lua().load("return GetInputCapture() ~= nil").eval().unwrap();
+    assert!(modal, "the Profile Manager is modal (its UpdateProfileList read the profile list)");
+    click(text_at("Create"));
+    run(1.0);
+    assert!(vm.text("Tester").unwrap(), "the name box has the focus");
+    click(text_at("OK"));
+    run(1.0);
+    vm.lua()
+        .load("local names = {} for _, p in GetPreference('profile.profiles') or {} do table.insert(names, p.Name) end table.sort(names) return names")
+        .eval()
+        .unwrap()
+}
+
+#[test]
+fn faf_profile_created_from_the_main_menu() {
+    let Some(vm) = vm() else { return };
+    assert_eq!(create_profile_from_the_main_menu(&vm), ["Player", "Tester"]);
+}
+
+/// LOUD (Git-LOUD checked out in the game folder, docs/guides/running.md):
+/// the same, with LOUD's main menu and profile dialog. Skipped without it.
+#[test]
+fn loud_profile_created_from_the_main_menu() {
+    const LOUD_INIT: &str = "../Supreme Commander Forged Alliance/Git-LOUD/bin/SupComDataPath.lua";
+    if !std::path::Path::new(LOUD_INIT).is_file() {
+        eprintln!("skipping: no LOUD at {LOUD_INIT}");
+        return;
+    }
+    if !rts_core_engine::test_data::require_game("LOUD UI test") {
+        return;
+    }
+    let engine = engine::Engine::new(LOUD_INIT, FA_PATH, Arc::new(Mutex::new(DebugUiState::new()))).expect("engine");
+    let vm = UserVm::with_cache(engine.vfs.clone(), engine.script_cache.clone()).expect("user vm");
+    vm.init().expect("userInit.lua");
+    assert_eq!(create_profile_from_the_main_menu(&vm), ["Player", "Tester"]);
+}
+
+/// A fresh profile is moho's shape: a list, `current` its index. Prefs
+/// this engine wrote before keyed profiles by name (`current = 'player'`):
+/// they load as a list, `current` the index of the one it named.
+#[test]
+fn profiles_are_a_list_and_old_named_ones_migrate() {
+    let Some(vm) = vm() else { return };
+    let fresh: (i64, String) = vm.lua().load("return GetPreference('profile.current'), GetPreference('profile.profiles')[1].Name").eval().unwrap();
+    assert_eq!(fresh, (1, "Player".to_string()));
+    let path = std::env::temp_dir().join(format!("rts-core-engine-old-profile-{}.prefs", std::process::id()));
+    std::fs::write(&path, "profile = {\n\tcurrent = \"player\",\n\tprofiles = {\n\t\t[1] = { Name = \"Tester\" },\n\t\tplayer = { Name = \"Player\", UserKeyMap = { K = \"stop\" } },\n\t},\n}\n").unwrap();
+    vm.load_prefs(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    let read: (i64, i64, String, String, String, Option<String>) = vm
+        .lua()
+        .load("local p = GetPreference('profile') local Prefs = import('/lua/user/prefs.lua') return p.current, table.getn(p.profiles), p.profiles[1].Name, p.profiles[2].Name, Prefs.GetCurrentProfile().Name, GetPreference('profile.profiles.' .. p.current .. '.UserKeyMap').K")
+        .eval()
+        .unwrap();
+    assert_eq!(read, (2, 2, "Tester".to_string(), "Player".to_string(), "Player".to_string(), Some("stop".to_string())));
+    assert_eq!(vm.profile_name().unwrap().as_deref(), Some("Player"));
+}
+
+/// Of controls at the same depth under the mouse, the first in tree order
+/// takes the click, as moho's walk keeps it.
+#[test]
+fn equal_depths_hit_the_first_control() {
+    use rts_core_engine::ui::controls::{Modifiers, MouseEvent};
+    let Some(vm) = vm() else { return };
+    vm.set_screen(1024.0, 768.0).unwrap();
+    vm.lua()
+        .load(
+            r#"
+            local Group = import('/lua/maui/group.lua').Group
+            local LayoutHelpers = import('/lua/maui/layouthelpers.lua')
+            rawset(_G, 'Clicked', {})
+            for _, name in { 'first', 'second' } do
+                local g = Group(GetFrame(0), name)
+                LayoutHelpers.AtLeftTopIn(g, GetFrame(0), 100, 100)
+                g.Width:Set(200) g.Height:Set(200)
+                g.Depth:Set(50)
+                g.HandleEvent = function(self, e) if e.Type == 'ButtonPress' then table.insert(Clicked, name) end return true end
+            end
+            "#,
+        )
+        .exec()
+        .unwrap();
+    vm.mouse(MouseEvent::Press(1), 150.0, 150.0, Modifiers { left: true, ..Default::default() }).unwrap();
+    let clicked: Vec<String> = vm.lua().load("return Clicked").eval().unwrap();
+    assert_eq!(clicked, ["first"]);
+}
+
 /// `General.QuickSelectPriority` (FAF's ACUs), which FAF's first update
 /// zooms to and its avatar panel shows; nil without any.
 #[test]
@@ -2296,9 +2425,136 @@ fn session_end_gives_the_score_screen_its_data() {
 #[test]
 fn set_focus_army_is_zero_based() {
     let Some(vm) = vm() else { return };
+    vm.set_armies(&two_armies(false)).unwrap();
     let r: (i64, i64) = vm.lua().load("SetFocusArmy(0) local a = GetFocusArmy() SetFocusArmy(-1) return a, GetFocusArmy()").eval().expect("focus");
     assert_eq!(r, (1, -1));
     assert_eq!(vm.focus_army(), None);
+}
+
+/// Two armies, AIs (an observer's game) or army 1 a human player's.
+fn two_armies(human: bool) -> [rts_core_engine::engine::snapshot::ArmyInfo; 2] {
+    use rts_core_engine::engine::snapshot::ArmyInfo;
+    [
+        ArmyInfo { index: 1, name: "ARMY_1".into(), nickname: "North".into(), faction: 1, human, civilian: false },
+        ArmyInfo { index: 2, name: "ARMY_2".into(), nickname: "South".into(), faction: 3, human: false, civilian: false },
+    ]
+}
+
+/// FAF's game interface for a two-army game as the renderer hands it over
+/// (`render::frame`): `own` the client's army (-1 an observer), a beat of
+/// scores so the score board lays its lines out.
+fn score_board(own: i64) -> Option<UserVm> {
+    use rts_core_engine::engine::sim::army::Alliance;
+    use rts_core_engine::engine::sync::SyncValue as V;
+    let vm = vm()?;
+    vm.set_screen(1280.0, 720.0).unwrap();
+    vm.set_armies(&two_armies(own == 1)).unwrap();
+    vm.set_alliances(&[(1, 2, Alliance::Enemy), (2, 1, Alliance::Enemy)]).unwrap();
+    let s = |x: &str| V::Str(x.into());
+    vm.set_scenario(&V::Table(vec![
+        (s("name"), s("Seton's Clutch")),
+        (s("type"), s("skirmish")),
+        (s("size"), V::Table(vec![(V::Num(1.0), V::Num(1024.0)), (V::Num(2.0), V::Num(1024.0))])),
+        (s("PlayableAreaWidth"), V::Num(1024.0)),
+        (s("PlayableAreaHeight"), V::Num(1024.0)),
+        (s("Options"), V::Table(vec![(s("Share"), s("ShareUntilDeath")), (s("Victory"), s("demoralization"))])),
+    ]))
+    .unwrap();
+    vm.set_session_flags(false, own < 1).unwrap();
+    vm.set_focus_army(own).unwrap();
+    vm.start_hud().expect("game interface");
+    for _ in 0..420 {
+        vm.frame(1.0 / 60.0).unwrap();
+    }
+    let score = |name: &str| V::Table(vec![(s("name"), s(name)), (s("general"), V::Table(vec![(s("score"), V::Num(100.0))]))]);
+    let econ = |army| rts_core_engine::engine::snapshot::ArmyEconomy { army, mass: [army as f32 * 100.0, 650.0, 1.0, 0.0, 0.0, 0.0], energy: [0.0; 6], resource_sharing: true };
+    let beat = |tick: u64| {
+        vm.sync(&V::Table(vec![(s("Score"), V::Table(vec![(V::Num(1.0), score("North")), (V::Num(2.0), score("South"))]))])).expect("OnSync");
+        vm.beat(tick, &[econ(1), econ(2)]).expect("beat");
+        vm.frame(0.1).unwrap();
+    };
+    beat(10);
+    beat(11);
+    Some(vm)
+}
+
+/// Clicks the middle of the score board's line for army `army` (0: the
+/// Observer line), as FAF's `HandleEvent` there hears it.
+fn click_score_line(vm: &UserVm, army: i64) {
+    use rts_core_engine::ui::controls::{Modifiers, MouseEvent};
+    let (x, y): (f64, f64) = vm
+        .lua()
+        .load(format!(
+            "for _, l in import('/lua/ui/game/score.lua').controls.armyLines do \
+                if l.armyID == {army} and not l:IsHidden() then return (l.Left() + l.Right()) / 2, (l.Top() + l.Bottom()) / 2 end \
+            end error('no visible score line for army {army}')"
+        ))
+        .eval()
+        .expect("score line");
+    let left = Modifiers { left: true, ..Default::default() };
+    vm.mouse(MouseEvent::Move, x as f32, y as f32, Modifiers::default()).unwrap();
+    assert!(vm.mouse(MouseEvent::Press(1), x as f32, y as f32, left).unwrap(), "the score line takes the click at ({x}, {y})");
+    vm.mouse(MouseEvent::Release(1), x as f32, y as f32, Modifiers::default()).unwrap();
+    vm.frame(1.0 / 60.0).unwrap();
+}
+
+/// An observer clicks an army's line in FAF's score board (`ConExecute
+/// 'SetFocusArmy n'`): the interface now shows that army (`GetFocusArmy`,
+/// `GetArmiesTable().focusArmy`, its economy in the top bar, and FAF's panels
+/// hear `Sync.FocusArmyChanged`); the Observer line goes back to every army.
+#[test]
+fn an_observer_switches_army_from_the_score_board() {
+    use rts_core_engine::engine::sync::SyncValue as V;
+    let Some(vm) = score_board(-1) else { return };
+    // FAF caches `GetArmiesTable` (`/lua/ui/override/ArmiesTable.lua`,
+    // refreshed every 4 s): wait that out before reading it.
+    let focus = || -> (i64, i64) {
+        for _ in 0..300 {
+            vm.frame(1.0 / 60.0).unwrap();
+        }
+        vm.lua().load("return GetFocusArmy(), GetArmiesTable().focusArmy").eval().unwrap()
+    };
+    assert_eq!(focus(), (-1, -1));
+    click_score_line(&vm, 2);
+    assert_eq!(focus(), (2, 2), "army 2's view");
+    assert_eq!(vm.focus_army(), Some(2), "the engine draws army 2's intel");
+    // The next Sync tells FAF's panels (avatars, tabs, ...).
+    vm.lua().load("rawset(_G, '__test_changed', false) local f = import('/lua/ui/game/avatars.lua').FocusArmyChanged import('/lua/ui/game/avatars.lua').FocusArmyChanged = function() rawset(_G, '__test_changed', true) f() end").exec().unwrap();
+    vm.sync(&V::Table(vec![])).unwrap();
+    let changed: (bool, i64, i64) = vm.lua().load("return rawget(_G, '__test_changed'), Sync.FocusArmyChanged.new, Sync.FocusArmyChanged.old").eval().unwrap();
+    assert_eq!(changed, (true, 2, -1));
+    vm.sync(&V::Table(vec![])).unwrap();
+    assert!(vm.lua().load("return Sync.FocusArmyChanged == nil").eval::<bool>().unwrap(), "noted once");
+    // Army 2's economy in the top bar.
+    vm.beat(12, &[
+        rts_core_engine::engine::snapshot::ArmyEconomy { army: 1, mass: [100.0, 650.0, 1.0, 0.0, 0.0, 0.0], energy: [0.0; 6], resource_sharing: true },
+        rts_core_engine::engine::snapshot::ArmyEconomy { army: 2, mass: [200.0, 650.0, 1.0, 0.0, 0.0, 0.0], energy: [0.0; 6], resource_sharing: true },
+    ]).unwrap();
+    let stored: f64 = vm.lua().load("return GetEconomyTotals().stored.MASS").eval().unwrap();
+    assert_eq!(stored, 200.0);
+    click_score_line(&vm, 0);
+    assert_eq!(focus(), (-1, -1), "the Observer line: every army again");
+    assert_eq!(vm.focus_army(), None);
+}
+
+/// A player in a live game can't take another army's view (moho's
+/// `ValidateFocusArmyRequest`): clicking a line, the console command and
+/// the user function all leave the focus on their own army.
+#[test]
+fn a_player_keeps_their_armys_view() {
+    let Some(vm) = score_board(1) else { return };
+    click_score_line(&vm, 2);
+    let focus = || -> i64 { vm.lua().load("return GetFocusArmy()").eval().unwrap() };
+    assert_eq!(focus(), 1);
+    vm.console("SetFocusArmy 1").unwrap();
+    vm.lua().load("SetFocusArmy(-1)").exec().unwrap();
+    assert_eq!(focus(), 1);
+    assert_eq!(vm.focus_army(), Some(1));
+    // Their own army is always theirs to show; cheats allow any.
+    vm.lua().load("SetFocusArmy(0)").exec().unwrap();
+    assert_eq!(focus(), 1);
+    vm.lua().load("rawget(_G, '__engine_session').Options.CheatsEnabled = 'true' SetFocusArmy(1)").exec().unwrap();
+    assert_eq!(focus(), 2, "cheats on");
 }
 
 /// A profile list as FAF writes it (`profiles` an array, `current` an
@@ -2785,8 +3041,10 @@ fn keyboard_focus_has_one_holder() {
     assert_eq!(got, [true; 7]);
 }
 
-/// `Edit:SetText` and `ClearText` call `OnTextChanged(new, old)` when the
-/// text changes (`probe_ui_controls` edit: `>abcdef;`, then `123>;`).
+/// `Edit:SetText` and `ClearText` call `OnTextChanged(new, old)`
+/// (`probe_ui_controls` edit: `>abcdef;`, then `123>;`), even when the text
+/// is the same (retail exe 0x796910: FAF's key bindings dialog fills its
+/// list that way), but not from inside the edit's own `OnTextChanged`.
 #[test]
 fn edit_set_text_calls_on_text_changed() {
     let Some(vm) = vm() else { return };
@@ -2803,12 +3061,19 @@ fn edit_set_text_calls_on_text_changed() {
             e:SetMaxChars(3)
             e:SetText('123456')
             e:ClearText()
-            return log
+            -- A digits-only filter sets its own text from the handler.
+            e.OnTextChanged = function(self, new, old)
+                log = log .. old .. '>' .. new .. ';'
+                self:SetText(string.gsub(new, '[^0-9]', ''))
+            end
+            e:SetText('a1')
+            return log .. e:GetText()
             "#,
         )
         .eval()
         .unwrap();
-    assert_eq!(log, ">abcdef;abcdef>123;123>;");
+    // `SetMaxChars(3)` already cut the text to `abc` (`probe_ui_controls` edit).
+    assert_eq!(log, ">abcdef;abcdef>abcdef;abc>123;123>;>a1;1");
 }
 
 /// `GetFireState(units)` is the units' shared state, or -1 when one has no
@@ -2833,4 +3098,310 @@ fn fire_state_of_units_without_the_toggle_is_minus_one() {
         .eval()
         .unwrap();
     assert_eq!(got, [1, -1, 2, -1, -1, -1, 1, -1]);
+}
+
+/// `ToggleFireState(units, state)` moves the units on from `state` to the
+/// next fire state, as FAF's cycle hotkey expects (`probe_ui_units` C: 0
+/// ends at 1); a mix (-1) starts the cycle at 0.
+#[test]
+fn toggle_fire_state_moves_on_to_the_next_state() {
+    use rts_core_engine::engine::sim::input::Toggle;
+    let Some(vm) = vm() else { return };
+    vm.take_orders().unwrap();
+    vm.lua().load("for _, s in { 0, 1, 2, -1, 'HoldFire' } do ToggleFireState({}, s) end").exec().unwrap();
+    let got: Vec<_> = vm.take_orders().unwrap().into_iter().map(|o| o.toggle).collect();
+    let want: Vec<_> = [1, 2, 0, 0, 2].into_iter().map(|v| Some(Toggle::FireState(v))).collect();
+    assert_eq!(got, want);
+}
+
+/// `SetCurrentFactoryForQueueDisplay` of an idle factory or of a unit that
+/// isn't one is nil, as moho's (`probe_ui_units` Q): FAF's
+/// `ResetOrderQueue` tests `if queue`.
+#[test]
+fn an_empty_factory_queue_is_nil() {
+    use rts_core_engine::engine::snapshot::UnitDetail;
+    use rts_core_engine::ui::UnitInfo;
+    let Some(vm) = vm() else { return };
+    let info = |id, bp: &str| UnitInfo { id, blueprint: bp.into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [0.0; 3], work: 0.0, shield: 0.0, detail: Some(UnitDetail { id, ..Default::default() }) };
+    vm.update_units(&[info(1, "ueb0101"), info(2, "uel0201")]).unwrap();
+    let got: (bool, bool) = vm.lua().load("return SetCurrentFactoryForQueueDisplay(__engine_unit(1)) == nil, SetCurrentFactoryForQueueDisplay(__engine_unit(2)) == nil").eval().unwrap();
+    assert_eq!(got, (true, true));
+}
+
+/// Front-end data round-trips as a copy and outlives the interface that set
+/// it (moho keeps it in the engine: FAF's campaign briefing and replay
+/// restart read it from the next Lua state; `probe_ui_globals` prefs).
+#[test]
+fn front_end_data_outlives_the_interface() {
+    let Some(first) = vm() else { return };
+    let same: String = first.lua().load("local t = { a = 1 } SetFrontEndData('test_k', t) t.a = 2 return GetFrontEndData('test_k').a .. tostring(GetFrontEndData('test_none'))").eval().unwrap();
+    assert_eq!(same, "1nil");
+    drop(first);
+    let Some(next) = vm() else { return };
+    let got: f64 = next.lua().load("return GetFrontEndData('test_k').a").eval().unwrap();
+    assert_eq!(got, 1.0);
+    let gone: bool = next.lua().load("SetFrontEndData('test_k', nil) return GetFrontEndData('test_k') == nil").eval().unwrap();
+    assert!(gone);
+}
+
+/// New controls take moho's defaults: a group is named `group`, a bitmap
+/// `Bitmap`, and both draw in render pass 8 (`probe_ui_controls` ctl,
+/// `probe_api_spot` ui.control).
+#[test]
+fn new_controls_take_mohos_name_and_render_pass() {
+    let Some(vm) = vm() else { return };
+    let got: (String, String, i32, i32) = vm
+        .lua()
+        .load(
+            r#"
+            local g = import('/lua/maui/group.lua').Group(GetFrame(0))
+            local b = import('/lua/maui/bitmap.lua').Bitmap(g)
+            return g:GetName(), b:GetName(), g:GetRenderPass(), b:GetRenderPass()
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(got, ("group".into(), "Bitmap".into(), 8, 8));
+}
+
+/// `ApplyFunction` visits the control and its direct children only
+/// (`probe_ui_controls` ctl: `renamed;probe_child;`).
+#[test]
+fn apply_function_goes_one_level_down() {
+    let Some(vm) = vm() else { return };
+    let got: String = vm
+        .lua()
+        .load(
+            r#"
+            local Group = import('/lua/maui/group.lua').Group
+            local g = Group(GetFrame(0), 'g')
+            local child = Group(g, 'child')
+            Group(child, 'grand')
+            local out = ''
+            g:ApplyFunction(function(c) out = out .. c:GetName() .. ';' end)
+            return out
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(got, "g;child;");
+}
+
+/// A game being played is recorded and observing reads false, as in the
+/// real game's single-player session (`probe_api_spot` ui.session3).
+#[test]
+fn a_played_session_is_recorded() {
+    let Some(vm) = vm() else { return };
+    let got: (bool, bool) = vm.lua().load("return SessionIsBeingRecorded(), SessionIsObservingAllowed()").eval().unwrap();
+    assert_eq!(got, (true, false));
+}
+
+/// An edit's limit is 1024 characters by default and `SetMaxChars` cuts
+/// the text to a new one (`probe_ui_controls` edit).
+#[test]
+fn set_max_chars_cuts_the_text() {
+    let Some(vm) = vm() else { return };
+    let got: (i64, String, i64) = vm
+        .lua()
+        .load(
+            r#"
+            local e = import('/lua/maui/edit.lua').Edit(GetFrame(0))
+            local default = e:GetMaxChars()
+            e:SetText('abcdef')
+            e:SetMaxChars(3)
+            return default, e:GetText(), e:GetCaretPosition()
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(got, (1024, "abc".into(), 3));
+}
+
+/// Every key in FAF's US strings database resolves to its text through
+/// `LOC` (`_Idle`, `_Tech`, ...), with an active mod hooking the database
+/// as AI mods do: its `hook/loc/us/strings_db.lua` starts with a BOM, which
+/// left mid-chunk failed the whole file, so only keys with inline text
+/// still read right.
+#[test]
+fn every_strings_db_key_resolves_through_loc() {
+    let _ = tracing_subscriber::fmt().with_writer(std::io::stderr).with_max_level(tracing::Level::WARN).try_init();
+    if !rts_core_engine::test_data::require_game("UI tests") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("loc_hook_mod_{}", std::process::id()));
+    let hook = dir.join("mods/lochook/hook/loc/us/strings_db.lua");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "\u{feff}\r\nlochook_0001=\"Hooked\"\r\n").unwrap();
+    let engine = engine::Engine::new(INIT_LUA_PATH, FA_PATH, Arc::new(Mutex::new(DebugUiState::new()))).expect("engine");
+    let mut vfs = engine.vfs.read().unwrap().clone();
+    vfs.mount_folder(engine::vfs::MountPoint { source: dir.clone(), mountpoint: "/".into() }).expect("mount");
+    let vfs = Arc::new(std::sync::RwLock::new(vfs));
+    let cache = Arc::new(engine::lua::script_cache::ScriptCache::new(vfs.clone()));
+    let vm = UserVm::with_cache(vfs, cache).expect("user vm");
+    vm.lua().load("__active_mods = { { uid = 'lochook', name = 'lochook', location = '/mods/lochook' } }").exec().unwrap();
+    vm.init().expect("userInit.lua");
+    let lua = vm.lua();
+    let loc: mlua::Function = lua.globals().get("LOC").expect("LOC");
+    let loc = |s: &str| -> String { loc.call(s).expect("LOC") };
+    // The keys and texts as FAF's file assigns them, read on its own.
+    let src = std::fs::read_to_string("../fa/loc/US/strings_db.lua").expect("strings_db.lua");
+    let env = lua.create_table().unwrap();
+    lua.load(src.trim_start_matches('\u{feff}')).set_name("=strings_db").set_environment(env.clone()).exec().expect("strings_db.lua");
+    let (mut total, mut failed) = (0, Vec::new());
+    for pair in env.pairs::<String, String>() {
+        let (key, text) = pair.unwrap();
+        total += 1;
+        // `LOC` expands the text's `{...}` directives; so does `LocExpand`.
+        let (got, want) = (loc(&format!("<LOC {key}>")), loc(&text));
+        if got != want && !(cfg!(not(windows)) && key == "_Exit_to_Windows") {
+            failed.push(format!("{key}: {got:?}, want {want:?}"));
+        }
+    }
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(total > 7000, "read {total} keys");
+    assert!(failed.is_empty(), "{} of {total} keys failed:\n{}", failed.len(), failed[..failed.len().min(20)].join("\n"));
+    assert_eq!(loc("<LOC lochook_0001>"), "Hooked", "the hook's keys");
+}
+
+/// The game interface with FAF's key bindings dialog to drive: texts on
+/// screen, clicks and the selected tank (entity 3) for key actions.
+mod key_bindings {
+    use super::*;
+    use rts_core_engine::engine::sim::command::CommandKind;
+    use rts_core_engine::ui::controls::{Modifiers, MouseEvent};
+    use rts_core_engine::ui::UnitInfo;
+
+    pub fn game(prefs: Option<&std::path::Path>) -> Option<UserVm> {
+        let vm = vm()?;
+        if let Some(p) = prefs {
+            vm.load_prefs(p).unwrap();
+        }
+        vm.set_screen(1280.0, 720.0).unwrap();
+        vm.set_focus_army(1).unwrap();
+        vm.start_hud().expect("game interface");
+        for _ in 0..420 {
+            vm.frame(1.0 / 60.0).unwrap();
+        }
+        vm.update_units(&[UnitInfo { id: 3, blueprint: "uel0201".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
+        vm.set_selection(&[3]).unwrap();
+        vm.take_orders().unwrap();
+        Some(vm)
+    }
+
+    pub fn texts(vm: &UserVm) -> Vec<([f32; 4], String)> {
+        vm.draw_list().unwrap().into_iter().filter_map(|i| match i { DrawItem::Text { rect, text, .. } => Some((rect, text)), _ => None }).collect()
+    }
+
+    /// The middle of the text shown that starts with `t`.
+    pub fn find(vm: &UserVm, t: &str) -> Option<(f32, f32)> {
+        texts(vm).into_iter().find(|(_, s)| s.starts_with(t)).map(|(r, _)| ((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0))
+    }
+
+    pub fn click(vm: &UserVm, t: &str, double: bool) {
+        let (x, y) = find(vm, t).unwrap_or_else(|| panic!("{t:?} not shown: {:?}", texts(vm).iter().map(|t| &t.1).collect::<Vec<_>>()));
+        let left = Modifiers { left: true, ..Default::default() };
+        vm.mouse(MouseEvent::Move, x, y, Modifiers::default()).unwrap();
+        for _ in 0..if double { 2 } else { 1 } {
+            vm.mouse(MouseEvent::Press(1), x, y, left).unwrap();
+            vm.mouse(MouseEvent::Release(1), x, y, Modifiers::default()).unwrap();
+        }
+        vm.frame(1.0 / 60.0).unwrap();
+    }
+
+    /// Does key `k` stop the selected tank?
+    pub fn stops(vm: &UserVm, k: &str) -> bool {
+        vm.take_orders().unwrap();
+        vm.key(k, false, false, false).unwrap();
+        vm.take_orders().unwrap().iter().any(|o| rts_core_engine::ui::command_kind(&o.command) == Some(CommandKind::Stop))
+    }
+
+    /// The key bindings dialog: binds Stop to H, which is select nearest
+    /// factory's, answering Yes to the conflict prompt, and closes it.
+    pub fn bind_stop_to_h(vm: &UserVm) {
+        assert!(vm.key("F1", false, false, false).unwrap(), "F1 opens the dialog");
+        vm.frame(1.0 / 60.0).unwrap();
+        assert!(vm.typing(), "the filter box has the focus");
+        vm.text("stop").unwrap();
+        vm.frame(1.0 / 60.0).unwrap();
+        click(vm, "Stop and cancel all Orders", true);
+        assert!(find(vm, "Hit the key combination").is_some(), "double click asks for a key");
+        assert!(!vm.typing(), "the key popup has the focus, not the filter");
+        vm.key("H", false, false, false).unwrap();
+        vm.frame(1.0 / 60.0).unwrap();
+        assert!(texts(vm).iter().any(|(_, t)| t == "H"), "the pressed key is shown");
+        click(vm, "Ok", false);
+        assert!(find(vm, "The H key is already mapped").is_some(), "H is taken: asked to confirm");
+        click(vm, "Yes", false);
+        assert!(texts(vm).iter().any(|(_, t)| t == "H"), "Stop's row shows H");
+        click(vm, "Close", false);
+        assert!(find(vm, "Key Bindings").is_none(), "closed");
+    }
+}
+
+/// FAF's key bindings dialog (F1) lists the key map's actions by category
+/// (its `SetText('')` fills the list through `OnTextChanged`), a header
+/// opens its category, and the wheel scrolls the list.
+#[test]
+fn key_bindings_dialog_lists_actions() {
+    use key_bindings::*;
+    let Some(vm) = game(None) else { return };
+    assert!(vm.key("F1", false, false, false).unwrap());
+    vm.frame(1.0 / 60.0).unwrap();
+    let shown = |vm: &UserVm, t: &str| texts(vm).iter().any(|(_, s)| s == t);
+    assert!(shown(&vm, "Key Bindings"));
+    for header in ["Orders", "Selection", "Camera", "UI"] {
+        assert!(shown(&vm, header), "{header} listed");
+    }
+    assert!(!shown(&vm, "Assist"), "categories start collapsed");
+    click(&vm, "Orders", false);
+    assert!(shown(&vm, "Assist") && shown(&vm, "Shift + I"), "Orders opened, with their keys");
+    let top = |vm: &UserVm| texts(vm).into_iter().find(|(r, s)| r[0] > 360.0 && r[1] > 80.0 && r[1] < 100.0 && !s.is_empty()).map(|t| t.1);
+    let first = top(&vm);
+    let (x, y) = find(&vm, "Assist").unwrap();
+    use rts_core_engine::ui::controls::{Modifiers, MouseEvent};
+    vm.mouse(MouseEvent::Move, x, y, Modifiers::default()).unwrap();
+    vm.mouse(MouseEvent::Wheel(-1.0), x, y, Modifiers::default()).unwrap();
+    vm.frame(1.0 / 60.0).unwrap();
+    assert_ne!(top(&vm), first, "the wheel scrolled the list");
+}
+
+/// A key bound in the dialog is the key map's at once, is kept in the
+/// profile and is the key map's on the next start; the action's old key
+/// no longer does it.
+#[test]
+fn key_bindings_dialog_rebind_applies_and_persists() {
+    use key_bindings::*;
+    let Some(vm) = game(None) else { return };
+    assert!(stops(&vm, "S"));
+    bind_stop_to_h(&vm);
+    assert!(stops(&vm, "H"), "H stops");
+    assert!(!stops(&vm, "S"), "S no longer does");
+    // Its Shift version follows (FAF's dialog moves `shift_stop` too).
+    let map: (String, Option<String>, Option<String>) = vm.lua().load("local m = GetPreference('profile.profiles.1.UserKeyMap') return m.H, m.S, m['Shift-H']").eval().unwrap();
+    assert_eq!(map, ("stop".to_string(), None, Some("shift_stop".to_string())));
+    // Written as Game.prefs and read by the next game.
+    let path = std::env::temp_dir().join(format!("rts-core-engine-keybind-{}.prefs", std::process::id()));
+    rts_core_engine::ui::prefs::save_file(&path, &vm.prefs().unwrap()).unwrap();
+    drop(vm);
+    let next = game(Some(&path));
+    let _ = std::fs::remove_file(&path);
+    let vm = next.unwrap();
+    assert!(stops(&vm, "H"), "H stops after a restart");
+    assert!(!stops(&vm, "S"));
+}
+
+/// The dialog's Default Preset (confirmed) puts FAF's default map back.
+#[test]
+fn key_bindings_dialog_resets_to_defaults() {
+    use key_bindings::*;
+    let Some(vm) = game(None) else { return };
+    bind_stop_to_h(&vm);
+    assert!(vm.key("F1", false, false, false).unwrap());
+    vm.frame(1.0 / 60.0).unwrap();
+    click(&vm, "Default Preset", false);
+    assert!(find(&vm, "Are you sure you want to reset").is_some(), "asked to confirm");
+    click(&vm, "Yes", false);
+    click(&vm, "Close", false);
+    assert!(stops(&vm, "S"), "S stops again");
+    assert!(!stops(&vm, "H"));
 }

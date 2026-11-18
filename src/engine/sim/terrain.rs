@@ -10,6 +10,9 @@ pub struct Terrain {
     pub height: u32,
     /// Sample heights pre-multiplied by the map's height scale.
     heights: Vec<Fx>,
+    /// The map's height scale (1/128 on stock maps): one step of the 16-bit
+    /// heightmap, the grid heights set by script land on.
+    scale: Fx,
     /// Water surface elevation, if the map has water.
     pub water_surface: Option<Fx>,
     /// Fraction of height samples below the water surface (0 without water).
@@ -28,6 +31,7 @@ impl Terrain {
             width: hm.width,
             height: hm.height,
             heights: hm.samples.iter().map(|&s| Fx::from_num(s) * scale).collect(),
+            scale,
             water_surface: None,
             water_ratio: 0.0,
             types: Vec::new(),
@@ -41,15 +45,20 @@ impl Terrain {
         self
     }
 
-    /// Terrain type code of the cell containing `(x, z)` (clamped); 1 =
-    /// `Default` when the map has no type data.
+    /// Terrain type code of the cell containing `(x, z)`; 1 = `Default`
+    /// off the map (the real game's `GetTerrainType(-1, -1)` and
+    /// `(1024, 1024)` on a 1024 map are `Default`, not the edge cell's type:
+    /// dev/probes probe_api_spot, probe_ai_brain) or when the map has no type
+    /// data.
     pub fn type_at(&self, x: Fx, z: Fx) -> u8 {
-        if self.types.is_empty() {
+        if self.types.is_empty() || x < Fx::ZERO || z < Fx::ZERO {
             return 1;
         }
-        let cell = |v: Fx, max: u32| v.max(Fx::ZERO).int().to_num::<u32>().min(max - 1);
-        let (ix, iz) = (cell(x, self.width), cell(z, self.height));
-        self.types[(iz * self.width + ix) as usize]
+        let (ix, iz) = (x.int().to_num::<u64>(), z.int().to_num::<u64>());
+        if ix >= u64::from(self.width) || iz >= u64::from(self.height) {
+            return 1;
+        }
+        self.types[(iz as u32 * self.width + ix as u32) as usize]
     }
 
     pub fn with_water(mut self, surface: Option<f32>) -> Self {
@@ -79,15 +88,20 @@ impl Terrain {
         self.heights[(z * (self.width + 1) + x) as usize]
     }
 
-    /// Sets every height sample inside the world rectangle `[x0, x1] x
-    /// [z0, z1]` (clamped to the map) to `elevation` (`FlattenMapRect`).
     /// Heights as floats for the renderer (`(width + 1) x (height + 1)`).
     pub fn heights_f32(&self) -> Vec<f32> {
         self.heights.iter().map(|h| h.to_num::<f32>()).collect()
     }
 
+    /// Sets every height sample inside the world rectangle `[x0, x1] x
+    /// [z0, z1]` (clamped to the map) to `elevation` (`FlattenMapRect`), as
+    /// the heightmap stores it: a whole number of height-scale steps in
+    /// 0..=65535 (the real game's heights after FAF's `FlattenSkirt` read
+    /// back on the 1/128 grid: 32.719 where the elevation asked for was
+    /// 32.725, dev/probes/maps/probe_re6_tilt).
     pub fn flatten(&mut self, x0: Fx, z0: Fx, x1: Fx, z1: Fx, elevation: Fx) {
         self.version = self.version.wrapping_add(1);
+        let elevation = self.on_grid(elevation);
         let sample = |v: Fx, max: u32| v.max(Fx::ZERO).min(Fx::from_num(max));
         let (sx0, sx1) = (sample(x0, self.width).ceil().to_num::<u32>(), sample(x1, self.width).floor().to_num::<u32>());
         let (sz0, sz1) = (sample(z0, self.height).ceil().to_num::<u32>(), sample(z1, self.height).floor().to_num::<u32>());
@@ -96,6 +110,15 @@ impl Terrain {
                 self.heights[(z * (self.width + 1) + x) as usize] = elevation;
             }
         }
+    }
+
+    /// `h` as the 16-bit heightmap holds it (see [`Terrain::flatten`]).
+    fn on_grid(&self, h: Fx) -> Fx {
+        if self.scale <= Fx::ZERO {
+            return h;
+        }
+        let steps = (h / self.scale).floor().clamp(Fx::ZERO, Fx::from_num(u16::MAX));
+        steps * self.scale
     }
 
     /// Lowest and highest height sample over the vertices `x0..=x1`,
@@ -257,6 +280,33 @@ impl Terrain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terrain_type_off_the_map_is_default() {
+        let t = Terrain::from_heightmap(&Heightmap { width: 4, height: 4, scale: 1.0 / 128.0, samples: vec![0u16; 25] }).with_types(vec![9; 16]);
+        let f = |v: f64| Fx::from_num(v);
+        assert_eq!(t.type_at(f(0.0), f(0.0)), 9);
+        assert_eq!(t.type_at(f(3.9), f(3.9)), 9);
+        assert_eq!(t.type_at(f(-1.0), f(-1.0)), 1);
+        assert_eq!(t.type_at(f(-0.5), f(2.0)), 1);
+        assert_eq!(t.type_at(f(4.0), f(4.0)), 1);
+        assert_eq!(t.type_at(f(2.0), f(100.0)), 1);
+    }
+
+    /// `FlattenMapRect` heights land on the heightmap's grid, rounded down
+    /// (the real game's 32.725 asked for reads 32.71875), within its range.
+    #[test]
+    fn flattened_heights_are_whole_height_steps() {
+        let mut t = Terrain::from_heightmap(&Heightmap { width: 4, height: 4, scale: 1.0 / 128.0, samples: vec![0u16; 25] });
+        let f = |v: f64| Fx::from_num(v);
+        t.flatten(f(1.0), f(1.0), f(1.0), f(1.0), f(32.725));
+        assert_eq!(t.height_at(f(1.0), f(1.0)), f(32.71875));
+        t.flatten(f(2.0), f(2.0), f(2.0), f(2.0), f(-3.0));
+        assert_eq!(t.height_at(f(2.0), f(2.0)), Fx::ZERO);
+        t.flatten(f(3.0), f(3.0), f(3.0), f(3.0), f(1000.0));
+        assert_eq!(t.height_at(f(3.0), f(3.0)), f(65535.0 / 128.0));
+        assert_eq!(t.height_at(f(0.0), f(0.0)), Fx::ZERO, "outside the rect: unchanged");
+    }
 
     #[test]
     fn hill_blocks_direct_fire_but_not_high_arcs() {

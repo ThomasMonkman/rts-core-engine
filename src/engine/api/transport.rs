@@ -119,11 +119,10 @@ pub(crate) fn storage_slots(lua: &Lua, transport: EntityId) -> u32 {
 
 /// Units stored in `carrier`, id order.
 pub(crate) fn stored_units(lua: &Lua, carrier: EntityId) -> Vec<EntityId> {
-    entity::world(lua)
-        .iter()
-        .filter(|e| !e.destroyed && e.attachment.is_some_and(|a| a.parent == carrier) && e.unit.as_deref().is_some_and(|u| u.stored_in == Some(carrier)))
-        .map(|e| e.id)
-        .collect()
+    let w = entity::world(lua);
+    let mut ids = w.attached_to(carrier);
+    ids.retain(|&id| w.get(id).is_some_and(|e| !e.destroyed && e.unit.as_deref().is_some_and(|u| u.stored_in == Some(carrier))));
+    ids
 }
 
 /// Puts `unit` inside `carrier`.
@@ -402,7 +401,7 @@ pub(crate) fn free_slots(lua: &Lua, transport: EntityId, class: u8) -> Vec<u32> 
         Some(sk) => &sk.bones,
         None => return Vec::new(),
     };
-    let taken: Vec<u32> = w.iter().filter(|e| !e.destroyed).filter_map(|e| e.attachment.filter(|a| a.parent == transport).and_then(|a| a.parent_bone)).collect();
+    let taken: Vec<u32> = w.attached_to(transport).into_iter().filter_map(|id| w.get(id)).filter(|e| !e.destroyed).filter_map(|e| e.attachment.and_then(|a| a.parent_bone)).collect();
     let reserved: Vec<u32> = match lua.app_data_ref::<Beaming>() {
         Some(b) => b.0.values().filter(|beam| beam.transport == transport).map(|beam| beam.bone).collect(),
         None => Vec::new(),
@@ -521,6 +520,8 @@ fn attach(lua: &Lua, transport: EntityId, unit: EntityId, bone: u32, hang: bool)
         }
     }
     set_state(lua, unit, "Attached", true);
+    // Down (on a pad, or picked up): no longer coming down.
+    set_state(lua, unit, "MovingDown", false);
     // Passengers ride in the air (FAF's drop logic waits for the change
     // back on landing).
     if !is_staging(lua, transport) {
@@ -827,7 +828,10 @@ fn beam_tick(lua: &Lua) -> LuaResult<()> {
         // The slot filled underneath (or the transport died): abort and let
         // the load order pick another slot.
         let slot_free = !gone(beam.transport)
-            && entity::world(lua).iter().filter(|e| !e.destroyed).filter_map(|e| e.attachment.filter(|a| a.parent == beam.transport).and_then(|a| a.parent_bone)).all(|b| b != beam.bone);
+            && {
+                let w = entity::world(lua);
+                w.attached_to(beam.transport).into_iter().filter_map(|id| w.get(id)).filter(|e| !e.destroyed).filter_map(|e| e.attachment.and_then(|a| a.parent_bone)).all(|b| b != beam.bone)
+            };
         if gone(unit) || !slot_free {
             stop_beam(lua, unit);
             continue;
@@ -1432,7 +1436,7 @@ fn ferry_states(lua: &Lua) {
     };
     let mut world = entity::world(lua);
     let mut was: Vec<EntityId> = Vec::new();
-    for e in world.iter() {
+    for e in world.units() {
         if e.unit.as_deref().is_some_and(|u| u.states.contains(index)) {
             was.push(e.id);
         }
@@ -1532,11 +1536,17 @@ fn ferry_tasks(lua: &Lua) -> LuaResult<()> {
 ///   as given, a per-tick amount: the blueprint values are per tick);
 /// - fuel above 0.99 and undamaged: the service stops (no callback).
 fn staging(lua: &Lua) -> LuaResult<()> {
-    let docked: Vec<(EntityId, EntityId)> = entity::world(lua)
-        .iter()
-        .filter(|e| !e.destroyed && e.unit.as_deref().is_some_and(|u| u.fuel_use_time > Fx::ZERO))
-        .filter_map(|e| e.attachment.map(|a| (e.id, a.parent)))
-        .collect();
+    let docked: Vec<(EntityId, EntityId)> = {
+        let w = entity::world(lua);
+        let mut attached = Vec::new();
+        w.attached_into(&mut attached);
+        attached
+            .into_iter()
+            .filter_map(|id| w.get(id))
+            .filter(|e| !e.destroyed && e.unit.as_deref().is_some_and(|u| u.fuel_use_time > Fx::ZERO))
+            .filter_map(|e| e.attachment.map(|a| (e.id, a.parent)))
+            .collect()
+    };
     let mut started = Vec::new();
     let mut refuelled = Vec::new();
     let mut leaving = Vec::new();

@@ -186,22 +186,23 @@ fn damage_shell(
 
 /// Shield entities with a collision shape that the shell between `min_r`
 /// (exclusive; 0 = a full sphere) and `r` around `center` touches, in id
-/// order.
-fn shield_entities_touched(w: &crate::engine::sim::entity::EntityWorld, center: FxVec3, min_r: Fx, r: Fx) -> Vec<EntityId> {
+/// order. From the volume index: only the bubbles listed in the cells the
+/// blast covers are tested.
+pub fn shield_entities_touched(w: &crate::engine::sim::entity::EntityWorld, center: FxVec3, min_r: Fx, r: Fx) -> Vec<EntityId> {
     use crate::engine::sim::collision::sphere_touches;
-    use crate::engine::sim::entity::{CollisionShape, EntityKind};
-    let mut ids: Vec<EntityId> = w
-        .iter()
-        .filter(|e| !e.destroyed && e.kind == EntityKind::Shield)
-        .filter(|e| {
+    use crate::engine::sim::entity::CollisionShape;
+    let mut ids = Vec::new();
+    w.volumes_in(center.x - r, center.z - r, center.x + r, center.z + r, &mut ids);
+    ids.retain(|&id| {
+        w.get(id).is_some_and(|e| {
             let shape = e.collision_shape();
-            !matches!(shape, CollisionShape::None)
+            e.kind == crate::engine::sim::entity::EntityKind::Shield
+                && !e.destroyed
+                && !matches!(shape, CollisionShape::None)
                 && !(min_r > Fx::ZERO && sphere_touches(center, min_r, e.position(), e.orientation, &shape))
                 && sphere_touches(center, r, e.position(), e.orientation, &shape)
         })
-        .map(|e| e.id)
-        .collect();
-    ids.sort_unstable();
+    });
     ids
 }
 
@@ -234,16 +235,18 @@ fn shields_absorbing(
     source_army: Option<u32>,
 ) -> LuaResult<Vec<Absorbing>> {
     use crate::engine::sim::collision::sphere_touches;
-    use crate::engine::sim::entity::{CollisionShape, EntityKind};
+    use crate::engine::sim::entity::CollisionShape;
     if amount <= 0.0 {
         return Ok(Vec::new());
     }
     let candidates: Vec<EntityId> = {
         let w = world(lua);
         let armies = lua.app_data_ref::<Armies>();
-        let mut ids: Vec<EntityId> = w
-            .iter()
-            .filter(|e| !e.destroyed && e.kind == EntityKind::Shield)
+        let mut near = Vec::new();
+        w.volumes_in(center.x - radius, center.z - radius, center.x + radius, center.z + radius, &mut near);
+        near.into_iter()
+            .filter_map(|id| w.get(id))
+            .filter(|e| e.kind == crate::engine::sim::entity::EntityKind::Shield && !e.destroyed)
             .filter(|e| match (friendly, source_army, e.army, &armies) {
                 (false, Some(from), Some(to), Some(a)) => a.alliance(from, to) != Alliance::Ally,
                 _ => true,
@@ -261,9 +264,7 @@ fn shields_absorbing(
                 outside && sphere_touches(center, radius, e.position(), e.orientation, &shape)
             })
             .map(|e| e.id)
-            .collect();
-        ids.sort_unstable();
-        ids
+            .collect()
     };
     let mut out = Vec::new();
     for id in candidates {

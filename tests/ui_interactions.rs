@@ -576,3 +576,26 @@ fn cheat_menu_over_the_minimap_takes_its_clicks() {
     frames(&vm, 2);
     assert!(vm.hit_minimap(x, y).unwrap(), "closed: the minimap's again");
 }
+
+/// `LockInput` is counted: two locks need two unlocks (`probe_ui_controls`
+/// cam: `LockInput nested = true false`).
+#[test]
+fn world_view_input_locks_are_counted() {
+    let Some(vm) = hud() else { return };
+    let got: (bool, bool, bool) = vm
+        .lua()
+        .load(
+            r#"
+            local view = import('/lua/ui/game/worldview.lua').viewLeft
+            view:LockInput() view:LockInput() view:UnlockInput()
+            local nested = view:IsInputLocked()
+            view:UnlockInput()
+            local open = view:IsInputLocked()
+            view:UnlockInput()
+            return nested, open, view:IsInputLocked()
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(got, (true, false, false));
+}

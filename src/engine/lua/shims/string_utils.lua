@@ -1,18 +1,26 @@
 -- Moho string helpers (Luau: small leaf functions are cheaper than native
 -- callbacks; see CLAUDE.md).
-local gmatch, gsub, insert = string.gmatch, string.gsub, table.insert
+local gmatch, gsub = string.gmatch, string.gsub
 local patternCache = {}
 
--- Splits on any character in `delimiter` (strtok semantics: empty tokens skipped).
+-- Splits on any character in `delimiter` (strtok semantics: empty tokens
+-- skipped), into a 0-based table, as moho: STR_GetTokens('a b c', ' ') =
+-- {[0]='a', [1]='b', [2]='c'}, and an empty delimiter gives the whole string
+-- (dev/probes probe_api_spot). FAF walks the result with `for k, v in`, which
+-- visits [0] last, in the real game as in ours.
 function STR_GetTokens(str, delimiter)
+    if delimiter == "" then
+        return str ~= "" and { [0] = str } or {}
+    end
     local pattern = patternCache[delimiter]
     if not pattern then
         pattern = "[^" .. gsub(delimiter, "(%W)", "%%%1") .. "]+"
         patternCache[delimiter] = pattern
     end
-    local out = {}
+    local out, n = {}, 0
     for token in gmatch(str, pattern) do
-        insert(out, token)
+        out[n] = token
+        n = n + 1
     end
     return out
 end
@@ -42,16 +50,21 @@ function STR_Utf8SubString(str, start, count)
     return string.sub(str, i, j - 1)
 end
 
--- moho STR_itox(int): lower-case hex, as a 32-bit unsigned value.
+-- moho STR_itox(int): upper-case hex, as a 32-bit unsigned value
+-- (STR_itox(255) = "FF", STR_itox(-1) = "FFFFFFFF": dev/probes probe_api_spot).
 function STR_itox(int)
-    return string.format("%x", bit32.band(int, 0xFFFFFFFF))
+    return string.format("%X", bit32.band(int, 0xFFFFFFFF))
 end
 
--- moho STR_xtoi(str): the leading hex digits as an integer (strtoul: 0 when
--- there are none).
+-- moho STR_xtoi(str): the leading hex digits as a signed 32-bit integer, 0
+-- when there are none; leading spaces aren't skipped (STR_xtoi('ffffffff')
+-- = -1, STR_xtoi(' 1f') = 0: dev/probes probe_api_spot).
 function STR_xtoi(str)
-    local digits = string.match(str, "^%s*(%x+)")
-    return digits and tonumber(digits, 16) or 0
+    local digits = string.match(str, "^(%x+)")
+    if not digits then return 0 end
+    local n = bit32.band(tonumber(string.sub(digits, -8), 16), 0xFFFFFFFF)
+    if n >= 0x80000000 then n = n - 0x100000000 end
+    return n
 end
 
 -- Lua 5.0's _TRACEBACK(...) (ldblib's errorfb, moho keeps it as a global):

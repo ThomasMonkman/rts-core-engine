@@ -205,14 +205,39 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             // Ground units standing on it stand on the new ground next tick
             // (the real game's do: dev/probes/maps/probe_fatboy). A unit's
             // corners reach at most half the biggest footprint out.
+            // Structures on the ground or seabed whose centre the change
+            // reaches (within a cell: heights interpolate between samples)
+            // stand at the new height at once: the real game's are at the
+            // flattened height from the tick they're made, so FAF's
+            // `StructureUnit.OnCreate`, flattening the skirt and then tilting
+            // to the slope from `GetPosition`, leans a 1x1 footprint from
+            // there (dev/probes/maps/probe_re6_tilt: a Cybran T2 shield 20.19
+            // degrees; from the height before flattening, 17.53).
             {
+                use crate::engine::sim::{layer::Layer, movement::MotionKind};
                 let reach = crate::engine::sim::math::Fx::from_num(16);
+                let (lo_x, lo_z, hi_x, hi_z) = (fx(x - 1.0), fx(z - 1.0), fx(x + sx + 1.0), fx(z + sz + 1.0));
+                let terrain = lua.app_data_ref::<Terrain>();
                 let mut world = crate::engine::api::entity::world(lua);
                 let mut ids = Vec::new();
                 world.unit_candidates(fx(x) - reach, fx(z) - reach, fx(x + sx) + reach, fx(z + sz) + reach, &mut ids);
                 for id in ids {
-                    if let Some(u) = world.get_mut(id).and_then(|e| e.unit.as_deref_mut()) {
+                    let Some(e) = world.get_mut(id) else { continue };
+                    let p = e.position();
+                    let structure = e.attachment.is_none()
+                        && e.unit.as_deref().is_some_and(|u| u.motion_params.kind == MotionKind::None && matches!(u.layer, Layer::Land | Layer::Seabed));
+                    if let Some(u) = e.unit.as_deref_mut() {
                         u.on_ground = false;
+                    }
+                    if structure
+                        && let Some(t) = terrain.as_deref()
+                        && (lo_x..=hi_x).contains(&p.x)
+                        && (lo_z..=hi_z).contains(&p.z)
+                    {
+                        let y = t.height_at(p.x, p.z);
+                        if y != p.y {
+                            world.set_position(id, crate::engine::sim::math::FxVec3 { y, ..p });
+                        }
                     }
                 }
             }

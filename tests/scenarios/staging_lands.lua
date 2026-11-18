@@ -15,8 +15,10 @@ ForkThread(function()
     plane:SetFuelRatio(0.3)
     IssueTransportLoad({ plane }, pad)
     local docked, layer
+    local down = false
     for t = 1, 400 do
         WaitTicks(1)
+        down = down or plane:IsUnitState('MovingDown')
         if plane:IsUnitState('Attached') then
             docked = t
             layer = plane:GetCurrentLayer()
@@ -31,6 +33,10 @@ ForkThread(function()
         local vx, vy, vz = plane:GetVelocity()
         check(vx == 0 and vy == 0 and vz == 0, 'docked at rest')
         note('docked at t=' .. docked)
+        -- `MovingDown` coming down to the pad, gone once docked
+        -- (dev/probes probe_re3_mov MS).
+        check(down, 'MovingDown on the way down to the pad')
+        check(not plane:IsUnitState('MovingDown'), 'not once docked')
     end
     ScenarioResult.done = true
 end)

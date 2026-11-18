@@ -640,9 +640,12 @@ pub enum LandEvent {
 
 /// Where the unit's current order wants it, and how close counts as there.
 /// Distance an attacker closes to: 90% of its reach (so slight target
-/// movement doesn't take it straight back out of range).
+/// movement doesn't take it straight back out of range), or its reach less
+/// 1.8 if that's further. The real game's stop about 1.7..1.9 inside range
+/// whatever the target (range 18: 16.05, 22: 20.28, 30: 28.2; dev/probes
+/// probe_re2_orders ATK); 90% stays for short ranges (not measured).
 fn attack_reach(range: Fx) -> Fx {
-    if range > Fx::ZERO { range * Fx::from_num(0.9) } else { Fx::from_num(2) }
+    if range > Fx::ZERO { (range * Fx::from_num(0.9)).max(range - Fx::from_num(1.8)) } else { Fx::from_num(2) }
 }
 
 /// Plain orders to a point given to at least this many units follow a
@@ -807,8 +810,12 @@ fn goal(cmd: Option<&crate::engine::sim::command::Command>, world: &EntityWorld,
         // sacrifice passes do the work).
         // Guarding a builder that is building: its construction instead (the
         // assist pass works on it from build range of it, not of the builder).
+        // A unit that can't build (a tank) guards the unit, never its work
+        // (the real tank guarding a building engineer stays put: dev/probes
+        // probe_re2_orders ST).
         K::Guard => {
-            let building = me.and_then(|me| match cmd.target {
+            let builder = world.get(unit).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.build_rate > Fx::ZERO);
+            let building = me.filter(|_| builder).and_then(|me| match cmd.target {
                 CommandTarget::Entity(id) => world
                     .get(id)
                     .and_then(|e| e.unit.as_deref()?.focus)
@@ -817,7 +824,23 @@ fn goal(cmd: Option<&crate::engine::sim::command::Command>, world: &EntityWorld,
                     .map(|f| f.skirt_point(me)),
                 _ => None,
             });
-            building.or_else(|| touch(cmd.target)).map(|p| (p, build_range, false))
+            if let Some(p) = building {
+                return Some((p, build_range, false));
+            }
+            // Otherwise it settles by the unit it guards, centre to centre
+            // the two avoidance radii apart and at least 2: the real game's
+            // tanks and an engineer by a generator settled 1.7-2.8 away,
+            // frigates (6 long) 5.6-6.1; ours stood its build range off
+            // (5.35, 6.0, 6.95: dev/probes probe_re3_mov GD). (Aircraft
+            // keep the old reach: the real gunship circles, not modelled.)
+            let me_unit = world.get(unit).and_then(|e| e.unit.as_deref());
+            if me_unit.is_some_and(|u| u.motion_params.kind != MotionKind::Air)
+                && let CommandTarget::Entity(id) = cmd.target
+                && let Some(t) = world.get(id).filter(|e| !e.destroyed) {
+                let r = me_unit.map_or(Fx::ZERO, |u| u.radius) + t.unit.as_deref().map_or(Fx::ZERO, |u| u.radius);
+                return Some((t.position(), r.max(Fx::from_num(2)), false));
+            }
+            touch(cmd.target).map(|p| (p, build_range, false))
         }
         K::Repair | K::Reclaim | K::Capture => touch(cmd.target).map(|p| (p, build_range, false)),
         // Right up to it (`api::sacrifice::REACH`; the real engineer walks
@@ -1368,7 +1391,16 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     // fighters start each turn of a square of waypoints ~11 early at
     // speed, its gunship cuts the corner: dev/probes probe_turns).
     let moving = |k: CommandKind| matches!(k, CommandKind::Move | CommandKind::FormMove | CommandKind::AggressiveMove | CommandKind::FormAggressiveMove | CommandKind::Patrol | CommandKind::FormPatrol);
-    let through = p.kind == MotionKind::Air && cmd.is_some_and(|c| matches!(c.kind, CommandKind::Move | CommandKind::FormMove)) && commands.queue(unit).nth(1).is_some_and(|c| moving(c.kind));
+    // A hovering aircraft's patrol point the loop goes on from (anything
+    // queued after it, or a player's leg home to follow) is flown through
+    // the same way, done `StartTurnDistance` short: the real game's
+    // gunships (5) turned 3-7 short of each point and never braked (5-tick
+    // speed 1-5 at the turn, mean 4.8 on a +-6 leg; ours braked to a stop
+    // at each point and crawled at 1.6: dev/probes probe_re3_mov GP).
+    // (Winged patrols keep their turning-radius rule: not measured.)
+    let patrol_on = |c: &crate::engine::sim::command::Command| !p.winged && matches!(c.kind, CommandKind::Patrol | CommandKind::FormPatrol) && (c.patrol_home || commands.queue(unit).nth(1).is_some());
+    let through = p.kind == MotionKind::Air
+        && cmd.is_some_and(|c| (matches!(c.kind, CommandKind::Move | CommandKind::FormMove) && commands.queue(unit).nth(1).is_some_and(|c| moving(c.kind))) || patrol_on(c));
     let pace = if immobile || engaged { None } else { pace(cmd, unit, env.tick) };
     if pace.is_none()
         && let Some(cap) = cmd.and_then(|c| c.slot(unit)).map(|s| s.speed_cap) {
@@ -1952,7 +1984,12 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
                 // path; at least the straight line), not just to the next
                 // waypoint - else every short leg is "within BackUpDistance"
                 // and a unit that starts reversing reverses the whole way.
-                let remaining = if end_short { leg } else if final_leg { dist - radius } else { leg.saturating_add(rest).max(dist - radius) };
+                // (A path that ends short of a goal inside a structure, an
+                // attack target's: still no further than the edge of range,
+                // else it braked for the path's end and rolled on past the
+                // range a braking distance closer than to a unit: dev/probes
+                // probe_re2_orders ATK.)
+                let remaining = if end_short { leg.min((dist - radius).max(Fx::ZERO)) } else if final_leg { dist - radius } else { leg.saturating_add(rest).max(dist - radius) };
                 // TurnRadius / the turn multiplier (moho's motion setup,
                 // 0x1027acbd); no multiplier, no turning.
                 let turn_radius = if mult.turn == Fx::ONE || p.turn_radius == Fx::ZERO {
@@ -2157,6 +2194,20 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
         // stayed closer than the real game's (dev/probes probe_dogfight).)
         let reach = steering.map_or(target_speed, |(_, d)| if through || combat_engaged { target_speed } else { target_speed.min(d) });
         let want = if combat <= 2 { reach.saturating_mul(ec.max(Fx::from_num(0.5))) } else { reach };
+        // Climbing to its height, D points up at it as much as along: its
+        // flat part is s x s / |(s, height still to climb)|, so a plane
+        // gathers speed slowly while it climbs (moho's winged forward is
+        // the 3D D; inferred from the real game's take-off curves: every
+        // winged plane's thrust along the ground is that share within 0.03
+        // on flat ground, the rest the followed ground's look-ahead,
+        // dev/probes probe_re9_takeoff). Climbs only: descents not measured.
+        let want = match surface_height(p.kind, terrain, pos.x, pos.z, p.elevation) {
+            Some(y) if state.landing.is_none() && y > pos.y && reach > Fx::ZERO => {
+                let up = y - pos.y;
+                want.saturating_mul(reach) / sqrt(reach.saturating_mul(reach).saturating_add(up.saturating_mul(up)))
+            }
+            _ => want,
+        };
         let (vs, vc) = match state.course {
             Some(h) => crate::engine::sim::math::sin_cos(h),
             None => (fx, fz),
@@ -2239,11 +2290,31 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
         None if p.kind == MotionKind::Water => data.depth,
         None => p.elevation,
     };
+    // A winged aircraft's true vertical speed when its lift controller flew
+    // it this tick (else its rise this tick).
+    let mut lift_speed = None;
     if let Some(y) = surface_height(p.kind, terrain, next.x, next.z, elevation) {
         surface = Some(y - elevation);
         // Aircraft climb / descend toward their elevation at `lift`; winged
         // ones climb only as fast as their wings are level allows.
-        next.y = if p.kind == MotionKind::Air && p.lift > Fx::ZERO {
+        next.y = if p.kind == MotionKind::Air && p.lift > Fx::ZERO && winged && elevation > Fx::ZERO && (y - pos.y > -Fx::ONE || state.climb > Fx::ZERO) {
+            // Climbing (and settling at its height): moho's lift controller,
+            // force KLift x D.y - KLiftDamping x vertical speed, D.y the
+            // height still to climb capped by `CalcWingedLift`, except on
+            // the take-off tick (still on the ground then: moho's layer is
+            // `Land`); position by the mean speed. The real game's planes
+            // fit it to 0.02 a second every tick from the ground up (UEF T1
+            // bomber 4.23, 4.67, 5.00 .. 5.85, its cap (up.y - 0.5) x 10
+            // easing with the pitch; LiftFactor 7 planes 5.6, 5.3 .. 4.2):
+            // dev/probes probe_re9_takeoff. Descents keep the rate rule below.
+            let take_off = state.vertical == VerticalMotion::Up && state.climb == Fx::ZERO;
+            let wanted = y - pos.y;
+            let d = if take_off { wanted } else { wanted.min(winged_lift(e.orientation, p.lift, elevation, pos.y - (y - elevation))) };
+            let ay = p.air.k_lift.saturating_mul(d) - p.air.k_lift_damping.saturating_mul(state.climb);
+            let new = state.climb + ay * dt;
+            lift_speed = Some(new);
+            pos.y + ((state.climb + new) / 2) * dt
+        } else if p.kind == MotionKind::Air && p.lift > Fx::ZERO {
             let step = p.lift * dt;
             let rise = if winged { winged_lift(e.orientation, p.lift, elevation, pos.y - (y - elevation)).min(p.lift) * dt } else { step };
             // Winged: down at half the climb rate (moho's followed ground,
@@ -2288,7 +2359,7 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     }
     // A winged aircraft touching the ground (`HandleGroundCollision`): its
     // climb is then the pushed-back velocity's, not its rise.
-    let mut climb = (next.y - pos.y) * 10;
+    let mut climb = lift_speed.unwrap_or((next.y - pos.y) * 10);
     // (The surface is the terrain or the water over it: at least the
     // terrain, so higher than the reach over it is higher over the terrain.)
     let low = surface.is_some_and(|g| next.y - g <= p.air.ground_collision_reach);
@@ -3521,6 +3592,20 @@ pub fn candidates(world: &EntityWorld, commands: &Commands, out: &mut Vec<Entity
     out.dedup();
 }
 
+/// An aircraft's `MovingDown` unit state, from its move this tick: set
+/// while it comes down towards a touchdown or attach point, cleared on
+/// touching down (and on docking, `api::transport`). The real game's
+/// (dev/probes probe_re3_mov MS): a transport descending to its cargo or its
+/// drop point, an aircraft to an air staging pad, an idle one landing.
+/// (Its one-tick `MovingUp` on lifting off after a load or from a pad isn't
+/// modelled: ours' transports load hovering, and docked aircraft don't
+/// leave their pad on an order. Submarines' are set by their dive,
+/// `api::movement`.)
+fn air_vertical_states(u: &mut crate::engine::sim::entity::UnitData, task: bool, m: &Moved) {
+    static DOWN: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("MovingDown").expect("state"));
+    u.states.set(*DOWN, m.state.vertical == VerticalMotion::Down && (task || m.state.landing.is_some()));
+}
+
 /// Applies a pass's results: transforms, motion state, completed orders.
 /// Returns the motion events (unit, new, old) in id order.
 pub fn apply(world: &mut EntityWorld, commands: &mut Commands, moved: &[Moved], events: &mut Vec<(EntityId, HorzState, HorzState)>) {
@@ -3563,7 +3648,20 @@ pub fn apply(world: &mut EntityWorld, commands: &mut Commands, moved: &[Moved], 
             }
             static MOVING: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("Moving").expect("state"));
             let moving = *MOVING;
-            u.states.set(moving, m.state.speed != Fx::ZERO);
+            // Only under move-like tasks: a unit closing on its attack
+            // target, patrolling, or following the unit it guards reads
+            // `Moving` false while it drives; a builder walking to help
+            // what it guards reads true (dev/probes probe_re2_orders ST).
+            // FAF's scripts read it that way (`DefaultProjectileWeapon`'s
+            // unpack lock, the Notha's `OnGotTarget`).
+            use crate::engine::sim::command::CommandKind as K;
+            let current = commands.current(m.unit).map(|c| c.kind);
+            let shows = match current {
+                Some(K::Attack | K::FormAttack | K::Patrol | K::FormPatrol | K::AggressiveMove | K::FormAggressiveMove) => false,
+                Some(K::Guard) => u.build_rate > Fx::ZERO,
+                _ => true,
+            };
+            u.states.set(moving, m.state.speed != Fx::ZERO && shows);
             // In an attack run, tail chase or break-off (moho's
             // `ComputeAirCombatTactics` sets it in states 1 and 2,
             // 0x1029bd5f, and in 6, 0x1029bf13; `CalcMoveAir` clears it
@@ -3573,6 +3671,9 @@ pub fn apply(world: &mut EntityWorld, commands: &mut Commands, moved: &[Moved], 
             // on that pass (FAF's strategic bombers, 50, at a target 38 out).
             static RUN: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("MakingAttackRun").expect("state"));
             u.states.set(*RUN, matches!(m.state.combat, 1 | 2 | 6));
+            if u.motion_params.kind == MotionKind::Air {
+                air_vertical_states(u, current.is_some_and(|k| k.is_transport_load_unload()), m);
+            }
         }
         if m.arrived && commands.dispatched(m.unit).is_some() {
             use crate::engine::sim::command::CommandKind as K;
@@ -3760,6 +3861,8 @@ mod tests {
         let site = tank(&mut w, 12.0, 0.0);
         w.get_mut(site).unwrap().fraction_complete = Fx::from_num(0.1);
         w.get_mut(helper).unwrap().unit.as_mut().unwrap().build_range = Fx::from_num(5);
+        // (A builder: one that can't build guards the unit, not its work.)
+        w.get_mut(helper).unwrap().unit.as_mut().unwrap().build_rate = Fx::from_num(5);
         w.get_mut(builder).unwrap().unit.as_mut().unwrap().focus = Some(site);
         c.issue(&[helper], CommandKind::Guard, CommandTarget::Entity(builder), None, 0);
         run(&mut w, &mut c, 100, usize::MAX);
@@ -3780,6 +3883,8 @@ mod tests {
         w.get_mut(site).unwrap().fraction_complete = Fx::from_num(0.1);
         w.get_mut(site).unwrap().unit.as_mut().unwrap().build_skirt = (Fx::from_num(-18), Fx::from_num(-6), Fx::from_num(18), Fx::from_num(6));
         w.get_mut(helper).unwrap().unit.as_mut().unwrap().build_range = Fx::from_num(5);
+        // (A builder: one that can't build guards the unit, not its work.)
+        w.get_mut(helper).unwrap().unit.as_mut().unwrap().build_rate = Fx::from_num(5);
         w.get_mut(builder).unwrap().unit.as_mut().unwrap().focus = Some(site);
         c.issue(&[helper], CommandKind::Guard, CommandTarget::Entity(builder), None, 0);
         run(&mut w, &mut c, 100, usize::MAX);
@@ -3929,6 +4034,28 @@ mod tests {
         assert!(c.is_done(cmd), "arrived");
         assert!(max_z > Fx::from_num(28), "went round through the gap");
         assert!(w.get(tk).unwrap().unit.as_ref().unwrap().path.is_none(), "path dropped on arrival");
+    }
+
+    /// A ground guard settles by the unit it guards the two avoidance
+    /// radii apart, at least 2 (the real game's tanks 2.0-2.3, frigates
+    /// 5.6-6.1: dev/probes probe_re3_mov GD), not its build range off.
+    #[test]
+    fn ground_guards_settle_close_by() {
+        for (radius, near, far) in [(0.5, 1.5, 2.5), (3.0, 5.0, 6.5)] {
+            let mut w = EntityWorld::default();
+            let mut c = Commands::default();
+            let guarded = tank(&mut w, 30.0, 0.0);
+            let guard = tank(&mut w, 0.0, 0.0);
+            for id in [guarded, guard] {
+                let u = w.get_mut(id).unwrap().unit.as_mut().unwrap();
+                u.radius = Fx::from_num(radius);
+                u.build_range = Fx::from_num(5);
+            }
+            c.issue(&[guard], CommandKind::Guard, CommandTarget::Entity(guarded), None, 0);
+            run(&mut w, &mut c, 300, usize::MAX);
+            let d = (w.get(guarded).unwrap().position().x - w.get(guard).unwrap().position().x).to_num::<f64>();
+            assert!(d > near && d < far, "radius {radius}: settled {d} away");
+        }
     }
 
     #[test]
@@ -4149,6 +4276,41 @@ mod tests {
         assert!((pos.x.to_num::<f64>() - 120.0).abs() <= 0.5, "within the arrival radius: {pos:?}");
     }
 
+    /// A gunship on a two-point patrol carries its speed through each
+    /// point (done `StartTurnDistance` short) instead of braking to a stop
+    /// there: the real game's averaged 4.8 a second on +-6 legs, ours 1.6
+    /// when it braked (dev/probes probe_re3_mov GP).
+    #[test]
+    fn hovering_aircraft_fly_through_patrol_points() {
+        let mut w = EntityWorld::default();
+        let mut c = Commands::default();
+        let p = plane(&mut w, 100.0, 100.0);
+        {
+            let m = &mut w.get_mut(p).unwrap().unit.as_mut().unwrap().motion_params;
+            m.winged = false;
+            m.min_speed = Fx::ZERO;
+            m.air.k_move = Fx::from_num(0.8);
+            m.air.k_move_damping = Fx::from_num(2);
+            m.air.start_turn_distance = Fx::from_num(5);
+        }
+        for x in [94.0, 106.0] {
+            c.issue(&[p], CommandKind::Patrol, CommandTarget::Ground(FxVec3::from_f64(x, 0.0, 100.0)), None, 0);
+        }
+        let (mut cands, mut moved, mut events) = (Vec::new(), Vec::new(), Vec::new());
+        let mut sum = 0.0;
+        for t in 0..600 {
+            candidates(&w, &c, &mut cands);
+            step(&w, &c, Env::default(), &cands, usize::MAX, &mut moved);
+            apply(&mut w, &mut c, &moved, &mut events);
+            if t >= 100 {
+                sum += w.get(p).unwrap().unit.as_ref().unwrap().motion_state.speed.to_num::<f64>();
+            }
+        }
+        let mean = sum / 500.0;
+        assert!(!c.is_idle(p), "still patrolling");
+        assert!(mean > 3.0, "keeps its speed through the turns (braking at each point: 2.0): mean {mean}");
+    }
+
     /// A hovering aircraft circles a target at the range of the weapon that
     /// engages it (`Env::aim_ranges`), not its longest weapon's: a Soul
     /// Ripper (anti-air 60, guns 30) over a land unit stays in gun range
@@ -4224,6 +4386,62 @@ mod tests {
             let pos = w.get(p).unwrap().position();
             assert!(c.is_done(cmd), "winged={winged}: the move completed with a target in range: at {pos:?}");
         }
+    }
+
+    /// A landed UEF T1 bomber (`uea0103`: `Elevation` 14, `LiftFactor` 10,
+    /// KLift 3 / KLiftDamping 2.5, KMove 1, `MaxAirspeed` 10) takes off on
+    /// flat ground as the real game's does (dev/probes probe_re9_takeoff):
+    /// the take-off tick's climb uncapped (4.2), then the lift controller
+    /// toward 6 a second under the `CalcWingedLift` cap, its height in ~26
+    /// ticks; along the ground only the share of its thrust that isn't
+    /// climbing, 3.5 a second 8 ticks up (real 3.53; it used to be 6.1).
+    #[test]
+    fn winged_aircraft_climb_by_their_lift_controller_on_take_off() {
+        use crate::engine::assets::scmap::Heightmap;
+        let t = Terrain::from_heightmap(&Heightmap { width: 64, height: 64, scale: 1.0 / 128.0, samples: vec![0u16; 65 * 65] });
+        let mut w = EntityWorld::default();
+        let mut c = Commands::default();
+        let p = plane(&mut w, 32.0, 10.0);
+        {
+            let u = w.get_mut(p).unwrap().unit.as_mut().unwrap();
+            u.layer = crate::engine::sim::layer::Layer::Land;
+            u.motion_state.landing = Some(FxVec3::from_f64(32.0, 0.0, 10.0));
+            let m = &mut u.motion_params;
+            m.min_speed = Fx::from_num(10);
+            m.elevation = Fx::from_num(14);
+            m.lift = Fx::from_num(10);
+            m.air.k_lift = Fx::from_num(3);
+            m.air.k_lift_damping = Fx::from_num(2.5);
+            m.air.k_move_damping = Fx::from_num(2);
+        }
+        w.set_transform(p, FxVec3::from_f64(32.0, 0.0, 10.0), FxQuat::IDENTITY);
+        c.issue(&[p], CommandKind::Move, CommandTarget::Ground(FxVec3::from_f64(32.0, 0.0, 300.0)), None, 0);
+        let (mut cands, mut moved, mut events) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut climbs, mut heights, mut speeds) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..40 {
+            candidates(&w, &c, &mut cands);
+            step(&w, &c, Env { terrain: Some(&t), ..Env::default() }, &cands, usize::MAX, &mut moved);
+            apply(&mut w, &mut c, &moved, &mut events);
+            // (The layer change is the API layer's: `api::movement`.)
+            if moved.iter().any(|m| matches!(m.land, Some(LandEvent::TakeOff))) {
+                w.get_mut(p).unwrap().unit.as_mut().unwrap().layer = crate::engine::sim::layer::Layer::Air;
+                continue;
+            }
+            let e = w.get(p).unwrap();
+            let s = &e.unit.as_ref().unwrap().motion_state;
+            if e.unit.as_ref().unwrap().layer == crate::engine::sim::layer::Layer::Air {
+                climbs.push(s.climb.to_num::<f64>());
+                heights.push(e.position().y.to_num::<f64>());
+                speeds.push(s.speed.to_num::<f64>());
+            }
+        }
+        assert!((climbs[0] - 4.2).abs() < 0.1, "uncapped on the take-off tick: {climbs:?}");
+        assert!((climbs[1] - 4.65).abs() < 0.1, "then capped at 5 a second: {climbs:?}");
+        let peak = climbs.iter().cloned().fold(0.0, f64::max);
+        assert!((5.6..6.0).contains(&peak), "toward 1.2 x the cap (real 5.85): {climbs:?}");
+        let up = heights.iter().position(|&h| h >= 13.5).expect("reaches its height");
+        assert!((22..=30).contains(&up), "at its height in {up} ticks (real 26): {heights:?}");
+        assert!((3.0..4.2).contains(&speeds[8]), "slow along the ground while it climbs: {speeds:?}");
     }
 
     #[test]

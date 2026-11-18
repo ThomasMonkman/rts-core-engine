@@ -81,6 +81,21 @@ fn platoon_destroy_brain() {
 }
 
 #[test]
+fn platoon_named_pool_survives() {
+    scenario("platoon_named_pool_survives", 40);
+}
+
+#[test]
+fn platoon_emptied_next_beat() {
+    scenario("platoon_emptied_next_beat", 30);
+}
+
+#[test]
+fn platoon_call_rules() {
+    scenario("platoon_call_rules", 80);
+}
+
+#[test]
 fn water_targets_only() {
     scenario("water_targets_only", 400);
 }
@@ -326,6 +341,11 @@ fn projectile_position() {
 }
 
 #[test]
+fn shared_position() {
+    scenario("shared_position", 100);
+}
+
+#[test]
 fn projectile_spin() {
     scenario("projectile_spin", 100);
 }
@@ -556,6 +576,26 @@ fn silo() {
 }
 
 #[test]
+fn unit_states_by_task() {
+    scenario("unit_states_by_task", 400);
+}
+
+#[test]
+fn build_structure_blocked() {
+    scenario("build_structure_blocked", 50);
+}
+
+#[test]
+fn attack_stop_distance() {
+    scenario("attack_stop_distance", 200);
+}
+
+#[test]
+fn orders_refused_at_issue() {
+    scenario("orders_refused_at_issue", 200);
+}
+
+#[test]
 fn air_motion() {
     scenario("air_motion", 150);
 }
@@ -578,6 +618,21 @@ fn collision_check() {
 }
 
 #[test]
+fn collision_check_timing() {
+    scenario("collision_check_timing", 50);
+}
+
+#[test]
+fn collision_check_friendly() {
+    scenario("collision_check_friendly", 120);
+}
+
+#[test]
+fn script_projectile_destroyed() {
+    scenario("script_projectile_destroyed", 10);
+}
+
+#[test]
 fn shield() {
     scenario("shield", 300);
 }
@@ -595,6 +650,11 @@ fn shield_absolver() {
 #[test]
 fn shield_fragments() {
     scenario("shield_fragments", 400);
+}
+
+#[test]
+fn projectile_survives_impact() {
+    scenario("projectile_survives_impact", 60);
 }
 
 #[test]
@@ -730,6 +790,31 @@ fn placement() {
 }
 
 #[test]
+fn remembered_structures() {
+    scenario("remembered_structures", 100);
+}
+
+#[test]
+fn do_not_target() {
+    scenario("do_not_target", 200);
+}
+
+#[test]
+fn capture_interrupt() {
+    scenario("capture_interrupt", 200);
+}
+
+#[test]
+fn prop_hpr() {
+    scenario("prop_hpr", 20);
+}
+
+#[test]
+fn build_platoon() {
+    scenario("build_platoon", 20);
+}
+
+#[test]
 fn deposit_placement() {
     scenario("deposit_placement", 20);
 }
@@ -785,9 +870,50 @@ fn ai_game_runs_clean() {
         let p = engine.sim_lua().app_data_ref::<rts_core_engine::engine::sim::presentation::Presentation>().expect("presentation");
         eprintln!("live effects after 2000 ticks: {} (created {})", p.effects().len(), p.next_effect_id);
         assert!(p.effects().len() < 300, "{} effects alive of {} created", p.effects().len(), p.next_effect_id);
+        drop(p);
+        ai_economy_grows(&engine);
     });
     let errors: Vec<String> = errors.0.lock().unwrap().iter().filter(|m| !expected_noise(m)).cloned().collect();
     assert!(errors.is_empty(), "{} Lua errors in the AI game, first ones:\n  {}", errors.len(), errors.iter().take(5).cloned().collect::<Vec<_>>().join("\n  "));
+}
+
+/// The AIs of [`ai_game_runs_clean`] get their economy going, without
+/// spinning: by tick 2000 every AI army has built mass extractors and
+/// produced mass, and the game has issued a bounded number of commands.
+/// Counts, not wall-clock time, so it's deterministic (healthy: 9 and 10
+/// extractors, 379 commands; the regression: 1 and 3, 4699). It catches an AI that
+/// keeps re-ordering builds the engine won't make (a `BuildStructure` that
+/// moved extractors off their deposits: every AI loops on its unbuildable
+/// orders, the game ran 40 times slower and the AIs barely built).
+fn ai_economy_grows(engine: &engine::Engine) {
+    let lua = engine.sim_lua();
+    let rows: Vec<(i64, f64, f64)> = lua
+        .load(
+            r#"
+            local rows = {}
+            for _, brain in ArmyBrains do
+                if brain.BrainType == 'AI' and table.getn(brain:GetListOfUnits(categories.ALLUNITS, false) or {}) > 0 then
+                    table.insert(rows, { table.getn(brain:GetListOfUnits(categories.MASSEXTRACTION * categories.STRUCTURE, false, true) or {}),
+                        brain:GetArmyStat('Economy_TotalProduced_Mass', 0).Value, brain:GetArmyStat('Economy_Income_Mass', 0).Value })
+                end
+            end
+            return rows
+            "#,
+        )
+        .eval::<Vec<LuaTable>>()
+        .expect("AI economy query")
+        .iter()
+        .map(|r| (r.get(1).unwrap_or(0), r.get(2).unwrap_or(0.0), r.get(3).unwrap_or(0.0)))
+        .collect();
+    let issued = lua.app_data_ref::<rts_core_engine::engine::sim::command::Commands>().expect("commands").issued();
+    eprintln!("AI armies (extractors, mass produced, mass income): {rows:?}; commands issued: {issued}");
+    assert!(!rows.is_empty(), "no AI armies");
+    for (i, &(extractors, produced, _)) in rows.iter().enumerate() {
+        assert!(extractors >= 5, "AI {i}: only {extractors} mass extractors after 2000 ticks ({rows:?})");
+        assert!(produced >= 1000.0, "AI {i}: only {produced:.0} mass produced after 2000 ticks ({rows:?})");
+    }
+    let per_army = issued as usize / rows.len();
+    assert!(per_army < 800, "{issued} commands issued by {} AIs in 2000 ticks: an AI is re-ordering in a loop", rows.len());
 }
 
 /// Cost of FAF's `formations.lua` laying out a big group (what a 1000-unit
@@ -1221,6 +1347,16 @@ fn build_target_destroyed() {
 /// not nested, still attached; `IsDestroyed` after it; the attachment
 /// notifications of `Destroy` and `Kill`.
 #[test]
+fn orient_from_dir() {
+    scenario("orient_from_dir", 10);
+}
+
+#[test]
+fn filter_down_destroyed() {
+    scenario("filter_down_destroyed", 40);
+}
+
+#[test]
 fn destroy_queue() {
     scenario("destroy_queue", 100);
 }
@@ -1532,4 +1668,19 @@ fn slope_velocity() {
 #[test]
 fn immobile_halt() {
     scenario("immobile_halt", 60);
+}
+
+#[test]
+fn brain_queries() {
+    scenario("brain_queries", 40);
+}
+
+#[test]
+fn upgrade_on_slope() {
+    scenario("upgrade_on_slope", 60);
+}
+
+#[test]
+fn drowning() {
+    scenario("drowning", 160);
 }

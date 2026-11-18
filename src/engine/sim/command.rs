@@ -287,6 +287,12 @@ impl Commands {
         }
     }
 
+    /// How many commands have been issued this game (ids are handed out in
+    /// order from 0): a deterministic measure of how busy the AI is.
+    pub fn issued(&self) -> CommandId {
+        self.next_id
+    }
+
     /// Creates a command and adds it to the queue of each unit in `units`
     /// (deduplicated; ids sorted in the command), at the back unless it's
     /// a patrol point joining a patrol loop ([`Self::add_to_queue`]).
@@ -356,6 +362,12 @@ impl Commands {
     /// Focus units whose commands are done: their owner destroys them.
     pub fn take_dropped_focus(&mut self) -> Vec<EntityId> {
         std::mem::take(&mut self.dropped_focus)
+    }
+
+    /// Live `BuildMobile` commands (queued on some unit, current or not),
+    /// in id order.
+    pub fn pending_builds(&self) -> impl Iterator<Item = &Command> {
+        self.map.values().filter(|c| c.kind == CommandKind::BuildMobile)
     }
 
     /// Done once no unit has it queued (or it never existed).

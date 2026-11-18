@@ -26,7 +26,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 if err ~= nil then error(err, level or 2) end
                 return
             end
-            return chunk()
+            -- The chunk's own return value is dropped: moho's doscript
+            -- returns nothing (probed).
+            chunk()
         end
         _G.doscript = doscript
         _G.dofile = doscript
@@ -38,7 +40,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     // can't be re-entered by a nested script without stacking Rust frames);
     // recorded here so they appear in the API.
     for (name, doc) in [
-        ("doscript", "Runs a script from the VFS, optionally in the environment `env`; returns what it returns. A missing file raises `Unable to find file <path>`; one that doesn't compile is skipped with a warning."),
+        ("doscript", "Runs a script from the VFS, optionally in the environment `env`; returns nothing, whatever the chunk returns. A missing file raises `Unable to find file <path>`; one that doesn't compile is skipped with a warning."),
         ("dofile", "Same as `doscript`."),
     ] {
         crate::lua_api::registry::record(
@@ -254,6 +256,23 @@ mod tests {
         let (ok, msg): (bool, String) = lua.load("return pcall(doscript, '/lua/nosuch_file.lua')").eval().unwrap();
         assert!(!ok);
         assert_eq!(msg, "Unable to find file /lua/nosuch_file.lua");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// `doscript` returns nothing whatever the chunk returns, as in the real
+    /// game.
+    #[test]
+    fn returns_nothing() {
+        let dir = std::env::temp_dir().join(format!("doscript_ret_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("lua")).unwrap();
+        std::fs::write(dir.join("lua/ret.lua"), "x = 1 return 5").unwrap();
+        let vfs = Vfs::new(vec![MountPoint { source: dir.clone(), mountpoint: "/".into() }], vec![]).unwrap();
+        let lua = Lua::new();
+        lua.set_app_data(Arc::new(ScriptCache::new(Arc::new(RwLock::new(vfs)))));
+        register(&lua).unwrap();
+
+        let (n, x): (i64, i64) = lua.load("return select('#', doscript('/lua/ret.lua')), x").eval().unwrap();
+        assert_eq!((n, x), (0, 1));
         std::fs::remove_dir_all(dir).ok();
     }
 }

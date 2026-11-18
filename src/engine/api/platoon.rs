@@ -26,14 +26,15 @@ fn objects(lua: &Lua) -> LuaResult<LuaTable> {
     crate::engine::api::script_object::registry_table(lua, PLATOONS_KEY)
 }
 
-fn platoons(lua: &Lua) -> mlua::AppDataRefMut<'_, Platoons> {
+pub(crate) fn platoons(lua: &Lua) -> mlua::AppDataRefMut<'_, Platoons> {
     lua.app_data_mut::<Platoons>().expect("Platoons not in app_data")
 }
 
 /// Live member units of platoon `this` whose squad passes `squad`, in
 /// insertion order (moho drops dead units from platoons).
+/// Raises for a disbanded platoon, as moho does for a destroyed game object.
 pub(crate) fn live_members(lua: &Lua, this: &LuaTable, squad: impl Fn(&str) -> bool) -> LuaResult<Vec<EntityId>> {
-    let id = platoon_id(this)?;
+    let id = live_id(lua, this)?;
     let members: Vec<EntityId> = match platoons(lua).get(id) {
         Some(p) => p.units.iter().filter(|(_, s)| squad(s)).map(|(u, _)| *u).collect(),
         None => return Ok(Vec::new()),
@@ -42,13 +43,64 @@ pub(crate) fn live_members(lua: &Lua, this: &LuaTable, squad: impl Fn(&str) -> b
     Ok(members.into_iter().filter(|u| world.get(*u).is_some_and(|e| !e.destroyed)).collect())
 }
 
+/// Like [`live_members`], without units that are dead but not yet
+/// destroyed (a bomber killed mid-air, still falling): the real game's
+/// `CalculatePlatoonThreat`, `PlatoonCategoryCount` and `CanAttackTarget`
+/// leave them out while `GetPlatoonUnits`, `GetSquadUnits` and
+/// `GetPlatoonPosition` still count them (dev/probes probe_re5_platoon `AK`,
+/// probe_re6_platoon `CE falling`).
+pub(crate) fn alive_members(lua: &Lua, this: &LuaTable, squad: impl Fn(&str) -> bool) -> LuaResult<Vec<EntityId>> {
+    let members = live_members(lua, this, squad)?;
+    let world = crate::engine::api::entity::world(lua);
+    Ok(members.into_iter().filter(|u| world.get(*u).is_some_and(|e| !e.cold.killed)).collect())
+}
+
+/// Whether platoon `this` has ended. The real game's threat and count calls
+/// give 0 for one instead of raising (dev/probes probe_re5_platoon `MG`,
+/// probe_re6_platoon `CE ended`).
+fn has_ended(lua: &Lua, this: &LuaTable) -> LuaResult<bool> {
+    let id = platoon_id(this)?;
+    Ok(platoons(lua).get(id).is_none())
+}
+
+/// Moho's squad enum, matched case-insensitively ('attack' is `Attack`).
+const SQUADS: [&str; 7] = ["Attack", "Artillery", "Guard", "None", "Scout", "Support", "Unassigned"];
+
+/// A squad name as moho's enum spells it; any other name raises as in the
+/// real game (`GetSquadUnits('Bogus')` and `AssignUnitsToPlatoon(..., 'Bogus')`
+/// raise `Invalid enum value Bogus`: dev/probes probe_ai_platoon,
+/// probe_ai_transport).
+pub(crate) fn squad_name(s: &str) -> LuaResult<&'static str> {
+    SQUADS.iter().copied().find(|q| q.eq_ignore_ascii_case(s)).ok_or_else(|| LuaError::runtime(format!("Invalid enum value {s}")))
+}
+
 pub fn platoon_id(obj: &LuaTable) -> LuaResult<PlatoonId> {
     Ok(script_object::handle::<PlatoonHandle>(obj)?.0)
 }
 
+/// The id of a platoon that still exists. Calls on a disbanded platoon raise
+/// `Game object has been destroyed` in the real game (dev/probes
+/// probe_ai_platoon, probe_ai_misc). A platoon emptied this tick still
+/// exists, and takes calls, until the next beat's threads.
+pub(crate) fn live_id(lua: &Lua, obj: &LuaTable) -> LuaResult<PlatoonId> {
+    let id = platoon_id(obj)?;
+    if platoons(lua).get(id).is_none() {
+        return Err(LuaError::runtime("Game object has been destroyed"));
+    }
+    Ok(id)
+}
+
 /// Creates a platoon for `army`, its Lua object, and runs `OnCreate(plan)`.
 pub fn make_platoon(lua: &Lua, army: u32, label: &str, plan: &str) -> LuaResult<Obj<moho::Platoon>> {
-    let id = platoons(lua).create(army, label.to_owned(), plan.to_owned());
+    let id = {
+        let tick = crate::engine::api::sim_time::current_tick(lua);
+        let mut ps = platoons(lua);
+        let id = ps.create(army, label.to_owned(), plan.to_owned());
+        if let Some(p) = ps.get_mut(id) {
+            p.created = tick;
+        }
+        id
+    };
     let import: LuaFunction = lua.globals().get("import")?;
     let class: LuaTable = import.call::<LuaTable>("/lua/platoon.lua")?.get("Platoon")?;
     let obj: LuaTable = class.call(())?;
@@ -191,7 +243,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
 
     lua_method!(lua, moho::AIBrain,
         /// Whether `platoon` is a live platoon. A platoon whose last unit died this tick is gone for
-        /// scripts already (it is destroyed at the tick's end): FAF follows a true `PlatoonExists`
+        /// scripts already (it ends before the next beat's threads): FAF follows a true `PlatoonExists`
         /// with `GetPlatoonPosition`, which would be nil.
         PlatoonExists = |lua, (_brain, platoon): (Obj<moho::AIBrain>, LuaValue)| {
             // Not a game object (nil, a plain table): the real game raises (dev/probes
@@ -203,7 +255,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             }
             let Ok(id) = platoon_id(&t) else { return Ok(false) };
             // A platoon whose last unit died this tick is gone for scripts
-            // already (it's destroyed at the tick's end): FAF follows a true
+            // already (it ends before the next beat's threads): FAF follows a true
             // `PlatoonExists` with `GetPlatoonPosition`, which would be nil.
             let ps = platoons(lua);
             Ok(ps.get(id).is_some() && !ps.is_doomed(id))
@@ -213,9 +265,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// MohoEngine.dll 0x102fe860). The original game's platoon AI asks.
         IsOpponentAIRunning = |lua, _this: Obj<moho::Platoon>| Ok(crate::engine::api::army::opponent_ai_running(lua)))?;
     lua_method!(lua, moho::Platoon,
-        /// The platoon's live member units, in insertion order.
+        /// The platoon's live member units, in insertion order; `{}` for a disbanded platoon.
         GetPlatoonUnits = |lua, this: Obj<moho::Platoon>| {
-            let ids = live_members(lua, &this, |_| true)?;
+            // A disbanded platoon has no units (`{}`; the one call that does not raise).
+            let ids = if live_id(lua, &this).is_ok() { live_members(lua, &this, |_| true)? } else { Vec::new() };
             crate::engine::api::entity::objects_table::<moho::Unit>(lua, &ids)
         })?;
     lua_method!(lua, moho::Platoon,
@@ -227,7 +280,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             for v in list.into_inner().sequence_values::<LuaUserDataRef<crate::engine::api::categories::EntityCategory>>() {
                 cats.push(v?.0.clone());
             }
-            let id = platoon_id(&this)?;
+            let id = live_id(lua, &this)?;
             if let Some(p) = platoons(lua).get_mut(id) {
                 match p.target_priorities.iter_mut().find(|(s, _)| s.eq_ignore_ascii_case(&squad)) {
                     Some(entry) => entry.1 = cats,
@@ -241,7 +294,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// empty squad, as in the real game (dev/probes probe_ai_platoon), which FAF's
         /// `if squadUnits then` guards rely on.
         GetSquadUnits = |lua, (this, squad): (Obj<moho::Platoon>, String)| {
-            let ids = live_members(lua, &this, |s| s.eq_ignore_ascii_case(&squad))?;
+            let squad = squad_name(&squad)?;
+            let ids = live_members(lua, &this, |s| s.eq_ignore_ascii_case(squad))?;
             if ids.is_empty() {
                 return Ok(None);
             }
@@ -269,9 +323,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(Some(crate::engine::api::entity::vector(lua, mean)?))
         })?;
     lua_method!(lua, moho::Platoon,
-        /// The brain of the platoon's army, or nil if the platoon is gone.
+        /// The brain of the platoon's army. Raises once the platoon has ended, as in the real
+        /// game (dev/probes probe_re5_platoon `MG`, probe_re6_platoon `CE ended`).
         GetBrain = |lua, this: Obj<moho::Platoon>| {
-            let id = script_object::handle::<PlatoonHandle>(&this)?.0;
+            let id = live_id(lua, &this)?;
             let army = platoons(lua).get(id).map(|p| p.army);
             match army {
                 Some(army) => crate::engine::api::army::brain_obj(lua, army),
@@ -285,7 +340,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::AIBrain,
         /// Disbands the platoon: its units go back to the army pool and `OnDestroy` runs on it.
         DisbandPlatoon = |lua, (_brain, platoon): (Obj<moho::AIBrain>, Obj<moho::Platoon>)| {
-            disband(lua, platoon_id(&platoon)?)
+            disband(lua, live_id(lua, &platoon)?)
         })?;
     lua_method!(lua, moho::AIBrain,
         /// Disbands the army's platoon holding that unique name, if any.
@@ -298,9 +353,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             }
         })?;
     lua_method!(lua, moho::Platoon,
-        /// How many live members match `category`.
+        /// How many members that are alive (not dead and falling) match `category`; 0 once the
+        /// platoon has ended.
         PlatoonCategoryCount = |lua, (this, category): (Obj<moho::Platoon>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>)| {
-            let members = live_members(lua, &this, |_| true)?;
+            if has_ended(lua, &this)? {
+                return Ok(0);
+            }
+            let members = alive_members(lua, &this, |_| true)?;
             let w = crate::engine::api::entity::world(lua);
             Ok(members.into_iter().filter_map(|id| w.get(id)).filter(|e| e.category_index.is_some_and(|c| category.0.contains(c))).count())
         },
@@ -309,7 +368,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// Average position of the squad's live units (nil if none).
         GetSquadPosition = |lua, (this, squad): (Obj<moho::Platoon>, String)| {
             use crate::engine::sim::math::{Fx, FxVec3};
-            let members = live_members(lua, &this, |s| s == squad)?;
+            let squad = squad_name(&squad)?;
+            let members = live_members(lua, &this, |s| s.eq_ignore_ascii_case(squad))?;
             if members.is_empty() {
                 return Ok(None);
             }
@@ -321,25 +381,27 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             crate::engine::api::entity::vector(lua, FxVec3 { x: sum.x / n, y: sum.y / n, z: sum.z / n }).map(Some)
         })?;
     lua_method!(lua, moho::Platoon,
-        /// Names are unique per army: a platoon already holding the name loses it.
+        /// Names are unique per army: a platoon already holding the name loses it. Returns the
+        /// name, as in the real game (dev/probes probe_re6_platoon).
         UniquelyNamePlatoon = |lua, (this, name): (Obj<moho::Platoon>, String)| {
-            let id = platoon_id(&this)?;
+            let id = live_id(lua, &this)?;
             let mut ps = platoons(lua);
-            let Some(army) = ps.get(id).map(|p| p.army) else { return Ok(()) };
+            let Some(army) = ps.get(id).map(|p| p.army) else { return Ok(name) };
             if let Some(old) = ps.by_unique_name(army, &name)
                 && let Some(p) = ps.get_mut(old) {
                 p.unique_name = None;
             }
             if let Some(p) = ps.get_mut(id) {
-                p.unique_name = Some(name);
+                p.unique_name = Some(name.clone());
             }
-            Ok(())
+            Ok(name)
         })?;
     lua_method!(lua, moho::Platoon,
-        /// The platoon's unique name, or nil.
+        /// The platoon's unique name; `''` when it has none, as in the real game (dev/probes
+        /// probe_re6_platoon).
         GetPlatoonUniqueName = |lua, this: Obj<moho::Platoon>| {
-            let id = platoon_id(&this)?;
-            Ok(platoons(lua).get(id).and_then(|p| p.unique_name.clone()))
+            let id = live_id(lua, &this)?;
+            Ok(platoons(lua).get(id).and_then(|p| p.unique_name.clone()).unwrap_or_default())
         })?;
     lua_method!(lua, moho::Platoon,
         /// The nearest unit (to the squad's first unit) of `category` with that alliance to the
@@ -350,7 +412,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             use crate::engine::sim::army::{Alliance, Armies};
             use crate::engine::sim::math::Fx;
             let want = Alliance::parse(&alliance).ok_or_else(|| LuaError::runtime(format!("unknown alliance '{alliance}'")))?;
-            let id = platoon_id(&this)?;
+            let id = live_id(lua, &this)?;
             let Some(army) = platoons(lua).get(id).map(|p| p.army) else { return Ok(None) };
             let mut members = live_members(lua, &this, |s| s.eq_ignore_ascii_case(&squad))?;
             if members.is_empty() {
@@ -361,8 +423,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 let Some(centre) = members.first().and_then(|&m| w.get(m)).map(|e| e.position()) else { return Ok(None) };
                 let armies = lua.app_data_ref::<Armies>().expect("Armies");
                 let known = known_to(lua, army);
-                w.iter()
-                    .filter(|e| e.kind == crate::engine::sim::entity::EntityKind::Unit && !e.destroyed)
+                w.units()
+                    .filter(|e| !e.destroyed)
                     .filter(|e| e.category_index.is_some_and(|c| category.0.contains(c)))
                     .filter(|e| e.army.is_some_and(|a| armies.alliance(army, a) == want && !(want == Alliance::Ally && a == army)))
                     .filter(|e| known(e))
@@ -381,10 +443,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         },
     )?;
     lua_method!(lua, moho::Platoon,
-        /// A squad unit has an enabled weapon that may fire at the target's
-        /// current layer (`SetFireTargetLayerCaps`).
+        /// A squad unit that is alive (not dead and falling) has an enabled weapon that may fire
+        /// at the target's current layer (`SetFireTargetLayerCaps`). Raises once the platoon has
+        /// ended (dev/probes probe_re6_platoon).
         CanAttackTarget = |lua, (this, squad, target): (Obj<moho::Platoon>, String, Obj<moho::Entity>)| {
-            let members = live_members(lua, &this, |s| s.eq_ignore_ascii_case(&squad))?;
+            let members = alive_members(lua, &this, |s| s.eq_ignore_ascii_case(&squad))?;
             let Ok(target) = crate::engine::api::entity::entity_id(&target) else { return Ok(false) };
             Ok(can_attack(lua, &members, target))
         })?;
@@ -397,7 +460,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             use crate::engine::sim::army::{Alliance, Armies};
             use crate::engine::sim::math::{from_lua, Fx};
             let want = Alliance::parse(&alliance).ok_or_else(|| LuaError::runtime(format!("unknown alliance '{alliance}'")))?;
-            let id = platoon_id(&this)?;
+            let id = live_id(lua, &this)?;
             let Some((army, priorities)) = platoons(lua).get(id).map(|p| {
                 let cats = p.target_priorities.iter().find(|(s, _)| s.eq_ignore_ascii_case(&squad)).map(|(_, c)| c.clone()).unwrap_or_default();
                 (p.army, cats)
@@ -437,18 +500,21 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::Platoon,
         /// Sets (or clears with nil) the formation the platoon moves in.
         SetPlatoonFormationOverride = |lua, (this, f): (Obj<moho::Platoon>, Option<String>)| {
-            let id = platoon_id(&this)?;
+            let id = live_id(lua, &this)?;
             if let Some(p) = platoons(lua).get_mut(id) {
                 p.formation = f;
             }
             Ok(())
         })?;
     lua_method!(lua, moho::Platoon,
-        /// How many live members match `category` within `radius` of `pos` (XZ plane).
+        /// Like `PlatoonCategoryCount`, counting only members within `radius` of `pos` (XZ plane).
         PlatoonCategoryCountAroundPosition = |lua, (this, category, pos, radius): (Obj<moho::Platoon>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>, shapes::Vector, f64)| {
             let p = read_location(Some(&pos))?.unwrap_or_default();
             let r2 = crate::engine::sim::math::from_lua(radius * radius);
-            let members = live_members(lua, &this, |_| true)?;
+            if has_ended(lua, &this)? {
+                return Ok(0);
+            }
+            let members = alive_members(lua, &this, |_| true)?;
             let w = crate::engine::api::entity::world(lua);
             Ok(members
                 .into_iter()
@@ -463,11 +529,12 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     )?;
     lua_method!(lua, moho::AIBrain,
         /// `platoon` is a platoon object or the unique name of one; `units` a list
-        /// of units (or one unit). Units leave their previous platoon.
+        /// of units (or one unit). Units leave their previous platoon. A squad name
+        /// outside moho's enum raises.
         AssignUnitsToPlatoon = |lua, (brain, platoon, units, squad, formation): (Obj<moho::AIBrain>, shapes::PlatoonRef, shapes::Units, Option<String>, Option<String>)| {
             let ArmyHandle(army) = script_object::handle(&brain)?;
             let target = match &*platoon {
-                LuaValue::Table(t) => platoon_id(t)?,
+                LuaValue::Table(t) => live_id(lua, t)?,
                 LuaValue::String(s) => match platoons(lua).by_unique_name(army, &s.to_str()?) {
                     Some(id) => id,
                     None => return Ok(()),
@@ -483,11 +550,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 LuaValue::Table(u) => vec![crate::engine::api::entity::entity_id(u)?],
                 _ => Vec::new(),
             };
-            let squad = squad.unwrap_or_else(|| "Unassigned".into());
+            let squad = squad.as_deref().map_or(Ok("Unassigned"), squad_name)?;
             {
                 let mut p = platoons(lua);
                 for id in ids {
-                    p.assign(id, target, &squad);
+                    p.assign(id, target, squad);
                 }
                 // The platoon moves in the last formation it was given
                 // (inferred: moho keeps one per squad).
@@ -501,8 +568,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         },
     )?;
-    // Sum of the live members' threat of `threatType`, for members in
-    // `category` (`...AroundPosition`: only those within `radius` of `pos`).
+    // Sum of the alive (not dead and falling) members' threat of
+    // `threatType`, for members in `category` (`...AroundPosition`: only
+    // those within `radius` of `pos`); 0 once the platoon has ended.
     fn platoon_threat(lua: &Lua, this: &LuaTable, ty: String, category: &crate::engine::sim::category::CategorySet, area: Option<(crate::engine::sim::math::FxVec3, f64)>) -> LuaResult<f64> {
         use crate::engine::sim::math::Fx;
         use crate::engine::sim::threat::ThreatType;
@@ -515,7 +583,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             "Sub" => ThreatType::AntiSub,
             other => ThreatType::parse(other).ok_or_else(|| LuaError::runtime(format!("unknown threat type '{other}'")))?,
         };
-        let members = live_members(lua, this, |_| true)?;
+        if has_ended(lua, this)? {
+            return Ok(0.0);
+        }
+        let members = alive_members(lua, this, |_| true)?;
         let w = crate::engine::api::entity::world(lua);
         let r2 = area.map(|(_, r)| crate::engine::sim::math::from_lua(r * r));
         let total = members
@@ -534,7 +605,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         Ok(total.to_num::<f64>())
     }
     lua_method!(lua, moho::Platoon,
-        /// Sum of the live members' threat of type `ty` ('Surface', 'Air', 'Sub' are the blueprint
+        /// Sum of the alive members' threat of type `ty` ('Surface', 'Air', 'Sub' are the blueprint
         /// levels, otherwise a threat type name) for members in `category`.
         CalculatePlatoonThreat = |lua, (this, ty, category): (Obj<moho::Platoon>, String, LuaUserDataRef<crate::engine::api::categories::EntityCategory>)| {
             platoon_threat(lua, &this, ty, &category.0, None)
@@ -605,10 +676,12 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(platoons(lua).of_army(army).filter(|p| p.plan.eq_ignore_ascii_case(&plan)).count() as f64)
         })?;
     lua_method!(lua, moho::AIBrain,
-        /// The army's platoons in creation order, without its ArmyPool (inferred).
+        /// The army's platoons holding units, in creation order, without its ArmyPool: the real
+        /// game leaves out platoons with no units (`{}` right after `MakePlatoon`; dev/probes
+        /// probe_ai_platoon).
         GetPlatoonsList = |lua, brain: Obj<moho::AIBrain>| {
             let ArmyHandle(army) = script_object::handle(&brain)?;
-            let ids: Vec<PlatoonId> = platoons(lua).of_army(army).filter(|p| p.unique_name.as_deref() != Some("ArmyPool")).map(|p| p.id).collect();
+            let ids: Vec<PlatoonId> = platoons(lua).of_army(army).filter(|p| p.unique_name.as_deref() != Some("ArmyPool") && !p.units.is_empty()).map(|p| p.id).collect();
             let reg = objects(lua)?;
             let out = lua.create_table_with_capacity(ids.len(), 0)?;
             let mut n = 0;
@@ -648,7 +721,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
 /// Disbands platoon `id`: units back to the army pool, `OnDestroy` on its
 /// script object (FAF's clears its trash, killing the platoon's threads),
 /// then the platoon gone. Also how platoons end when their last unit dies
-/// (`entity::compact`). `OnDestroy` runs while the platoon still exists, so
+/// (`entity::end_emptied_platoons`). `OnDestroy` runs while the platoon still exists, so
 /// `self:GetBrain()` there is its brain: FAF's `DoDestroyCallbacks` and
 /// LOUD's `OnDestroy` hand it to every destroy callback (LOUD releases its
 /// builders' instances with it). An `OnDestroy` that disbands the

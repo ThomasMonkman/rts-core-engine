@@ -2,11 +2,13 @@
 -- its cargo, which gathers at its group's centre, and every unit attaches on
 -- the same tick (the real game: dev/probes probe_mov_air TR1; ours had the
 -- cargo drive to a waiting transport and board one at a time).
+-- GetPosition() is one table per entity, rewritten by each call: copy it to keep it.
+local function pos(e) local p = e:GetPosition() return Vector(p[1], p[2], p[3]) end
 rawset(_G, "ScenarioResult", { done = false, failures = {}, notes = {} })
 local function check(ok, msg) if not ok then table.insert(ScenarioResult.failures, msg) end end
 local function note(msg) table.insert(ScenarioResult.notes, msg) end
 local function ground(x, z) return GetTerrainHeight(x, z) end
-local function height(u) local p = u:GetPosition() return p[2] - ground(p[1], p[3]) end
+local function height(u) local p = pos(u) return p[2] - ground(p[1], p[3]) end
 ForkThread(function()
     local ok, err = pcall(function()
         WaitTicks(2)
@@ -14,8 +16,8 @@ ForkThread(function()
         local tanks = {}
         for i = 1, 4 do table.insert(tanks, CreateUnitHPR('uel0201', 'ARMY_1', 395 + i * 3, ground(395 + i * 3, 560), 560, 0, 0, 0)) end
         WaitTicks(10)
-        local from, start = {}, t:GetPosition()
-        for i, u in tanks do from[i] = u:GetPosition() end
+        local from, start = {}, pos(t)
+        for i, u in tanks do from[i] = pos(u) end
         local attach, stop = {}, nil
         local attached = t.OnTransportAttach
         t.OnTransportAttach = function(self, bone, unit)
@@ -47,7 +49,7 @@ ForkThread(function()
             note('loaded ' .. (attach[4] - ordered) .. ' ticks after the order')
             check(attach[4] - ordered <= 70, 'loaded within 70 ticks: ' .. (attach[4] - ordered))
         end
-        local at = t:GetPosition()
+        local at = pos(t)
         check(VDist2(at[1], at[3], 402.5, 560) < 3, 'the transport came to the cargo (402.5, 560): ' .. at[1] .. ', ' .. at[3])
         check(VDist2(at[1], at[3], start[1], start[3]) > 20, 'it flew there: ' .. VDist2(at[1], at[3], start[1], start[3]))
         check(math.abs(height(t) - t.Blueprint.Air.TransportHoverHeight) < 1, 'down at its hover height: ' .. height(t))
@@ -57,11 +59,11 @@ ForkThread(function()
             WaitTicks(1)
         end
         check(table.getn(t:GetCargo()) == 0, 'unloaded at the queued point')
-        local p = t:GetPosition()
+        local p = pos(t)
         check(VDist2(p[1], p[3], 460, 560) < 4, 'over the drop point: ' .. p[1] .. ', ' .. p[3])
         -- A second load: cargo that only had to close up never drove far.
         WaitTicks(30)
-        for i, u in tanks do from[i] = u:GetPosition() end
+        for i, u in tanks do from[i] = pos(u) end
         IssueClearCommands({ t })
         IssueMove({ t }, { 430, 0, 560 })
         WaitTicks(60)
@@ -71,7 +73,7 @@ ForkThread(function()
             WaitTicks(1)
             for i, u in tanks do
                 if not u:IsUnitState('Attached') and not u:IsUnitState('Immobile') then
-                    local q = u:GetPosition()
+                    local q = pos(u)
                     check(VDist2(q[1], q[3], from[i][1], from[i][3]) < 8, 'tank ' .. i .. ' stays by its group: ' .. VDist2(q[1], q[3], from[i][1], from[i][3]))
                 end
             end

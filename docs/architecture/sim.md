@@ -16,14 +16,14 @@ real game and what is inferred) are in the module comments of its file, listed b
 | Stage | What happens | Code |
 |---|---|---|
 | Input | player commands due this tick are applied as orders | `api/player_input.rs`, `sim/input.rs` |
-| Economy | production, consumption and stalls; economy events; regen | `sim/economy.rs`, `api/economy_event.rs` |
+| Economy | production, consumption and stalls; economy events | `sim/economy.rs`, `api/economy_event.rs` |
 | Threat | the AI threat map; animators (manipulators) step | `sim/threat.rs`, `sim/manipulator.rs` |
 | Orders | orders whose target is gone end | `api/orders.rs` |
 | Construction | building, upgrades, assisting; silos, teleport, script tasks, transports | `api/construction.rs`, `api/transport.rs`, ... |
 | Reclaim | reclaim, capture, sacrifice | `api/reclaim.rs`, `api/capture.rs` |
 | Weapons | targeting, aim and the fire clock; beams | `sim/weapon.rs`, `api/weapon.rs`, `api/beam.rs` |
 | LuaThreads | FAF's Lua threads due this tick | `sim/scheduler.rs`, `api/threads.rs` |
-| Movement | units move, air units fly, submarines dive; attached entities follow their parents | `sim/movement.rs`, `api/movement.rs` |
+| Movement | health regeneration; units move, land units under water drown, air units fly, submarines dive; attached entities follow their parents | `sim/movement.rs`, `api/movement.rs` |
 | Projectiles | flight, collisions, `OnImpact` | `sim/projectile.rs`, `sim/collision.rs` |
 | Intel | vision, radar, sonar and the rest are re-stamped; who sees what | `sim/vision.rs` |
 | Destroy | the destroy queue: the `OnDestroy` of everything destroyed this tick, first destroyed first (moho's end-of-beat drain) | `api/entity.rs` (`run_destroy_queue`) |
@@ -82,6 +82,23 @@ dense array includes destroyed entities until compaction, which callers must rem
 Units are also indexed in a uniform grid of 32-unit cells (`sim/spatial.rs`). Every move goes
 through `EntityWorld::set_position` / `set_transform`, which re-cell the entity, so the index can't
 drift. Map props live in their own grid, so unit queries never see them.
+
+Shield bubbles and script entities (flares, missile redirectors, depth charges) that have a
+collision shape live in a third grid, the volume index (`EntityWorld::volumes_in`, `volumes`). A
+bubble is big, so it's listed in every cell its shape can reach (position ± `collision::reach`),
+not just the one under its origin: a query reads only the cells it covers, with no margin for the
+biggest bubble. Moves, shape changes (`set_collision_override`: FAF drops a bubble's shape while
+it's down) and `destroy` re-list it. Area damage, damage rings, beams and the projectile step's
+shield gather ask it, never the whole world.
+
+Other indexes, all kept in id order so passes need no sort:
+
+- `units()` / `unit_indices()`: every unit; `units_of(army)`: one army's (AI brain queries such
+  as `GetListOfUnits`, `GetCurrentUnits`, the unit cap).
+- The attach index (`attached_to(parent)`, `attached_into`): what's attached to what (transport
+  cargo, docked aircraft, shield bubbles on their units). The per-tick follow pass walks it and
+  drops pairs a script detach left behind.
+- Weapons are sorted by (unit, index): `Weapons::of(unit)` is one unit's.
 
 ## Orders
 

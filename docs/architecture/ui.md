@@ -62,7 +62,10 @@ Height Depth`), then `OnInit`.
 ## Input
 
 **Mouse** (`ui::controls::mouse`). The topmost hit-testable control under the cursor gets
-`HandleEvent`, bubbling to its parents until one returns true. Over a world view (or no control) the
+`HandleEvent`, bubbling to its parents until one returns true. While there is an input capture
+(`AddInputCapture`, FAF's `MakeInputModal`), only the capture and its children are searched and
+the capture gets the event when none of them is under the cursor, as in moho: a modal dialog takes
+its clicks even under a deeper control, and the world gets none. Over a world view (or no control) the
 input belongs to the world and goes on to the renderer's selection and orders (`render/player.rs`);
 over any other control the world never sees it. Every press first goes to FAF's
 `uimain.OnMouseButtonPress` (popups close on a click outside them).
@@ -156,8 +159,9 @@ At start it loads the first file that exists (`install::choose_prefs`):
 4. on Windows, Forged Alliance's own (`%LOCALAPPDATA%\Gas Powered Games\Supreme Commander Forged
    Alliance\Game.prefs`), so a FAF player keeps their options and hotkeys. It's only ever read.
 
-`SavePreferences` and closing the game write the store back in moho's format to the file it came
-from (or the engine's own). `--screenshot` runs read and write nothing unless given `--prefs`, so
+`SavePreferences` and the game ending (however it ends: the window closed, the interface's Exit, a
+`--ticks` run done) write the store back in moho's format to the file it came from (or the
+engine's own). FAF's key bindings dialog only sets preferences, so its bindings are kept that way. `--screenshot` runs read and write nothing unless given `--prefs`, so
 screenshots look the same on every machine.
 
 ## Adding to the interface
@@ -176,5 +180,6 @@ Implement the API in `ui::user_api` (globals) or on the control in `ui::controls
 macros ([lua-api-types.md](../guides/lua-api-types.md)). Take behaviour from the binary over FAF's
 annotations ([verifying-against-the-binary.md](../research/verifying-against-the-binary.md)).
 
-`tests/ui.rs` checks that userInit boots, FAF's layout places controls where it says, and the
-economy bar shows the economy after a beat.
+`tests/ui.rs` checks that userInit boots, FAF's layout places controls where it says, the
+economy bar shows the economy after a beat, and FAF's key bindings dialog lists, rebinds (kept
+across a restart) and resets to its presets.

@@ -86,10 +86,12 @@ end
 methods.GetStat = function(self, name, default)
     local u = d(self)
     local v = u and u.stats and u.stats[name]
-    -- moho fills a missing stat with the default (sim `GetStat` creates
-    -- it); the UI side only reads, so it returns the default instead.
-    if v == nil then v = default or 0 end
-    return { Value = v }
+    -- Moho's interface reads a missing stat as 0 whatever the default
+    -- (`probe_ui_units` A: `GetStat('NOPE', 7)` is `{ Name = 'NOPE', Type =
+    -- 'Integer', Value = 0 }`). Every measured stat was an `Integer`; a
+    -- fractional one as `Float` is a guess.
+    if v == nil then v = 0 end
+    return { Name = name, Type = math.floor(v) == v and 'Integer' or 'Float', Value = v }
 end
 -- A name given here (FAF's rename dialog) wins over the sim's
 -- (`SetCustomName`: AI and campaign commanders).
@@ -253,12 +255,15 @@ local function shapeOf(q)
 end
 -- The engine reads `__engine_queue_factory` to send the shown factory's
 -- queue when it isn't selected (a mobile factory's external factory:
--- FAF's construction.lua shows `selection[1]:GetCreator()`'s queue).
+-- FAF's construction.lua shows `selection[1]:GetCreator()`'s queue). An
+-- empty queue (an idle factory, a unit that isn't one) is nil, as moho's
+-- (`probe_ui_units` Q): FAF's `ResetOrderQueue` tests `if queue`.
 function SetCurrentFactoryForQueueDisplay(unit)
     queueFactory = unit and unit._id
     rawset(_G, '__engine_queue_factory', queueFactory)
     local q = factoryQueue(queueFactory)
     queueShape = shapeOf(q)
+    if q[1] == nil then return nil end
     return q
 end
 function ClearCurrentFactoryForQueueDisplay()

@@ -24,6 +24,8 @@ pub struct Platoon {
     /// Formation its moves use (`AssignUnitsToPlatoon`'s formation,
     /// `SetPlatoonFormationOverride`); `None` = no formation.
     pub formation: Option<String>,
+    /// The tick it was made on (`MakePlatoon`).
+    pub created: u64,
 }
 
 /// All platoons, id-ordered.
@@ -31,8 +33,15 @@ pub struct Platoon {
 pub struct Platoons {
     next_id: PlatoonId,
     map: BTreeMap<PlatoonId, Platoon>,
-    /// Platoons emptied by unit deaths this tick, destroyed at its end.
+    /// Platoons emptied this beat, ended before the next beat's threads.
     doomed: Vec<PlatoonId>,
+    /// Platoons made this beat. One still empty and unnamed at the next
+    /// beat's threads ends then too (dev/probes probe_re6_platoon `EM1`:
+    /// `OnDestroy` the beat after `MakePlatoon`; a uniquely named one lives
+    /// on and can be filled 100 beats later, `EM2`). Unlike `doomed`, it
+    /// exists for scripts until then (`PlatoonExists` true in its first beat).
+    #[serde(default)]
+    fresh: Vec<PlatoonId>,
     /// Each member unit's platoon (a unit is in at most one): a death or
     /// reassignment touches only that platoon, not every army's pool.
     home: BTreeMap<EntityId, PlatoonId>,
@@ -42,7 +51,8 @@ impl Platoons {
     pub fn create(&mut self, army: u32, label: String, plan: String) -> PlatoonId {
         let id = self.next_id;
         self.next_id += 1;
-        self.map.insert(id, Platoon { id, army, label, plan, unique_name: None, units: Vec::new(), target_priorities: Vec::new(), formation: None });
+        self.map.insert(id, Platoon { id, army, label, plan, unique_name: None, units: Vec::new(), target_priorities: Vec::new(), formation: None, created: 0 });
+        self.fresh.push(id);
         id
     }
 
@@ -64,17 +74,23 @@ impl Platoons {
         Some(p)
     }
 
-    /// Takes `unit` out of its platoon; returns it if that left it empty
-    /// (an army pool never counts as emptied).
+    /// Takes `unit` out of its platoon; returns it if that left it empty.
+    /// A uniquely named platoon never counts as emptied: the army's
+    /// `ArmyPool`, and the pools FAF's AI names and keeps for the game
+    /// (`TransportPool`, made once and empty whenever every transport is
+    /// out; `BusyFactories`, `<location>_LeftoverUnits`). The real game's
+    /// emptied platoons that ended (dev/probes probe_ai_platoon `P2`, `PK`)
+    /// were unnamed; that naming keeps one is inferred from FAF relying on
+    /// its pools (probe_re5_platoon asks).
     fn leave(&mut self, unit: EntityId) -> Option<PlatoonId> {
         let p = self.map.get_mut(&self.home.remove(&unit)?)?;
         let before = p.units.len();
         p.units.retain(|(u, _)| *u != unit);
-        (before > 0 && p.units.is_empty() && p.unique_name.as_deref() != Some("ArmyPool")).then_some(p.id)
+        (before > 0 && p.units.is_empty() && p.unique_name.is_none()).then_some(p.id)
     }
 
     /// A unit was destroyed: it leaves its platoon at once; a platoon it
-    /// empties (other than an army pool) is queued for `take_doomed`.
+    /// empties (other than a named pool) is queued for `take_doomed`.
     pub fn unit_destroyed(&mut self, unit: EntityId) {
         if let Some(p) = self.leave(unit) {
             self.doomed.push(p);
@@ -82,14 +98,23 @@ impl Platoons {
     }
 
     /// Platoons emptied since the last call, in the order they emptied.
-    /// Emptied by unit deaths this tick (destroyed at its end): no longer
+    /// Emptied this beat (ended before the next beat's threads): no longer
     /// exists for scripts.
     pub fn is_doomed(&self, id: PlatoonId) -> bool {
-        self.doomed.contains(&id)
+        self.doomed.contains(&id) && self.map.get(&id).is_some_and(|p| p.units.is_empty() && p.unique_name.is_none())
     }
 
+    /// With them, platoons made since the last call that are still empty
+    /// and unnamed. (Leaves out any since named or given units: they live
+    /// on.)
     pub fn take_doomed(&mut self) -> Vec<PlatoonId> {
-        std::mem::take(&mut self.doomed)
+        let mut doomed = std::mem::take(&mut self.doomed);
+        for id in std::mem::take(&mut self.fresh) {
+            if !doomed.contains(&id) {
+                doomed.push(id);
+            }
+        }
+        doomed.into_iter().filter(|id| self.map.get(id).is_some_and(|p| p.units.is_empty() && p.unique_name.is_none())).collect()
     }
 
     pub fn by_unique_name(&self, army: u32, name: &str) -> Option<PlatoonId> {
@@ -101,10 +126,9 @@ impl Platoons {
 
     /// Puts `unit` in platoon `id` under `squad`, taking it out of whatever
     /// platoon it was in (a unit belongs to one platoon at a time).
-    /// Moves `unit` into platoon `id`. A platoon it leaves empty (other than
-    /// an army pool) ends like one emptied by deaths (inferred: moho drops
-    /// unit-less platoons; FAF's AI follows `PlatoonExists` with
-    /// `GetPlatoonPosition`).
+    /// Moves `unit` into platoon `id`. An unnamed platoon it leaves empty
+    /// ends like one emptied by deaths (dev/probes probe_ai_platoon `P2`:
+    /// `OnDestroy` the beat after); a named one is a pool and stays.
     pub fn assign(&mut self, unit: EntityId, id: PlatoonId, squad: &str) {
         if let Some(p) = self.leave(unit).filter(|&p| p != id && !self.doomed.contains(&p)) {
             self.doomed.push(p);
@@ -112,6 +136,8 @@ impl Platoons {
         if let Some(p) = self.map.get_mut(&id) {
             p.units.push((unit, squad.to_owned()));
             self.home.insert(unit, id);
+            // Given units again before it ended: it lives on.
+            self.doomed.retain(|&d| d != id);
         }
     }
 
@@ -145,13 +171,28 @@ mod tests {
         assert!(ps.map[&pool].units.is_empty());
     }
 
+    #[test]
+    fn a_named_pool_outlives_being_emptied() {
+        let mut ps = Platoons::default();
+        let tp = ps.create(1, "TransportPool".into(), "none".into());
+        ps.map.get_mut(&tp).unwrap().unique_name = Some("TransportPool".into());
+        let out = ps.create(1, "out".into(), String::new());
+        ps.assign(1, tp, "Support");
+        ps.assign(2, tp, "Support");
+        ps.assign(1, out, "Attack");
+        ps.unit_destroyed(2);
+        assert!(ps.take_doomed().is_empty(), "the named pool lives on");
+        ps.assign(1, tp, "Support");
+        assert_eq!(ps.take_doomed(), vec![out], "the unnamed platoon it left ends");
+    }
+
     /// Reassigning moves a unit between platoons (dooming the one it
     /// empties); a removed platoon's units are in none; deaths after either
     /// leave the right platoon.
     #[test]
     fn membership_follows_assign_and_remove() {
         let mut ps = Platoons::default();
-        let (a, b, c) = (ps.create(1, "a".into(), String::new()), ps.create(1, "b".into(), String::new()), ps.create(1, "c".into(), String::new()));
+        let (a, b) = (ps.create(1, "a".into(), String::new()), ps.create(1, "b".into(), String::new()));
         ps.assign(1, a, "Attack");
         ps.assign(2, a, "Attack");
         ps.assign(1, b, "Scout");
@@ -159,6 +200,8 @@ mod tests {
         assert_eq!(ps.take_doomed(), vec![a]);
         assert!(ps.map[&a].units.is_empty());
         assert_eq!(ps.map[&b].units, vec![(1, "Scout".into()), (2, "Scout".into())]);
+        // Made and filled in one beat (one made empty ends the beat after).
+        let c = ps.create(1, "c".into(), String::new());
         ps.assign(3, c, "Attack");
         ps.remove(b);
         ps.unit_destroyed(1);
@@ -168,5 +211,18 @@ mod tests {
         assert_eq!(ps.map[&c].units, vec![(2, "Support".into())]);
         ps.unit_destroyed(2);
         assert_eq!(ps.take_doomed(), vec![c]);
+    }
+
+    /// A platoon made and never given a unit ends at the next beat unless
+    /// named; one filled in the beat it was made lives on.
+    #[test]
+    fn a_platoon_made_empty_ends_unless_named_or_filled() {
+        let mut ps = Platoons::default();
+        let (empty, named, filled) = (ps.create(1, "e".into(), String::new()), ps.create(1, "n".into(), String::new()), ps.create(1, "f".into(), String::new()));
+        ps.map.get_mut(&named).unwrap().unique_name = Some("Named".into());
+        ps.assign(1, filled, "Attack");
+        assert!(!ps.is_doomed(empty), "it exists for scripts in the beat it was made");
+        assert_eq!(ps.take_doomed(), vec![empty]);
+        assert!(ps.take_doomed().is_empty(), "only checked once, the beat after it was made");
     }
 }

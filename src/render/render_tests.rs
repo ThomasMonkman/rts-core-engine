@@ -497,6 +497,53 @@ fn click_picks_a_naval_factory_by_its_top_only() {
     assert_ne!(h.world.pick(x, y), Some(id), "its hull under the water doesn't");
 }
 
+/// `UNSELECTABLE` units aren't picked, for a click, the rollover or a
+/// drag: FAF's Cybran build bots (no `StrategicIconName`, which the unit
+/// panel reads) hovering over a build. A tank beside one still is.
+#[test]
+fn unselectable_build_bots_are_not_picked() {
+    use super::player::{Event, Mods, PlayerControl};
+    let Some(mut h) = Harness::new(None, false, None) else { return };
+    let ids: mlua::Table = h
+        .engine
+        .sim_lua()
+        .load(
+            r#"
+            local bot = CreateUnitHPR('ura0001o', 'ARMY_1', 300, GetTerrainHeight(300, 600) + 3, 600, 0, 0, 0)
+            local tank = CreateUnitHPR('uel0201', 'ARMY_1', 306, GetTerrainHeight(306, 600), 600, 0, 0, 0)
+            return { tonumber(bot:GetEntityId()), tonumber(tank:GetEntityId()) }
+            "#,
+        )
+        .eval()
+        .expect("spawn");
+    let (bot, tank): (u32, u32) = (ids.get(1).unwrap(), ids.get(2).unwrap());
+    h.ticks(3);
+    {
+        let y = h.scene.height_at(303.0, 600.0);
+        let cam = h.world.camera_mut().expect("camera");
+        cam.target = Vec3::new(303.0, y, 600.0);
+        cam.zoom = 40.0;
+    }
+    h.settle();
+    h.frame();
+    let screen = [640.0, 480.0];
+    let at = |h: &Harness, id: u32| -> (f32, f32) {
+        let e = h.world.entities().iter().find(|e| e.id == id).expect("on the map");
+        let [x, y] = h.world.camera().unwrap().project(Vec3::from_array(e.position), screen).expect("on screen");
+        (x, y)
+    };
+    let (bx, by) = at(&h, bot);
+    assert_ne!(h.world.pick(bx, by), Some(bot), "the bot isn't picked");
+    let (tx, ty) = at(&h, tank);
+    assert_eq!(h.world.pick(tx, ty), Some(tank), "the tank is");
+    let mut p = PlayerControl::new(None, Vec::new(), None);
+    // With shift a box takes every selectable unit in it, whatever its priority.
+    let shift = Mods { shift: true, ..Mods::default() };
+    p.handle(&mut h.world, Event::LeftDown(1.0, 1.0), shift, None);
+    p.handle(&mut h.world, Event::LeftUp(639.0, 479.0), shift, None);
+    assert_eq!(p.selection, vec![tank], "a box over both takes the tank");
+}
+
 /// Selection and right-click orders on a real scene: a box selects the six
 /// tanks (the observer gets the army with most units in the box), a
 /// double-click selects every tank of that type on screen, a right drag sends
@@ -693,8 +740,8 @@ fn friendly_commander_offers_guard_not_attack() {
 /// Repro: right-clicking a transport with a loadable unit
 /// selected walks it aboard, and right-clicking a unit with a transport
 /// selected flies the transport out to pick it up (moho's
-/// `GetRightMouseButtonOrder` answers `RULEUCC_CallTransport` for the first;
-/// the reverse is the transport's own order onto the unit).
+/// `GetRightMouseButtonOrder` answers `RULEUCC_CallTransport` for the first
+/// and `RULEUCC_Transport` for the second, as probed in the real game).
 #[test]
 fn transport_hover_offers_load_both_ways() {
     use super::player::PlayerControl;
@@ -2958,10 +3005,10 @@ fn terrain_changes_queued_behind_one_another_end_at_the_newest() {
 
 /// A structure the view army scouted but can't see now keeps its last-seen
 /// look (the mesh at rest pose, darkened by the fog at its spot, no bar or
-/// ranges) and its strategic icon stays as the greyed blip; seen again, all
-/// of it comes back live.
+/// ranges) and its strategic icon stays, in its army's colour
+/// (probe_re3_intel); seen again, all of it comes back live.
 #[test]
-fn scouted_structure_keeps_its_last_seen_look_and_greyed_icon() {
+fn scouted_structure_keeps_its_last_seen_look_and_icon() {
     use super::scene::{IconKind, shows_bar};
     let Some(mut h) = Harness::new(None, false, None) else { return };
     let ids: mlua::Table = h
@@ -3019,14 +3066,14 @@ fn scouted_structure_keeps_its_last_seen_look_and_greyed_icon() {
     assert!(!shows_bar(&out), "out of sight, no bar");
     assert!(!h.scene.bars.contains(&(index(&h) as u32)), "not among the posed bars");
     // Zoomed in: the building remains as last seen (the fog's factor greys
-    // it); zoomed out: its icon, greyed. Never an army colour while it's
-    // out of sight.
+    // it); zoomed out: its remembered icon. Never a live (Full) icon while
+    // it's out of sight.
     inside(&mut h, 30.0);
     assert!(h.scene.mesh_drawn(factory), "the last-seen building still draws");
     assert!(h.scene.icons.iter().flatten().all(|i| i.0 != factory || i.4 == IconKind::Remembered), "never a full icon while it's out of sight");
     inside(&mut h, 400.0);
     assert!(h.scene.mesh_drawn(factory), "the last-seen building still draws, zoomed out");
-    assert_eq!(h.scene.icons.iter().flatten().filter(|i| i.0 == factory).map(|i| i.4).collect::<Vec<_>>(), vec![IconKind::Remembered], "zoomed out, one greyed icon");
+    assert_eq!(h.scene.icons.iter().flatten().filter(|i| i.0 == factory).map(|i| i.4).collect::<Vec<_>>(), vec![IconKind::Remembered], "zoomed out, one remembered icon");
     h.ticks(2);
     assert_eq!(at(&h).sighting, crate::engine::snapshot::Sighting::Remembered, "still there without a sighting");
 }
@@ -3131,5 +3178,51 @@ fn fog_circles_frame() {
             enc.set_depth(png::BitDepth::Eight);
             enc.write_header().unwrap().write_image_data(&rgba).unwrap();
         }
+    }
+}
+
+/// A shield bubble's surface scrolls its textures over the sphere's own
+/// UVs: FAF's `ShieldNormalVS` writes `texcoord0 * texScaleN` (a float4)
+/// into each float2 set, so all four sets come from the first UV channel.
+/// FAF's `Sphere01` has one constant second UV, (0, 1), on every vertex:
+/// read from it, the whole Aeon dome sampled a single scrolling texel, and
+/// the reflection of that one normal swept across the bubble every second
+/// (the bubble seemed to turn back and forth). Half a second apart, the
+/// frame now changes a quarter as much.
+#[test]
+fn shield_bubble_surface_holds_still() {
+    let Some(mut h) = Harness::new(None, false, None) else { return };
+    h.engine
+        .sim_lua()
+        .load(
+            r#"
+            local b = ArmyBrains[1]
+            b:__engine_SetStorage('ENERGY', 1e6) b:GiveResource('ENERGY', 1e6)
+            CreateUnitHPR('uab4202', 'ARMY_1', 668, GetTerrainHeight(668, 366), 366, 0, 0, 0)
+            "#,
+        )
+        .exec()
+        .expect("spawn");
+    h.ticks(80);
+    h.settle();
+    h.scene.record_all_bones = false;
+    if let Some(c) = h.world.camera_mut() {
+        c.target = Vec3::new(668.0, 18.0, 366.0);
+        c.zoom = 22.0;
+    }
+    let (w, ht) = (480, 360);
+    let mut frames = Vec::new();
+    for t in [0.0, 0.5, 1.0] {
+        h.scene.frozen_time = Some(t);
+        h.frame();
+        frames.push(render_rgba(&mut h, w, ht));
+    }
+    for pair in frames.windows(2) {
+        let sum: u64 = pair[0].chunks_exact(4).zip(pair[1].chunks_exact(4)).map(|(a, b)| (0..3).map(|i| (a[i] as i32 - b[i] as i32).unsigned_abs() as u64).sum::<u64>()).sum();
+        let mean = sum as f64 / (w * ht * 3) as f64;
+        eprintln!("shield frame diff {mean:.2}");
+        // Fixed: ~4.5 (the surface's slow drift, water, effects); the
+        // single-texel sampling swept the dome at ~18.
+        assert!(mean < 9.0, "the bubble's surface changed by {mean:.2} per channel in half a second");
     }
 }

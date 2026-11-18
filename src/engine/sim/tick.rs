@@ -91,7 +91,6 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
     economy(lua);
     contain(lua, tick, crate::engine::api::army::stat_triggers_tick(lua))?;
     contain(lua, tick, crate::engine::api::economy_event::tick(lua))?;
-    regen(lua);
     enter(Phase::Threat);
     crate::engine::api::threat::tick(lua);
     if let (Some(mut m), Some(w)) = (lua.app_data_mut::<crate::engine::sim::manipulator::Manipulators>(), lua.app_data_ref::<crate::engine::sim::entity::EntityWorld>()) {
@@ -128,9 +127,16 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
     // next tick. Then intel from where everything ended up (the recon
     // refresh, 0x1031913b).
     enter(Phase::Movement);
+    // Regeneration is in the motion stage too, after the scripts: a rate set
+    // from a thread first heals that same beat (FAF probe `probe_re_wpn`
+    // `hc [regen]`: 740 at 50 a second set at +9 reads 750 at +10 and 865
+    // at +34).
+    contain(lua, tick, regen(lua))?;
     crate::engine::api::orders::hold_new(lua);
     contain(lua, tick, crate::engine::api::movement::tick(lua))?;
     contain(lua, tick, crate::engine::api::movement::fuel_tick(lua))?;
+    // Land units under water drown, on the layer the motion just gave them.
+    contain(lua, tick, drown(lua))?;
     // Attached entities (cargo, shields, effect entities) follow their parent.
     // On parent bones as posed (sliders, aims, clips) when the parent has
     // manipulators; the rest pose otherwise.
@@ -195,18 +201,106 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
-/// Health regeneration (`SetRegenRate`) for finished, living units.
-fn regen(lua: &Lua) {
+/// Health regeneration (`SetRegenRate`) for finished, living units; a unit
+/// whose health crosses a quarter step hears `OnHealthChanged` at once
+/// (FAF probe `probe_re_wpn` `hc [regen]`: at the tick it crosses), in id
+/// order.
+fn regen(lua: &Lua) -> mlua::Result<()> {
     use crate::engine::sim::math::Fx;
-    let Some(mut world) = lua.app_data_mut::<crate::engine::sim::entity::EntityWorld>() else { return };
-    let dt = Fx::ONE / Fx::from_num(10);
-    world.for_each_unit_mut(|e| {
-        let Some(rate) = e.unit.as_deref().map(|u| u.regen).filter(|r| *r != Fx::ZERO) else { return };
-        if e.destroyed || e.fraction_complete < Fx::ONE || e.health <= Fx::ZERO {
-            return;
+    let changed: Vec<u32> = {
+        let Some(mut world) = lua.app_data_mut::<crate::engine::sim::entity::EntityWorld>() else { return Ok(()) };
+        let mut changed = Vec::new();
+        world.for_each_unit_mut(|e| {
+            let Some(rate) = e.unit.as_deref().map(|u| u.regen).filter(|r| *r != Fx::ZERO) else { return };
+            if e.destroyed || e.fraction_complete < Fx::ONE || e.health <= Fx::ZERO {
+                return;
+            }
+            let before = e.health;
+            // A tenth of the rate a tick, divided rather than times 0.1 (not
+            // exact in fixed point): 50 a second is 5 a tick, so 740 reaches
+            // the 750 step in 2 ticks, as in the real game.
+            e.health = (e.health + rate / Fx::from_num(10)).clamp(Fx::ZERO, e.max_health);
+            if e.health != before {
+                changed.push(e.id);
+            }
+        });
+        changed
+    };
+    for id in changed {
+        crate::engine::api::unit::health_changed_now(lua, id)?;
+    }
+    Ok(())
+}
+
+/// Whether a unit drowns this beat: a finished, living, unattached unit of
+/// `Physics.MotionType` `RULEUMT_Land` (or `Biped`) on the `Seabed` layer.
+///
+/// Measured in the real game (dev/probes `probe_re7_kill2`,
+/// `probe_re7_drown`): T1 tanks, scouts, artillery, AA and the T3 tank on the
+/// seabed drown, even a tank 1.1 under the surface and one with
+/// `SetCanTakeDamage(false)`; Wagner (`RULEUMT_Amphibious`), the ACU
+/// (`Amphibious`), an Aurora (`Hover`), the UEF engineer
+/// (`AmphibiousFloating`, on `Water`), structures on the seabed and aircraft
+/// don't; a tank warped out of the water stops losing health that beat, and
+/// one warped in starts. Inferred, not measured: that the motion type (no
+/// other blueprint field: no FAF `RULEUMT_Land` unit can use the seabed) is
+/// the rule, and that units under construction and attached ones (cargo)
+/// are spared.
+pub(crate) fn drowns(e: &crate::engine::sim::entity::Entity) -> bool {
+    use crate::engine::sim::{layer::Layer, math::Fx, movement::MotionKind};
+    let Some(u) = e.unit.as_deref() else { return false };
+    u.motion_params.kind == MotionKind::Land
+        && u.layer == Layer::Seabed
+        && !e.destroyed
+        && !e.cold.killed
+        && e.attachment.is_none()
+        && e.fraction_complete >= Fx::ONE
+        && e.health > Fx::ZERO
+}
+
+/// A drowning unit's loss each beat: 1% of its max health, rounded up to
+/// the next fixed-point step, so the hundredth beat empties it exactly as
+/// the real game's does (a 29 health scout as a 300 one) where rounding
+/// down would leave a crumb for a 101st.
+pub(crate) fn drown_step(max_health: crate::engine::sim::math::Fx) -> crate::engine::sim::math::Fx {
+    use crate::engine::sim::math::Fx;
+    let hundred = Fx::from_num(100);
+    let d = max_health / hundred;
+    if d * hundred < max_health { d + Fx::DELTA } else { d }
+}
+
+/// Land units under water drown ([`drowns`]): each beat, after the motion,
+/// they lose [`drown_step`] with no `OnDamage`, from the beat they are made
+/// or reach the seabed (real game: a tank made in a thread at beat 5 reads
+/// 297 at 6 and 3 at 104, then hears `OnKilled(nil, '', 0)` at 104, with
+/// health 0, 99 beats after it was made; T3 2400 -> 2376 -> 2352). Health
+/// steps crossed fire `OnHealthChanged` as regeneration's do (inferred);
+/// the empty unit is killed through its script `Kill`, so FAF's
+/// `CheckCanBeKilled` and the carrier / transport overrides still apply.
+fn drown(lua: &Lua) -> mlua::Result<()> {
+    use crate::engine::sim::math::Fx;
+    let (changed, dead) = {
+        let Some(mut world) = lua.app_data_mut::<crate::engine::sim::entity::EntityWorld>() else { return Ok(()) };
+        let (mut changed, mut dead) = (Vec::new(), Vec::new());
+        world.for_each_unit_mut(|e| {
+            if !drowns(e) {
+                return;
+            }
+            e.health = (e.health - drown_step(e.max_health)).max(Fx::ZERO);
+            if e.health == Fx::ZERO { dead.push(e.id) } else { changed.push(e.id) }
+        });
+        (changed, dead)
+    };
+    for id in changed {
+        crate::engine::api::unit::health_changed_now(lua, id)?;
+    }
+    for id in dead {
+        if let Some(t) = crate::engine::api::entity::object(lua, id)? {
+            let kill: LuaFunction = t.get("Kill")?;
+            kill.call::<()>((t, LuaValue::Nil, "", 0.0))?;
         }
-        e.health = (e.health + rate * dt).clamp(Fx::ZERO, e.max_health);
-    });
+    }
+    Ok(())
 }
 
 /// Per-army intel coverage and what each army has seen (`sim::vision`).
@@ -246,4 +340,86 @@ fn sync_beat(lua: &Lua) -> LuaResult<()> {
         reset.call::<()>(())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::api::blueprints::BlueprintKind;
+    use crate::engine::sim::entity::{Attachment, EntityKind, EntityWorld};
+    use crate::engine::sim::layer::Layer;
+    use crate::engine::sim::math::{Fx, FxQuat, FxVec3};
+    use crate::engine::sim::movement::MotionKind;
+
+    /// A finished unit of `kind` on `layer`, at full health.
+    fn unit(w: &mut EntityWorld, kind: MotionKind, layer: Layer) -> u32 {
+        let id = w.spawn(EntityKind::Unit, BlueprintKind::Unit, "u".into(), Some(1), FxVec3::default(), FxQuat::IDENTITY);
+        let e = w.get_mut(id).unwrap();
+        e.fraction_complete = Fx::ONE;
+        e.max_health = Fx::from_num(300);
+        e.health = e.max_health;
+        let u = e.unit.as_mut().unwrap();
+        u.motion_params.kind = kind;
+        u.layer = layer;
+        id
+    }
+
+    /// Land units on the seabed drown; amphibious ones (Wagner, the ACU),
+    /// hover and floating units (the Aurora, the UEF engineer), ships,
+    /// structures and aircraft don't (real game, `probe_re7_kill2`,
+    /// `probe_re7_drown`), nor land units on land.
+    #[test]
+    fn only_land_units_on_the_seabed_drown() {
+        let mut w = EntityWorld::default();
+        let tank = unit(&mut w, MotionKind::Land, Layer::Seabed);
+        assert!(drowns(w.get(tank).unwrap()), "tank on the seabed");
+        for (kind, layer, what) in [
+            (MotionKind::Land, Layer::Land, "tank on land"),
+            (MotionKind::Amphibious, Layer::Seabed, "Wagner / ACU / SACU"),
+            (MotionKind::Hover, Layer::Water, "hover tank, UEF engineer"),
+            (MotionKind::Hover, Layer::Seabed, "hover unit (were it on the seabed)"),
+            (MotionKind::Water, Layer::Sub, "submarine"),
+            (MotionKind::None, Layer::Seabed, "underwater extractor"),
+            (MotionKind::Air, Layer::Air, "bomber"),
+        ] {
+            let id = unit(&mut w, kind, layer);
+            assert!(!drowns(w.get(id).unwrap()), "{what}");
+        }
+    }
+
+    /// Cargo and units still being built are spared (inferred: not
+    /// measured), as are dead ones.
+    #[test]
+    fn cargo_unfinished_and_dead_units_do_not_drown() {
+        let mut w = EntityWorld::default();
+        let carrier = unit(&mut w, MotionKind::Air, Layer::Air);
+        let cargo = unit(&mut w, MotionKind::Land, Layer::Seabed);
+        w.get_mut(cargo).unwrap().attachment = Some(Attachment { parent: carrier, parent_bone: None, self_bone: None });
+        assert!(!drowns(w.get(cargo).unwrap()), "cargo");
+        let built = unit(&mut w, MotionKind::Land, Layer::Seabed);
+        w.get_mut(built).unwrap().fraction_complete = Fx::from_num(0.5);
+        assert!(!drowns(w.get(built).unwrap()), "under construction");
+        let dead = unit(&mut w, MotionKind::Land, Layer::Seabed);
+        w.get_mut(dead).unwrap().cold.killed = true;
+        assert!(!drowns(w.get(dead).unwrap()), "killed");
+        let empty = unit(&mut w, MotionKind::Land, Layer::Seabed);
+        w.get_mut(empty).unwrap().health = Fx::ZERO;
+        assert!(!drowns(w.get(empty).unwrap()), "at 0 health (can't be killed)");
+    }
+
+    /// 1% of max health a beat empties a unit on exactly the 100th beat
+    /// (real game: 300 and 29 health units both die then), never the 99th.
+    #[test]
+    fn a_hundred_steps_drown_any_unit() {
+        for max in [29.0, 205.0, 300.0, 310.0, 2400.0, 0.7, 12345.6] {
+            let max = Fx::from_num(max);
+            let step = drown_step(max);
+            let mut h = max;
+            for beat in 1..=100 {
+                h = (h - step).max(Fx::ZERO);
+                assert_eq!(h == Fx::ZERO, beat == 100, "max {max} at beat {beat}: {h}");
+            }
+        }
+        assert_eq!(drown_step(Fx::from_num(300)), Fx::from_num(3));
+    }
 }

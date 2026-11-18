@@ -402,14 +402,35 @@ impl SimControl {
         self.agreed().unwrap_or_else(|| self.speed())
     }
 
-    /// The speed the game actually runs at (percent), as the real-time
-    /// loop last paced or measured it; else the shown one.
+    /// The speed the game actually runs at (percent), as the sim loop last
+    /// paced or measured it; else the shown one (`MAX` only then: a
+    /// measured speed is a number).
     pub fn effective(&self) -> u32 {
-        Some(self.effective.load(std::sync::atomic::Ordering::Relaxed)).filter(|&p| p != 0).unwrap_or_else(|| self.shown())
+        self.measured().unwrap_or_else(|| self.shown())
     }
 
+    /// The speed the sim loop last paced or measured (percent), `None`
+    /// before it knows.
+    pub fn measured(&self) -> Option<u32> {
+        Some(self.effective.load(std::sync::atomic::Ordering::Relaxed)).filter(|&p| p != 0)
+    }
+
+    /// The sim loop's actual speed ([`RateMeter::actual`]): a number, never
+    /// `MAX` ("max" is a speed asked for, not one run at).
     pub fn set_effective(&self, percent: u32) {
-        self.effective.store(percent.max(1), std::sync::atomic::Ordering::Relaxed);
+        debug_assert_ne!(percent, Self::MAX, "an actual speed is measured, not max");
+        self.effective.store(percent.clamp(1, Self::MAX - 1), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The game speed as the interface sees it, in moho steps: the one
+    /// asked for (`GetGameSpeed`, FAF's clock's first number) and the one
+    /// the game runs at (`GetSimRate`, the second). "Max" is asked for as
+    /// [`Self::MAX_STEP`] (the keys step up to it one at a time); the
+    /// actual one is what the sim loop measured (below 0 when slower than real time), and until
+    /// it has measured anything, the one asked for.
+    pub fn interface_steps(&self) -> (i32, i32) {
+        let asked = Self::step_of(self.shown());
+        (asked, self.measured().map_or(asked.min(Self::MOHO_MAX_STEP), Self::step_of))
     }
 
     /// The session client (1-based) who changed the speed last.
@@ -487,6 +508,9 @@ impl SimControl {
     /// go): 10^(77/10) times normal no longer fits a percent.
     pub const MAX_STEP: i32 = 77;
 
+    /// Moho's fastest step (10x): how the interface sees "max".
+    pub const MOHO_MAX_STEP: i32 = 10;
+
     /// Moho's game speed step (0 normal) nearest `percent`: the rate is
     /// 10^(step/10) (`RATE_GameSpeedToRate`, MohoEngine.dll 0x1014a3d0), so
     /// +10 is 10x, +20 100x. Moho stops at -10..=10; we don't: "max" is
@@ -509,6 +533,58 @@ impl SimControl {
 
     pub fn label(percent: u32) -> String {
         if percent == Self::MAX { "max".into() } else { format!("{}x", percent as f32 / 100.0) }
+    }
+}
+
+/// The speed the sim really runs at, measured over at least
+/// [`Self::WINDOW`] of ticks (wall-clock time: it paces and reports, never
+/// reaches sim state).
+#[derive(Debug)]
+pub struct RateMeter {
+    since: std::time::Instant,
+    ticks: u32,
+    achieved: Option<u32>,
+}
+
+impl RateMeter {
+    pub const WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+    pub fn new(now: std::time::Instant) -> Self {
+        Self { since: now, ticks: 0, achieved: None }
+    }
+
+    /// A pause or hold: the time stopped doesn't count (the last
+    /// measurement stays).
+    pub fn restart(&mut self, now: std::time::Instant) {
+        (self.since, self.ticks) = (now, 0);
+    }
+
+    /// A tick ended at `now`.
+    pub fn tick(&mut self, now: std::time::Instant) {
+        self.ticks += 1;
+        let secs = now.saturating_duration_since(self.since).as_secs_f64();
+        if secs >= Self::WINDOW.as_secs_f64() {
+            // 10 ticks a second is 100%.
+            self.achieved = Some(((self.ticks as f64 * 10.0 / secs).round() as u32).clamp(1, SimControl::MAX - 1));
+            self.restart(now);
+        }
+    }
+
+    /// The last measured speed (percent).
+    pub fn achieved(&self) -> Option<u32> {
+        self.achieved
+    }
+
+    /// The actual speed (percent) while pacing at `speed`: the pace,
+    /// unless the sim measurably falls short of it (5% slack for timer
+    /// jitter), and as measured when running flat out ("max": `None`
+    /// until measured, never `MAX`).
+    pub fn actual(&self, speed: u32) -> Option<u32> {
+        match self.achieved {
+            Some(a) if speed == SimControl::MAX || (a as f64) < speed as f64 * 0.95 => Some(a),
+            _ if speed == SimControl::MAX => None,
+            _ => Some(speed),
+        }
     }
 }
 
@@ -625,9 +701,10 @@ pub struct UnitDetail {
     pub paused: bool,
     /// Overcharge auto-fire paused (`SetOverchargePaused`).
     pub overcharge_paused: bool,
-    /// Silo missiles (`UserUnit:GetMissileInfo`): nuke building (the
-    /// missile in progress as a fraction, FA-Binary-Patches#14), nuke max
-    /// storage, nukes stored, then the same for tactical missiles.
+    /// Silo missiles (`UserUnit:GetMissileInfo`): nukes being built (a
+    /// count: 1 while one is in progress, as moho's integer field; the
+    /// progress is `GetWorkProgress`), nuke max storage, nukes stored, then
+    /// the same for tactical missiles.
     pub missiles: [f32; 6],
     /// The unit that made it (a pod's carrier, an external factory's
     /// unit): `UserUnit:GetCreator`.
@@ -725,6 +802,10 @@ pub struct Snapshot {
     /// 1 = highest), bit 7 set for `LOWSELECTPRIO` units (priority 6 while
     /// being built: FAF's exe patch), same index.
     pub blueprint_selection_priority: Option<Arc<Vec<u8>>>,
+    /// Each blueprint's `UNSELECTABLE` category, same index: such units
+    /// (FAF's Cybran build bots) aren't picked by the mouse, for a click,
+    /// a drag or the rollover.
+    pub blueprint_unselectable: Option<Arc<Vec<bool>>>,
     /// Each blueprint's `StrategicIconName` (empty: none), same index.
     pub blueprint_icons: Option<Arc<Vec<String>>>,
     /// Each blueprint's `Display.IconFadeInZoom`: the camera zoom from
@@ -1558,6 +1639,21 @@ fn blueprint_selection_priority(lua: &mlua::Lua, ids: &[String]) -> Vec<u8> {
         .collect()
 }
 
+/// Each blueprint's `UNSELECTABLE` category (see [`Snapshot::blueprint_unselectable`]).
+fn blueprint_unselectable(lua: &mlua::Lua, ids: &[String]) -> Vec<bool> {
+    use mlua::prelude::*;
+    let bps: Option<LuaTable> = lua.globals().raw_get("__blueprints").ok().flatten();
+    ids.iter()
+        .map(|id| {
+            bps.as_ref()
+                .and_then(|b| b.raw_get::<Option<LuaTable>>(id.as_str()).ok().flatten())
+                .and_then(|bp| bp.raw_get::<Option<LuaTable>>("CategoriesHash").ok().flatten())
+                .and_then(|c| c.raw_get::<Option<bool>>("UNSELECTABLE").ok().flatten())
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 /// Per blueprint, its cargo-slot classes, its cargo class and its
 /// `Transport.ClassGenericUpTo`, same index as [`blueprint_caps`]. The slot
 /// classes are bits (bit `class - 1`, classes 1..4) from the model's
@@ -2304,8 +2400,19 @@ fn debug_data(lua: &mlua::Lua, req: &DebugRequest, sink: &mut SnapshotSink) -> D
                         (cmd.kind as u8, at)
                     })
                     .collect();
+                let building_silo = u.states.contains(crate::engine::sim::unit_state::UnitStates::index("SiloBuildingAmmo").expect("unit state"));
                 let served = f(u.resource_consumed);
-                let (cm, ce) = if u.consumption_active { (f(u.consumption_mass), f(u.consumption_energy)) } else { (0.0, 0.0) };
+                let (mut cm, mut ce) = if u.consumption_active { (f(u.consumption_mass), f(u.consumption_energy)) } else { (0.0, 0.0) };
+                // A missile in progress (its fractional economy event) shows
+                // as the unit's drain, as moho's silo build sets the unit's
+                // maintenance cost (`probe_ui_units` A: a tactical launcher
+                // reads 120 energy, 8.33 mass a second).
+                if building_silo && let Some(ev) = lua.app_data_ref::<crate::engine::sim::economy::EconomyEvents>() {
+                    for e in ev.map.values().filter(|e| e.unit == id && !e.whole_steps && !e.held && !e.done()) {
+                        cm += f(e.mass) * 10.0;
+                        ce += f(e.energy) * 10.0;
+                    }
+                }
                 let (pm, pe) = if u.production_active { (f(u.production_mass), f(u.production_energy)) } else { (0.0, 0.0) };
                 Some(UnitDetail {
                     id,
@@ -2322,11 +2429,10 @@ fn debug_data(lua: &mlua::Lua, req: &DebugRequest, sink: &mut SnapshotSink) -> D
                         use crate::engine::sim::weapon::SiloKind;
                         let weapons = lua.app_data_ref::<crate::engine::sim::weapon::Weapons>();
                         let max = |kind: SiloKind| weapons.as_ref().map_or(0, |w| w.of(id).iter().filter(|s| s.silo == Some(kind)).map(|s| s.max_storage).max().unwrap_or(0)) as f32;
-                        let building = u.states.contains(crate::engine::sim::unit_state::UnitStates::index("SiloBuildingAmmo").expect("unit state"));
                         let (nuke_max, tac_max) = (max(SiloKind::Nuke), max(SiloKind::Tactical));
-                        let progress = if building { f(u.work_progress) } else { 0.0 };
-                        let nuke_building = if nuke_max > 0.0 && (u.nuke_ammo as f32) < nuke_max { progress } else { 0.0 };
-                        let tac_building = if nuke_max == 0.0 && tac_max > 0.0 { progress } else { 0.0 };
+                        let building = if building_silo { 1.0 } else { 0.0 };
+                        let nuke_building = if nuke_max > 0.0 && (u.nuke_ammo as f32) < nuke_max { building } else { 0.0 };
+                        let tac_building = if nuke_max == 0.0 && tac_max > 0.0 { building } else { 0.0 };
                         [nuke_building, nuke_max, u.nuke_ammo as f32, tac_building, tac_max, u.tactical_ammo as f32]
                     },
                     creator: u.creator,
@@ -2569,6 +2675,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
             snap.blueprint_order_categories = Some(Arc::new(blueprint_order_categories(lua, d)));
             snap.blueprint_transport = Some(Arc::new(blueprint_transport(lua, &ids)));
             snap.blueprint_selection_priority = Some(Arc::new(blueprint_selection_priority(lua, &ids)));
+            snap.blueprint_unselectable = Some(Arc::new(blueprint_unselectable(lua, &ids)));
             snap.blueprint_icons = Some(Arc::new(blueprint_icons(lua, &ids)));
             snap.blueprint_icon_zoom = Some(Arc::new(blueprint_icon_zoom(lua, &ids)));
             snap.blueprint_icon_layer = Some(Arc::new(blueprint_icon_layer(lua, &ids)));
@@ -2806,6 +2913,66 @@ mod speed_tests {
         for step in -15..=SimControl::MAX_STEP {
             assert_eq!(SimControl::step_of(SimControl::percent_of(step)), step);
         }
+    }
+
+    /// The interface's two numbers (`GetGameSpeed` / `GetSimRate`, FAF's
+    /// clock "+asked / +actual"): the actual one is the measured speed, so
+    /// below 0 when the sim can't keep real time, and "max" (77 inside)
+    /// never reaches the interface.
+    #[test]
+    fn interface_steps_show_the_measured_speed_and_never_max() {
+        let c = SimControl::new(100);
+        assert_eq!(c.interface_steps(), (0, 0), "nothing measured yet: as asked");
+        // A heavy scene at a quarter of real time.
+        c.set_effective(25);
+        assert_eq!(c.interface_steps(), (0, -6));
+        // Max asked: its own step, and the measured rate as actual.
+        c.set_speed(SimControl::MAX);
+        assert_eq!(c.interface_steps(), (SimControl::MAX_STEP, -6));
+        c.set_effective(2000);
+        assert_eq!(c.interface_steps(), (SimControl::MAX_STEP, 13));
+        // Max before anything was measured (a new session).
+        c.begin_session();
+        assert_eq!(c.interface_steps(), (SimControl::MAX_STEP, SimControl::MOHO_MAX_STEP));
+        assert_eq!(c.measured(), None);
+    }
+
+    /// The real-time loop's measured speed: ticks over at least half a
+    /// second, the pace while it keeps up, the measured speed when it falls
+    /// short or runs flat out, and never "max".
+    #[test]
+    fn rate_meter_measures_what_the_sim_achieves() {
+        use super::RateMeter;
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut m = RateMeter::new(t0);
+        assert_eq!(m.actual(100), Some(100), "unmeasured: the pace");
+        assert_eq!(m.actual(SimControl::MAX), None, "unmeasured flat out: unknown, not max");
+        // 2.5 ticks a second (400 ms ticks): a quarter of normal speed.
+        for i in 1..=5 {
+            m.tick(t0 + Duration::from_millis(400 * i));
+        }
+        assert_eq!(m.achieved(), Some(25));
+        assert_eq!(m.actual(100), Some(25), "short of normal speed: measured");
+        assert_eq!(m.actual(SimControl::MAX), Some(25), "flat out: measured");
+        assert_eq!(m.actual(20), Some(20), "keeps up with a fifth: the pace");
+        // Keeping up within the timer slack shows the pace.
+        let mut m = RateMeter::new(t0);
+        for i in 1..=6 {
+            m.tick(t0 + Duration::from_millis(103 * i));
+        }
+        assert_eq!(m.achieved(), Some(97));
+        assert_eq!(m.actual(100), Some(100));
+        // A pause doesn't count as slow.
+        let mut m = RateMeter::new(t0);
+        m.restart(t0 + Duration::from_secs(60));
+        for i in 1..=5 {
+            m.tick(t0 + Duration::from_secs(60) + Duration::from_millis(100 * i));
+        }
+        assert_eq!(m.achieved(), Some(100));
+        let c = SimControl::new(100);
+        c.set_effective(m.actual(SimControl::MAX).unwrap());
+        assert_ne!(SimControl::step_of(c.effective()), SimControl::MAX_STEP);
     }
 }
 
