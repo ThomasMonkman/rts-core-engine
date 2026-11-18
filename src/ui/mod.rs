@@ -1899,6 +1899,7 @@ impl UserVm {
         controls::on_frame(&self.lua, dt)?;
         movie::tick(&self.lua, dt)?;
         self.update_frame_rate(dt)?;
+        engine_stats::update_cursor(&self.lua)?;
         cursor::update(&self.lua)
     }
 

@@ -136,6 +136,60 @@ fn engine_stats_count_the_sims_entities() {
     assert_eq!(engine_stat(&vm, &["EntityCount", "Prop"]).1, LuaValue::Number(counts.props.into()));
 }
 
+/// `__EngineStats`' `Camera` / `Cursor`: over water `Position` is on the
+/// surface and `Elevation` the sea floor under it, as in the real game
+/// (FAF probe `probe_engine_stats` on Seton's: surface 17.5, elevation
+/// 4.75). FAF's `GetMouseTerrainElevation` (userInit.lua) and the water
+/// depth indicator's read (`/lua/ui/game/cursor/depth.lua`) get numbers.
+#[test]
+fn engine_stats_cursor_is_over_the_sea_floor() {
+    use glam::Vec3;
+    use rts_core_engine::engine::snapshot::TerrainView;
+    use rts_core_engine::ui::world_pick::PickView;
+    let Some(vm) = vm() else { return };
+    let elevation = "return GetMouseTerrainElevation()";
+    assert_eq!(vm.lua().load(elevation).eval::<f64>().unwrap(), 0.0, "a number before the mouse is over the world");
+    // A camera 50 above (10, 3, 20) looking straight down at a sea floor
+    // at 3 under water at 10; the mouse in the middle of the view.
+    let eye = Vec3::new(10.0, 53.0, 20.0);
+    let view = glam::camera::rh::view::look_at_mat4(eye, Vec3::new(10.0, 3.0, 20.0), Vec3::NEG_Z);
+    let proj = glam::camera::rh::proj::directx::perspective(1.0, 1.0, 1.0, 1000.0);
+    let terrain = TerrainView { width: 64, height: 64, heights: vec![3.0; 65 * 65], water: Some(10.0), map: None };
+    vm.set_pick_views(vec![PickView { camera: "WorldCamera".into(), origin: [0.0, 0.0], view_proj: proj * view, inv_view_proj: (proj * view).inverse(), screen: [200.0, 200.0], ui_scale: 2.0, target_y: 3.0, distance: 50.0, terrain: Some(Arc::new(terrain)) }]);
+    vm.lua().load("rawset(_G, '__engine_mouse_x', 50) rawset(_G, '__engine_mouse_y', 50)").exec().unwrap();
+    vm.frame(1.0 / 60.0).unwrap();
+    let got: f64 = vm.lua().load(elevation).eval().unwrap();
+    assert!((got - 3.0).abs() < 1e-4, "{got}");
+    assert_eq!(engine_stat(&vm, &["Camera", "Cursor", "Elevation"]).0.as_deref(), Some("Float"));
+    let (kind, position) = engine_stat(&vm, &["Camera", "Cursor", "Position"]);
+    assert_eq!(kind.as_deref(), Some("String"));
+    assert_eq!(position.as_string().map(|s| s.to_string_lossy()).as_deref(), Some("x=10.00,y=10.00,z=20.00"));
+    // depth.lua's read: every entry of the cursor node by name.
+    let depth: f64 = vm
+        .lua()
+        .load(
+            r#"
+            local cursor = { }
+            for _, a in __EngineStats.Children do
+                if a.Name == 'Camera' then
+                    for _, b in a.Children do
+                        if b.Name == 'Cursor' then
+                            for _, c in b.Children do
+                                cursor[c.Name] = c.Value
+                            end
+                            break
+                        end
+                    end
+                end
+            end
+            return cursor.Elevation
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!((depth - 3.0).abs() < 1e-4, "{depth}");
+}
+
 /// FAF's in-game tabs label their exit `_Exit_to_Windows`: Windows
 /// keeps that; elsewhere it reads like the main menu's `_Exit`.
 #[test]

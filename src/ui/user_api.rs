@@ -1207,12 +1207,16 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         -- only the nodes FAF and mods read, kept up by the engine
         -- (`ui::engine_stats`): `Frame` / `FPS` (AI-Uveso's interface hook,
         -- FAF's debug FPS panel), `EntityCount` (FAF's performance
-        -- tracking samples `Unit`).
+        -- tracking samples `Unit`), `Camera` / `Cursor` (FAF's
+        -- `GetMouseTerrainElevation`: the water depth indicator, the
+        -- context-based build templates). The cursor's are 0 until the
+        -- mouse is first over a world view.
         local function stat(name, type) return { Name = name, Type = type, Value = 0 } end
         rawset(_G, '__EngineStats', rawget(_G, '__EngineStats') or {
             Name = 'Root', Children = {
                 { Name = 'Frame', Children = { stat('FPS', 'Float') } },
                 { Name = 'EntityCount', Children = { stat('Prop', 'Integer'), stat('Unit', 'Integer'), stat('Projectile', 'Integer'), stat('Shield', 'Integer'), stat('Other', 'Integer') } },
+                { Name = 'Camera', Children = { { Name = 'Cursor', Children = { { Name = 'Position', Type = 'String', Value = 'x=0.00,y=0.00,z=0.00' }, stat('Elevation', 'Float') } } } },
             },
         })
         rawset(_G, 'LaunchDir', rawget(_G, 'LaunchDir') or '')
