@@ -156,8 +156,9 @@ At start it loads the first file that exists (`install::choose_prefs`):
 4. on Windows, Forged Alliance's own (`%LOCALAPPDATA%\Gas Powered Games\Supreme Commander Forged
    Alliance\Game.prefs`), so a FAF player keeps their options and hotkeys. It's only ever read.
 
-`SavePreferences` and closing the game write the store back in moho's format to the file it came
-from (or the engine's own). `--screenshot` runs read and write nothing unless given `--prefs`, so
+`SavePreferences` and the game ending (however it ends: the window closed, the interface's Exit, a
+`--ticks` run done) write the store back in moho's format to the file it came from (or the
+engine's own). FAF's key bindings dialog only sets preferences, so its bindings are kept that way. `--screenshot` runs read and write nothing unless given `--prefs`, so
 screenshots look the same on every machine.
 
 ## Adding to the interface
@@ -176,5 +177,6 @@ Implement the API in `ui::user_api` (globals) or on the control in `ui::controls
 macros ([lua-api-types.md](../guides/lua-api-types.md)). Take behaviour from the binary over FAF's
 annotations ([verifying-against-the-binary.md](../research/verifying-against-the-binary.md)).
 
-`tests/ui.rs` checks that userInit boots, FAF's layout places controls where it says, and the
-economy bar shows the economy after a beat.
+`tests/ui.rs` checks that userInit boots, FAF's layout places controls where it says, the
+economy bar shows the economy after a beat, and FAF's key bindings dialog lists, rebinds (kept
+across a restart) and resets to its presets.

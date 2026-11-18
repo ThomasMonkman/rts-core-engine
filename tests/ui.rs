@@ -3010,3 +3010,146 @@ fn every_strings_db_key_resolves_through_loc() {
     assert!(failed.is_empty(), "{} of {total} keys failed:\n{}", failed.len(), failed[..failed.len().min(20)].join("\n"));
     assert_eq!(loc("<LOC lochook_0001>"), "Hooked", "the hook's keys");
 }
+
+/// The game interface with FAF's key bindings dialog to drive: texts on
+/// screen, clicks and the selected tank (entity 3) for key actions.
+mod key_bindings {
+    use super::*;
+    use rts_core_engine::engine::sim::command::CommandKind;
+    use rts_core_engine::ui::controls::{Modifiers, MouseEvent};
+    use rts_core_engine::ui::UnitInfo;
+
+    pub fn game(prefs: Option<&std::path::Path>) -> Option<UserVm> {
+        let vm = vm()?;
+        if let Some(p) = prefs {
+            vm.load_prefs(p).unwrap();
+        }
+        vm.set_screen(1280.0, 720.0).unwrap();
+        vm.set_focus_army(1).unwrap();
+        vm.start_hud().expect("game interface");
+        for _ in 0..420 {
+            vm.frame(1.0 / 60.0).unwrap();
+        }
+        vm.update_units(&[UnitInfo { id: 3, blueprint: "uel0201".into(), army: 1, health: 1.0, max_health: 100.0, build_rate: 0.0, build: 1.0, position: [400.0, 20.0, 600.0], work: 0.0, shield: 0.0, detail: None }]).unwrap();
+        vm.set_selection(&[3]).unwrap();
+        vm.take_orders().unwrap();
+        Some(vm)
+    }
+
+    pub fn texts(vm: &UserVm) -> Vec<([f32; 4], String)> {
+        vm.draw_list().unwrap().into_iter().filter_map(|i| match i { DrawItem::Text { rect, text, .. } => Some((rect, text)), _ => None }).collect()
+    }
+
+    /// The middle of the text shown that starts with `t`.
+    pub fn find(vm: &UserVm, t: &str) -> Option<(f32, f32)> {
+        texts(vm).into_iter().find(|(_, s)| s.starts_with(t)).map(|(r, _)| ((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0))
+    }
+
+    pub fn click(vm: &UserVm, t: &str, double: bool) {
+        let (x, y) = find(vm, t).unwrap_or_else(|| panic!("{t:?} not shown: {:?}", texts(vm).iter().map(|t| &t.1).collect::<Vec<_>>()));
+        let left = Modifiers { left: true, ..Default::default() };
+        vm.mouse(MouseEvent::Move, x, y, Modifiers::default()).unwrap();
+        for _ in 0..if double { 2 } else { 1 } {
+            vm.mouse(MouseEvent::Press(1), x, y, left).unwrap();
+            vm.mouse(MouseEvent::Release(1), x, y, Modifiers::default()).unwrap();
+        }
+        vm.frame(1.0 / 60.0).unwrap();
+    }
+
+    /// Does key `k` stop the selected tank?
+    pub fn stops(vm: &UserVm, k: &str) -> bool {
+        vm.take_orders().unwrap();
+        vm.key(k, false, false, false).unwrap();
+        vm.take_orders().unwrap().iter().any(|o| rts_core_engine::ui::command_kind(&o.command) == Some(CommandKind::Stop))
+    }
+
+    /// The key bindings dialog: binds Stop to H, which is select nearest
+    /// factory's, answering Yes to the conflict prompt, and closes it.
+    pub fn bind_stop_to_h(vm: &UserVm) {
+        assert!(vm.key("F1", false, false, false).unwrap(), "F1 opens the dialog");
+        vm.frame(1.0 / 60.0).unwrap();
+        assert!(vm.typing(), "the filter box has the focus");
+        vm.text("stop").unwrap();
+        vm.frame(1.0 / 60.0).unwrap();
+        click(vm, "Stop and cancel all Orders", true);
+        assert!(find(vm, "Hit the key combination").is_some(), "double click asks for a key");
+        assert!(!vm.typing(), "the key popup has the focus, not the filter");
+        vm.key("H", false, false, false).unwrap();
+        vm.frame(1.0 / 60.0).unwrap();
+        assert!(texts(vm).iter().any(|(_, t)| t == "H"), "the pressed key is shown");
+        click(vm, "Ok", false);
+        assert!(find(vm, "The H key is already mapped").is_some(), "H is taken: asked to confirm");
+        click(vm, "Yes", false);
+        assert!(texts(vm).iter().any(|(_, t)| t == "H"), "Stop's row shows H");
+        click(vm, "Close", false);
+        assert!(find(vm, "Key Bindings").is_none(), "closed");
+    }
+}
+
+/// FAF's key bindings dialog (F1) lists the key map's actions by category
+/// (its `SetText('')` fills the list through `OnTextChanged`), a header
+/// opens its category, and the wheel scrolls the list.
+#[test]
+fn key_bindings_dialog_lists_actions() {
+    use key_bindings::*;
+    let Some(vm) = game(None) else { return };
+    assert!(vm.key("F1", false, false, false).unwrap());
+    vm.frame(1.0 / 60.0).unwrap();
+    let shown = |vm: &UserVm, t: &str| texts(vm).iter().any(|(_, s)| s == t);
+    assert!(shown(&vm, "Key Bindings"));
+    for header in ["Orders", "Selection", "Camera", "UI"] {
+        assert!(shown(&vm, header), "{header} listed");
+    }
+    assert!(!shown(&vm, "Assist"), "categories start collapsed");
+    click(&vm, "Orders", false);
+    assert!(shown(&vm, "Assist") && shown(&vm, "Shift + I"), "Orders opened, with their keys");
+    let top = |vm: &UserVm| texts(vm).into_iter().find(|(r, s)| r[0] > 360.0 && r[1] > 80.0 && r[1] < 100.0 && !s.is_empty()).map(|t| t.1);
+    let first = top(&vm);
+    let (x, y) = find(&vm, "Assist").unwrap();
+    use rts_core_engine::ui::controls::{Modifiers, MouseEvent};
+    vm.mouse(MouseEvent::Move, x, y, Modifiers::default()).unwrap();
+    vm.mouse(MouseEvent::Wheel(-1.0), x, y, Modifiers::default()).unwrap();
+    vm.frame(1.0 / 60.0).unwrap();
+    assert_ne!(top(&vm), first, "the wheel scrolled the list");
+}
+
+/// A key bound in the dialog is the key map's at once, is kept in the
+/// profile and is the key map's on the next start; the action's old key
+/// no longer does it.
+#[test]
+fn key_bindings_dialog_rebind_applies_and_persists() {
+    use key_bindings::*;
+    let Some(vm) = game(None) else { return };
+    assert!(stops(&vm, "S"));
+    bind_stop_to_h(&vm);
+    assert!(stops(&vm, "H"), "H stops");
+    assert!(!stops(&vm, "S"), "S no longer does");
+    // Its Shift version follows (FAF's dialog moves `shift_stop` too).
+    let map: (String, Option<String>, Option<String>) = vm.lua().load("local m = GetPreference('profile.profiles.player.UserKeyMap') return m.H, m.S, m['Shift-H']").eval().unwrap();
+    assert_eq!(map, ("stop".to_string(), None, Some("shift_stop".to_string())));
+    // Written as Game.prefs and read by the next game.
+    let path = std::env::temp_dir().join(format!("rts-core-engine-keybind-{}.prefs", std::process::id()));
+    rts_core_engine::ui::prefs::save_file(&path, &vm.prefs().unwrap()).unwrap();
+    drop(vm);
+    let next = game(Some(&path));
+    let _ = std::fs::remove_file(&path);
+    let vm = next.unwrap();
+    assert!(stops(&vm, "H"), "H stops after a restart");
+    assert!(!stops(&vm, "S"));
+}
+
+/// The dialog's Default Preset (confirmed) puts FAF's default map back.
+#[test]
+fn key_bindings_dialog_resets_to_defaults() {
+    use key_bindings::*;
+    let Some(vm) = game(None) else { return };
+    bind_stop_to_h(&vm);
+    assert!(vm.key("F1", false, false, false).unwrap());
+    vm.frame(1.0 / 60.0).unwrap();
+    click(&vm, "Default Preset", false);
+    assert!(find(&vm, "Are you sure you want to reset").is_some(), "asked to confirm");
+    click(&vm, "Yes", false);
+    click(&vm, "Close", false);
+    assert!(stops(&vm, "S"), "S stops again");
+    assert!(!stops(&vm, "H"));
+}
