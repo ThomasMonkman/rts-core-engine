@@ -291,7 +291,10 @@ It shows:
 - a frame mark per rendered frame, and a "sim tick" mark per tick ("head 2 frame" for the second head);
 - spans for every sim stage (`Economy`, `Movement`, `LuaThreads`, ...) inside `sim tick`, and for the
   render frame (`receive snapshots`, `prepare scene`, `ui`, `submit`, `present`);
-- every log event as a message;
+- every log event that passes the log filter as a message: TRACE for our own targets, WARN for
+  every other crate. Unfiltered, a window's wgpu and naga TRACE logs (millions of messages) took more
+  than the link to the profiler can carry: the threads that log the most (sim, render) fell
+  further and further behind, so their zones seemed to stop a few seconds into a capture;
 - on GPUs with timestamp queries, a "wgpu" track timing the `scene pass` and `ui pass`;
 - model loading (`load model`, `upload models`) and a "memory MB" plot of resident memory.
 
@@ -304,9 +307,14 @@ feature because it adds a lookup to every thread resume.
 
 ```sh
 cargo build --release --features lua-profile
-tracy-capture -o lua.tracy -f &             # save a trace from a headless run
-./target/release/rts-core-engine --headless --ticks 3000
+./target/release/rts-core-engine --headless --ticks 3000 &
+sleep 5; tracy-capture -o lua.tracy -f      # save a trace from a headless run
 ```
+
+Start the game first, then the recorder: a `tracy-capture` already waiting when the game starts
+fails with "disconnected during the initial connection handshake". The client keeps everything from
+the start of the process until a recorder connects, so nothing is lost. `TRACY_PORT=<n>` on the game
+and `tracy-capture -p <n>` keep a capture away from another profiled process on the default port.
 
 ### Stress maps (manual)
 
