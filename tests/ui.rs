@@ -2956,3 +2956,49 @@ fn set_max_chars_cuts_the_text() {
         .unwrap();
     assert_eq!(got, (1024, "abc".into(), 3));
 }
+
+/// Every key in FAF's US strings database resolves to its text through
+/// `LOC` (`_Idle`, `_Tech`, ...), with an active mod hooking the database
+/// as AI mods do: its `hook/loc/us/strings_db.lua` starts with a BOM, which
+/// left mid-chunk failed the whole file, so only keys with inline text
+/// still read right.
+#[test]
+fn every_strings_db_key_resolves_through_loc() {
+    let _ = tracing_subscriber::fmt().with_writer(std::io::stderr).with_max_level(tracing::Level::WARN).try_init();
+    if !rts_core_engine::test_data::require_game("UI tests") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("loc_hook_mod_{}", std::process::id()));
+    let hook = dir.join("mods/lochook/hook/loc/us/strings_db.lua");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "\u{feff}\r\nlochook_0001=\"Hooked\"\r\n").unwrap();
+    let engine = engine::Engine::new(INIT_LUA_PATH, FA_PATH, Arc::new(Mutex::new(DebugUiState::new()))).expect("engine");
+    let mut vfs = engine.vfs.read().unwrap().clone();
+    vfs.mount_folder(engine::vfs::MountPoint { source: dir.clone(), mountpoint: "/".into() }).expect("mount");
+    let vfs = Arc::new(std::sync::RwLock::new(vfs));
+    let cache = Arc::new(engine::lua::script_cache::ScriptCache::new(vfs.clone()));
+    let vm = UserVm::with_cache(vfs, cache).expect("user vm");
+    vm.lua().load("__active_mods = { { uid = 'lochook', name = 'lochook', location = '/mods/lochook' } }").exec().unwrap();
+    vm.init().expect("userInit.lua");
+    let lua = vm.lua();
+    let loc: mlua::Function = lua.globals().get("LOC").expect("LOC");
+    let loc = |s: &str| -> String { loc.call(s).expect("LOC") };
+    // The keys and texts as FAF's file assigns them, read on its own.
+    let src = std::fs::read_to_string("../fa/loc/US/strings_db.lua").expect("strings_db.lua");
+    let env = lua.create_table().unwrap();
+    lua.load(src.trim_start_matches('\u{feff}')).set_name("=strings_db").set_environment(env.clone()).exec().expect("strings_db.lua");
+    let (mut total, mut failed) = (0, Vec::new());
+    for pair in env.pairs::<String, String>() {
+        let (key, text) = pair.unwrap();
+        total += 1;
+        // `LOC` expands the text's `{...}` directives; so does `LocExpand`.
+        let (got, want) = (loc(&format!("<LOC {key}>")), loc(&text));
+        if got != want && !(cfg!(not(windows)) && key == "_Exit_to_Windows") {
+            failed.push(format!("{key}: {got:?}, want {want:?}"));
+        }
+    }
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(total > 7000, "read {total} keys");
+    assert!(failed.is_empty(), "{} of {total} keys failed:\n{}", failed.len(), failed[..failed.len().min(20)].join("\n"));
+    assert_eq!(loc("<LOC lochook_0001>"), "Hooked", "the hook's keys");
+}
