@@ -16,13 +16,13 @@ ForkThread(function()
     local pool = brain:MakePlatoon('TransportPool', 'none')
     pool:UniquelyNamePlatoon('TransportPool')
     local plain = brain:MakePlatoon('plain', 'none')
-    local work = brain:MakePlatoon('work', 'none')
     local tr, tank = unit('uea0107', 400), unit('uel0201', 410)
     brain:AssignUnitsToPlatoon(pool, {tr}, 'Support', 'None')
     brain:AssignUnitsToPlatoon(plain, {tank}, 'Attack', 'None')
     WaitTicks(1)
-    -- Both emptied by moving their only unit out.
-    brain:AssignUnitsToPlatoon(work, {tr, tank}, 'Attack', 'None')
+    -- Both emptied by moving their only unit out (into a platoon made this
+    -- beat: one made empty ends the beat after).
+    brain:AssignUnitsToPlatoon(brain:MakePlatoon('work', 'none'), {tr, tank}, 'Attack', 'None')
     WaitTicks(5)
     check(brain:PlatoonExists(pool), 'the emptied transport pool still exists')
     check(not brain:PlatoonExists(plain), 'an unnamed platoon emptied the same way has ended')

@@ -15,8 +15,9 @@ ForkThread(function()
     check(brain:GetNumPlatoonsWithAI('Missing') == 0, 'no platoon runs Missing')
     check(brain:GetNumPlatoonsWithAI(5) == 0, 'a non-string plan counts nothing')
     check(other:GetNumPlatoonsWithAI('ReclaimAIProbe') == 1, 'only the brain\'s own army counts')
+    -- Disbanding ends it at once; no wait (the others, made empty, end the
+    -- beat after).
     brain:DisbandPlatoon(a)
-    WaitTicks(1)
     check(brain:GetNumPlatoonsWithAI('ReclaimAIProbe') == 1, 'a disbanded platoon no longer counts')
     ScenarioResult.done = true
 end)
