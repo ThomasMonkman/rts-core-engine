@@ -14,13 +14,13 @@ Items are counted as bullets of the batches below. A bullet that was half fixed 
 | 2. Lua runtime | 9 | 19 | 0 | 0 | 1 | 29 |
 | 3. Orders and construction | 40 | 6 | 0 | 0 | 4 | 50 |
 | 4. Weapons, projectiles, shields | 26 | 9 | 0 | 0 | 4 | 39 |
-| 5. Movement and transports | 15 | 9 | 0 | 2 | 3 | 29 |
-| 6. AI brain, platoons, threat | 28 | 14 | 0 | 1 | 1 | 44 |
+| 5. Movement and transports | 15 | 10 | 0 | 1 | 3 | 29 |
+| 6. AI brain, platoons, threat | 28 | 15 | 0 | 0 | 1 | 44 |
 | 7. Blueprint defaults | 1 | 3 | 0 | 0 | 0 | 4 |
 | 8. Interface | 26 | 31 | 0 | 0 | 2 | 59 |
 | 9. API surface and arity | 11 | 17 | 0 | 0 | 1 | 29 |
 | 10. Intel: jamming and contact icons | 11 | 2 | 0 | 1 | 2 | 16 |
-| **Total** | 170 | 112 | 0 | 4 | 18 | 304 |
+| **Total** | 170 | 114 | 0 | 2 | 18 | 304 |
 
 ### Decisions made (2026-11-16)
 
@@ -31,6 +31,9 @@ Items are counted as bullets of the batches below. A bullet that was half fixed 
 5. **`^` is XOR** (`af857a4`): keep. A rerun of `probe_api_lang` with RNGAI's own expressions (`syn_rngpow.lua`) gives XOR in the real game in both VMs: `(1.25 - 0.5) ^ 2` = 2, `0.4 ^ 2` = 2, `30.5 ^ 2` = 28, `1.5 ^ 3` = 2. `syn_powzero.lua` loops 4 times in the real game, as ours does now. RNGAI's `x ^ 2` lines are bugs in the real game too.
 6. **Syntax and library extras in ours that the real game rejects**: accepted, no change.
 7. **`GetPosition()` table identity** ([weapons 5](weapons.md#r5); `b6a71e8`): match the real game. Plain `GetPosition()` returns one table per entity, rewritten by each call; FAF's AI code and AI mods depend on it.
+8. **Intel on 10-tick steps** ([intel J12](intel.md#j12)): keep ours (changes land on their own tick). Decided 2026-11-18.
+9. **Transport hover of about 16 ticks before the beam** ([movement 1](movement.md#r1)): keep ours (no wait). Decided 2026-11-18.
+10. **`UseFerryBeacon` pick-up wait of about 90 ticks** ([ai D56](ai.md#d56)): keep ours for now; look again if scripted missions depend on the timing. Decided 2026-11-18.
 
 ## 1. Engine aborts and harness
 
@@ -184,7 +187,7 @@ Building queries and AI build orders
 ## 5. Movement and transports
 
 - [x] **A transport ordered to load flies to its cargo; all cargo attaches on the same tick** (fixed `a1c28d5`) (G). Ours: transport stays and sinks, cargo drives to it, attaches one at a time (done at t=106 vs 75). `engine/api/transport.rs`, `engine/sim/movement.rs` `hover_step`. `probe_mov_air` TR1-TR3. [movement 1](movement.md#r1)
-- [ ] **A transport hovers about 16 ticks before the beam takes its cargo** (open: unexplained, needs a new probe) (N?). Left after the pick-up fix (`a1c28d5`); where the real game's timing differs is not known. `engine/api/transport.rs`. `probe_mov_air` TR1-TR3. [movement 1](movement.md#r1)
+- [ ] **A transport hovers about 16 ticks before the beam takes its cargo** (open: kept ours on purpose, decision 9; the cause in the real game is not traced) (N?). Left after the pick-up fix (`a1c28d5`); where the real game's timing differs is not known. `engine/api/transport.rs`. `probe_mov_air` TR1-TR3. [movement 1](movement.md#r1)
 - [x] **A loaded transport flies at `Elevation` and descends to `TransportHoverHeight` only over the drop point** (fixed `886606b`) (G). Ours flies the whole leg at hover height. `engine/sim/movement.rs` `hover_step` (`CommandKind::is_transport_load_unload`). `probe_mov_air` TR1, TR2. [movement 3](movement.md#r3)
 - [x] **Dead cargo of a killed transport falls and impacts** (fixed `2dab3ab`) (G). Ours: no detach callbacks, passengers hang in the air until the wreck lands. `engine/api/transport.rs`. `probe_mov_air` TR3. [movement 4](movement.md#r4)
 - [x] **Air staging: the plane lands on the pad before it docks** (fixed `f4a6701`); ours attaches on arrival, 11 s sooner, docked layer `Air` and velocity still 14.94 (N). `engine/api/transport.rs`. `probe_mov_air` F4. [movement 8](movement.md#r8) Ours now lands first and docks at rest, which is slower than ours used to be (see Decisions needed).
@@ -256,7 +259,7 @@ Building queries and AI build orders
 - [x] **`ArmyPool:FormPlatoon` with a template with no unit lines raises** (fixed `6cacbd8`); ours returns a platoon (C). `engine/api/platoon.rs:543`. `probe_ai_misc`. [ai D47](ai.md#d47)
 - [x] **Platoon `FindClosestUnit` / `FindPrioritizedUnit` go by intel** (fixed `15d6b50`) (A). Real: nil before the first intel update (t=3, t=8), then only enemy units the army sees now and structures it has seen, never an unseen unit; `FindClosestUnit` honours `canAttack`, and its `'Ally'` means other allied armies, not the own one. Ours answered from t=3 with unseen units, ignored `canAttack` and counted the own army as Ally. FAF: `FindClosestUnit` 26 call sites (`platoon.lua:477`, `:1156` attack targets), `FindPrioritizedUnit` 5. `engine/api/platoon.rs:336-418`. `probe_ai_find`. [ai D50](ai.md#d50), [ai D51](ai.md#d51), [ai D52](ai.md#d52)
 - [x] **Threat type `Artillery` is 0 for mobile artillery and the Fatboy** (fixed `6cacbd8`) (C). Ours counted category `ARTILLERY` (1.20 and 993.36). Which units moho does count is not known; no `GetThreat*(..., 'Artillery')` call site in FAF or RNGAI. `engine/api/unit.rs:320`, `engine/sim/threat.rs:134`. `probe_ai_find`. [ai D54](ai.md#d54)
-- [ ] **`UseFerryBeacon`: the real pick-up waits about 90 ticks longer** (open: where the wait comes from is not traced, needs a new probe) (B, medium; one call site, `ScenarioPlatoonAI.lua:990`). Real: the tanks walk to the beacon and board at +140, drop at +250; ours boards at +50 and drops at +130, `IsMoving('Attack')` is false while they walk, and `tr2`'s queue is 3 after two `IssueFerry` calls (real 2). `engine/api/ferry.rs`, `engine/api/command.rs:971`. `probe_ai_transport`. [ai D56](ai.md#d56)
+- [ ] **`UseFerryBeacon`: the real pick-up waits about 90 ticks longer** (open: kept ours on purpose for now, decision 10; where the wait comes from is not traced) (B, medium; one call site, `ScenarioPlatoonAI.lua:990`). Real: the tanks walk to the beacon and board at +140, drop at +250; ours boards at +50 and drops at +130, `IsMoving('Attack')` is false while they walk, and `tr2`'s queue is 3 after two `IssueFerry` calls (real 2). `engine/api/ferry.rs`, `engine/api/command.rs:971`. `probe_ai_transport`. [ai D56](ai.md#d56)
 - [ ] **`IsFerrying()` with no squad raises; `GetFerryBeacons()` returns `{}`; `AssignUnitsToPlatoon` returns `"None"`** (open: no AI call site observes these) (C). Ours: `IsFerrying()` false, `GetFerryBeacons` not implemented, returns nothing (D20). `engine/api/command.rs:953-966`, `pending.rs:62`. `probe_ai_transport`. [ai D57](ai.md#d57)
 - [ ] **Error texts for bad arguments are moho's** (open: text only, both raise) (usage strings, `Invalid enum value`); ours mlua conversion messages (C, text only). `engine/api/threat.rs`, `army.rs`. `probe_ai_misc`. [ai D49](ai.md#d49)
 
