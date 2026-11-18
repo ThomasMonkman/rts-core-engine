@@ -180,6 +180,11 @@ copy would show as a desync at the first checksum.
   other one by more than half a tick shortens its tick period (up to 2x) until
   level (a late loader otherwise stays behind and everyone waits for it every
   tick). Real-time pacing only; never sim state.
+- **The schedule.** Ticks are paced to an absolute timeline
+  (`snapshot::Pacer`): a tick that runs late is made up by the next ones, up
+  to a quarter of a second of debt, so the speed holds on average. Time a
+  tick spent waiting for players' turns is not owed, so a wait never causes
+  a burst; catching up with the others is the catch-up above.
 - **Desync detection.** Every turn carries the sender's checksum of the
   previous tick (any held back while the input delay falls go in the next
   one), so a mismatch names the first tick that differs; the last 128 are

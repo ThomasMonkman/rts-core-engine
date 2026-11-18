@@ -308,13 +308,13 @@ impl Engine {
             Some((a, b)) => Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?, true)),
             None => v.parse::<u64>().ok().map(|t| (t, t, false)),
         }).zip(std::env::var("RTS_DUMP_FILE").ok());
-        let mut next = std::time::Instant::now();
+        let mut pacer = snapshot::Pacer::new(std::time::Instant::now());
         // Paced (a window's `--ticks`, headless network tests): speed
         // changes apply as in a real-time game. A window's run shares its
         // control, so the player's speed changes reach it and the
         // interface hears the speed it really runs at.
         let pace = self.pace.map(|p| self.control.clone().unwrap_or_else(|| snapshot::SimControl::new(p)));
-        let mut meter = snapshot::RateMeter::new(next);
+        let mut meter = snapshot::RateMeter::new(std::time::Instant::now());
         // Dev: `RTS_NET_SPEED_AT=tick:step` asks for game speed `step` at
         // `tick`, as a player pressing `+` / `-` would.
         let speed_at = std::env::var("RTS_NET_SPEED_AT").ok().and_then(|v| {
@@ -345,13 +345,10 @@ impl Engine {
                     control.set_effective(actual);
                 }
             }
-            if let Some(speed) = speed.filter(|&s| s != snapshot::SimControl::MAX) {
-                let factor = self.net_catch_up(speed);
-                next += std::time::Duration::from_micros(((100_000 * 100 / speed.max(1) as u64) as f64 * factor) as u64);
-                match next.checked_duration_since(std::time::Instant::now()) {
-                    Some(wait) => std::thread::sleep(wait),
-                    None => next = std::time::Instant::now(),
-                }
+            match speed {
+                Some(snapshot::SimControl::MAX) => pacer.restart(std::time::Instant::now()),
+                Some(speed) => self.pace_tick(&mut pacer, speed),
+                None => {}
             }
             if gc_every_tick {
                 sim::gc::collect(&self.sim_lua)?;
@@ -423,10 +420,10 @@ impl Engine {
     /// time only paces the loop; it never reaches sim state.
     pub fn run_realtime(&mut self) -> LuaResult<()> {
         let control = self.control.clone().unwrap_or_else(|| snapshot::SimControl::new(100));
-        let mut next = std::time::Instant::now();
+        let mut pacer = snapshot::Pacer::new(std::time::Instant::now());
         // What the game really runs at when the machine can't keep up with
         // the speed asked for (or runs flat out, "max").
-        let mut meter = snapshot::RateMeter::new(next);
+        let mut meter = snapshot::RateMeter::new(std::time::Instant::now());
         // Ticks that took longer than their real-time slot (waiting for
         // players excluded: the lockstep logs that), for the log.
         let mut slow_ticks = crate::diagnostics::Hitches::new("sim tick");
@@ -463,8 +460,9 @@ impl Engine {
                     snapshot::republish(&self.sim_lua);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
-                next = std::time::Instant::now();
-                meter.restart(next);
+                let now = std::time::Instant::now();
+                pacer.restart(now);
+                meter.restart(now);
                 continue;
             }
             let step_started = std::time::Instant::now();
@@ -483,17 +481,25 @@ impl Engine {
                 control.set_effective(actual);
             }
             if speed == snapshot::SimControl::MAX {
-                next = std::time::Instant::now();
+                pacer.restart(std::time::Instant::now());
                 continue;
             }
-            // 100 ms per tick at 1x.
-            let factor = self.net_catch_up(speed);
-            next += std::time::Duration::from_micros(((100_000 * 100 / speed.max(1) as u64) as f64 * factor) as u64);
-            match next.checked_duration_since(std::time::Instant::now()) {
-                Some(wait) => std::thread::sleep(wait),
-                // Running behind: don't try to catch up in a burst.
-                None => next = std::time::Instant::now(),
-            }
+            self.pace_tick(&mut pacer, speed);
+        }
+    }
+
+    /// Waits for the next tick's slot at `speed` (percent; 100 ms per tick
+    /// at 1x), on the pacer's absolute schedule: a late tick is made up by
+    /// the next ones (a bounded debt), so the speed holds on average. In a
+    /// networked game the slot is shorter while catching up with the other
+    /// players, and time spent waiting for their turns isn't owed.
+    fn pace_tick(&self, pacer: &mut snapshot::Pacer, speed: u32) {
+        let factor = self.net_catch_up(speed);
+        let period = std::time::Duration::from_micros(((100_000 * 100 / speed.max(1) as u64) as f64 * factor) as u64);
+        let waited = self.sim_lua.app_data_ref::<crate::net::lockstep::Lockstep>().map_or(0.0, |l| l.last_wait_ms());
+        let excused = std::time::Duration::from_secs_f64(waited.max(0.0) / 1000.0);
+        if let Some(deadline) = pacer.after_tick(std::time::Instant::now(), period, excused) {
+            snapshot::Pacer::wait_until(deadline);
         }
     }
 
