@@ -2449,6 +2449,102 @@ fn lua_api(c: &mut Criterion) {
     g.finish();
 }
 
+/// The small engine calls AI Lua makes most (the late-game profile's top
+/// accessors), each called 1000 times from Luau on 1000 units in 8 armies
+/// (4v4), so a sample's time / 1000 is the cost of one call.
+fn hot_accessors(c: &mut Criterion) {
+    use rts_core_engine::engine::api::army::ArmyHandle;
+    use rts_core_engine::engine::api::blueprints::BlueprintKind;
+    use rts_core_engine::engine::api::entity::EntityHandle;
+    use rts_core_engine::engine::lua::script_cache::ScriptCache;
+    use rts_core_engine::engine::sim::army::{Alliance, Armies, Army};
+    use rts_core_engine::engine::sim::entity::{EntityKind, EntityWorld};
+    use rts_core_engine::engine::sim::math::{FxQuat, FxVec3};
+    use rts_core_engine::engine::sim::threat::{unit_threat, Knowledge, ThreatKinds, ThreatMap};
+    use rts_core_engine::engine::vfs::Vfs;
+    use std::sync::{Arc, RwLock};
+
+    let vfs = Arc::new(RwLock::new(Vfs::new(Vec::new(), Vec::new()).unwrap()));
+    let lua = Lua::new();
+    lua.set_app_data(vfs.clone());
+    lua.set_app_data(Arc::new(ScriptCache::new(vfs)));
+    api::register_safe(&lua).unwrap();
+    let mut world = EntityWorld::default();
+    let ids: Vec<_> = (0..1000u32)
+        .map(|i| world.spawn(EntityKind::Unit, BlueprintKind::Unit, String::new(), Some(1 + i % 8), FxVec3::from_f64((i % 40) as f64 * 25.0, 0.0, (i / 40) as f64 * 40.0), FxQuat::IDENTITY))
+        .collect();
+    for &id in &ids {
+        world.get_mut(id).unwrap().unit.as_mut().unwrap().threat = unit_threat(Fx::from_num(1), Fx::from_num(3), Fx::ZERO, Fx::ZERO, ThreatKinds { land: true, ..Default::default() });
+    }
+    let mut armies = Armies::default();
+    for i in 1..=8u32 {
+        armies.list.push(Army { index: i, name: format!("ARMY_{i}"), ..Default::default() });
+    }
+    for a in 1..=8u32 {
+        for b in 1..=8u32 {
+            if a != b {
+                armies.set_alliance_one_way(a, b, if (a % 2) == (b % 2) { Alliance::Ally } else { Alliance::Enemy });
+            }
+        }
+    }
+    let mut map = ThreatMap::new(1024, 1024);
+    let brains: Vec<u32> = (1..=8).collect();
+    map.update(&world, 0, &brains, &|_, _| Knowledge::Detected);
+    lua.set_app_data(world);
+    lua.set_app_data(armies);
+    lua.set_app_data(map);
+    let make: LuaFunction = lua
+        .load(
+            "local cls = moho.unit_methods
+             for k, v in pairs(moho.entity_methods) do if type(k) == 'string' and cls[k] == nil then cls[k] = v end end
+             local mt = { __index = cls }
+             return function(h) return setmetatable({ _c_object = h }, mt) end",
+        )
+        .eval()
+        .unwrap();
+    let units = lua.create_table().unwrap();
+    for (i, &id) in ids.iter().enumerate() {
+        units.raw_set(i + 1, make.call::<LuaTable>(EntityHandle(id)).unwrap()).unwrap();
+    }
+    let brain: LuaTable = lua
+        .load("local h = ... return setmetatable({ _c_object = h }, { __index = moho.aibrain_methods })")
+        .call(ArmyHandle(1))
+        .unwrap();
+    let mut g = c.benchmark_group("hot_accessors x1000");
+    let cases: &[(&str, &str)] = &[
+        ("empty loop", "local x = u"),
+        ("GetPosition", "u:GetPosition()"),
+        ("GetPositionXYZ", "u:GetPositionXYZ()"),
+        ("IsDestroyed", "IsDestroyed(u)"),
+        ("BeenDestroyed", "u:BeenDestroyed()"),
+        ("GetArmy", "u:GetArmy()"),
+        ("GetEntityId", "u:GetEntityId()"),
+        ("IsUnitState", "u:IsUnitState('Building')"),
+        ("GetFractionComplete", "u:GetFractionComplete()"),
+        ("GetHealth", "u:GetHealth()"),
+        ("GetThreatAtPosition ring 0", "brain:GetThreatAtPosition(p, 0, true, 'AntiSurface')"),
+        ("GetThreatAtPosition ring 1", "brain:GetThreatAtPosition(p, 1, true, 'AntiSurface')"),
+        ("GetThreatAtPosition ring 1 overall army 2", "brain:GetThreatAtPosition(p, 1, true, 'Overall', 2)"),
+    ];
+    for (name, body) in cases {
+        let f: LuaFunction = lua
+            .load(format!(
+                "local units, brain = ...
+                 return function()
+                     for i = 1, 1000 do
+                         local u = units[i]
+                         local p = {{ (i % 40) * 25, 0, (i % 25) * 40 }}
+                         {body}
+                     end
+                 end"
+            ))
+            .call((units.clone(), brain.clone()))
+            .unwrap();
+        g.bench_function(*name, |b| b.iter(|| f.call::<()>(()).unwrap()));
+    }
+    g.finish();
+}
+
 /// The interface's per-frame work with FAF's Unit Manager open in the
 /// skirmish lobby (~3400 drawn controls, ~6000 live): the draw list
 /// (`UserVm::draw_list`, every rendered frame) and a mouse move's hit test.
@@ -2574,5 +2670,5 @@ fn audio(c: &mut Criterion) {
     eprintln!("audio bench: {} cues active", e.active());
 }
 
-criterion_group!(benches, scripts, blueprints, mods, categories, rng, bounded_props, terrain, trig, scheduler, sim_tick, entities, spatial, economy, checksum, unit_stats, projectiles, projectile_collision, projectile_refusals, weapons, threat, movement, avoidance, effects, attachments, intel, nav, snapshot, poses, models, map_render, manipulators, transport, construction, placement, lua_call_overhead, lua_table_shims, objects_table, lua_api, lua_interrupt, interface, movies, audio);
+criterion_group!(benches, scripts, blueprints, mods, categories, rng, bounded_props, terrain, trig, scheduler, sim_tick, entities, spatial, economy, checksum, unit_stats, projectiles, projectile_collision, projectile_refusals, weapons, threat, movement, avoidance, effects, attachments, intel, nav, snapshot, poses, models, map_render, manipulators, transport, construction, placement, lua_call_overhead, lua_table_shims, objects_table, lua_api, hot_accessors, lua_interrupt, interface, movies, audio);
 criterion_main!(benches);
