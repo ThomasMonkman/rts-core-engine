@@ -33,21 +33,10 @@ struct Vertex {
     pos: [f32; 2],
     uv: [f32; 2],
     color: [f32; 4],
-    /// 0: a plain quad (texel x colour, both linear). Else a strategic icon
-    /// (`DrawItem::Icon`, `fs` in `ui.wesl`) at this brightness, its colour
-    /// sRGB.
+    /// 0: a plain quad (texel x colour, both linear). 1: a strategic icon
+    /// (`DrawItem::Icon`, `fs` in `ui.wesl`), its colour sRGB.
     icon: f32,
 }
-
-/// Strategic icons' brightness: every icon texel the real game shows reads
-/// 187/255 of the shader's colour (FAF probes `probe_intel_icons`,
-/// `probe_re3_intel`, zooms 80 to 700, paused): the tech pip's white as
-/// (187, 187, 187), the outline's (8, 4, 8) as (6, 3, 6), a contact's
-/// `UnidentifiedColor` 128 as 94, army 2's (144, 20, 39) as (106, 15, 29).
-/// The resource icons read the same (`resource_icons.wesl`); the interface
-/// does not (white text stays 255). Where moho dims the world layer is not
-/// found (not `primbatcher.fx`).
-pub const STRATEGIC_ICON_BRIGHTNESS: f32 = 187.0 / 255.0;
 
 /// Where an image sits in the atlas (texels) and, for glyphs, how to place it.
 #[derive(Clone, Copy, Debug)]
@@ -556,7 +545,7 @@ impl UiRenderer {
         // strategic icons): the sRGB -> linear conversion is remembered.
         let mut last_colour: Option<([f32; 4], [f32; 4])> = None;
         // `turned`: the texture a quarter anticlockwise in `r` (vertical text).
-        // `icon`: a strategic icon at that brightness (its colour stays sRGB).
+        // `icon`: 1 for a strategic icon (its colour stays sRGB).
         let mut quad = |out: &mut Vec<Vertex>, r: [f32; 4], uv: [f32; 4], c: [f32; 4], turned: bool, icon: f32| {
             let c = match last_colour {
                 _ if icon > 0.0 => c,
@@ -623,7 +612,7 @@ impl UiRenderer {
                     let (x0, y0, sw, sh) = (s.x as f32, s.y as f32, s.w as f32, s.h as f32);
                     let tuv = [(x0 + uv[0] * sw) / tw, (y0 + uv[1] * sh) / th, (x0 + uv[2] * sw) / tw, (y0 + uv[3] * sh) / th];
                     batch(&mut self.batches, s.own.map_or(Tex::Atlas, Tex::Own), out.len());
-                    quad(out, *rect, tuv, *color, false, STRATEGIC_ICON_BRIGHTNESS);
+                    quad(out, *rect, tuv, *color, false, 1.0);
                 }
                 DrawItem::Text { rect, text, family, size, color, shadow, vertical } => {
                     let file = fonts::file_for(family);

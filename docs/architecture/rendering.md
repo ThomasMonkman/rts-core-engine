@@ -445,8 +445,8 @@ over the sim's intel grids) to what that army's side knows:
   `icon_*_generic` textures): a diamond for every land unit (commanders and
   experimentals too), a square for structures, a half-dome for ships and
   subs; aircraft keep their own generic air shape (a flying aircraft's
-  real contact is unconfirmed). Tinted to the measured (94, 94, 94) grey
-  (`overlays::CONTACT`; FAF probe `probe_intel_icons`); minimap dots grey;
+  real contact is unconfirmed). Filled with `UnidentifiedColor`'s (128, 128, 128) grey
+  (`overlays::UNIDENTIFIED`; FAF probes `probe_intel_icons`, `probe_re6_icons`); minimap dots grey;
 - enemy units seen before and on radar / sonar now, out of sight
   (`Sighting::Identified`): their full strategic icon in their army's
   colour at any zoom, no mesh (a structure keeps its remembered mesh, its

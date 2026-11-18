@@ -522,8 +522,8 @@ fn icon_half_size((w, h): (u32, u32), icon_scale: f32, display: f32) -> (f32, f3
 
 /// Radar and sonar contacts' colour: FAF's `UnidentifiedColor` ("FF808080",
 /// `/lua/GameColors.lua`; moho reads it through `GetUnidentifiedColor`,
-/// MohoEngine.dll 0x100f2980). On screen their fill reads (94, 94, 94): this
-/// at the icons' brightness (`ui::STRATEGIC_ICON_BRIGHTNESS`).
+/// MohoEngine.dll 0x100f2980). On screen their fill reads (128, 128, 128)
+/// running; (94, 94, 94) under FAF's pause overlay.
 pub const UNIDENTIFIED: [f32; 3] = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0];
 
 /// The land contact's shape (also when a contact's unit has no icon).
