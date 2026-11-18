@@ -1753,6 +1753,9 @@ fn combo_drop_downs_open_pick_and_close() {
     let Some(vm) = vm() else { return };
     vm.set_screen(1280.0, 720.0).unwrap();
     vm.start_hud().expect("game interface"); // (the skin's colours)
+    // FAF's first frame (`OnFirstUpdate`) lifts the input lock the HUD
+    // starts with (`worldview.LockInput`, an input capture).
+    vm.frame(0.1).unwrap();
     vm.lua()
         .load(
             r#"
@@ -1992,6 +1995,75 @@ fn front_end_escape_and_the_lobby_changelog() {
 }
 
 /// `GetArmyAvatars`: the focus army's units whose blueprint has
+/// The main menu's Change Profile, then Create: the name dialog
+/// (`profile.lua` `CreationDialog`, depth `GetFrame(0).Depth() + 10`) is
+/// under the menu's full-screen `topLevelGroup` (depth 100), but it is the
+/// input capture (`MakeInputModal`), so its OK button takes the click and
+/// the profile is made. Returns the profiles' names afterwards.
+fn create_profile_from_the_main_menu(vm: &UserVm) -> Vec<String> {
+    use rts_core_engine::ui::controls::{Modifiers, MouseEvent};
+    vm.set_screen(1024.0, 768.0).unwrap();
+    vm.start_front_end().expect("main menu");
+    let run = |seconds: f32| {
+        for _ in 0..(seconds * 60.0) as u32 {
+            vm.frame(1.0 / 60.0).unwrap();
+        }
+    };
+    // The centre of the topmost text reading `label`.
+    let text_at = |label: &str| -> (f32, f32) {
+        let items = vm.draw_list().unwrap();
+        items
+            .iter()
+            .rev()
+            .find_map(|i| match i {
+                DrawItem::Text { rect, text, .. } if text == label => Some(((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no '{label}' drawn"))
+    };
+    let click = |(x, y): (f32, f32)| {
+        vm.mouse(MouseEvent::Move, x, y, Modifiers::default()).unwrap();
+        vm.mouse(MouseEvent::Press(1), x, y, Modifiers { left: true, ..Default::default() }).unwrap();
+        vm.mouse(MouseEvent::Release(1), x, y, Modifiers::default()).unwrap();
+    };
+    run(7.0);
+    click(text_at("Change Profile"));
+    run(3.0);
+    click(text_at("Create"));
+    run(1.0);
+    assert!(vm.text("Tester").unwrap(), "the name box has the focus");
+    click(text_at("OK"));
+    run(1.0);
+    vm.lua()
+        .load("local names = {} for _, p in GetPreference('profile.profiles') or {} do table.insert(names, p.Name) end table.sort(names) return names")
+        .eval()
+        .unwrap()
+}
+
+#[test]
+fn faf_profile_created_from_the_main_menu() {
+    let Some(vm) = vm() else { return };
+    assert!(create_profile_from_the_main_menu(&vm).contains(&"Tester".to_string()));
+}
+
+/// LOUD (Git-LOUD checked out in the game folder, docs/guides/running.md):
+/// the same, with LOUD's main menu and profile dialog. Skipped without it.
+#[test]
+fn loud_profile_created_from_the_main_menu() {
+    const LOUD_INIT: &str = "../Supreme Commander Forged Alliance/Git-LOUD/bin/SupComDataPath.lua";
+    if !std::path::Path::new(LOUD_INIT).is_file() {
+        eprintln!("skipping: no LOUD at {LOUD_INIT}");
+        return;
+    }
+    if !rts_core_engine::test_data::require_game("LOUD UI test") {
+        return;
+    }
+    let engine = engine::Engine::new(LOUD_INIT, FA_PATH, Arc::new(Mutex::new(DebugUiState::new()))).expect("engine");
+    let vm = UserVm::with_cache(engine.vfs.clone(), engine.script_cache.clone()).expect("user vm");
+    vm.init().expect("userInit.lua");
+    assert!(create_profile_from_the_main_menu(&vm).contains(&"Tester".to_string()));
+}
+
 /// `General.QuickSelectPriority` (FAF's ACUs), which FAF's first update
 /// zooms to and its avatar panel shows; nil without any.
 #[test]

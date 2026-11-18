@@ -62,7 +62,10 @@ Height Depth`), then `OnInit`.
 ## Input
 
 **Mouse** (`ui::controls::mouse`). The topmost hit-testable control under the cursor gets
-`HandleEvent`, bubbling to its parents until one returns true. Over a world view (or no control) the
+`HandleEvent`, bubbling to its parents until one returns true. While there is an input capture
+(`AddInputCapture`, FAF's `MakeInputModal`), only the capture and its children are searched and
+the capture gets the event when none of them is under the cursor, as in moho: a modal dialog takes
+its clicks even under a deeper control, and the world gets none. Over a world view (or no control) the
 input belongs to the world and goes on to the renderer's selection and orders (`render/player.rs`);
 over any other control the world never sees it. Every press first goes to FAF's
 `uimain.OnMouseButtonPress` (popups close on a click outside them).

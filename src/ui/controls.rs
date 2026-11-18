@@ -2287,11 +2287,30 @@ enum Hit {
     Locked,
 }
 
-/// The topmost visible, hit-testable control under (x, y).
+/// The newest live input capture (`AddInputCapture`: FAF's and LOUD's
+/// modal dialogs, `UIUtil.MakeInputModal`).
+fn input_capture(lua: &Lua) -> LuaResult<Option<ControlId>> {
+    let capture = lua.globals().get::<LuaFunction>("GetInputCapture")?.call::<Option<LuaTable>>(())?;
+    Ok(capture.and_then(|c| id_of(&c).ok()).filter(|id| controls(lua).map.contains_key(id)))
+}
+
+/// The topmost visible, hit-testable control under (x, y). With an input
+/// capture, only the capture and what's under it are searched, and the
+/// capture itself takes the event when none of them is under the mouse,
+/// as moho's mouse dispatch does (MohoEngine.dll 0x1036db00:
+/// `GetTopmostControl` from the capture stack's top, else the root frame;
+/// nothing found goes to the capture, else the frame). So a modal dialog
+/// takes its clicks even when a deeper control covers it: LOUD's and FAF's
+/// profile name dialog (depth `GetFrame(0).Depth() + 10`) under the main
+/// menu's full-screen `topLevelGroup` (depth 100).
 fn hit(lua: &Lua, x: f32, y: f32) -> LuaResult<Option<Hit>> {
-    let roots: Vec<ControlId> = {
-        let c = controls(lua);
-        c.frames.get(&c.mouse_head).copied().into_iter().collect()
+    let capture = input_capture(lua)?;
+    let roots: Vec<ControlId> = match capture {
+        Some(id) => vec![id],
+        None => {
+            let c = controls(lua);
+            c.frames.get(&c.mouse_head).copied().into_iter().collect()
+        }
     };
     // The visible, hit-testable controls (with their tree order), under
     // one borrow; then all their layouts in one call.
@@ -2333,7 +2352,7 @@ fn hit(lua: &Lua, x: f32, y: f32) -> LuaResult<Option<Hit>> {
             best = Some((depth, order, what));
         }
     }
-    Ok(best.map(|b| b.2))
+    Ok(best.map(|b| b.2).or(capture.map(Hit::Control)))
 }
 
 fn event_table(lua: &Lua, kind: &str, x: f32, y: f32, mods: Modifiers, wheel: f32, key: i64) -> LuaResult<LuaTable> {
@@ -2582,8 +2601,7 @@ pub fn key_down(lua: &Lua, name: &str, mods: Modifiers, repeat: bool) -> LuaResu
     }
     // An input capture (FAF's modal dialogs: `MakeInputModal`) takes every
     // key: its Esc / Enter answer the dialog, and nothing else hears them.
-    let capture = lua.globals().get::<LuaFunction>("GetInputCapture")?.call::<Option<LuaTable>>(())?;
-    if let Some(id) = capture.and_then(|c| id_of(&c).ok()).filter(|id| controls(lua).map.contains_key(id)) {
+    if let Some(id) = input_capture(lua)? {
         let e = key_event(lua, name, mods)?;
         bubble(lua, Some(id), &e)?;
         return Ok(Some(true));
