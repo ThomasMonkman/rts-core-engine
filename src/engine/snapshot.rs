@@ -588,6 +588,68 @@ impl RateMeter {
     }
 }
 
+/// The real-time loop's schedule: every tick has a slot on an absolute
+/// timeline, one period after the last one's. A tick that ends late (a slow
+/// tick, a sleep that overshot, a coarse OS timer) is owed: the next ones
+/// start without waiting until the schedule is met again, so the speed asked
+/// for is held on average. The debt is capped at [`Self::MAX_DEBT`], so a
+/// long stall (a hitch, a debugger) is forgiven rather than caught up in a
+/// burst. Wall-clock time only: it never reaches sim state.
+#[derive(Debug)]
+pub struct Pacer {
+    /// When the next tick's slot starts.
+    next: std::time::Instant,
+}
+
+impl Pacer {
+    /// The most the schedule carries when behind: a quarter of a second
+    /// (25 ticks at 10x, 2.5 at normal speed).
+    pub const MAX_DEBT: std::time::Duration = std::time::Duration::from_millis(250);
+
+    pub fn new(now: std::time::Instant) -> Self {
+        Self { next: now }
+    }
+
+    /// Paused, held or flat out: the schedule starts again from `now` (no
+    /// debt).
+    pub fn restart(&mut self, now: std::time::Instant) {
+        self.next = now;
+    }
+
+    /// A tick ended at `now`; the next one's slot is `period` after this
+    /// one's. Returns when to start it, or `None` to start it now (behind:
+    /// the debt, less `excused`, carries up to [`Self::MAX_DEBT`]).
+    /// `excused` is time the tick spent not on its own work (a networked
+    /// game's wait for players' turns): it isn't owed, as the lockstep paces
+    /// against the other players itself.
+    pub fn after_tick(&mut self, now: std::time::Instant, period: std::time::Duration, excused: std::time::Duration) -> Option<std::time::Instant> {
+        self.next += period;
+        let late = now.saturating_duration_since(self.next);
+        if late.is_zero() {
+            return Some(self.next);
+        }
+        let owed = late.saturating_sub(excused).min(Self::MAX_DEBT);
+        self.next = now.checked_sub(owed).unwrap_or(now);
+        None
+    }
+
+    /// Waits until `deadline`: sleeps most of the way, then yields for the
+    /// last [`Self::SPIN`], so the OS timer's overshoot (about a millisecond
+    /// on Windows' high-resolution timer) doesn't land on every tick.
+    pub fn wait_until(deadline: std::time::Instant) {
+        loop {
+            let Some(left) = deadline.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero()) else { return };
+            match left.checked_sub(Self::SPIN) {
+                Some(sleep) if !sleep.is_zero() => std::thread::sleep(sleep),
+                _ => std::thread::yield_now(),
+            }
+        }
+    }
+
+    /// The tail of a wait spent yielding rather than asleep.
+    const SPIN: std::time::Duration = std::time::Duration::from_micros(if cfg!(windows) { 1000 } else { 200 });
+}
+
 /// What the renderer wants beyond the basics (written by the renderer,
 /// read at publish time; it only shapes the snapshot, never the sim).
 #[derive(Clone, Debug, Default)]
@@ -2973,6 +3035,72 @@ mod speed_tests {
         let c = SimControl::new(100);
         c.set_effective(m.actual(SimControl::MAX).unwrap());
         assert_ne!(SimControl::step_of(c.effective()), SimControl::MAX_STEP);
+    }
+
+    /// Runs `ticks` ticks through a pacer on a simulated clock: tick `i`
+    /// costs `cost(i)`, and every sleep ends on the timer's next `granule`
+    /// plus `overshoot` (as an OS timer does). Returns the wall time taken.
+    fn paced(ticks: u32, period_us: u64, cost: impl Fn(u32) -> u64, granule_us: u64, overshoot_us: u64) -> std::time::Duration {
+        use super::Pacer;
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut t = 0u64;
+        let mut p = Pacer::new(t0);
+        for i in 0..ticks {
+            t += cost(i);
+            if let Some(d) = p.after_tick(t0 + Duration::from_micros(t), Duration::from_micros(period_us), Duration::ZERO) {
+                let wake = d.duration_since(t0).as_micros() as u64;
+                t = wake.div_ceil(granule_us) * granule_us + overshoot_us;
+            }
+        }
+        Duration::from_micros(t)
+    }
+
+    /// The speed asked for is held whenever the machine can: ticks that run
+    /// late, sleeps that overshoot and coarse timers are made up, within 1%.
+    #[test]
+    fn pacer_holds_the_asked_rate() {
+        let period = 10_000; // 10x: 100 ticks a second
+        let target = std::time::Duration::from_micros(period * 1000);
+        let close = |d: std::time::Duration| (d.as_secs_f64() / target.as_secs_f64() - 1.0).abs() < 0.01;
+        // Light ticks, a fine timer that overshoots 80 us.
+        assert!(close(paced(1000, period, |_| 1_000, 1, 80)));
+        // An AI game: 4 ms ticks, every 7th taking 25 ms (well within what
+        // the machine can do on average), a 1.5 ms overshoot.
+        let spiky = |i: u32| if i % 7 == 0 { 25_000 } else { 4_000 };
+        assert!(close(paced(1000, period, spiky, 1, 1_500)), "{:?}", paced(1000, period, spiky, 1, 1_500));
+        // Windows' default 15.6 ms timer: every sleep overshoots past the
+        // next slot, which then starts at once.
+        assert!(close(paced(1000, period, |_| 2_000, 15_625, 0)), "{:?}", paced(1000, period, |_| 2_000, 15_625, 0));
+        // Normal speed, too.
+        assert!(close(paced(100, 100_000, spiky, 1, 1_500)));
+    }
+
+    /// A long stall is forgiven beyond a quarter of a second: no burst of
+    /// hundreds of ticks after it.
+    #[test]
+    fn pacer_caps_the_debt() {
+        use super::Pacer;
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let period = Duration::from_millis(10);
+        let mut p = Pacer::new(t0);
+        // A 5 s stall on the first tick.
+        let mut now = t0 + Duration::from_secs(5);
+        assert_eq!(p.after_tick(now, period, Duration::ZERO), None);
+        // 1 ms ticks: they run back to back until the 250 ms debt is paid
+        // (about 250 / 9 ticks), then wait again.
+        let mut burst = 0;
+        while p.after_tick(now + Duration::from_millis(1), period, Duration::ZERO).is_none() {
+            now += Duration::from_millis(1);
+            burst += 1;
+            assert!(burst < 40, "caught up in a burst");
+        }
+        assert!((25..=29).contains(&burst), "{burst}");
+        // Time excused (waiting for players) isn't owed.
+        let mut p = Pacer::new(t0);
+        assert_eq!(p.after_tick(t0 + Duration::from_millis(50), period, Duration::from_millis(40)), None);
+        assert_eq!(p.after_tick(t0 + Duration::from_millis(51), period, Duration::ZERO), Some(t0 + Duration::from_millis(60)));
     }
 }
 
