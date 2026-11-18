@@ -2029,6 +2029,8 @@ fn create_profile_from_the_main_menu(vm: &UserVm) -> Vec<String> {
     run(7.0);
     click(text_at("Change Profile"));
     run(3.0);
+    let modal: bool = vm.lua().load("return GetInputCapture() ~= nil").eval().unwrap();
+    assert!(modal, "the Profile Manager is modal (its UpdateProfileList read the profile list)");
     click(text_at("Create"));
     run(1.0);
     assert!(vm.text("Tester").unwrap(), "the name box has the focus");
@@ -2043,7 +2045,7 @@ fn create_profile_from_the_main_menu(vm: &UserVm) -> Vec<String> {
 #[test]
 fn faf_profile_created_from_the_main_menu() {
     let Some(vm) = vm() else { return };
-    assert!(create_profile_from_the_main_menu(&vm).contains(&"Tester".to_string()));
+    assert_eq!(create_profile_from_the_main_menu(&vm), ["Player", "Tester"]);
 }
 
 /// LOUD (Git-LOUD checked out in the game folder, docs/guides/running.md):
@@ -2061,7 +2063,28 @@ fn loud_profile_created_from_the_main_menu() {
     let engine = engine::Engine::new(LOUD_INIT, FA_PATH, Arc::new(Mutex::new(DebugUiState::new()))).expect("engine");
     let vm = UserVm::with_cache(engine.vfs.clone(), engine.script_cache.clone()).expect("user vm");
     vm.init().expect("userInit.lua");
-    assert!(create_profile_from_the_main_menu(&vm).contains(&"Tester".to_string()));
+    assert_eq!(create_profile_from_the_main_menu(&vm), ["Player", "Tester"]);
+}
+
+/// A fresh profile is moho's shape: a list, `current` its index. Prefs
+/// this engine wrote before keyed profiles by name (`current = 'player'`):
+/// they load as a list, `current` the index of the one it named.
+#[test]
+fn profiles_are_a_list_and_old_named_ones_migrate() {
+    let Some(vm) = vm() else { return };
+    let fresh: (i64, String) = vm.lua().load("return GetPreference('profile.current'), GetPreference('profile.profiles')[1].Name").eval().unwrap();
+    assert_eq!(fresh, (1, "Player".to_string()));
+    let path = std::env::temp_dir().join(format!("rts-core-engine-old-profile-{}.prefs", std::process::id()));
+    std::fs::write(&path, "profile = {\n\tcurrent = \"player\",\n\tprofiles = {\n\t\t[1] = { Name = \"Tester\" },\n\t\tplayer = { Name = \"Player\", UserKeyMap = { K = \"stop\" } },\n\t},\n}\n").unwrap();
+    vm.load_prefs(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    let read: (i64, i64, String, String, String, Option<String>) = vm
+        .lua()
+        .load("local p = GetPreference('profile') local Prefs = import('/lua/user/prefs.lua') return p.current, table.getn(p.profiles), p.profiles[1].Name, p.profiles[2].Name, Prefs.GetCurrentProfile().Name, GetPreference('profile.profiles.' .. p.current .. '.UserKeyMap').K")
+        .eval()
+        .unwrap();
+    assert_eq!(read, (2, 2, "Tester".to_string(), "Player".to_string(), "Player".to_string(), Some("stop".to_string())));
+    assert_eq!(vm.profile_name().unwrap().as_deref(), Some("Player"));
 }
 
 /// `General.QuickSelectPriority` (FAF's ACUs), which FAF's first update
@@ -3325,7 +3348,7 @@ fn key_bindings_dialog_rebind_applies_and_persists() {
     assert!(stops(&vm, "H"), "H stops");
     assert!(!stops(&vm, "S"), "S no longer does");
     // Its Shift version follows (FAF's dialog moves `shift_stop` too).
-    let map: (String, Option<String>, Option<String>) = vm.lua().load("local m = GetPreference('profile.profiles.player.UserKeyMap') return m.H, m.S, m['Shift-H']").eval().unwrap();
+    let map: (String, Option<String>, Option<String>) = vm.lua().load("local m = GetPreference('profile.profiles.1.UserKeyMap') return m.H, m.S, m['Shift-H']").eval().unwrap();
     assert_eq!(map, ("stop".to_string(), None, Some("shift_stop".to_string())));
     // Written as Game.prefs and read by the next game.
     let path = std::env::temp_dir().join(format!("rts-core-engine-keybind-{}.prefs", std::process::id()));
