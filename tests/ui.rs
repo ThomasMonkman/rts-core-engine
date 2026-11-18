@@ -135,6 +135,7 @@ fn maui_layout_comes_out_in_the_draw_list() {
 #[test]
 fn resource_sharing_is_the_focus_armys() {
     let Some(vm) = vm() else { return };
+    vm.set_armies(&two_armies(false)).unwrap();
     let econ = |army, resource_sharing| rts_core_engine::engine::snapshot::ArmyEconomy { army, mass: [0.0; 6], energy: [0.0; 6], resource_sharing };
     vm.beat(1, &[econ(1, true), econ(2, false)]).expect("beat");
     let ask = |focus: i64| -> bool {
@@ -2300,9 +2301,136 @@ fn session_end_gives_the_score_screen_its_data() {
 #[test]
 fn set_focus_army_is_zero_based() {
     let Some(vm) = vm() else { return };
+    vm.set_armies(&two_armies(false)).unwrap();
     let r: (i64, i64) = vm.lua().load("SetFocusArmy(0) local a = GetFocusArmy() SetFocusArmy(-1) return a, GetFocusArmy()").eval().expect("focus");
     assert_eq!(r, (1, -1));
     assert_eq!(vm.focus_army(), None);
+}
+
+/// Two armies, AIs (an observer's game) or army 1 a human player's.
+fn two_armies(human: bool) -> [rts_core_engine::engine::snapshot::ArmyInfo; 2] {
+    use rts_core_engine::engine::snapshot::ArmyInfo;
+    [
+        ArmyInfo { index: 1, name: "ARMY_1".into(), nickname: "North".into(), faction: 1, human, civilian: false },
+        ArmyInfo { index: 2, name: "ARMY_2".into(), nickname: "South".into(), faction: 3, human: false, civilian: false },
+    ]
+}
+
+/// FAF's game interface for a two-army game as the renderer hands it over
+/// (`render::frame`): `own` the client's army (-1 an observer), a beat of
+/// scores so the score board lays its lines out.
+fn score_board(own: i64) -> Option<UserVm> {
+    use rts_core_engine::engine::sim::army::Alliance;
+    use rts_core_engine::engine::sync::SyncValue as V;
+    let vm = vm()?;
+    vm.set_screen(1280.0, 720.0).unwrap();
+    vm.set_armies(&two_armies(own == 1)).unwrap();
+    vm.set_alliances(&[(1, 2, Alliance::Enemy), (2, 1, Alliance::Enemy)]).unwrap();
+    let s = |x: &str| V::Str(x.into());
+    vm.set_scenario(&V::Table(vec![
+        (s("name"), s("Seton's Clutch")),
+        (s("type"), s("skirmish")),
+        (s("size"), V::Table(vec![(V::Num(1.0), V::Num(1024.0)), (V::Num(2.0), V::Num(1024.0))])),
+        (s("PlayableAreaWidth"), V::Num(1024.0)),
+        (s("PlayableAreaHeight"), V::Num(1024.0)),
+        (s("Options"), V::Table(vec![(s("Share"), s("ShareUntilDeath")), (s("Victory"), s("demoralization"))])),
+    ]))
+    .unwrap();
+    vm.set_session_flags(false, own < 1).unwrap();
+    vm.set_focus_army(own).unwrap();
+    vm.start_hud().expect("game interface");
+    for _ in 0..420 {
+        vm.frame(1.0 / 60.0).unwrap();
+    }
+    let score = |name: &str| V::Table(vec![(s("name"), s(name)), (s("general"), V::Table(vec![(s("score"), V::Num(100.0))]))]);
+    let econ = |army| rts_core_engine::engine::snapshot::ArmyEconomy { army, mass: [army as f32 * 100.0, 650.0, 1.0, 0.0, 0.0, 0.0], energy: [0.0; 6], resource_sharing: true };
+    let beat = |tick: u64| {
+        vm.sync(&V::Table(vec![(s("Score"), V::Table(vec![(V::Num(1.0), score("North")), (V::Num(2.0), score("South"))]))])).expect("OnSync");
+        vm.beat(tick, &[econ(1), econ(2)]).expect("beat");
+        vm.frame(0.1).unwrap();
+    };
+    beat(10);
+    beat(11);
+    Some(vm)
+}
+
+/// Clicks the middle of the score board's line for army `army` (0: the
+/// Observer line), as FAF's `HandleEvent` there hears it.
+fn click_score_line(vm: &UserVm, army: i64) {
+    use rts_core_engine::ui::controls::{Modifiers, MouseEvent};
+    let (x, y): (f64, f64) = vm
+        .lua()
+        .load(format!(
+            "for _, l in import('/lua/ui/game/score.lua').controls.armyLines do \
+                if l.armyID == {army} and not l:IsHidden() then return (l.Left() + l.Right()) / 2, (l.Top() + l.Bottom()) / 2 end \
+            end error('no visible score line for army {army}')"
+        ))
+        .eval()
+        .expect("score line");
+    let left = Modifiers { left: true, ..Default::default() };
+    vm.mouse(MouseEvent::Move, x as f32, y as f32, Modifiers::default()).unwrap();
+    assert!(vm.mouse(MouseEvent::Press(1), x as f32, y as f32, left).unwrap(), "the score line takes the click at ({x}, {y})");
+    vm.mouse(MouseEvent::Release(1), x as f32, y as f32, Modifiers::default()).unwrap();
+    vm.frame(1.0 / 60.0).unwrap();
+}
+
+/// An observer clicks an army's line in FAF's score board (`ConExecute
+/// 'SetFocusArmy n'`): the interface now shows that army (`GetFocusArmy`,
+/// `GetArmiesTable().focusArmy`, its economy in the top bar, and FAF's panels
+/// hear `Sync.FocusArmyChanged`); the Observer line goes back to every army.
+#[test]
+fn an_observer_switches_army_from_the_score_board() {
+    use rts_core_engine::engine::sync::SyncValue as V;
+    let Some(vm) = score_board(-1) else { return };
+    // FAF caches `GetArmiesTable` (`/lua/ui/override/ArmiesTable.lua`,
+    // refreshed every 4 s): wait that out before reading it.
+    let focus = || -> (i64, i64) {
+        for _ in 0..300 {
+            vm.frame(1.0 / 60.0).unwrap();
+        }
+        vm.lua().load("return GetFocusArmy(), GetArmiesTable().focusArmy").eval().unwrap()
+    };
+    assert_eq!(focus(), (-1, -1));
+    click_score_line(&vm, 2);
+    assert_eq!(focus(), (2, 2), "army 2's view");
+    assert_eq!(vm.focus_army(), Some(2), "the engine draws army 2's intel");
+    // The next Sync tells FAF's panels (avatars, tabs, ...).
+    vm.lua().load("rawset(_G, '__test_changed', false) local f = import('/lua/ui/game/avatars.lua').FocusArmyChanged import('/lua/ui/game/avatars.lua').FocusArmyChanged = function() rawset(_G, '__test_changed', true) f() end").exec().unwrap();
+    vm.sync(&V::Table(vec![])).unwrap();
+    let changed: (bool, i64, i64) = vm.lua().load("return rawget(_G, '__test_changed'), Sync.FocusArmyChanged.new, Sync.FocusArmyChanged.old").eval().unwrap();
+    assert_eq!(changed, (true, 2, -1));
+    vm.sync(&V::Table(vec![])).unwrap();
+    assert!(vm.lua().load("return Sync.FocusArmyChanged == nil").eval::<bool>().unwrap(), "noted once");
+    // Army 2's economy in the top bar.
+    vm.beat(12, &[
+        rts_core_engine::engine::snapshot::ArmyEconomy { army: 1, mass: [100.0, 650.0, 1.0, 0.0, 0.0, 0.0], energy: [0.0; 6], resource_sharing: true },
+        rts_core_engine::engine::snapshot::ArmyEconomy { army: 2, mass: [200.0, 650.0, 1.0, 0.0, 0.0, 0.0], energy: [0.0; 6], resource_sharing: true },
+    ]).unwrap();
+    let stored: f64 = vm.lua().load("return GetEconomyTotals().stored.MASS").eval().unwrap();
+    assert_eq!(stored, 200.0);
+    click_score_line(&vm, 0);
+    assert_eq!(focus(), (-1, -1), "the Observer line: every army again");
+    assert_eq!(vm.focus_army(), None);
+}
+
+/// A player in a live game can't take another army's view (moho's
+/// `ValidateFocusArmyRequest`): clicking a line, the console command and
+/// the user function all leave the focus on their own army.
+#[test]
+fn a_player_keeps_their_armys_view() {
+    let Some(vm) = score_board(1) else { return };
+    click_score_line(&vm, 2);
+    let focus = || -> i64 { vm.lua().load("return GetFocusArmy()").eval().unwrap() };
+    assert_eq!(focus(), 1);
+    vm.console("SetFocusArmy 1").unwrap();
+    vm.lua().load("SetFocusArmy(-1)").exec().unwrap();
+    assert_eq!(focus(), 1);
+    assert_eq!(vm.focus_army(), Some(1));
+    // Their own army is always theirs to show; cheats allow any.
+    vm.lua().load("SetFocusArmy(0)").exec().unwrap();
+    assert_eq!(focus(), 1);
+    vm.lua().load("rawget(_G, '__engine_session').Options.CheatsEnabled = 'true' SetFocusArmy(1)").exec().unwrap();
+    assert_eq!(focus(), 2, "cheats on");
 }
 
 /// A profile list as FAF writes it (`profiles` an array, `current` an

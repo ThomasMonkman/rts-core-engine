@@ -676,6 +676,72 @@ fn register_loadstring(lua: &Lua) -> LuaResult<()> {
         })
 }
 
+/// `SetFocusArmy(index)` (the user function and the console command, which
+/// FAF's score board sends): view the game as army `index` (0-based; -1 every
+/// army). As moho's `CWldSession::RequestFocusArmy` (MohoEngine.dll
+/// 0x10458d20): an index outside -1 .. armies - 1 is refused; then
+/// `ValidateFocusArmyRequest` (0x10458da0) allows it when the session is a
+/// replay (no command source), cheats are on, the army is one this client
+/// commands, the game is over, or this client commands no army still in the
+/// game (an observer, or a defeated player; moho also wants the session to
+/// allow observers, which ours always do). So a player in a live game keeps
+/// their own army's view.
+///
+/// It's the view's alone: the sim, its Lua and the command stream don't
+/// hear of it (moho tells its sim driver, whose `NoteFocusArmyChanged` only
+/// fills the local `Sync`). The next `Sync` the interface gets carries
+/// `FocusArmyChanged` (`UserVm::sync`), as moho's would, so FAF's panels
+/// refresh. True if the focus is now `index`.
+pub fn request_focus_army(lua: &Lua, index: i64) -> LuaResult<bool> {
+    let g = lua.globals();
+    let armies = g.raw_get::<Option<LuaTable>>("__engine_armies")?;
+    let count = armies.as_ref().map_or(0, |a| a.raw_len() as i64);
+    if index < -1 || index >= count {
+        tracing::warn!(target: "lua", index, count, "SetFocusArmy: no such army");
+        return Ok(false);
+    }
+    let new = if index < 0 { -1 } else { index + 1 };
+    let old = lua.named_registry_value::<Option<i64>>("user.focus_army")?.unwrap_or(-1);
+    let flag = |name: &str| -> LuaResult<bool> { Ok(g.raw_get::<Option<bool>>(name)?.unwrap_or(false)) };
+    let cheats = || -> LuaResult<bool> {
+        let Some(session) = g.raw_get::<Option<LuaTable>>("__engine_session")? else { return Ok(false) };
+        let Some(options) = session.raw_get::<Option<LuaTable>>("Options")? else { return Ok(false) };
+        Ok(match options.raw_get::<LuaValue>("CheatsEnabled")? {
+            LuaValue::Boolean(b) => b,
+            LuaValue::String(s) => s.to_str().is_ok_and(|s| s.eq_ignore_ascii_case("true")),
+            _ => false,
+        })
+    };
+    let own = lua.named_registry_value::<Option<i64>>("user.own_army")?.unwrap_or(-1);
+    let own_in_game = || -> LuaResult<bool> {
+        if own < 1 {
+            return Ok(false);
+        }
+        let army = armies.as_ref().map(|a| a.raw_get::<Option<LuaTable>>(own)).transpose()?.flatten();
+        Ok(army.is_some_and(|a| !a.raw_get::<Option<bool>>("outOfGame").ok().flatten().unwrap_or(false)))
+    };
+    let allowed = flag("__engine_replay")? || cheats()? || (new >= 1 && new == own) || flag("__engine_game_over")? || !own_in_game()?;
+    if !allowed {
+        tracing::info!(target: "lua", index, "SetFocusArmy: refused (a player in a live game keeps their army's view)");
+        return Ok(false);
+    }
+    if new != old {
+        lua.set_named_registry_value("user.focus_army", new)?;
+        // The first change since the last Sync keeps its `old`.
+        let pending = match lua.named_registry_value::<Option<LuaTable>>("user.focus_changed")? {
+            Some(t) => t,
+            None => {
+                let t = lua.create_table()?;
+                t.raw_set("old", old)?;
+                lua.set_named_registry_value("user.focus_changed", &t)?;
+                t
+            }
+        };
+        pending.raw_set("new", new)?;
+    }
+    Ok(true)
+}
+
 pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
         /// The selection's orders, toggles and buildable categories
@@ -843,8 +909,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// The army the player sees as, 1-based (`--player`, else observer: -1).
         GetFocusArmy = |lua, ()| lua.named_registry_value::<i64>("user.focus_army"))?;
     lua_fn!(lua, global,
-        /// `index` is 0-based (-1: observer); `GetFocusArmy` is 1-based.
-        SetFocusArmy = |lua, a: i64| lua.set_named_registry_value("user.focus_army", if a < 0 { -1 } else { a + 1 }))?;
+        /// `index` is 0-based (-1: observer); `GetFocusArmy` is 1-based. A
+        /// request, allowed only as moho allows it ([`request_focus_army`]).
+        SetFocusArmy = |lua, a: i64| request_focus_army(lua, a).map(|_| ()))?;
     crate::lua_api::script::exec(
         lua,
         r#"

@@ -132,6 +132,11 @@ pub fn moved_marker(marker: &crate::engine::snapshot::OrderMarker, node: [f32; 3
 pub struct PlayerControl {
     /// Army commanded; `None` = observer (any army's units).
     pub player: Option<u32>,
+    /// An observer seeing the game as one army (the score board's
+    /// `SetFocusArmy`): units are selected but take no orders, as in moho.
+    /// Back on every army's view, the observer commands any army's units
+    /// again (the engine's watching mode, docs/guides/running.md).
+    pub view_only: bool,
     /// Selected entity ids, sorted.
     pub selection: Vec<u32>,
     groups: [Vec<u32>; 10],
@@ -271,6 +276,7 @@ impl PlayerControl {
     pub fn new(player: Option<u32>, select: Vec<u32>, orders: Option<Sender<PlayerCommand>>) -> Self {
         Self {
             player,
+            view_only: false,
             selection: select,
             groups: Default::default(),
             mode: Mode::Normal,
@@ -363,7 +369,7 @@ impl PlayerControl {
 
     /// Can the player give orders to `e`?
     fn commandable(&self, e: &EntityView) -> bool {
-        matches!(e.kind, ViewKind::Unit | ViewKind::Structure) && !e.in_builder && e.army != 0 && self.player.is_none_or(|p| p == e.army)
+        !self.view_only && matches!(e.kind, ViewKind::Unit | ViewKind::Structure) && !e.in_builder && e.army != 0 && self.player.is_none_or(|p| p == e.army)
     }
 
     /// Can the player give orders to unit `id` (an ally's waypoints show,

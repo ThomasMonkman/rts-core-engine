@@ -71,7 +71,10 @@ lobby, and LAN / Direct Connect play over the network
 `--armies`, `--script`, `--player`, `--replay`, ...) and `--headless` imply `--session`. The window
 opens at 1024×768, SupCom's minimum resolution.
 
-Without `--player` you watch the AIs, but you can still select and order any army's units.
+Without `--player` you watch the AIs, but you can still select and order any army's units. As in
+the real game, clicking an army's line in the score board shows the game as that army (its fog of
+war, economy and commanders; its units can be selected but take no orders), and the Observer line
+goes back to every army. A player in a live game keeps their own army's view (cheats aside).
 
 ### Controls
 

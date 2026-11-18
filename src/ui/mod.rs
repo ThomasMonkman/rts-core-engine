@@ -1815,16 +1815,37 @@ impl UserVm {
         let g = self.lua.globals();
         let old: LuaValue = g.raw_get("Sync")?;
         g.raw_set("PreviousSync", old)?;
-        g.raw_set("Sync", value.to_lua(&self.lua)?)?;
+        let sync = value.to_lua(&self.lua)?;
+        // The interface's own focus change (`SetFocusArmy`) since the last
+        // Sync: moho's sim driver would note it in this one.
+        if let Some(changed) = self.lua.named_registry_value::<Option<LuaTable>>("user.focus_changed")? {
+            self.lua.set_named_registry_value("user.focus_changed", LuaNil)?;
+            if let LuaValue::Table(t) = &sync
+                && changed.raw_get::<i64>("new")? != changed.raw_get::<i64>("old")?
+                && t.raw_get::<LuaValue>("FocusArmyChanged")?.is_nil() {
+                t.raw_set("FocusArmyChanged", changed)?;
+            }
+        }
+        g.raw_set("Sync", sync)?;
         if let Some(f) = g.raw_get::<Option<LuaFunction>>("OnSync")? {
             f.call::<()>(())?;
         }
         Ok(())
     }
 
-    /// The army the UI shows as (`--player`; observers: -1).
+    /// The army this client commands, and so first shows as (`--player`,
+    /// or the sim moved it; observers: -1). The interface's `SetFocusArmy`
+    /// then changes only what it shows, as far as that army's player may
+    /// (`user_api::request_focus_army`).
     pub fn set_focus_army(&self, army: i64) -> LuaResult<()> {
+        self.lua.set_named_registry_value("user.own_army", army)?;
         self.lua.set_named_registry_value("user.focus_army", army)
+    }
+
+    /// `SetFocusArmy(index)` from the engine (0-based, -1 every army), as
+    /// the interface asks it: true if the focus is now `index`.
+    pub fn request_focus_army(&self, index: i64) -> LuaResult<bool> {
+        user_api::request_focus_army(&self.lua, index)
     }
 
     /// The army the UI shows as, if any (observers: `None`): moho's sound
@@ -2169,6 +2190,13 @@ pub fn console(lua: &Lua, line: &str) -> LuaResult<()> {
             data.set("name", name)?;
             cm.get::<LuaFunction>("StartCommandMode")?.call::<()>((mode, data))?;
         }
+        // FAF's score board: an army's line, or the Observer line (-1).
+        "setfocusarmy" => match rest.parse::<i64>() {
+            Ok(index) => {
+                user_api::request_focus_army(lua, index)?;
+            }
+            Err(_) => tracing::warn!(target: "lua", line, "SetFocusArmy: expected an army index"),
+        },
         // Control groups live in FAF's selection.lua.
         "ui_makeselectionset" => {
             let sel: LuaTable = import()?.call("/lua/ui/game/selection.lua")?;

@@ -1214,6 +1214,9 @@ fn update_ui(s: &mut RenderState, dt: f32) {
             tracing::warn!("UI focus army: {e}");
         }
     }
+    // An observer seeing the game as one army (the score board's
+    // `SetFocusArmy`) commands nothing.
+    s.player.view_only = s.player.player.is_none() && vm.focus_army().is_some();
     // Alliances changed in the sim (FAF's SetAlliance: teams, sharing).
     if let Some(a) = &s.world.alliances
         && !s.ui_alliances.as_ref().is_some_and(|u| std::sync::Arc::ptr_eq(u, a)) {
