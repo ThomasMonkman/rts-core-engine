@@ -20,8 +20,16 @@ $hooks = Join-Path $here 'ui_hooks'
 $faf = Get-Content (Join-Path $bin 'init.lua') -Raw
 "InitFileDir = [[$bin]]`n$faf`ntable.insert(path, 1, { dir = [[$maps]], mountpoint = '/maps' })`ntable.insert(path, 1, { dir = [[$hooks]], mountpoint = '/schook' })`n" | Set-Content -Encoding ASCII $init
 
-$game = Start-Process -PassThru (Join-Path $bin 'ForgedAlliance.exe') -WorkingDirectory $bin -ArgumentList @(
-    '/init', "`"$init`"", '/map', $probe, '/log', "`"$log`"", '/nosound', '/nomovie', '/exitongameover')
+# Optional: a probe map's `launch_args.txt` adds to the command line, e.g.
+# `/probeai adaptive /probemod <uid>` for an all-AI game running a mod (the
+# ui_hooks SinglePlayerLaunch.lua hook reads those).
+$extra = @()
+$argsFile = Join-Path (Join-Path $maps $probe) 'launch_args.txt'
+if (Test-Path $argsFile) {
+    $extra = @((Get-Content $argsFile -Raw).Trim() -split '\s+' | Where-Object { $_ })
+}
+$game = Start-Process -PassThru (Join-Path $bin 'ForgedAlliance.exe') -WorkingDirectory $bin -ArgumentList (@(
+    '/init', "`"$init`"", '/map', $probe, '/log', "`"$log`"", '/nosound', '/nomovie', '/exitongameover') + $extra)
 # A `PROBE shot <name>` log line captures the screen to out\<probe>_<name>.png
 # (visual probes: the probe holds the view a few seconds after logging it).
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
