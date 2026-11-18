@@ -726,6 +726,10 @@ pub struct Snapshot {
     /// 1 = highest), bit 7 set for `LOWSELECTPRIO` units (priority 6 while
     /// being built: FAF's exe patch), same index.
     pub blueprint_selection_priority: Option<Arc<Vec<u8>>>,
+    /// Each blueprint's `UNSELECTABLE` category, same index: such units
+    /// (FAF's Cybran build bots) aren't picked by the mouse, for a click,
+    /// a drag or the rollover.
+    pub blueprint_unselectable: Option<Arc<Vec<bool>>>,
     /// Each blueprint's `StrategicIconName` (empty: none), same index.
     pub blueprint_icons: Option<Arc<Vec<String>>>,
     /// Each blueprint's `Display.IconFadeInZoom`: the camera zoom from
@@ -1555,6 +1559,21 @@ fn blueprint_selection_priority(lua: &mlua::Lua, ids: &[String]) -> Vec<u8> {
                 .and_then(|c| c.raw_get::<Option<bool>>("LOWSELECTPRIO").ok().flatten())
                 .unwrap_or(false);
             priority | if low { 0x80 } else { 0 }
+        })
+        .collect()
+}
+
+/// Each blueprint's `UNSELECTABLE` category (see [`Snapshot::blueprint_unselectable`]).
+fn blueprint_unselectable(lua: &mlua::Lua, ids: &[String]) -> Vec<bool> {
+    use mlua::prelude::*;
+    let bps: Option<LuaTable> = lua.globals().raw_get("__blueprints").ok().flatten();
+    ids.iter()
+        .map(|id| {
+            bps.as_ref()
+                .and_then(|b| b.raw_get::<Option<LuaTable>>(id.as_str()).ok().flatten())
+                .and_then(|bp| bp.raw_get::<Option<LuaTable>>("CategoriesHash").ok().flatten())
+                .and_then(|c| c.raw_get::<Option<bool>>("UNSELECTABLE").ok().flatten())
+                .unwrap_or(false)
         })
         .collect()
 }
@@ -2580,6 +2599,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
             snap.blueprint_order_categories = Some(Arc::new(blueprint_order_categories(lua, d)));
             snap.blueprint_transport = Some(Arc::new(blueprint_transport(lua, &ids)));
             snap.blueprint_selection_priority = Some(Arc::new(blueprint_selection_priority(lua, &ids)));
+            snap.blueprint_unselectable = Some(Arc::new(blueprint_unselectable(lua, &ids)));
             snap.blueprint_icons = Some(Arc::new(blueprint_icons(lua, &ids)));
             snap.blueprint_icon_zoom = Some(Arc::new(blueprint_icon_zoom(lua, &ids)));
             snap.blueprint_icon_layer = Some(Arc::new(blueprint_icon_layer(lua, &ids)));

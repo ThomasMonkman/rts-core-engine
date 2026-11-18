@@ -236,6 +236,8 @@ pub struct World {
     /// blueprint (same index): the load cursors only where boarding works.
     pub blueprint_transport: Option<Arc<Vec<(u8, u8, u8)>>>,
     pub blueprint_selection_priority: Option<Arc<Vec<u8>>>,
+    /// Per blueprint (same index): `UNSELECTABLE`, never picked.
+    pub blueprint_unselectable: Option<Arc<Vec<bool>>>,
     pub blueprint_icons: Option<Arc<Vec<String>>>,
     pub blueprint_icon_zoom: Option<Arc<Vec<f32>>>,
     pub blueprint_icon_layer: Option<Arc<Vec<u8>>>,
@@ -321,6 +323,7 @@ impl World {
             blueprint_order_categories: None,
             blueprint_transport: None,
             blueprint_selection_priority: None,
+            blueprint_unselectable: None,
             blueprint_icons: None,
             blueprint_icon_zoom: None,
             blueprint_icon_layer: None,
@@ -680,6 +683,9 @@ impl World {
             if let Some(e) = snap.blueprint_selection_priority.take() {
                 self.blueprint_selection_priority = Some(e);
             }
+            if let Some(u) = snap.blueprint_unselectable.take() {
+                self.blueprint_unselectable = Some(u);
+            }
             if let Some(b) = snap.blueprints.take() {
                 self.blueprint_names = Some(Arc::new(b.iter().map(|s| Arc::from(s.as_str())).collect()));
                 self.blueprints = Some(b);
@@ -870,10 +876,13 @@ impl World {
     /// box the ray of the view's camera there hits (props last), in last
     /// frame's interpolated positions. Other entities (shield bubbles, the
     /// script entities FAF hangs on units for effects and beams) don't take
-    /// clicks: they'd sit in front of the unit.
+    /// clicks: they'd sit in front of the unit. Nor do `UNSELECTABLE`
+    /// units (FAF's Cybran build bots, hovering over what they build): the
+    /// interface's unit panel can't show them (no `StrategicIconName`).
     pub fn pick(&self, px: f32, py: f32) -> Option<u32> {
         // A strategic icon covers its unit: the topmost under the point.
-        if let Some(&(id, _)) = self.heads[self.active].icon_rects.iter().rev().find(|(_, r)| px >= r[0] && px < r[2] && py >= r[1] && py < r[3]) {
+        let selectable = |id: u32| self.entities().binary_search_by_key(&id, |e| e.id).is_ok_and(|i| !self.unselectable(&self.entities()[i]));
+        if let Some(&(id, _)) = self.heads[self.active].icon_rects.iter().rev().find(|&&(id, r)| px >= r[0] && px < r[2] && py >= r[1] && py < r[3] && selectable(id)) {
             return Some(id);
         }
         let (view, cam) = self.view_at(px, py)?;
@@ -886,6 +895,12 @@ impl World {
         let hit = self.pick_boxes(lx, ly, view.size(), view_proj);
         self.pick_cache.set(Some(([px, py], self.tick, view_proj, hit)));
         hit
+    }
+
+    /// Is `e` a unit of an `UNSELECTABLE` blueprint (never picked or
+    /// drag-selected)?
+    pub fn unselectable(&self, e: &EntityView) -> bool {
+        e.kind != ViewKind::Prop && self.blueprint_unselectable.as_ref().and_then(|u| u.get(e.blueprint as usize)).copied().unwrap_or(false)
     }
 
     /// Moho's click pick (`render::selection_box`): of the units whose
@@ -906,7 +921,7 @@ impl World {
         for e in self.entities() {
             // A unit being built in a factory isn't picked: the click goes
             // through to the factory around it.
-            if !matches!(e.kind, ViewKind::Unit | ViewKind::Structure | ViewKind::Prop) || e.half == [0.0; 3] || e.in_builder {
+            if !matches!(e.kind, ViewKind::Unit | ViewKind::Structure | ViewKind::Prop) || e.half == [0.0; 3] || e.in_builder || self.unselectable(e) {
                 continue;
             }
             let prop = e.kind == ViewKind::Prop;

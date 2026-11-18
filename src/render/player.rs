@@ -572,7 +572,7 @@ impl PlayerControl {
         let inside: Vec<&EntityView> = scene
             .entities()
             .iter()
-            .filter(|e| self.commandable(e))
+            .filter(|e| self.commandable(e) && !scene.unselectable(e))
             .filter(|e| {
                 let bounds = scene.mesh_bounds.get(e.mesh as usize).copied().flatten();
                 let pick = picks.and_then(|p| p.get(e.blueprint as usize).copied()).unwrap_or([0.0, 0.5, 1.0, 1.0, 1.0]);

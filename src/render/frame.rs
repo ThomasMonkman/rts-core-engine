@@ -1397,7 +1397,7 @@ fn update_ui(s: &mut RenderState, dt: f32) {
                 .collect(),
         );
         vm.set_busy(s.world.latest.as_ref().map_or(&[][..], |l| l.busy.as_slice()));
-        vm.set_unselectable(s.world.entities().iter().filter(|e| e.attached || e.in_builder).map(|e| e.id).collect());
+        vm.set_unselectable(s.world.entities().iter().filter(|e| e.attached || e.in_builder || s.world.unselectable(e)).map(|e| e.id).collect());
         if let Some(d) = &s.world.deposits {
             vm.set_deposits(d.clone());
         }

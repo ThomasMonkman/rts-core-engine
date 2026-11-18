@@ -497,6 +497,53 @@ fn click_picks_a_naval_factory_by_its_top_only() {
     assert_ne!(h.world.pick(x, y), Some(id), "its hull under the water doesn't");
 }
 
+/// `UNSELECTABLE` units aren't picked, for a click, the rollover or a
+/// drag: FAF's Cybran build bots (no `StrategicIconName`, which the unit
+/// panel reads) hovering over a build. A tank beside one still is.
+#[test]
+fn unselectable_build_bots_are_not_picked() {
+    use super::player::{Event, Mods, PlayerControl};
+    let Some(mut h) = Harness::new(None, false, None) else { return };
+    let ids: mlua::Table = h
+        .engine
+        .sim_lua()
+        .load(
+            r#"
+            local bot = CreateUnitHPR('ura0001o', 'ARMY_1', 300, GetTerrainHeight(300, 600) + 3, 600, 0, 0, 0)
+            local tank = CreateUnitHPR('uel0201', 'ARMY_1', 306, GetTerrainHeight(306, 600), 600, 0, 0, 0)
+            return { tonumber(bot:GetEntityId()), tonumber(tank:GetEntityId()) }
+            "#,
+        )
+        .eval()
+        .expect("spawn");
+    let (bot, tank): (u32, u32) = (ids.get(1).unwrap(), ids.get(2).unwrap());
+    h.ticks(3);
+    {
+        let y = h.scene.height_at(303.0, 600.0);
+        let cam = h.world.camera_mut().expect("camera");
+        cam.target = Vec3::new(303.0, y, 600.0);
+        cam.zoom = 40.0;
+    }
+    h.settle();
+    h.frame();
+    let screen = [640.0, 480.0];
+    let at = |h: &Harness, id: u32| -> (f32, f32) {
+        let e = h.world.entities().iter().find(|e| e.id == id).expect("on the map");
+        let [x, y] = h.world.camera().unwrap().project(Vec3::from_array(e.position), screen).expect("on screen");
+        (x, y)
+    };
+    let (bx, by) = at(&h, bot);
+    assert_ne!(h.world.pick(bx, by), Some(bot), "the bot isn't picked");
+    let (tx, ty) = at(&h, tank);
+    assert_eq!(h.world.pick(tx, ty), Some(tank), "the tank is");
+    let mut p = PlayerControl::new(None, Vec::new(), None);
+    // With shift a box takes every selectable unit in it, whatever its priority.
+    let shift = Mods { shift: true, ..Mods::default() };
+    p.handle(&mut h.world, Event::LeftDown(1.0, 1.0), shift, None);
+    p.handle(&mut h.world, Event::LeftUp(639.0, 479.0), shift, None);
+    assert_eq!(p.selection, vec![tank], "a box over both takes the tank");
+}
+
 /// Selection and right-click orders on a real scene: a box selects the six
 /// tanks (the observer gets the army with most units in the box), a
 /// double-click selects every tank of that type on screen, a right drag sends
