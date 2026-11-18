@@ -93,7 +93,7 @@ goes back to every army. A player in a live game keeps their own army's view (ch
 | `F` | cycle formation |
 | ctrl/cmd + 0-9, 0-9 (twice: centre camera), shift + 0-9 | set / recall / add to a control group |
 | Esc | cancel an armed order, else clear the selection |
-| `+` / `-` | game speed up / down (0.25x … 16x, max; FAF's clock shows max as +10 and the actual speed as measured) |
+| `+` / `-` | game speed up / down (0.25x … 16x, max; the keys step one at a time with no upper limit, max is step +77; FAF's clock shows the step asked for and the actual speed as measured) |
 | Pause (FAF's key map), or the bottom bar's pause | pause / resume |
 
 With FAF's interface up, its own key map and panels work as in the real game

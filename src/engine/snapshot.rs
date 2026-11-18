@@ -425,15 +425,12 @@ impl SimControl {
     /// The game speed as the interface sees it, in moho steps: the one
     /// asked for (`GetGameSpeed`, FAF's clock's first number) and the one
     /// the game runs at (`GetSimRate`, the second). "Max" is asked for as
-    /// [`Self::MOHO_MAX_STEP`], moho's fastest; the actual one is what the
-    /// sim loop measured (below 0 when slower than real time), and until
+    /// [`Self::MAX_STEP`] (the keys step up to it one at a time); the
+    /// actual one is what the sim loop measured (below 0 when slower than real time), and until
     /// it has measured anything, the one asked for.
     pub fn interface_steps(&self) -> (i32, i32) {
-        let asked = match self.shown() {
-            Self::MAX => Self::MOHO_MAX_STEP,
-            p => Self::step_of(p),
-        };
-        (asked, self.measured().map_or(asked, Self::step_of))
+        let asked = Self::step_of(self.shown());
+        (asked, self.measured().map_or(asked.min(Self::MOHO_MAX_STEP), Self::step_of))
     }
 
     /// The session client (1-based) who changed the speed last.
@@ -2929,14 +2926,14 @@ mod speed_tests {
         // A heavy scene at a quarter of real time.
         c.set_effective(25);
         assert_eq!(c.interface_steps(), (0, -6));
-        // Max asked: moho's fastest step, and the measured rate as actual.
+        // Max asked: its own step, and the measured rate as actual.
         c.set_speed(SimControl::MAX);
-        assert_eq!(c.interface_steps(), (SimControl::MOHO_MAX_STEP, -6));
+        assert_eq!(c.interface_steps(), (SimControl::MAX_STEP, -6));
         c.set_effective(2000);
-        assert_eq!(c.interface_steps(), (SimControl::MOHO_MAX_STEP, 13));
+        assert_eq!(c.interface_steps(), (SimControl::MAX_STEP, 13));
         // Max before anything was measured (a new session).
         c.begin_session();
-        assert_eq!(c.interface_steps(), (SimControl::MOHO_MAX_STEP, SimControl::MOHO_MAX_STEP));
+        assert_eq!(c.interface_steps(), (SimControl::MAX_STEP, SimControl::MOHO_MAX_STEP));
         assert_eq!(c.measured(), None);
     }
 
