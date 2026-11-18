@@ -43,6 +43,26 @@ pub(crate) fn live_members(lua: &Lua, this: &LuaTable, squad: impl Fn(&str) -> b
     Ok(members.into_iter().filter(|u| world.get(*u).is_some_and(|e| !e.destroyed)).collect())
 }
 
+/// Like [`live_members`], without units that are dead but not yet
+/// destroyed (a bomber killed mid-air, still falling): the real game's
+/// `CalculatePlatoonThreat`, `PlatoonCategoryCount` and `CanAttackTarget`
+/// leave them out while `GetPlatoonUnits`, `GetSquadUnits` and
+/// `GetPlatoonPosition` still count them (dev/probes probe_re5_platoon `AK`,
+/// probe_re6_platoon `CE falling`).
+pub(crate) fn alive_members(lua: &Lua, this: &LuaTable, squad: impl Fn(&str) -> bool) -> LuaResult<Vec<EntityId>> {
+    let members = live_members(lua, this, squad)?;
+    let world = crate::engine::api::entity::world(lua);
+    Ok(members.into_iter().filter(|u| world.get(*u).is_some_and(|e| !e.cold.killed)).collect())
+}
+
+/// Whether platoon `this` has ended. The real game's threat and count calls
+/// give 0 for one instead of raising (dev/probes probe_re5_platoon `MG`,
+/// probe_re6_platoon `CE ended`).
+fn has_ended(lua: &Lua, this: &LuaTable) -> LuaResult<bool> {
+    let id = platoon_id(this)?;
+    Ok(platoons(lua).get(id).is_none())
+}
+
 /// Moho's squad enum, matched case-insensitively ('attack' is `Attack`).
 const SQUADS: [&str; 7] = ["Attack", "Artillery", "Guard", "None", "Scout", "Support", "Unassigned"];
 
@@ -303,9 +323,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(Some(crate::engine::api::entity::vector(lua, mean)?))
         })?;
     lua_method!(lua, moho::Platoon,
-        /// The brain of the platoon's army, or nil if the platoon is gone.
+        /// The brain of the platoon's army. Raises once the platoon has ended, as in the real
+        /// game (dev/probes probe_re5_platoon `MG`, probe_re6_platoon `CE ended`).
         GetBrain = |lua, this: Obj<moho::Platoon>| {
-            let id = script_object::handle::<PlatoonHandle>(&this)?.0;
+            let id = live_id(lua, &this)?;
             let army = platoons(lua).get(id).map(|p| p.army);
             match army {
                 Some(army) => crate::engine::api::army::brain_obj(lua, army),
@@ -332,9 +353,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             }
         })?;
     lua_method!(lua, moho::Platoon,
-        /// How many live members match `category`.
+        /// How many members that are alive (not dead and falling) match `category`; 0 once the
+        /// platoon has ended.
         PlatoonCategoryCount = |lua, (this, category): (Obj<moho::Platoon>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>)| {
-            let members = live_members(lua, &this, |_| true)?;
+            if has_ended(lua, &this)? {
+                return Ok(0);
+            }
+            let members = alive_members(lua, &this, |_| true)?;
             let w = crate::engine::api::entity::world(lua);
             Ok(members.into_iter().filter_map(|id| w.get(id)).filter(|e| e.category_index.is_some_and(|c| category.0.contains(c))).count())
         },
@@ -356,25 +381,27 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             crate::engine::api::entity::vector(lua, FxVec3 { x: sum.x / n, y: sum.y / n, z: sum.z / n }).map(Some)
         })?;
     lua_method!(lua, moho::Platoon,
-        /// Names are unique per army: a platoon already holding the name loses it.
+        /// Names are unique per army: a platoon already holding the name loses it. Returns the
+        /// name, as in the real game (dev/probes probe_re6_platoon).
         UniquelyNamePlatoon = |lua, (this, name): (Obj<moho::Platoon>, String)| {
             let id = live_id(lua, &this)?;
             let mut ps = platoons(lua);
-            let Some(army) = ps.get(id).map(|p| p.army) else { return Ok(()) };
+            let Some(army) = ps.get(id).map(|p| p.army) else { return Ok(name) };
             if let Some(old) = ps.by_unique_name(army, &name)
                 && let Some(p) = ps.get_mut(old) {
                 p.unique_name = None;
             }
             if let Some(p) = ps.get_mut(id) {
-                p.unique_name = Some(name);
+                p.unique_name = Some(name.clone());
             }
-            Ok(())
+            Ok(name)
         })?;
     lua_method!(lua, moho::Platoon,
-        /// The platoon's unique name, or nil.
+        /// The platoon's unique name; `''` when it has none, as in the real game (dev/probes
+        /// probe_re6_platoon).
         GetPlatoonUniqueName = |lua, this: Obj<moho::Platoon>| {
             let id = live_id(lua, &this)?;
-            Ok(platoons(lua).get(id).and_then(|p| p.unique_name.clone()))
+            Ok(platoons(lua).get(id).and_then(|p| p.unique_name.clone()).unwrap_or_default())
         })?;
     lua_method!(lua, moho::Platoon,
         /// The nearest unit (to the squad's first unit) of `category` with that alliance to the
@@ -416,10 +443,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         },
     )?;
     lua_method!(lua, moho::Platoon,
-        /// A squad unit has an enabled weapon that may fire at the target's
-        /// current layer (`SetFireTargetLayerCaps`).
+        /// A squad unit that is alive (not dead and falling) has an enabled weapon that may fire
+        /// at the target's current layer (`SetFireTargetLayerCaps`). Raises once the platoon has
+        /// ended (dev/probes probe_re6_platoon).
         CanAttackTarget = |lua, (this, squad, target): (Obj<moho::Platoon>, String, Obj<moho::Entity>)| {
-            let members = live_members(lua, &this, |s| s.eq_ignore_ascii_case(&squad))?;
+            let members = alive_members(lua, &this, |s| s.eq_ignore_ascii_case(&squad))?;
             let Ok(target) = crate::engine::api::entity::entity_id(&target) else { return Ok(false) };
             Ok(can_attack(lua, &members, target))
         })?;
@@ -479,11 +507,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_method!(lua, moho::Platoon,
-        /// How many live members match `category` within `radius` of `pos` (XZ plane).
+        /// Like `PlatoonCategoryCount`, counting only members within `radius` of `pos` (XZ plane).
         PlatoonCategoryCountAroundPosition = |lua, (this, category, pos, radius): (Obj<moho::Platoon>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>, shapes::Vector, f64)| {
             let p = read_location(Some(&pos))?.unwrap_or_default();
             let r2 = crate::engine::sim::math::from_lua(radius * radius);
-            let members = live_members(lua, &this, |_| true)?;
+            if has_ended(lua, &this)? {
+                return Ok(0);
+            }
+            let members = alive_members(lua, &this, |_| true)?;
             let w = crate::engine::api::entity::world(lua);
             Ok(members
                 .into_iter()
@@ -537,8 +568,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         },
     )?;
-    // Sum of the live members' threat of `threatType`, for members in
-    // `category` (`...AroundPosition`: only those within `radius` of `pos`).
+    // Sum of the alive (not dead and falling) members' threat of
+    // `threatType`, for members in `category` (`...AroundPosition`: only
+    // those within `radius` of `pos`); 0 once the platoon has ended.
     fn platoon_threat(lua: &Lua, this: &LuaTable, ty: String, category: &crate::engine::sim::category::CategorySet, area: Option<(crate::engine::sim::math::FxVec3, f64)>) -> LuaResult<f64> {
         use crate::engine::sim::math::Fx;
         use crate::engine::sim::threat::ThreatType;
@@ -551,7 +583,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             "Sub" => ThreatType::AntiSub,
             other => ThreatType::parse(other).ok_or_else(|| LuaError::runtime(format!("unknown threat type '{other}'")))?,
         };
-        let members = live_members(lua, this, |_| true)?;
+        if has_ended(lua, this)? {
+            return Ok(0.0);
+        }
+        let members = alive_members(lua, this, |_| true)?;
         let w = crate::engine::api::entity::world(lua);
         let r2 = area.map(|(_, r)| crate::engine::sim::math::from_lua(r * r));
         let total = members
@@ -570,7 +605,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         Ok(total.to_num::<f64>())
     }
     lua_method!(lua, moho::Platoon,
-        /// Sum of the live members' threat of type `ty` ('Surface', 'Air', 'Sub' are the blueprint
+        /// Sum of the alive members' threat of type `ty` ('Surface', 'Air', 'Sub' are the blueprint
         /// levels, otherwise a threat type name) for members in `category`.
         CalculatePlatoonThreat = |lua, (this, ty, category): (Obj<moho::Platoon>, String, LuaUserDataRef<crate::engine::api::categories::EntityCategory>)| {
             platoon_threat(lua, &this, ty, &category.0, None)

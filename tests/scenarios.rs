@@ -91,6 +91,11 @@ fn platoon_emptied_next_beat() {
 }
 
 #[test]
+fn platoon_call_rules() {
+    scenario("platoon_call_rules", 80);
+}
+
+#[test]
 fn water_targets_only() {
     scenario("water_targets_only", 400);
 }

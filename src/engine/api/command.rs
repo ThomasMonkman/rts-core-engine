@@ -1056,7 +1056,18 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     platoon_order(lua, "AggressiveMoveToLocation", K::AggressiveMove, Some(K::FormAggressiveMove))?;
     platoon_order(lua, "AttackTarget", K::Attack, None)?;
     platoon_order(lua, "GuardTarget", K::Guard, None)?;
-    platoon_order(lua, "Patrol", K::Patrol, Some(K::FormPatrol))?;
+    crate::lua_api::add_class_fn(
+        lua,
+        moho::Platoon::CLASS,
+        "Patrol",
+        Some(&[Some("this"), Some("target"), Some("squad")]),
+        "Orders the platoon's live units (of `squad`, if given) to patrol; in its formation, if it has one. Returns nil, unlike the other platoon orders (dev/probes probe_re6_platoon).",
+        Status::Implemented,
+        |lua, (this, target, squad): (Obj<moho::Platoon>, shapes::OrderTarget, Option<String>)| {
+            let units = platoon_units(lua, &this, &squad)?;
+            platoon_issue(lua, &this, &units, K::Patrol, Some(K::FormPatrol), target_of(&target)?).map(|_| ())
+        },
+    )?;
     lua_method!(lua, moho::Platoon,
         /// Clears the orders of the platoon's live units (of `squad`, if given).
         Stop = |lua, (this, squad): (Obj<moho::Platoon>, Option<String>)| {
