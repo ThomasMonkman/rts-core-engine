@@ -13,6 +13,7 @@
 pub mod clipboard;
 pub mod controls;
 pub mod cursor;
+mod engine_stats;
 pub mod fonts;
 pub mod movie;
 pub mod net_lobby;
@@ -1921,22 +1922,13 @@ impl UserVm {
             *c = FrameRate::default();
             fps
         };
-        let Some(stats) = self.lua.globals().raw_get::<Option<LuaTable>>("__EngineStats")? else { return Ok(()) };
-        let Some(children) = stats.raw_get::<Option<LuaTable>>("Children")? else { return Ok(()) };
-        for node in children.sequence_values::<LuaTable>() {
-            let node = node?;
-            if node.raw_get::<Option<String>>("Name")?.as_deref() != Some("Frame") {
-                continue;
-            }
-            let Some(entries) = node.raw_get::<Option<LuaTable>>("Children")? else { continue };
-            for entry in entries.sequence_values::<LuaTable>() {
-                let entry = entry?;
-                if entry.raw_get::<Option<String>>("Name")?.as_deref() == Some("FPS") {
-                    entry.raw_set("Value", fps.round())?;
-                }
-            }
-        }
-        Ok(())
+        engine_stats::set(&self.lua, engine_stats::Stat::Fps, fps.round().into())
+    }
+
+    /// The sim's counts in `__EngineStats` (`EntityCount`), from the latest
+    /// snapshot.
+    pub fn set_engine_counts(&self, counts: &crate::engine::snapshot::EngineCounts) -> LuaResult<()> {
+        engine_stats::set_counts(&self.lua, counts)
     }
 
     /// The cursor FAF wants (the renderer makes it the window's cursor).

@@ -1013,6 +1013,41 @@ pub struct Snapshot {
     /// The game is over (`EndGame` in an earlier tick): the sim no longer
     /// advances. The user layer's `SessionIsGameOver`, `NoteGameOver`.
     pub game_over: bool,
+    /// The sim's counts for the interface's `__EngineStats`.
+    pub engine_counts: EngineCounts,
+}
+
+/// The sim's counts for the interface's `__EngineStats` (moho's engine
+/// statistics tree), this tick: live entities by kind, the whole sim, not
+/// the view army's share. Display only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EngineCounts {
+    pub units: u32,
+    pub projectiles: u32,
+    pub props: u32,
+    /// Shield bubbles.
+    pub shields: u32,
+    /// Blueprint-less script entities (collision beams, flares, ...):
+    /// moho's `Other`.
+    pub other: u32,
+}
+
+impl EngineCounts {
+    /// Every live entity in `world`.
+    pub fn of(world: &EntityWorld) -> Self {
+        let mut c = EngineCounts::default();
+        for e in world.iter().filter(|e| !e.destroyed) {
+            let n = match e.kind {
+                EntityKind::Unit => &mut c.units,
+                EntityKind::Projectile => &mut c.projectiles,
+                EntityKind::Prop => &mut c.props,
+                EntityKind::Shield => &mut c.shields,
+                EntityKind::Script => &mut c.other,
+            };
+            *n += 1;
+        }
+        c
+    }
 }
 
 /// An army as the interface describes it (sent with the first snapshot).
@@ -2935,6 +2970,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
         snap.entities = std::mem::take(&mut out.entities);
         snap.poses = std::mem::take(&mut out.poses);
         sink.pose_ops = out.ops;
+        snap.engine_counts = EngineCounts::of(world);
         sink.hidden = out.hidden;
         {
             let _b = crate::prof_span!("snapshot busy + props");

@@ -4,6 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use mlua::prelude::*;
 use rts_core_engine::debug_ui::DebugUiState;
 use rts_core_engine::engine;
 use rts_core_engine::ui::controls::DrawItem;
@@ -52,6 +53,87 @@ fn engine_stats_has_the_frame_rate() {
     assert_eq!(after, 50.0);
     let s: String = vm.lua().load(format!("return string.format('FPS: %02d', (function() {read} end)())")).eval().unwrap();
     assert_eq!(s, "FPS: 50");
+}
+
+/// The node `group` / `name` of `__EngineStats` as `(Type, Value)`,
+/// found as FAF's readers find it (by name, any order).
+fn engine_stat(vm: &UserVm, path: &[&str]) -> (Option<String>, LuaValue) {
+    let names = path.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", ");
+    vm.lua()
+        .load(format!(
+            "local node = __EngineStats
+            for _, name in {{ {names} }} do
+                local found
+                for _, c in node.Children or {{}} do
+                    if c.Name == name then found = c break end
+                end
+                if not found then return nil, nil end
+                node = found
+            end
+            return node.Type, node.Value"
+        ))
+        .eval()
+        .unwrap()
+}
+
+/// `__EngineStats`' `EntityCount` holds the sim's counts, carried in the
+/// snapshot: FAF's performance tracking (`/lua/system/performance.lua`)
+/// samples `Unit` once a second, as read here with its own loop.
+#[test]
+fn engine_stats_count_the_sims_entities() {
+    if !rts_core_engine::test_data::require_game("UI tests") {
+        return;
+    }
+    let mut engine = engine::Engine::new(INIT_LUA_PATH, FA_PATH, Arc::new(Mutex::new(DebugUiState::new()))).expect("engine");
+    let session = engine::session::SessionConfig { ticks: Some(0), create_initial_units: false, ai: false, ..Default::default() };
+    engine.start(&session).expect("session");
+    let (sink, rx, _request) = engine::snapshot::channel();
+    engine.set_snapshot_sink(sink);
+    engine
+        .sim_lua()
+        .load("for i = 1, 3 do CreateUnitHPR('uel0201', 'ARMY_1', 400 + 5 * i, GetTerrainHeight(400, 640), 640, 0, 0, 0) end")
+        .exec()
+        .unwrap();
+    let mut counts = None;
+    for _ in 0..3 {
+        engine.tick().expect("tick");
+        while let Ok(mut snap) = rx.try_recv() {
+            drop(snap.ticket.take());
+            counts = Some(snap.engine_counts);
+        }
+    }
+    let counts = counts.expect("a snapshot");
+    assert_eq!(counts.units, 3);
+    assert!(counts.props > 0, "the map's props: {counts:?}");
+
+    let vm = UserVm::with_cache(engine.vfs.clone(), engine.script_cache.clone()).expect("user vm");
+    vm.init().expect("userInit.lua");
+    for name in ["Unit", "Projectile", "Prop", "Shield", "Other"] {
+        assert_eq!(engine_stat(&vm, &["EntityCount", name]), (Some("Integer".into()), LuaValue::Number(0.0)), "{name}");
+    }
+    vm.set_engine_counts(&counts).unwrap();
+    let unit_count: f64 = vm
+        .lua()
+        .load(
+            r#"
+            local engineStats = __EngineStats
+            local unitCount = 0
+            for k, stat in engineStats.Children do
+                if stat.Name == 'EntityCount' then
+                    for _, entry in stat.Children do
+                        if entry.Name == 'Unit' then
+                            unitCount = entry.Value
+                        end
+                    end
+                end
+            end
+            return unitCount
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(unit_count, 3.0);
+    assert_eq!(engine_stat(&vm, &["EntityCount", "Prop"]).1, LuaValue::Number(counts.props.into()));
 }
 
 /// FAF's in-game tabs label their exit `_Exit_to_Windows`: Windows
