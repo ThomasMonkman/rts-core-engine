@@ -4,6 +4,7 @@ mod hash_comment;
 mod lexscan;
 mod long_bracket;
 mod neq;
+mod numeral;
 mod prealloc;
 mod vararg;
 
@@ -25,6 +26,7 @@ mod actual_fa_files_tests;
 /// | `for k,v in t` (table) | ✓ (5.0)| ✗           | ✗ (`__forin(t)` → `next, t`) |
 /// | implicit `arg`     | ✓ (5.0)| ✗                | ✗ (`local arg = table.pack(...)`) |
 /// | nested `[[ [[ ]] ]]` | ✓ (5.0)| ✗              | ✗ (levelled `[=[ ]=]`)        |
+/// | `1then` (numeral + name) | ✓ (5.0)| ✗          | ✗ (split to `1 then`)         |
 ///
 /// The bitwise pass parses with `full_moon` configured for Lua 5.3 **and** Luau
 /// at once, so `continue` and bitwise operators coexist without any masking.
@@ -36,6 +38,7 @@ pub fn translate(source: &str) -> String {
     let s = strip_bom(source);
     let s = long_bracket::rewrite(s);
     let s = hash_comment::rewrite(&s);
+    let s = numeral::rewrite(&s);
     let s = neq::rewrite(&s);
     let s = prealloc::strip(&s);
     let s = bitwise::rewrite(&s);

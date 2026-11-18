@@ -47,6 +47,7 @@ The interface is told every frame, the sim before each tick (but not in a networ
 | A UTF-8 BOM at the start | rejected | stripped (`strip_bom`) |
 | nested long brackets: `[[a [[b]] c]]`, `--[[ a [[ b ]] c ]]` (5.0 nests them) | ends at the first `]]` | a nesting bracket gets a level, `[=[ ... ]=]` (`long_bracket.rs`) |
 | `# comment` (line start or after code) | `#` is the length operator | `#` → `--` (`hash_comment.rs`) |
+| `1then`: a numeral with a name or keyword straight after it (5.0's lexer stops at the end of the numeral) | one malformed number | a space is inserted, `1 then` (`numeral.rs`; hex literals, names like `a1then`, strings and comments untouched) |
 | `a != b` | only `~=` | `!=` → `~=` (`neq.rs`; a plain text replace, so it would also change a `!=` inside a string. FAF has none) |
 | `{&N &M}` (table pre-size hints) | not valid | stripped to `{}` (`prealloc.rs`) |
 | `&`, `\|`, `~`, `<<`, `>>` | no bitwise operators | `bit32.band`, `bor`, `bxor`, `lshift`, `rshift` (`bitwise.rs`, parsed with `full_moon` as Lua 5.3 + Luau) |
