@@ -2312,14 +2312,14 @@ fn hit(lua: &Lua, x: f32, y: f32) -> LuaResult<Option<Hit>> {
             c.frames.get(&c.mouse_head).copied().into_iter().collect()
         }
     };
-    // The visible, hit-testable controls (with their tree order), under
-    // one borrow; then all their layouts in one call.
+    // The visible, hit-testable controls in tree order (depth first, each
+    // control before its children, children in the order they were made),
+    // under one borrow; then all their layouts in one call.
     forget_dirty_layouts(lua)?;
-    let mut candidates: Vec<(ControlId, usize, Hit)> = Vec::new();
+    let mut candidates: Vec<(ControlId, Hit)> = Vec::new();
     let mut stale: Vec<ControlId> = Vec::new();
     {
         let c = controls(lua);
-        let mut order = 0usize;
         let mut stack: Vec<ControlId> = roots.into_iter().rev().collect();
         while let Some(id) = stack.pop() {
             let Some(ctl) = c.map.get(&id) else { continue };
@@ -2327,7 +2327,6 @@ fn hit(lua: &Lua, x: f32, y: f32) -> LuaResult<Option<Hit>> {
                 continue;
             }
             stack.extend(ctl.children.iter().rev());
-            order += 1;
             if !ctl.hit_test {
                 continue;
             }
@@ -2336,7 +2335,7 @@ fn hit(lua: &Lua, x: f32, y: f32) -> LuaResult<Option<Hit>> {
                 Kind::WorldView(_) => Hit::World(id),
                 _ => Hit::Control(id),
             };
-            candidates.push((id, order, what));
+            candidates.push((id, what));
             if ctl.layout.is_none() {
                 stale.push(id);
             }
@@ -2344,15 +2343,17 @@ fn hit(lua: &Lua, x: f32, y: f32) -> LuaResult<Option<Hit>> {
     }
     read_layouts(lua, &stale)?;
     let c = controls(lua);
-    let mut best: Option<(f32, usize, Hit)> = None;
-    for (id, order, what) in candidates {
+    // The greatest depth; of equal ones, the first in tree order, as moho's
+    // walk keeps (original game's MohoEngine.dll `GetTopmostControl`,
+    // 0x103515d0: a control replaces the best only with a greater depth).
+    let mut best: Option<(f32, Hit)> = None;
+    for (id, what) in candidates {
         let Some((l, t, w, h, depth)) = c.map.get(&id).and_then(|ctl| ctl.layout) else { continue };
-        if x >= l && y >= t && x < l + w && y < t + h
-            && best.is_none_or(|b| (depth, order) >= (b.0, b.1)) {
-            best = Some((depth, order, what));
+        if x >= l && y >= t && x < l + w && y < t + h && best.is_none_or(|b| depth > b.0) {
+            best = Some((depth, what));
         }
     }
-    Ok(best.map(|b| b.2).or(capture.map(Hit::Control)))
+    Ok(best.map(|b| b.1).or(capture.map(Hit::Control)))
 }
 
 fn event_table(lua: &Lua, kind: &str, x: f32, y: f32, mods: Modifiers, wheel: f32, key: i64) -> LuaResult<LuaTable> {

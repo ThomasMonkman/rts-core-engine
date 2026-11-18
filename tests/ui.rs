@@ -2087,6 +2087,35 @@ fn profiles_are_a_list_and_old_named_ones_migrate() {
     assert_eq!(vm.profile_name().unwrap().as_deref(), Some("Player"));
 }
 
+/// Of controls at the same depth under the mouse, the first in tree order
+/// takes the click, as moho's walk keeps it.
+#[test]
+fn equal_depths_hit_the_first_control() {
+    use rts_core_engine::ui::controls::{Modifiers, MouseEvent};
+    let Some(vm) = vm() else { return };
+    vm.set_screen(1024.0, 768.0).unwrap();
+    vm.lua()
+        .load(
+            r#"
+            local Group = import('/lua/maui/group.lua').Group
+            local LayoutHelpers = import('/lua/maui/layouthelpers.lua')
+            rawset(_G, 'Clicked', {})
+            for _, name in { 'first', 'second' } do
+                local g = Group(GetFrame(0), name)
+                LayoutHelpers.AtLeftTopIn(g, GetFrame(0), 100, 100)
+                g.Width:Set(200) g.Height:Set(200)
+                g.Depth:Set(50)
+                g.HandleEvent = function(self, e) if e.Type == 'ButtonPress' then table.insert(Clicked, name) end return true end
+            end
+            "#,
+        )
+        .exec()
+        .unwrap();
+    vm.mouse(MouseEvent::Press(1), 150.0, 150.0, Modifiers { left: true, ..Default::default() }).unwrap();
+    let clicked: Vec<String> = vm.lua().load("return Clicked").eval().unwrap();
+    assert_eq!(clicked, ["first"]);
+}
+
 /// `General.QuickSelectPriority` (FAF's ACUs), which FAF's first update
 /// zooms to and its avatar panel shows; nil without any.
 #[test]
