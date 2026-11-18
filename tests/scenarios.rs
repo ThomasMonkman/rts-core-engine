@@ -714,6 +714,13 @@ fn decay() {
     scenario("decay", 900);
 }
 
+/// A build order given again on the site of the same unit left unfinished
+/// takes it up again instead of starting a second one.
+#[test]
+fn build_resume() {
+    scenario("build_resume", 500);
+}
+
 /// `ChangeUnitArmy` past the receiver's unit cap: refused, the receiver
 /// hears `OnFailedUnitTransfer`; commanders with `noRestrictions`.
 #[test]
