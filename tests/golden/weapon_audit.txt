@@ -733,7 +733,7 @@
 531@180|xsb2304|1|xsa0101|pass|2|600
 532|xsb2305|1|xsb1101|pass|1|70502
 533|xsb2305|2|-|non-attack|0|0
-534|xsb2401|1|xsb1101|pass|1|1007503
+534|xsb2401|1|xsb1101|pass|1|2
 535|xsb2401|2|-|non-attack|0|0
 536|xsb4201|1|xsb2108|pass|2|1
 537|xsb4302|1|xsb2305|pass|1|1
