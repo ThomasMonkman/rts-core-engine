@@ -225,6 +225,67 @@ fn engine_stats_heap_is_the_process_memory() {
     assert!(line.starts_with("Heap: ") && line.ends_with('M') && !line.contains("0.000M"), "{line}");
 }
 
+/// AI-Uveso's interface hook (`hook/lua/ui/game/gamemain.lua`) reads
+/// `Instance Counts`, `Heap` and `Frame` and formats them once a game
+/// minute; its own code, cut from the mod, runs once here and gets
+/// numbers for every `%d` (missing classes stay its 0). Skipped without
+/// the mod (`../faf-vault/mods/AI-Uveso`).
+#[test]
+fn engine_stats_feed_ai_uvesos_report() {
+    let Ok(hook) = std::fs::read_to_string("../faf-vault/mods/AI-Uveso/hook/lua/ui/game/gamemain.lua") else {
+        eprintln!("skipped: no AI-Uveso in ../faf-vault");
+        return;
+    };
+    if !rts_core_engine::test_data::require_game("UI tests") {
+        return;
+    }
+    let mut engine = engine::Engine::new(INIT_LUA_PATH, FA_PATH, Arc::new(Mutex::new(DebugUiState::new()))).expect("engine");
+    let session = engine::session::SessionConfig { ticks: Some(0), create_initial_units: false, ai: false, ..Default::default() };
+    engine.start(&session).expect("session");
+    let (sink, rx, _request) = engine::snapshot::channel();
+    engine.set_snapshot_sink(sink);
+    engine
+        .sim_lua()
+        .load("CreateUnitHPR('uel0201', 'ARMY_1', 400, GetTerrainHeight(400, 640), 640, 0, 0, 0) ForkThread(function() WaitSeconds(100) end)")
+        .exec()
+        .unwrap();
+    let mut counts = None;
+    for _ in 0..3 {
+        engine.tick().expect("tick");
+        while let Ok(mut snap) = rx.try_recv() {
+            drop(snap.ticket.take());
+            counts = Some(snap.engine_counts);
+        }
+    }
+    let counts = counts.expect("a snapshot");
+    assert!(counts.lua_threads >= 1 && counts.platoons >= 1, "{counts:?}");
+    let vm = UserVm::with_cache(engine.vfs.clone(), engine.script_cache.clone()).expect("user vm");
+    vm.init().expect("userInit.lua");
+    vm.set_engine_counts(&counts).unwrap();
+    for _ in 0..70 {
+        vm.frame(1.0 / 50.0).unwrap();
+    }
+    // The thread's body from its counters to its report, run once, an
+    // hour and two minutes in.
+    let start = hook.find("local CTask, CTaskThread").expect("the hook's counters");
+    let end = hook.find(",Entity, Prop, CScriptObject, CTask, CTaskThread, CLuaTask, CDecalHandle, ReconBlip))").expect("the hook's report") + ",Entity, Prop, CScriptObject, CTask, CTaskThread, CLuaTask, CDecalHandle, ReconBlip))".len();
+    let body = hook[start..end].replacen("while true do", "do", 1);
+    let chunk = format!(
+        "local out = {{}}
+        local function SPEW(s) table.insert(out, s) end
+        local function GetGameTimeSeconds() return 3725.5 end
+        {body}
+        end end
+        return out[1], out[2]"
+    );
+    let (first, second): (String, String) = vm.lua().load(chunk).eval().expect("AI-Uveso's report");
+    eprintln!("{first}\n{second}");
+    assert!(first.contains("Unit: 01") && first.contains("FPS: 50") && !first.contains("Memory: 0.000M"), "{first}");
+    let entities = counts.units + counts.projectiles + counts.props + counts.shields + counts.other;
+    assert!(second.contains(&format!("Entity: {entities:05}")) && second.contains(&format!("Prop: {:05}", counts.props)), "{second}");
+    assert!(second.contains("CTask: 00000") && second.contains("ReconBlip: 00000"), "{second}");
+}
+
 /// FAF's in-game tabs label their exit `_Exit_to_Windows`: Windows
 /// keeps that; elsewhere it reads like the main menu's `_Exit`.
 #[test]

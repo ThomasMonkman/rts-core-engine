@@ -1030,6 +1030,12 @@ pub struct EngineCounts {
     /// Blueprint-less script entities (collision beams, flares, ...):
     /// moho's `Other`.
     pub other: u32,
+    /// AI platoons (`CPlatoon`).
+    pub platoons: u32,
+    /// Live decal handles (`CreateDecal`'s `CDecalHandle`s).
+    pub decals: u32,
+    /// The sim's live Lua threads (`ForkThread`: moho's `CLuaTask`).
+    pub lua_threads: u32,
 }
 
 impl EngineCounts {
@@ -3147,6 +3153,9 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
     drop(tail_span);
     let _send = crate::prof_span!("snapshot send");
     sink.in_flight.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    snap.engine_counts.platoons = lua.app_data_ref::<crate::engine::sim::platoon::Platoons>().map_or(0, |p| p.len() as u32);
+    snap.engine_counts.decals = lua.app_data_ref::<crate::engine::sim::presentation::Presentation>().map_or(0, |p| p.decals.len() as u32);
+    snap.engine_counts.lua_threads = lua.app_data_ref::<crate::engine::sim::scheduler::Scheduler>().map_or(0, |s| s.task_count() as u32);
     snap.ticket = Some(Ticket(sink.in_flight.clone()));
     // In lockstep with the consumer every snapshot goes (it waits for room).
     let sent = match &sink.consumer {

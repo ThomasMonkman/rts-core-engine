@@ -1900,6 +1900,7 @@ impl UserVm {
         movie::tick(&self.lua, dt)?;
         self.update_frame_rate(dt)?;
         engine_stats::update_cursor(&self.lua)?;
+        engine_stats::update_lua_tasks(&self.lua)?;
         cursor::update(&self.lua)
     }
 
@@ -1929,8 +1930,8 @@ impl UserVm {
         engine_stats::update_heap(&self.lua)
     }
 
-    /// The sim's counts in `__EngineStats` (`EntityCount`), from the latest
-    /// snapshot.
+    /// The sim's counts in `__EngineStats` (`EntityCount`, `Instance
+    /// Counts`), from the latest snapshot.
     pub fn set_engine_counts(&self, counts: &crate::engine::snapshot::EngineCounts) -> LuaResult<()> {
         engine_stats::set_counts(&self.lua, counts)
     }

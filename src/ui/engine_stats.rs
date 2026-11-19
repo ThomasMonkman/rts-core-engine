@@ -23,10 +23,16 @@ pub(super) enum Stat {
     HeapCommitted,
     HeapTotal,
     HeapInUse,
+    InstanceEntity,
+    InstanceProp,
+    InstanceUnit,
+    InstancePlatoon,
+    InstanceDecal,
+    InstanceLuaTask,
 }
 
 impl Stat {
-    const ALL: [Stat; 11] = [
+    const ALL: [Stat; 17] = [
         Stat::Fps,
         Stat::EntityUnit,
         Stat::EntityProjectile,
@@ -38,6 +44,12 @@ impl Stat {
         Stat::HeapCommitted,
         Stat::HeapTotal,
         Stat::HeapInUse,
+        Stat::InstanceEntity,
+        Stat::InstanceProp,
+        Stat::InstanceUnit,
+        Stat::InstancePlatoon,
+        Stat::InstanceDecal,
+        Stat::InstanceLuaTask,
     ];
 
     /// The node's names from the root's children down.
@@ -54,6 +66,12 @@ impl Stat {
             Stat::HeapCommitted => &["Heap", "Committed"],
             Stat::HeapTotal => &["Heap", "Total"],
             Stat::HeapInUse => &["Heap", "InUse"],
+            Stat::InstanceEntity => &["Instance Counts", "class Moho::Entity"],
+            Stat::InstanceProp => &["Instance Counts", "class Moho::Prop"],
+            Stat::InstanceUnit => &["Instance Counts", "class Moho::Unit"],
+            Stat::InstancePlatoon => &["Instance Counts", "class Moho::CPlatoon"],
+            Stat::InstanceDecal => &["Instance Counts", "class Moho::CDecalHandle"],
+            Stat::InstanceLuaTask => &["Instance Counts", "class Moho::CLuaTask"],
         }
     }
 }
@@ -64,6 +82,8 @@ struct Nodes {
     last: Vec<Option<f64>>,
     /// What the cursor's point was last found from, and that point.
     cursor: Option<(CursorKey, glam::Vec3)>,
+    /// The sim's live Lua threads, from the latest snapshot.
+    sim_threads: u32,
 }
 
 /// The mouse (interface coordinates), the camera and the terrain a cursor
@@ -100,7 +120,7 @@ fn find(lua: &Lua) -> LuaResult<Nodes> {
         }
         tables.push(node);
     }
-    Ok(Nodes { tables, last: vec![None; Stat::ALL.len()], cursor: None })
+    Ok(Nodes { tables, last: vec![None; Stat::ALL.len()], cursor: None, sim_threads: 0 })
 }
 
 fn nodes(lua: &Lua) -> LuaResult<mlua::AppDataRefMut<'_, Nodes>> {
@@ -166,13 +186,33 @@ pub(super) fn update_heap(lua: &Lua) -> LuaResult<()> {
     set_string(lua, Stat::HeapInUse, bytes as f64, || megabytes(bytes))
 }
 
-/// The sim's entity counts (`EntityCount`), from the latest snapshot.
+/// The sim's counts (`EntityCount`, `Instance Counts`), from the latest
+/// snapshot. `Instance Counts` has only classes ours has the same objects
+/// for; moho's `Entity` also counts its recon blips, which aren't entities
+/// here.
 pub(super) fn set_counts(lua: &Lua, c: &crate::engine::snapshot::EngineCounts) -> LuaResult<()> {
     set(lua, Stat::EntityUnit, c.units.into())?;
     set(lua, Stat::EntityProjectile, c.projectiles.into())?;
     set(lua, Stat::EntityProp, c.props.into())?;
     set(lua, Stat::EntityShield, c.shields.into())?;
-    set(lua, Stat::EntityOther, c.other.into())
+    set(lua, Stat::EntityOther, c.other.into())?;
+    let entities = c.units + c.projectiles + c.props + c.shields + c.other;
+    set(lua, Stat::InstanceEntity, entities.into())?;
+    set(lua, Stat::InstanceProp, c.props.into())?;
+    set(lua, Stat::InstanceUnit, c.units.into())?;
+    set(lua, Stat::InstancePlatoon, c.platoons.into())?;
+    set(lua, Stat::InstanceDecal, c.decals.into())?;
+    nodes(lua)?.sim_threads = c.lua_threads;
+    update_lua_tasks(lua)
+}
+
+/// `Instance Counts` / `CLuaTask`: moho counts the instances of a class
+/// across the process, so both VMs' live Lua threads, the sim's (from the
+/// snapshot) and the interface's.
+pub(super) fn update_lua_tasks(lua: &Lua) -> LuaResult<()> {
+    let user = lua.app_data_ref::<crate::engine::sim::scheduler::Scheduler>().map_or(0, |s| s.task_count() as u32);
+    let sim = nodes(lua)?.sim_threads;
+    set(lua, Stat::InstanceLuaTask, (sim + user).into())
 }
 
 /// `Camera` / `Cursor`: where the ray through the mouse meets the terrain

@@ -109,6 +109,16 @@ expects.
 **Beats and frames.** Each new tick, `UserVm::beat` moves `GameTick`, updates the economy and runs
 FAF's `gamemain.OnBeat`. Each frame, `UserVm::frame` runs user threads and `OnFrame`; building the draw list then calls `OnRenderWorld(delta)` of each world view with `SetCustomRender(true)`, whose `UI_Draw*` shapes go with that view to the renderer (`ui/world_draw.rs`).
 
+**Engine statistics.** `__EngineStats` is moho's statistics tree (`{Name, Type, Value, Children}`
+nodes under `Root`; the shape of a real dump is at the top of FAF's `/lua/system/performance.lua`).
+Ours holds only the nodes FAF and mods read, each updated in place only when its value changes
+(`ui::engine_stats`): `Frame` / `FPS`, `EntityCount` (`Unit`, `Projectile`, `Prop`, `Shield`, `Other`:
+the sim's live entities, carried in the snapshot as `EngineCounts`), `Camera` / `Cursor` (`Position`
+on the terrain or the water above it, `Elevation`: the terrain under it, the sea floor over water),
+`Heap` (`Committed`, `Total`, `InUse`: all the process's resident memory) and some `Instance Counts`. The rest of moho's tree (render, sound,
+sync, blips, task and script-object counts) is left out on purpose: either nothing reads it or ours
+has no count with the same meaning. A reader that searches by name finds nothing for those nodes.
+
 **Fog of war.** The interface only sees what the renderer's frame holds, which is the view army's
 fog-of-war snapshot ([rendering.md](rendering.md#fog-of-war)). Undetected enemies aren't in it at
 all, and radar blips are drawn but left out of the interface's unit data, so nothing in FAF's Lua can
