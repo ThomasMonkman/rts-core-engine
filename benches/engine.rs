@@ -2072,6 +2072,38 @@ fn lua_table_shims(c: &mut Criterion) {
     g.finish();
 }
 
+/// Building a unit query's result list (`entity::objects_table`, behind
+/// `GetUnitsAroundPoint`, `GetListOfUnits`, ...) of N entity objects, against
+/// the per-entry mlua lookup it replaced (registry table, get, set per id).
+fn objects_table(c: &mut Criterion) {
+    use rts_core_engine::engine::api::{entity, moho, script_object};
+    let lua = Lua::new();
+    rts_core_engine::engine::lua::heap_snapshot::prepare(&lua).unwrap();
+    let objects = script_object::registry_table(&lua, "engine.entities").unwrap();
+    for id in 0..1000u32 {
+        objects.raw_set(id, lua.create_table().unwrap()).unwrap();
+    }
+    let mut g = c.benchmark_group("objects_table");
+    for n in [10u32, 100, 1000] {
+        let ids: Vec<u32> = (0..n).collect();
+        g.bench_with_input(BenchmarkId::new("raw", n), &ids, |b, ids| b.iter(|| entity::objects_table::<moho::Unit>(&lua, black_box(ids)).unwrap()));
+        g.bench_with_input(BenchmarkId::new("mlua per entry", n), &ids, |b, ids| {
+            b.iter(|| {
+                let t = lua.create_table_with_capacity(ids.len(), 0).unwrap();
+                let mut k = 0;
+                for &id in black_box(ids) {
+                    if let Some(o) = script_object::registry_table(&lua, "engine.entities").unwrap().raw_get::<Option<LuaTable>>(id).unwrap() {
+                        k += 1;
+                        t.raw_set(k, o).unwrap();
+                    }
+                }
+                t
+            })
+        });
+    }
+    g.finish();
+}
+
 /// The Rust <-> Lua boundary as the typed-API layer (`lua_api`) touches it,
 /// measured from the Lua side so the same bench runs before and after a
 /// conversion:
@@ -2542,5 +2574,5 @@ fn audio(c: &mut Criterion) {
     eprintln!("audio bench: {} cues active", e.active());
 }
 
-criterion_group!(benches, scripts, blueprints, mods, categories, rng, bounded_props, terrain, trig, scheduler, sim_tick, entities, spatial, economy, checksum, unit_stats, projectiles, projectile_collision, projectile_refusals, weapons, threat, movement, avoidance, effects, attachments, intel, nav, snapshot, poses, models, map_render, manipulators, transport, construction, placement, lua_call_overhead, lua_table_shims, lua_api, lua_interrupt, interface, movies, audio);
+criterion_group!(benches, scripts, blueprints, mods, categories, rng, bounded_props, terrain, trig, scheduler, sim_tick, entities, spatial, economy, checksum, unit_stats, projectiles, projectile_collision, projectile_refusals, weapons, threat, movement, avoidance, effects, attachments, intel, nav, snapshot, poses, models, map_render, manipulators, transport, construction, placement, lua_call_overhead, lua_table_shims, objects_table, lua_api, lua_interrupt, interface, movies, audio);
 criterion_main!(benches);

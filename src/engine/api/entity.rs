@@ -406,11 +406,37 @@ fn on_destroy(lua: &Lua, id: EntityId) -> LuaResult<()> {
 /// A Lua array of the script objects of `ids`, in order (unbound ids skipped).
 /// The script objects of `ids`, as a list of class `C` (the caller knows
 /// which: `objects_table::<moho::Unit>`).
-pub(crate) fn objects_table<C>(lua: &Lua, ids: &[EntityId]) -> LuaResult<shapes::List<Obj<C>>> {
+///
+/// Makes one Lua object (the list) either way. A long list is filled on the
+/// raw stack (`heap_snapshot::with_raw_state_args`, which makes no objects):
+/// a raw get and set per entry instead of mlua's two calls and a ref.
+pub fn objects_table<C>(lua: &Lua, ids: &[EntityId]) -> LuaResult<shapes::List<Obj<C>>> {
+    /// Below this the raw call's own cost isn't won back.
+    const RAW_FROM: usize = 8;
     let t = lua.create_table_with_capacity(ids.len(), 0)?;
+    let objects = objects(lua)?;
+    if ids.len() >= RAW_FROM && crate::engine::lua::heap_snapshot::is_prepared(lua) && ids.iter().all(|&id| id <= i32::MAX as u32) {
+        use mlua::ffi;
+        // SAFETY: the stack holds the registry's id -> object table at 1 and
+        // the new list at 2 (the call's arguments); each step pushes at most
+        // one value and pops it, and raw gets / sets on plain tables raise
+        // nothing.
+        crate::engine::lua::heap_snapshot::with_raw_state_args(lua, (&objects, &t), |state| unsafe {
+            let mut n = 0;
+            for &id in ids {
+                if ffi::lua_rawgeti_(state, 1, id as i32) == ffi::LUA_TNIL {
+                    ffi::lua_pop(state, 1);
+                } else {
+                    n += 1;
+                    ffi::lua_rawseti_(state, 2, n);
+                }
+            }
+        })?;
+        return Ok(shapes::List::new(t));
+    }
     let mut n = 0;
     for &id in ids {
-        if let Some(obj) = object(lua, id)? {
+        if let Some(obj) = objects.raw_get::<Option<LuaTable>>(id)? {
             n += 1;
             t.raw_set(n, obj)?;
         }
@@ -1514,4 +1540,34 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The raw fill (long lists, prepared VM) and the mlua one give the same
+    /// list: the bound objects of `ids` in order, unbound ids skipped.
+    #[test]
+    fn objects_table_raw_matches_mlua() {
+        for prepared in [false, true] {
+            let lua = Lua::new();
+            if prepared {
+                crate::engine::lua::heap_snapshot::prepare(&lua).unwrap();
+            }
+            let objs: Vec<LuaTable> = (0..40).map(|_| lua.create_table().unwrap()).collect();
+            for (id, o) in objs.iter().enumerate().filter(|(id, _)| id % 3 != 0) {
+                objects(&lua).unwrap().raw_set(id as u32, o).unwrap();
+            }
+            for n in [0usize, 5, 8, 40] {
+                let ids: Vec<EntityId> = (0..n as u32).rev().collect();
+                let t = objects_table::<moho::Unit>(&lua, &ids).unwrap().0;
+                let want: Vec<&LuaTable> = ids.iter().filter(|&&id| id % 3 != 0).map(|&id| &objs[id as usize]).collect();
+                assert_eq!(t.raw_len(), want.len(), "prepared={prepared} n={n}");
+                for (i, o) in want.iter().enumerate() {
+                    assert_eq!(&t.raw_get::<LuaTable>(i + 1).unwrap(), *o);
+                }
+            }
+        }
+    }
 }
