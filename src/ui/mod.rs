@@ -1904,13 +1904,15 @@ impl UserVm {
     }
 
     /// `__EngineStats`' `Frame` / `FPS`: the frames shown over the last
-    /// second or so, written once that much time has gone by.
+    /// second or so, written once that much time has gone by; the `Heap`
+    /// figures then too (and on the first frame).
     fn update_frame_rate(&self, dt: f32) -> LuaResult<()> {
         let fps = {
             let mut c = match self.lua.app_data_mut::<FrameRate>() {
                 Some(c) => c,
                 None => {
                     self.lua.set_app_data(FrameRate::default());
+                    engine_stats::update_heap(&self.lua)?;
                     self.lua.app_data_mut::<FrameRate>().expect("just set")
                 }
             };
@@ -1923,7 +1925,8 @@ impl UserVm {
             *c = FrameRate::default();
             fps
         };
-        engine_stats::set(&self.lua, engine_stats::Stat::Fps, fps.round().into())
+        engine_stats::set(&self.lua, engine_stats::Stat::Fps, fps.round().into())?;
+        engine_stats::update_heap(&self.lua)
     }
 
     /// The sim's counts in `__EngineStats` (`EntityCount`), from the latest

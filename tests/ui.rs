@@ -190,6 +190,41 @@ fn engine_stats_cursor_is_over_the_sea_floor() {
     assert!((depth - 3.0).abs() < 1e-4, "{depth}");
 }
 
+/// `__EngineStats`' `Heap` / `Committed`, `Total` and `InUse` are moho's strings
+/// (`315.3M`), here the process's memory, from the first frame: FAF's
+/// session logger (`/lua/system/logger.lua`) formats them with `%s`.
+#[test]
+fn engine_stats_heap_is_the_process_memory() {
+    let Some(vm) = vm() else { return };
+    vm.frame(1.0 / 60.0).unwrap();
+    for name in ["Committed", "Total", "InUse"] {
+        let (kind, value) = engine_stat(&vm, &["Heap", name]);
+        assert_eq!(kind.as_deref(), Some("String"));
+        let value = value.as_string().map(|s| s.to_string_lossy()).unwrap_or_default();
+        let mb: f64 = value.strip_suffix('M').and_then(|v| v.parse().ok()).unwrap_or_else(|| panic!("{name}: {value}"));
+        assert!(mb > 1.0, "{name}: {value}");
+    }
+    let line: String = vm
+        .lua()
+        .load(
+            r#"
+            local heapCommitted, heapTotal = 0, 0
+            for _, a in pairs(__EngineStats.Children) do
+                if a.Name == 'Heap' then
+                    for _, b in pairs(a.Children) do
+                        if b.Name == 'Committed' then heapCommitted = b.Value end
+                        if b.Name == 'Total' then heapTotal = b.Value end
+                    end
+                end
+            end
+            return string.format("Heap: %s / %s", heapTotal, heapCommitted)
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(line.starts_with("Heap: ") && line.ends_with('M') && !line.contains("0.000M"), "{line}");
+}
+
 /// FAF's in-game tabs label their exit `_Exit_to_Windows`: Windows
 /// keeps that; elsewhere it reads like the main menu's `_Exit`.
 #[test]

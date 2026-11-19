@@ -20,10 +20,13 @@ pub(super) enum Stat {
     EntityOther,
     CursorElevation,
     CursorPosition,
+    HeapCommitted,
+    HeapTotal,
+    HeapInUse,
 }
 
 impl Stat {
-    const ALL: [Stat; 8] = [
+    const ALL: [Stat; 11] = [
         Stat::Fps,
         Stat::EntityUnit,
         Stat::EntityProjectile,
@@ -32,6 +35,9 @@ impl Stat {
         Stat::EntityOther,
         Stat::CursorElevation,
         Stat::CursorPosition,
+        Stat::HeapCommitted,
+        Stat::HeapTotal,
+        Stat::HeapInUse,
     ];
 
     /// The node's names from the root's children down.
@@ -45,6 +51,9 @@ impl Stat {
             Stat::EntityOther => &["EntityCount", "Other"],
             Stat::CursorElevation => &["Camera", "Cursor", "Elevation"],
             Stat::CursorPosition => &["Camera", "Cursor", "Position"],
+            Stat::HeapCommitted => &["Heap", "Committed"],
+            Stat::HeapTotal => &["Heap", "Total"],
+            Stat::HeapInUse => &["Heap", "InUse"],
         }
     }
 }
@@ -116,6 +125,47 @@ pub(super) fn set(lua: &Lua, stat: Stat, v: f64) -> LuaResult<()> {
     }
 }
 
+/// Sets `stat`'s value to the string `value()` makes if `key` (what the
+/// string is made from) changed.
+fn set_string(lua: &Lua, stat: Stat, key: f64, value: impl FnOnce() -> String) -> LuaResult<()> {
+    let mut nodes = nodes(lua)?;
+    let i = stat as usize;
+    if nodes.last[i] == Some(key) {
+        return Ok(());
+    }
+    nodes.last[i] = Some(key);
+    match &nodes.tables[i] {
+        Some(t) => t.raw_set("Value", value()),
+        None => Ok(()),
+    }
+}
+
+/// Bytes as moho writes its heap figures: megabytes to four significant
+/// figures, `M` after (`512.0M`, `315.3M`, `4.503M`: FAF probe
+/// `probe_engine_stats`).
+fn megabytes(bytes: u64) -> String {
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    match mb {
+        m if m < 10.0 => format!("{m:.3}M"),
+        m if m < 100.0 => format!("{m:.2}M"),
+        m if m < 1000.0 => format!("{m:.1}M"),
+        m => format!("{m:.0}M"),
+    }
+}
+
+/// `Heap` / `Committed`, `Total` (FAF's session logger) and `InUse`
+/// (AI-Uveso's hook: its report's `%s` raises without it or `Reserved`):
+/// moho's own heap figures; ours are all the process's resident memory
+/// (the status bar's RAM figure), the nearest true number we have.
+/// `Reserved` (address space) is left out.
+/// Nothing is written while the OS doesn't report it.
+pub(super) fn update_heap(lua: &Lua) -> LuaResult<()> {
+    let Some(bytes) = memory_stats::memory_stats().map(|m| m.physical_mem as u64) else { return Ok(()) };
+    set_string(lua, Stat::HeapCommitted, bytes as f64, || megabytes(bytes))?;
+    set_string(lua, Stat::HeapTotal, bytes as f64, || megabytes(bytes))?;
+    set_string(lua, Stat::HeapInUse, bytes as f64, || megabytes(bytes))
+}
+
 /// The sim's entity counts (`EntityCount`), from the latest snapshot.
 pub(super) fn set_counts(lua: &Lua, c: &crate::engine::snapshot::EngineCounts) -> LuaResult<()> {
     set(lua, Stat::EntityUnit, c.units.into())?;
@@ -154,5 +204,18 @@ pub(super) fn update_cursor(lua: &Lua) -> LuaResult<()> {
     match &nodes.tables[Stat::CursorPosition as usize] {
         Some(t) if moved => t.raw_set("Value", format!("x={:.2},y={:.2},z={:.2}", p.x, p.y, p.z)),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn megabytes_read_as_moho_writes_them() {
+        let mb = |m: f64| super::megabytes((m * 1024.0 * 1024.0) as u64);
+        assert_eq!(mb(512.0), "512.0M");
+        assert_eq!(mb(315.3), "315.3M");
+        assert_eq!(mb(18.21), "18.21M");
+        assert_eq!(mb(4.503), "4.503M");
+        assert_eq!(mb(2048.0), "2048M");
     }
 }
