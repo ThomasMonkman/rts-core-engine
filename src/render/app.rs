@@ -167,8 +167,14 @@ impl ApplicationHandler<UserEvent> for App {
                 s.apply_visibility();
                 return;
             }
-            // The OS releases a confined cursor when the window loses focus.
-            WindowEvent::Focused(true) => s.apply_cursor_clip(),
+            // The OS releases a confined cursor when the window loses focus,
+            // and the cursor image is set again (another app's may show).
+            WindowEvent::Focused(true) => {
+                s.apply_cursor_clip();
+                s.os_cursor = None;
+            }
+            // Back over the window: its cursor is set again.
+            WindowEvent::CursorEntered { .. } => s.os_cursor = None,
             // Moved to a screen of another density (a Resized follows).
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 s.scale_factor = *scale_factor as f32;
@@ -177,7 +183,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // entered an output: pace by its refresh now.
                 s.pace_main();
                 // The cursor image is remade at the new size.
-                s.os_cursor = rts_core_engine::ui::cursor::Wanted::System;
+                s.os_cursor = None;
             }
             // Onto another monitor: with a second head, its refresh paces
             // this window's frames too.
@@ -189,6 +195,11 @@ impl ApplicationHandler<UserEvent> for App {
 
         // (egui's windows are on the main window only.)
         if !second {
+            match &event {
+                WindowEvent::CursorMoved { .. } => s.pointer_in_main = true,
+                WindowEvent::CursorLeft { .. } => s.pointer_in_main = false,
+                _ => {}
+            }
             let response = s.egui_state.on_window_event(&s.window, &event);
             if response.repaint {
                 s.window.request_redraw();
@@ -411,12 +422,13 @@ fn scale_rgba(rgba: &[u8], w: u32, h: u32, scale: f32) -> (Vec<u8>, u32, u32) {
 fn apply_cursor(s: &mut super::state::RenderState, event_loop: &ActiveEventLoop) {
     use rts_core_engine::ui::cursor::Wanted;
     use winit::window::{CursorIcon, CustomCursor};
-    if s.ui_cursor == s.os_cursor {
+    // Over an egui window its cursor shows (it may be a text or resize one).
+    if s.egui_owns_cursor || s.os_cursor.as_ref() == Some(&s.ui_cursor) {
         return;
     }
-    s.os_cursor = s.ui_cursor.clone();
+    let wanted = s.ui_cursor.clone();
     let scale = cursor_image_scale(&s.window, s.ui_scale());
-    let custom = match &s.os_cursor {
+    let custom = match &wanted {
         Wanted::Texture(t) => {
             let vfs = s.world.models_vfs();
             s.os_cursors
@@ -439,13 +451,54 @@ fn apply_cursor(s: &mut super::state::RenderState, event_loop: &ActiveEventLoop)
         }
         _ => None,
     };
+    // Not known what the window shows (focus back, the pointer back over
+    // it): winit on macOS skips a cursor equal to the one it holds, and only
+    // a changed one has AppKit rebuild the window's cursor rects (which puts
+    // it on screen with the pointer still), so another is set first.
+    let refresh = s.os_cursor.is_none();
     let second = s.second.as_ref().and_then(|h| h.window.as_ref());
     for window in std::iter::once(&s.window).chain(second) {
-        window.set_cursor_visible(s.os_cursor != Wanted::Hidden && s.spinning.is_none());
+        window.set_cursor_visible(wanted != Wanted::Hidden && s.spinning.is_none());
         match &custom {
-            Some(c) => window.set_cursor(c.clone()),
-            None => window.set_cursor(CursorIcon::Default),
+            Some(c) => {
+                if refresh {
+                    window.set_cursor(CursorIcon::Default);
+                }
+                window.set_cursor(c.clone());
+            }
+            None => {
+                if refresh {
+                    window.set_cursor(CursorIcon::Crosshair);
+                }
+                window.set_cursor(CursorIcon::Default);
+            }
         }
+    }
+    s.os_cursor = Some(wanted);
+}
+
+/// What egui-winit last did to the window's cursor, mirrored from its
+/// `State::set_cursor_icon` (egui-winit 0.34): it sets the cursor (and makes
+/// it visible) when the pointer is in the window and its icon differs from
+/// the one it set last, and forgets that one when the icon changes while
+/// the pointer is out, so the pointer coming back sets it again. FAF's
+/// cursor is set again after each of those, or egui's arrow stays until
+/// FAF's cursor next changes (e.g. after hovering a status-bar label, or
+/// leaving the window from one and coming back).
+#[derive(Default)]
+pub struct EguiCursor {
+    last: Option<egui::CursorIcon>,
+}
+
+impl EguiCursor {
+    /// Whether egui-winit sets the window's cursor this frame, given where
+    /// the pointer is and the icon egui wants.
+    pub fn sets(&mut self, pointer_in_window: bool, icon: egui::CursorIcon) -> bool {
+        if self.last == Some(icon) {
+            return false;
+        }
+        self.last = pointer_in_window.then_some(icon);
+        pointer_in_window
     }
 }
 
@@ -648,9 +701,38 @@ fn exit_soon() {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScrollState, scale_rgba, wheel_notches};
+    use super::{EguiCursor, ScrollState, scale_rgba, wheel_notches};
     use winit::dpi::PhysicalPosition;
     use winit::event::{MouseScrollDelta, TouchPhase as T};
+
+    /// egui-winit sets the window's cursor once per icon change while the
+    /// pointer is in the window, and again when the pointer comes back if it
+    /// left with another icon showing: each time FAF's cursor must be set
+    /// again.
+    #[test]
+    fn egui_cursor_mirrors_when_egui_winit_sets_the_cursor() {
+        use egui::CursorIcon as C;
+        let mut e = EguiCursor::default();
+        // Not in the window yet: nothing set.
+        assert!(!e.sets(false, C::Default));
+        // In: egui sets its arrow once, not every frame.
+        assert!(e.sets(true, C::Default));
+        assert!(!e.sets(true, C::Default));
+        // Over a selectable label (I-beam) and back over the game: egui
+        // sets its arrow over FAF's cursor.
+        assert!(e.sets(true, C::Text));
+        assert!(e.sets(true, C::Default));
+        // Out with the arrow and back: egui leaves the cursor alone.
+        assert!(!e.sets(false, C::Default));
+        assert!(!e.sets(true, C::Default));
+        // Out from over a label: egui forgets, and sets its arrow on the
+        // way back in.
+        assert!(e.sets(true, C::Text));
+        assert!(!e.sets(false, C::Default));
+        assert!(!e.sets(false, C::Default));
+        assert!(e.sets(true, C::Default));
+        assert!(!e.sets(true, C::Default));
+    }
 
     /// Shift+wheel zooms (issue #8): macOS delivers it as a horizontal
     /// scroll, which still counts as the wheel; unshifted horizontal scroll

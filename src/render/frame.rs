@@ -291,7 +291,7 @@ fn spin_camera(s: &mut RenderState, pointer: Option<&crate::render::camera::View
             }
             s.apply_cursor_clip();
             let _ = s.window.set_cursor_position(winit::dpi::PhysicalPosition::new(at.0, at.1));
-            s.window.set_cursor_visible(s.os_cursor != rts_core_engine::ui::cursor::Wanted::Hidden);
+            s.window.set_cursor_visible(s.os_cursor != Some(rts_core_engine::ui::cursor::Wanted::Hidden));
         }
     }
 }
@@ -2089,6 +2089,14 @@ pub fn render_frame(s: &mut RenderState) {
     drop(debug);
     let _ = egui_span;
 
+    // egui-winit sets the window's cursor (and shows it) whenever its icon
+    // changes or the pointer comes back into the window: FAF's cursor is
+    // then set again after the frame (`app.rs`), unless the pointer is over
+    // an egui window.
+    if s.egui_cursor.sets(s.pointer_in_main, full_output.platform_output.cursor_icon) {
+        s.os_cursor = None;
+    }
+    s.egui_owns_cursor = s.egui_ctx.egui_wants_pointer_input();
     s.egui_state
         .handle_platform_output(&s.window, full_output.platform_output);
 
