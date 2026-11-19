@@ -1947,6 +1947,55 @@ fn construction(c: &mut Criterion) {
     g.finish();
 }
 
+/// `CAiBrain:CanBuildStructureAt` in a busy game: 400 tanks with 5 queued
+/// moves each (2000 commands) and 50 engineers with 4 queued builds each.
+fn placement(c: &mut Criterion) {
+    use rts_core_engine::test_data::{FA_PATH, INIT_LUA_PATH};
+    if !rts_core_engine::test_data::require_game("placement benches") {
+        return;
+    }
+    let mut engine = rts_core_engine::engine::Engine::new(INIT_LUA_PATH, FA_PATH, std::sync::Arc::new(std::sync::Mutex::new(rts_core_engine::debug_ui::DebugUiState::new()))).expect("engine");
+    let session = rts_core_engine::engine::session::SessionConfig { ticks: Some(0), create_initial_units: false, ai: false, ..Default::default() };
+    engine.start(&session).expect("session");
+    engine
+        .sim_lua()
+        .load(
+            "for i = 0, 399 do
+                 local x, z = 200 + math.mod(i, 20) * 3, 200 + math.floor(i / 20) * 3
+                 local t = CreateUnitHPR('uel0201', 'ARMY_1', x, GetTerrainHeight(x, z), z, 0, 0, 0)
+                 for k = 1, 5 do IssueMove({t}, {x + k, GetTerrainHeight(x, z), z + 40}) end
+             end
+             for i = 0, 49 do
+                 local x, z = 380 + math.mod(i, 10) * 2, 320 + math.floor(i / 10) * 2
+                 local e = CreateUnitHPR('uel0105', 'ARMY_1', x, GetTerrainHeight(x, z), z, 0, 0, 0)
+                 for k = 0, 3 do
+                     local bx, bz = 300.5 + math.mod(i, 10) * 8, 400.5 + (math.floor(i / 10) * 4 + k) * 4
+                     IssueBuildMobile({e}, {bx, GetTerrainHeight(bx, bz), bz}, 'ueb1101', {})
+                 end
+             end",
+        )
+        .exec()
+        .expect("setup");
+    let probe: LuaFunction = engine
+        .sim_lua()
+        .load(
+            "local brain = GetArmyBrain('ARMY_1')
+             return function()
+                 local n = 0
+                 for i = 0, 9 do
+                     local x, z = 500.5 + i * 6, 500.5
+                     if brain:CanBuildStructureAt('ueb1101', {x, GetTerrainHeight(x, z), z}) then n = n + 1 end
+                 end
+                 return n
+             end",
+        )
+        .eval()
+        .expect("probe");
+    let mut g = c.benchmark_group("placement");
+    g.bench_function("CanBuildStructureAt x10 (2000 moves, 200 queued builds)", |b| b.iter(|| black_box(probe.call::<u32>(()).unwrap())));
+    g.finish();
+}
+
 /// One full sim tick (`sim::tick::step`): 1000 waiting threads plus the sync
 /// beat (a Luau port of FAF's `ResetSyncTable` over its default sync tables).
 fn sim_tick(c: &mut Criterion) {
@@ -2493,5 +2542,5 @@ fn audio(c: &mut Criterion) {
     eprintln!("audio bench: {} cues active", e.active());
 }
 
-criterion_group!(benches, scripts, blueprints, mods, categories, rng, bounded_props, terrain, trig, scheduler, sim_tick, entities, spatial, economy, checksum, unit_stats, projectiles, projectile_collision, projectile_refusals, weapons, threat, movement, avoidance, effects, attachments, intel, nav, snapshot, poses, models, map_render, manipulators, transport, construction, lua_call_overhead, lua_table_shims, lua_api, lua_interrupt, interface, movies, audio);
+criterion_group!(benches, scripts, blueprints, mods, categories, rng, bounded_props, terrain, trig, scheduler, sim_tick, entities, spatial, economy, checksum, unit_stats, projectiles, projectile_collision, projectile_refusals, weapons, threat, movement, avoidance, effects, attachments, intel, nav, snapshot, poses, models, map_render, manipulators, transport, construction, placement, lua_call_overhead, lua_table_shims, lua_api, lua_interrupt, interface, movies, audio);
 criterion_main!(benches);

@@ -120,6 +120,14 @@ fn with_skirts<R>(lua: &Lua, f: impl FnOnce(&Skirts) -> R) -> LuaResult<R> {
     Ok(f(cache.0.get().expect("skirts")))
 }
 
+/// Each unit blueprint's [`Placement`] read so far, by lowercase id. Not
+/// saved in keyframes, like [`SkirtCache`]: filling it only reads blueprint
+/// fields (no Lua objects are made), so a loaded game refilling it plays
+/// the same.
+#[derive(Default)]
+pub struct PlacementCache(std::cell::RefCell<std::collections::BTreeMap<String, std::rc::Rc<Placement>>>);
+crate::engine::api::blueprints::derived_cache!(PlacementCache);
+
 /// Blueprint `bp`'s build skirt relative to its position (x0, z0, x1, z1),
 /// if it is a unit blueprint.
 pub fn skirt_of(lua: &Lua, bp: &str) -> LuaResult<Option<[f32; 4]>> {
@@ -186,8 +194,29 @@ impl Placement {
         self.deposit.is_some()
     }
 
-    pub fn of(lua: &Lua, bp_id: &str) -> LuaResult<Self> {
-        let bp = entity::blueprint_table(lua, BlueprintKind::Unit, &bp_id.to_lowercase())?;
+    /// Blueprint `bp_id`'s placement rules, read from its blueprint once
+    /// and kept ([`PlacementCache`]): the AI asks `CanBuildStructureAt`
+    /// dozens of times a tick for a handful of blueprints. An unknown
+    /// blueprint's error isn't kept (it is raised on every call).
+    pub fn of(lua: &Lua, bp_id: &str) -> LuaResult<std::rc::Rc<Self>> {
+        let id: std::borrow::Cow<str> = if bp_id.bytes().any(|b| b.is_ascii_uppercase() || !b.is_ascii()) {
+            std::borrow::Cow::Owned(bp_id.to_lowercase())
+        } else {
+            std::borrow::Cow::Borrowed(bp_id)
+        };
+        if let Some(p) = lua.app_data_ref::<PlacementCache>().and_then(|c| c.0.borrow().get(&*id).cloned()) {
+            return Ok(p);
+        }
+        let p = std::rc::Rc::new(Self::read(lua, &id)?);
+        if let Some(c) = lua.app_data_ref::<PlacementCache>() {
+            c.0.borrow_mut().insert(id.into_owned(), p.clone());
+        }
+        Ok(p)
+    }
+
+    /// Reads blueprint `bp_id`'s (lowercase) placement rules.
+    fn read(lua: &Lua, bp_id: &str) -> LuaResult<Self> {
+        let bp = entity::blueprint_table(lua, BlueprintKind::Unit, bp_id)?;
         let half = half_footprint(&bp)?;
         let skirt = Skirt::of(&bp)?;
         let physics = bp.get::<Option<LuaTable>>("Physics")?;
@@ -373,14 +402,14 @@ pub fn can_place_at(lua: &Lua, army: Option<u32>, bp_id: &str, pos: FxVec3) -> L
 /// count beyond the asker's own isn't probed; ours counts only its own.
 pub fn reserved_sites(lua: &Lua, army: Option<u32>) -> LuaResult<Vec<(FxVec3, Skirt)>> {
     let Some(army) = army else { return Ok(Vec::new()) };
-    let sites: Vec<(FxVec3, String)> = {
-        let Some(commands) = lua.app_data_ref::<crate::engine::sim::command::Commands>() else { return Ok(Vec::new()) };
+    let Some(commands) = lua.app_data_ref::<crate::engine::sim::command::Commands>() else { return Ok(Vec::new()) };
+    let sites: Vec<(FxVec3, &str)> = {
         let w = entity::world(lua);
         commands
             .pending_builds()
             .filter(|c| c.units.first().and_then(|&u| w.get(u)).is_some_and(|e| e.army == Some(army)))
             .filter_map(|c| match (c.target, &c.blueprint) {
-                (crate::engine::sim::command::CommandTarget::Ground(p), Some(bp)) => Some((p, bp.clone())),
+                (crate::engine::sim::command::CommandTarget::Ground(p), Some(bp)) => Some((p, bp.as_str())),
                 _ => None,
             })
             .collect()
@@ -388,7 +417,7 @@ pub fn reserved_sites(lua: &Lua, army: Option<u32>) -> LuaResult<Vec<(FxVec3, Sk
     if sites.is_empty() {
         return Ok(Vec::new());
     }
-    with_skirts(lua, |skirts| sites.into_iter().filter_map(|(p, bp)| skirts.by_id.get(&bp).map(|s| (p, *s))).collect())
+    with_skirts(lua, |skirts| sites.into_iter().filter_map(|(p, bp)| skirts.by_id.get(bp).map(|s| (p, *s))).collect())
 }
 
 impl Skirt {
@@ -863,6 +892,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         })?;
     lua.set_app_data(BuildableCache::default());
     lua.set_app_data(SkirtCache::default());
+    lua.set_app_data(PlacementCache::default());
     lua_method!(lua, moho::AIBrain,
         /// Finds a place to build structure `structure` from the faction's build templates; `builder`
         /// (a unit, a bool or nil) is what to stay close to.
