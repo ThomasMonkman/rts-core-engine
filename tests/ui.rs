@@ -21,6 +21,21 @@ fn vm() -> Option<UserVm> {
     let engine = engine::Engine::new(INIT_LUA_PATH, FA_PATH, Arc::new(Mutex::new(DebugUiState::new()))).expect("engine");
     let vm = UserVm::with_cache(engine.vfs.clone(), engine.script_cache.clone()).expect("user vm");
     vm.init().expect("userInit.lua");
+    // A session always has a map and an army: FAF's game start
+    // (`gamemain.lua` OnFirstUpdate, the score panel) reads both and errors
+    // out half way without them. Tests that care set their own.
+    use rts_core_engine::engine::sync::SyncValue as V;
+    let s = |x: &str| V::Str(x.into());
+    vm.set_scenario(&V::Table(vec![
+        (s("name"), s("Test Map")),
+        (s("type"), s("skirmish")),
+        (s("size"), V::Table(vec![(V::Num(1.0), V::Num(1024.0)), (V::Num(2.0), V::Num(1024.0))])),
+        (s("PlayableAreaWidth"), V::Num(1024.0)),
+        (s("PlayableAreaHeight"), V::Num(1024.0)),
+        (s("Options"), V::Table(vec![(s("Share"), s("ShareUntilDeath")), (s("Victory"), s("sandbox"))])),
+    ]))
+    .expect("scenario");
+    vm.set_armies(&[rts_core_engine::engine::snapshot::ArmyInfo { index: 1, name: "ARMY_1".into(), nickname: "Player".into(), faction: 1, human: true, civilian: false }]).expect("armies");
     Some(vm)
 }
 
@@ -1313,6 +1328,8 @@ fn get_unit_by_id_finds_unselected_units() {
 #[test]
 fn chat_to_the_local_client_loops_back_without_a_network() {
     let Some(vm) = vm() else { return };
+    // No armies: the local client is an observer.
+    vm.set_armies(&[]).unwrap();
     let got: String = vm
         .lua()
         .load(
