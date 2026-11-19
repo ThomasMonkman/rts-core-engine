@@ -37,6 +37,14 @@ pub fn create<T: LuaUserData + mlua::MaybeSend + 'static>(
 
 /// Reads the native handle of a script object (`self` in a native method).
 pub fn handle<T: LuaUserData + Clone + 'static>(obj: &LuaTable) -> LuaResult<T> {
+    // Hot (every native method's `self`): borrow the userdata where the
+    // read leaves it, without making a registry reference to it first.
+    // Anything else takes the general path below, for its error.
+    match obj.raw_get::<Option<LuaUserDataRef<T>>>(C_OBJECT) {
+        Ok(Some(h)) => return Ok(h.clone()),
+        Ok(None) => return Err(LuaError::runtime("expected an engine object (no _c_object)")),
+        Err(_) => {}
+    }
     match obj.raw_get::<LuaValue>(C_OBJECT)? {
         LuaValue::UserData(ud) => Ok(ud.borrow::<T>()?.clone()),
         _ => Err(LuaError::runtime("expected an engine object (no _c_object)")),
