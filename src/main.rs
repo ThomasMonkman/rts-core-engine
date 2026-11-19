@@ -115,6 +115,8 @@ fn main() -> std::process::ExitCode {
         print!("{}", cli::LICENSE);
         return std::process::ExitCode::SUCCESS;
     }
+    // Before any Lua VM: level 2's zones are chosen as functions register.
+    rts_core_engine::engine::tracy::set_level(cli.tracy_level);
     if cli.enable_disk_watch {
         rts_core_engine::engine::disk_watch::enable();
     }
@@ -269,7 +271,11 @@ fn main() -> std::process::ExitCode {
     };
     // Windowed runs attach a renderer through a snapshot channel; headless
     // runs don't create one, so the sim builds no snapshots.
-    let (sink, snapshots) = if headless {
+    let (sink, snapshots) = if headless && cli.headless_snapshots {
+        let (sink, rx, _) = engine::snapshot::channel();
+        std::thread::spawn(move || rx.into_iter().for_each(drop));
+        (Some(sink), None)
+    } else if headless {
         (None, None)
     } else {
         let (sink, rx, request) = engine::snapshot::channel();

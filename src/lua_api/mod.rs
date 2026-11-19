@@ -55,12 +55,9 @@ where
     A: FromLuaMulti + LuaArgs,
     R: IntoLuaMulti + LuaArgs,
 {
-    let func = lua.create_function(f)?;
-    if scope.is_empty() {
-        name_function(lua, &func, name)?;
-    } else {
-        name_function(lua, &func, &format!("{scope}.{name}"))?;
-    }
+    let full = if scope.is_empty() { name.to_string() } else { format!("{scope}.{name}") };
+    let func = create_function(lua, &full, f)?;
+    name_function(lua, &func, &full)?;
     let scope = if scope.is_empty() { Scope::Global } else { Scope::Table(Cow::Borrowed(scope)) };
     registry::record(lua, FnEntry { scope, name: Cow::Borrowed(name), params, args: A::param_types, rets: R::types, doc, status });
     if raw { target.raw_set(name, func) } else { target.set(name, func) }
@@ -101,9 +98,31 @@ where
     R: IntoLuaMulti + LuaArgs,
 {
     registry::record(lua, FnEntry { scope: Scope::Class(Cow::Borrowed(class)), name: Cow::Borrowed(name), params, args: A::param_types, rets: R::types, doc, status });
-    let func = lua.create_function(f)?;
-    name_function(lua, &func, &format!("{}:{name}", class::luau_name(class).unwrap_or(class)))?;
+    let full = format!("{}:{name}", class::luau_name(class).unwrap_or(class));
+    let func = create_function(lua, &full, f)?;
+    name_function(lua, &func, &full)?;
     crate::engine::api::moho::class_table(lua, class)?.raw_set(name, func)
+}
+
+/// `lua.create_function(f)`; at Tracy level 2 or more
+/// (`engine::tracy`), wrapped in a zone named `name` (its body and the
+/// conversion of what it returns). Below it, the bare function.
+fn create_function<A, R, F>(lua: &Lua, name: &str, f: F) -> LuaResult<LuaFunction>
+where
+    F: Fn(&Lua, A) -> LuaResult<R> + mlua::MaybeSend + 'static,
+    A: FromLuaMulti,
+    R: IntoLuaMulti,
+{
+    #[cfg(feature = "tracy")]
+    if crate::engine::tracy::on(2) {
+        let loc = crate::engine::tracy::location("engine fn", name);
+        return lua.create_function(move |lua, a: A| -> LuaResult<LuaMultiValue> {
+            let _zone = crate::engine::tracy::Zone::begin(loc);
+            f(lua, a)?.into_lua_multi(lua)
+        });
+    }
+    let _ = name;
+    lua.create_function(f)
 }
 
 unsafe extern "C" {
