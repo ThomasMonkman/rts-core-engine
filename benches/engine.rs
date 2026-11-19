@@ -534,6 +534,31 @@ fn weapons(c: &mut Criterion) {
             })
         });
     }
+    // Target searches with only friends about (a late game's bases and
+    // idle groups): 2000 units of one army packed as above, an enemy army
+    // far off, every weapon without a target and due to search.
+    {
+        let (mut world, mut ws) = battle(1000);
+        let ids: Vec<_> = world.iter().map(|e| e.id).collect();
+        for (i, &id) in ids.iter().enumerate() {
+            let (x, z) = if i % 2 == 0 { (300.0 + (i % 64) as f64 * 1.5, 300.0 + (i / 64) as f64 * 1.5) } else { (900.0, 900.0) };
+            world.set_position(id, rts_core_engine::engine::sim::math::FxVec3::from_f64(x, 0.0, z));
+            ws.get_mut(id, 1).max_radius = Fx::from_num(30);
+        }
+        let keys: Vec<_> = ws.iter().map(|w| (w.unit, w.index)).collect();
+        let mut out = Vec::new();
+        g.bench_function(BenchmarkId::new("friendly_search", 2000), |b| {
+            b.iter(|| {
+                for &(u, i) in &keys {
+                    let w = ws.get_mut(u, i);
+                    w.target = None;
+                    w.check_countdown = 0;
+                }
+                out.clear();
+                weapon::step_with(&mut ws, &world, None, None, None, &mut out, usize::MAX);
+            })
+        });
+    }
     // `range_for` (moho's `GetTargetWeapon`), per targeting unit per tick
     // in the movement stage: 2000 units of four weapons each, only the last
     // able to hit a land target, so each scans all four.
@@ -1947,6 +1972,55 @@ fn construction(c: &mut Criterion) {
     g.finish();
 }
 
+/// `CAiBrain:CanBuildStructureAt` in a busy game: 400 tanks with 5 queued
+/// moves each (2000 commands) and 50 engineers with 4 queued builds each.
+fn placement(c: &mut Criterion) {
+    use rts_core_engine::test_data::{FA_PATH, INIT_LUA_PATH};
+    if !rts_core_engine::test_data::require_game("placement benches") {
+        return;
+    }
+    let mut engine = rts_core_engine::engine::Engine::new(INIT_LUA_PATH, FA_PATH, std::sync::Arc::new(std::sync::Mutex::new(rts_core_engine::debug_ui::DebugUiState::new()))).expect("engine");
+    let session = rts_core_engine::engine::session::SessionConfig { ticks: Some(0), create_initial_units: false, ai: false, ..Default::default() };
+    engine.start(&session).expect("session");
+    engine
+        .sim_lua()
+        .load(
+            "for i = 0, 399 do
+                 local x, z = 200 + math.mod(i, 20) * 3, 200 + math.floor(i / 20) * 3
+                 local t = CreateUnitHPR('uel0201', 'ARMY_1', x, GetTerrainHeight(x, z), z, 0, 0, 0)
+                 for k = 1, 5 do IssueMove({t}, {x + k, GetTerrainHeight(x, z), z + 40}) end
+             end
+             for i = 0, 49 do
+                 local x, z = 380 + math.mod(i, 10) * 2, 320 + math.floor(i / 10) * 2
+                 local e = CreateUnitHPR('uel0105', 'ARMY_1', x, GetTerrainHeight(x, z), z, 0, 0, 0)
+                 for k = 0, 3 do
+                     local bx, bz = 300.5 + math.mod(i, 10) * 8, 400.5 + (math.floor(i / 10) * 4 + k) * 4
+                     IssueBuildMobile({e}, {bx, GetTerrainHeight(bx, bz), bz}, 'ueb1101', {})
+                 end
+             end",
+        )
+        .exec()
+        .expect("setup");
+    let probe: LuaFunction = engine
+        .sim_lua()
+        .load(
+            "local brain = GetArmyBrain('ARMY_1')
+             return function()
+                 local n = 0
+                 for i = 0, 9 do
+                     local x, z = 500.5 + i * 6, 500.5
+                     if brain:CanBuildStructureAt('ueb1101', {x, GetTerrainHeight(x, z), z}) then n = n + 1 end
+                 end
+                 return n
+             end",
+        )
+        .eval()
+        .expect("probe");
+    let mut g = c.benchmark_group("placement");
+    g.bench_function("CanBuildStructureAt x10 (2000 moves, 200 queued builds)", |b| b.iter(|| black_box(probe.call::<u32>(()).unwrap())));
+    g.finish();
+}
+
 /// One full sim tick (`sim::tick::step`): 1000 waiting threads plus the sync
 /// beat (a Luau port of FAF's `ResetSyncTable` over its default sync tables).
 fn sim_tick(c: &mut Criterion) {
@@ -2019,6 +2093,38 @@ fn lua_table_shims(c: &mut Criterion) {
             .eval::<LuaFunction>()
             .unwrap();
         g.bench_function(if shimmed { "shim" } else { "luau" }, |b| b.iter(|| chunk.call::<f64>(()).unwrap()));
+    }
+    g.finish();
+}
+
+/// Building a unit query's result list (`entity::objects_table`, behind
+/// `GetUnitsAroundPoint`, `GetListOfUnits`, ...) of N entity objects, against
+/// the per-entry mlua lookup it replaced (registry table, get, set per id).
+fn objects_table(c: &mut Criterion) {
+    use rts_core_engine::engine::api::{entity, moho, script_object};
+    let lua = Lua::new();
+    rts_core_engine::engine::lua::heap_snapshot::prepare(&lua).unwrap();
+    let objects = script_object::registry_table(&lua, "engine.entities").unwrap();
+    for id in 0..1000u32 {
+        objects.raw_set(id, lua.create_table().unwrap()).unwrap();
+    }
+    let mut g = c.benchmark_group("objects_table");
+    for n in [10u32, 100, 1000] {
+        let ids: Vec<u32> = (0..n).collect();
+        g.bench_with_input(BenchmarkId::new("raw", n), &ids, |b, ids| b.iter(|| entity::objects_table::<moho::Unit>(&lua, black_box(ids)).unwrap()));
+        g.bench_with_input(BenchmarkId::new("mlua per entry", n), &ids, |b, ids| {
+            b.iter(|| {
+                let t = lua.create_table_with_capacity(ids.len(), 0).unwrap();
+                let mut k = 0;
+                for &id in black_box(ids) {
+                    if let Some(o) = script_object::registry_table(&lua, "engine.entities").unwrap().raw_get::<Option<LuaTable>>(id).unwrap() {
+                        k += 1;
+                        t.raw_set(k, o).unwrap();
+                    }
+                }
+                t
+            })
+        });
     }
     g.finish();
 }
@@ -2368,6 +2474,102 @@ fn lua_api(c: &mut Criterion) {
     g.finish();
 }
 
+/// The small engine calls AI Lua makes most (the late-game profile's top
+/// accessors), each called 1000 times from Luau on 1000 units in 8 armies
+/// (4v4), so a sample's time / 1000 is the cost of one call.
+fn hot_accessors(c: &mut Criterion) {
+    use rts_core_engine::engine::api::army::ArmyHandle;
+    use rts_core_engine::engine::api::blueprints::BlueprintKind;
+    use rts_core_engine::engine::api::entity::EntityHandle;
+    use rts_core_engine::engine::lua::script_cache::ScriptCache;
+    use rts_core_engine::engine::sim::army::{Alliance, Armies, Army};
+    use rts_core_engine::engine::sim::entity::{EntityKind, EntityWorld};
+    use rts_core_engine::engine::sim::math::{FxQuat, FxVec3};
+    use rts_core_engine::engine::sim::threat::{unit_threat, Knowledge, ThreatKinds, ThreatMap};
+    use rts_core_engine::engine::vfs::Vfs;
+    use std::sync::{Arc, RwLock};
+
+    let vfs = Arc::new(RwLock::new(Vfs::new(Vec::new(), Vec::new()).unwrap()));
+    let lua = Lua::new();
+    lua.set_app_data(vfs.clone());
+    lua.set_app_data(Arc::new(ScriptCache::new(vfs)));
+    api::register_safe(&lua).unwrap();
+    let mut world = EntityWorld::default();
+    let ids: Vec<_> = (0..1000u32)
+        .map(|i| world.spawn(EntityKind::Unit, BlueprintKind::Unit, String::new(), Some(1 + i % 8), FxVec3::from_f64((i % 40) as f64 * 25.0, 0.0, (i / 40) as f64 * 40.0), FxQuat::IDENTITY))
+        .collect();
+    for &id in &ids {
+        world.get_mut(id).unwrap().unit.as_mut().unwrap().threat = unit_threat(Fx::from_num(1), Fx::from_num(3), Fx::ZERO, Fx::ZERO, ThreatKinds { land: true, ..Default::default() });
+    }
+    let mut armies = Armies::default();
+    for i in 1..=8u32 {
+        armies.list.push(Army { index: i, name: format!("ARMY_{i}"), ..Default::default() });
+    }
+    for a in 1..=8u32 {
+        for b in 1..=8u32 {
+            if a != b {
+                armies.set_alliance_one_way(a, b, if (a % 2) == (b % 2) { Alliance::Ally } else { Alliance::Enemy });
+            }
+        }
+    }
+    let mut map = ThreatMap::new(1024, 1024);
+    let brains: Vec<u32> = (1..=8).collect();
+    map.update(&world, 0, &brains, &|_, _| Knowledge::Detected);
+    lua.set_app_data(world);
+    lua.set_app_data(armies);
+    lua.set_app_data(map);
+    let make: LuaFunction = lua
+        .load(
+            "local cls = moho.unit_methods
+             for k, v in pairs(moho.entity_methods) do if type(k) == 'string' and cls[k] == nil then cls[k] = v end end
+             local mt = { __index = cls }
+             return function(h) return setmetatable({ _c_object = h }, mt) end",
+        )
+        .eval()
+        .unwrap();
+    let units = lua.create_table().unwrap();
+    for (i, &id) in ids.iter().enumerate() {
+        units.raw_set(i + 1, make.call::<LuaTable>(EntityHandle(id)).unwrap()).unwrap();
+    }
+    let brain: LuaTable = lua
+        .load("local h = ... return setmetatable({ _c_object = h }, { __index = moho.aibrain_methods })")
+        .call(ArmyHandle(1))
+        .unwrap();
+    let mut g = c.benchmark_group("hot_accessors x1000");
+    let cases: &[(&str, &str)] = &[
+        ("empty loop", "local x = u"),
+        ("GetPosition", "u:GetPosition()"),
+        ("GetPositionXYZ", "u:GetPositionXYZ()"),
+        ("IsDestroyed", "IsDestroyed(u)"),
+        ("BeenDestroyed", "u:BeenDestroyed()"),
+        ("GetArmy", "u:GetArmy()"),
+        ("GetEntityId", "u:GetEntityId()"),
+        ("IsUnitState", "u:IsUnitState('Building')"),
+        ("GetFractionComplete", "u:GetFractionComplete()"),
+        ("GetHealth", "u:GetHealth()"),
+        ("GetThreatAtPosition ring 0", "brain:GetThreatAtPosition(p, 0, true, 'AntiSurface')"),
+        ("GetThreatAtPosition ring 1", "brain:GetThreatAtPosition(p, 1, true, 'AntiSurface')"),
+        ("GetThreatAtPosition ring 1 overall army 2", "brain:GetThreatAtPosition(p, 1, true, 'Overall', 2)"),
+    ];
+    for (name, body) in cases {
+        let f: LuaFunction = lua
+            .load(format!(
+                "local units, brain = ...
+                 return function()
+                     for i = 1, 1000 do
+                         local u = units[i]
+                         local p = {{ (i % 40) * 25, 0, (i % 25) * 40 }}
+                         {body}
+                     end
+                 end"
+            ))
+            .call((units.clone(), brain.clone()))
+            .unwrap();
+        g.bench_function(*name, |b| b.iter(|| f.call::<()>(()).unwrap()));
+    }
+    g.finish();
+}
+
 /// The interface's per-frame work with FAF's Unit Manager open in the
 /// skirmish lobby (~3400 drawn controls, ~6000 live): the draw list
 /// (`UserVm::draw_list`, every rendered frame) and a mouse move's hit test.
@@ -2493,5 +2695,5 @@ fn audio(c: &mut Criterion) {
     eprintln!("audio bench: {} cues active", e.active());
 }
 
-criterion_group!(benches, scripts, blueprints, mods, categories, rng, bounded_props, terrain, trig, scheduler, sim_tick, entities, spatial, economy, checksum, unit_stats, projectiles, projectile_collision, projectile_refusals, weapons, threat, movement, avoidance, effects, attachments, intel, nav, snapshot, poses, models, map_render, manipulators, transport, construction, lua_call_overhead, lua_table_shims, lua_api, lua_interrupt, interface, movies, audio);
+criterion_group!(benches, scripts, blueprints, mods, categories, rng, bounded_props, terrain, trig, scheduler, sim_tick, entities, spatial, economy, checksum, unit_stats, projectiles, projectile_collision, projectile_refusals, weapons, threat, movement, avoidance, effects, attachments, intel, nav, snapshot, poses, models, map_render, manipulators, transport, construction, placement, lua_call_overhead, lua_table_shims, objects_table, lua_api, hot_accessors, lua_interrupt, interface, movies, audio);
 criterion_main!(benches);

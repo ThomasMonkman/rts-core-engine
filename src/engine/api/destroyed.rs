@@ -30,6 +30,10 @@ fn entity_alive(lua: &Lua, id: u32) -> bool {
 /// `BeenDestroyed`: `Destroy` has been called (moho reads the destroy-queued
 /// flag, 0x102746d0 tests +0x1b9).
 pub(crate) fn entity_destroy_queued(lua: &Lua, this: &LuaTable) -> LuaResult<bool> {
+    // Hot: an entity's handle borrowed in place (as `script_object::handle`).
+    if let Ok(Some(h)) = this.raw_get::<Option<LuaUserDataRef<EntityHandle>>>(C_OBJECT) {
+        return Ok(lua.app_data_ref::<EntityWorld>().and_then(|w| w.get(h.0).map(|e| e.destroyed)).unwrap_or(true));
+    }
     let LuaValue::UserData(ud) = this.raw_get::<LuaValue>(C_OBJECT)? else { return Ok(true) };
     let Ok(h) = ud.borrow::<EntityHandle>() else { return is_destroyed(lua, &LuaValue::Table(this.clone())) };
     Ok(lua.app_data_ref::<EntityWorld>().and_then(|w| w.get(h.0).map(|e| e.destroyed)).unwrap_or(true))
@@ -38,6 +42,14 @@ pub(crate) fn entity_destroy_queued(lua: &Lua, this: &LuaTable) -> LuaResult<boo
 /// True unless `v` is a live engine object (non-engine values count as destroyed).
 pub fn is_destroyed(lua: &Lua, v: &LuaValue) -> LuaResult<bool> {
     let LuaValue::Table(t) = v else { return Ok(true) };
+    // Hot (most calls are on units): an entity's handle borrowed in place
+    // (as `script_object::handle`); nil is no engine object; any other
+    // object takes the type checks below.
+    match t.raw_get::<Option<LuaUserDataRef<EntityHandle>>>(C_OBJECT) {
+        Ok(Some(h)) => return Ok(!entity_alive(lua, h.0)),
+        Ok(None) => return Ok(true),
+        Err(_) => {}
+    }
     let LuaValue::UserData(ud) = t.raw_get::<LuaValue>(C_OBJECT)? else { return Ok(true) };
     if let Ok(h) = ud.borrow::<EntityHandle>() {
         return Ok(!entity_alive(lua, h.0));

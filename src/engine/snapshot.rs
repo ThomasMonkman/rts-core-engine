@@ -1078,7 +1078,8 @@ pub struct SnapshotSink {
     sent_projectile_icons: usize,
     sent_vfs: bool,
     /// Clip paths seen so far (render-side numbering, not sim state).
-    clip_ids: std::collections::BTreeMap<String, u32>,
+    /// (Lookup only: the numbering is `clips`' order.)
+    clip_ids: std::collections::HashMap<String, u32>,
     clips: Vec<String>,
     sent_clips: usize,
     sent_effect_assets: usize,
@@ -1221,13 +1222,13 @@ pub fn build_where(
     out.clear();
     let keep = |e: &&crate::engine::sim::entity::Entity| !e.destroyed && drawn(e) && !stored(e) && pick(e);
     let all = world.as_slice();
-    if all.len() < VIEWS_PARALLEL_MIN {
+    if !parallel(all.len(), VIEWS_PARALLEL_MIN) {
         out.extend(all.iter().filter(keep).map(|e| view_of(e, structure)));
         return;
     }
     // Chunks in parallel, appended in id order.
     let chunks: Vec<Vec<EntityView>> = all
-        .par_chunks(2048)
+        .par_chunks(VIEWS_CHUNK)
         .map(|chunk| {
             let _s = crate::prof_span!("snapshot entities (worker)");
             chunk.iter().filter(keep).map(|e| view_of(e, structure)).collect()
@@ -1239,8 +1240,20 @@ pub fn build_where(
     }
 }
 
-/// Entities from which [`build_where`] splits across threads.
-const VIEWS_PARALLEL_MIN: usize = 16384;
+/// Entities from which [`build_where`] splits across threads, and how
+/// many each job takes. (A view is ~100 ns: a late game's ~6k entities were
+/// 0.6 ms serially, well past rayon's wake-up.)
+const VIEWS_PARALLEL_MIN: usize = 4096;
+const VIEWS_CHUNK: usize = 1024;
+
+/// Testing: every builder takes its serial path (`RTS_SNAPSHOT_CHECK`
+/// compares the parallel output against it).
+static FORCE_SERIAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `len` items are worth splitting across threads (from `min`).
+fn parallel(len: usize, min: usize) -> bool {
+    len >= min && !FORCE_SERIAL.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Entities that have hidden a bone (`HideBone`), so snapshots visit only
 /// those rather than every entity's cold half. Render bookkeeping: stale
@@ -1317,12 +1330,12 @@ pub fn manipulator_poses<'m>(
     // id-ordered list by owner gave, without the sort).
     // (owner, id) pairs, then each fetched in the parallel pass below: a
     // serial lookup per manipulator was most of this step.
+    let list_span = crate::prof_span!("snapshot manip list");
     let ids: Vec<crate::engine::sim::manipulator::ManipulatorId> = manips.owner_order().collect();
-    let list: Vec<&'m crate::engine::sim::manipulator::Manipulator> = if ids.len() >= POSES_PARALLEL_MIN {
-        ids.par_chunks(2048).flat_map_iter(|c| c.iter().filter_map(|&id| manips.get(id)).filter(|m| crate::engine::sim::manipulator::Manipulators::poses(m)).collect::<Vec<_>>()).collect()
-    } else {
-        ids.iter().filter_map(|&id| manips.get(id)).filter(|m| crate::engine::sim::manipulator::Manipulators::poses(m)).collect()
-    };
+    drop(list_span);
+    crate::prof_plot!("snapshot manipulators", ids.len());
+    // Each id fetched in the pass that builds its ops (below).
+    let posing = |id: &crate::engine::sim::manipulator::ManipulatorId| manips.get(*id).filter(|m| crate::engine::sim::manipulator::Manipulators::poses(m));
     // An op with its clip still a path (interned serially below).
     enum Pending<'a> {
         Ready(PoseOp),
@@ -1354,16 +1367,19 @@ pub fn manipulator_poses<'m>(
     };
     // (Thousands of units each with a few pods / rotators / clips: one
     // thread per chunk, merged in order.)
-    let pending: Vec<Vec<(u32, u32, Pending<'m>)>> = if list.len() >= POSES_PARALLEL_MIN {
-        list.par_chunks(512)
+    let ops_span = crate::prof_span!("snapshot manip ops");
+    let pending: Vec<Vec<(u32, u32, Pending<'m>)>> = if parallel(ids.len(), POSES_PARALLEL_MIN) {
+        ids.par_chunks(256)
             .map(|chunk| {
                 let _s = crate::prof_span!("snapshot poses (worker)");
-                chunk.iter().flat_map(&ops_for).collect()
+                chunk.iter().filter_map(posing).flat_map(|m| ops_for(&m)).collect()
             })
             .collect()
     } else {
-        vec![list.iter().flat_map(&ops_for).collect()]
+        vec![ids.iter().filter_map(posing).flat_map(|m| ops_for(&m)).collect()]
     };
+    drop(ops_span);
+    let _merge = crate::prof_span!("snapshot manip merge");
     out.reserve(pending.iter().map(Vec::len).sum());
     // Slaves of the owner being merged: (index in `out` it goes at, slave
     // id, dest, src). Resolved when the owner's run ends, from its other
@@ -1415,7 +1431,7 @@ pub fn manipulator_poses<'m>(
 const PLACEMENT_QUERIES_MAX: usize = 128;
 
 /// Manipulators from which [`manipulator_poses`] splits across threads.
-const POSES_PARALLEL_MIN: usize = 4096;
+const POSES_PARALLEL_MIN: usize = 1024;
 
 /// Gives each view its slice of `poses`: its manipulator ops (`ops`, sorted
 /// by owner) then its hidden bones (`hidden`, sorted by entity).
@@ -1467,10 +1483,24 @@ pub(crate) fn last_anchor(world: &EntityWorld, entity: u32, bone: Option<u32>) -
 /// and curves gathered serially in id order, so the output doesn't depend
 /// on the thread count. 63 armies of 1000 aircraft carry ~200k emitters:
 /// serially this was 18 ms a tick.
+#[cfg(test)]
 fn effect_views(
     lua: &mlua::Lua,
     world: &EntityWorld,
     p: &crate::engine::sim::presentation::Presentation,
+    out: &mut Vec<EffectView>,
+    curves: &mut Vec<EffectCurve>,
+) {
+    let beams = lua.app_data_ref::<crate::engine::api::beam::Beams>();
+    effect_views_with(world, p, beams.as_deref(), out, curves);
+}
+
+/// [`effect_views`] with the beams in hand (no Lua: runs beside the
+/// entity views on another thread).
+fn effect_views_with(
+    world: &EntityWorld,
+    p: &crate::engine::sim::presentation::Presentation,
+    beams: Option<&crate::engine::api::beam::Beams>,
     out: &mut Vec<EffectView>,
     curves: &mut Vec<EffectCurve>,
 ) {
@@ -1480,8 +1510,6 @@ fn effect_views(
     use rayon::prelude::*;
     out.clear();
     curves.clear();
-    let beams = lua.app_data_ref::<crate::engine::api::beam::Beams>();
-    let beams = beams.as_deref();
     let f3 = |v: FxVec3| [v.x.to_num::<f32>(), v.y.to_num::<f32>(), v.z.to_num::<f32>()];
     let view_at = |id: u32, e: &crate::engine::sim::presentation::Effect, pos: FxVec3, rot: FxQuat, ended: bool| -> (EffectView, Vec<EffectCurve>) {
         let r = [rot.x.to_num::<f32>(), rot.y.to_num::<f32>(), rot.z.to_num::<f32>(), rot.w.to_num::<f32>()];
@@ -1572,9 +1600,12 @@ fn effect_views(
         }
         (views, own_curves)
     };
+    let collect_span = crate::prof_span!("snapshot effects collect");
     let all: Vec<(&u32, &crate::engine::sim::presentation::Effect)> = p.effects().iter().map(|(k, e)| (k, &**e)).collect();
-    let parts: Vec<(Vec<EffectView>, Vec<EffectCurve>)> = if all.len() >= EFFECTS_PARALLEL_MIN {
-        all.par_chunks(1024)
+    drop(collect_span);
+    let build_span = crate::prof_span!("snapshot effects build");
+    let parts: Vec<(Vec<EffectView>, Vec<EffectCurve>)> = if parallel(all.len(), EFFECTS_PARALLEL_MIN) {
+        all.par_chunks(512)
             .map(|c| {
                 let _s = crate::prof_span!("snapshot effects (worker)");
                 chunk(c)
@@ -1583,6 +1614,8 @@ fn effect_views(
     } else {
         vec![chunk(&all)]
     };
+    drop(build_span);
+    let _merge = crate::prof_span!("snapshot effects merge");
     out.reserve(parts.iter().map(|(v, _)| v.len()).sum());
     for (views, own_curves) in parts {
         let base = curves.len() as u32;
@@ -1623,7 +1656,7 @@ fn effect_views(
 
 /// Effects from which [`effect_views`] splits the work across threads
 /// (rayon's wake-up is ~100 µs; a view is ~90 ns).
-const EFFECTS_PARALLEL_MIN: usize = 4096;
+const EFFECTS_PARALLEL_MIN: usize = 1024;
 
 /// `General.CommandCaps` of each blueprint as [`caps`] bits (read once,
 /// with the first snapshot).
@@ -2579,6 +2612,183 @@ fn debug_data(lua: &mlua::Lua, req: &DebugRequest, sink: &mut SnapshotSink) -> D
     out
 }
 
+/// What [`world_views`] builds: the pose ops by owner and hidden bones
+/// (scratch kept by the sink), the entity views and their pose slices.
+struct WorldViews {
+    ops: Vec<(u32, Pose)>,
+    hidden: Vec<(u32, u32)>,
+    entities: Vec<EntityView>,
+    poses: Vec<Pose>,
+}
+
+/// Numbers clip paths for the renderer: the sink's ids and paths. Exact
+/// path first (no allocation), then lowercased.
+fn intern_clip(clip_ids: &mut std::collections::HashMap<String, u32>, clips: &mut Vec<String>, path: &str) -> u32 {
+    if let Some(&i) = clip_ids.get(path) {
+        return i;
+    }
+    let lower = path.to_lowercase();
+    let i = match clip_ids.get(&lower) {
+        Some(&i) => i,
+        None => {
+            let i = clips.len() as u32;
+            clips.push(lower.clone());
+            clip_ids.insert(lower, i);
+            i
+        }
+    };
+    clip_ids.insert(path.to_owned(), i);
+    i
+}
+
+/// A snapshot's entity side: hidden and placed bones, manipulator pose
+/// ops (`clips` numbers clip paths), the views (props only when posed; the
+/// rest come in `props` when they change) and their poses. Reads no Lua,
+/// so it runs beside [`effect_views_with`]; within it the hidden bones,
+/// the manipulator ops and the views are built side by side too (the
+/// views of all props, then those not posed dropped: what picking only
+/// the posed ones gives, without waiting for the ops).
+fn world_views(
+    world: &EntityWorld,
+    owners: Option<&mut HiddenBoneOwners>,
+    manips: Option<&crate::engine::sim::manipulator::Manipulators>,
+    weapons: Option<&crate::engine::sim::weapon::Weapons>,
+    clips: (&mut std::collections::HashMap<String, u32>, &mut Vec<String>),
+    structure: Option<&crate::engine::sim::category::CategorySet>,
+    out: &mut WorldViews,
+) {
+    let WorldViews { ops, hidden, entities, poses } = out;
+    let mut placed = Vec::new();
+    let (clip_ids, clips) = clips;
+    rayon::join(
+        || {
+            rayon::join(
+                || match owners {
+                    Some(owners) => {
+                        let _s = crate::prof_span!("snapshot hidden bones");
+                        hidden_bones(world, owners, hidden, &mut placed);
+                        crate::prof_plot!("snapshot hidden owners", owners.0.len());
+                    }
+                    None => hidden.clear(),
+                },
+                || match manips {
+                    Some(m) => {
+                        let _s = crate::prof_span!("snapshot poses");
+                        manipulator_poses(m, weapons, world, |path| intern_clip(clip_ids, clips, path), ops);
+                    }
+                    None => ops.clear(),
+                },
+            )
+        },
+        || {
+            let _s = crate::prof_span!("snapshot entities");
+            build_where(world, structure, entities, |_| true);
+        },
+    );
+    crate::prof_plot!("snapshot hidden bones", hidden.len());
+    crate::prof_plot!("snapshot placed ops", placed.len());
+    let _s = crate::prof_span!("snapshot attach poses");
+    if !placed.is_empty() {
+        // After each owner's manipulator ops: both lists are by owner, so
+        // one merge (what a stable sort of the two gave).
+        let manip = std::mem::take(ops);
+        ops.reserve(manip.len() + placed.len());
+        let mut placed = placed.into_iter().peekable();
+        for op in manip {
+            while let Some(p) = placed.next_if(|p| p.0 < op.0) {
+                ops.push(p);
+            }
+            ops.push(op);
+        }
+        ops.extend(placed);
+    }
+    crate::prof_plot!("snapshot pose ops", ops.len());
+    // Props only when posed (their ops must attach to a view here).
+    let posed = |id: u32| ops.binary_search_by_key(&id, |(o, _)| *o).is_ok() || hidden.binary_search_by_key(&id, |(o, _)| *o).is_ok();
+    entities.retain(|v| v.kind != ViewKind::Prop || posed(v.id));
+    crate::prof_plot!("snapshot world slots", world.as_slice().len());
+    crate::prof_plot!("snapshot entity views", entities.len());
+    attach_poses(entities, ops, hidden, poses);
+    crate::prof_plot!("snapshot poses", poses.len());
+}
+
+/// [`world_views`] as it was built before it ran in parallel: one step
+/// after another, the props picked as the views are built
+/// (`RTS_SNAPSHOT_CHECK`'s reference).
+fn world_views_serial(
+    world: &EntityWorld,
+    owners: Option<&mut HiddenBoneOwners>,
+    manips: Option<&crate::engine::sim::manipulator::Manipulators>,
+    weapons: Option<&crate::engine::sim::weapon::Weapons>,
+    clips: (&mut std::collections::HashMap<String, u32>, &mut Vec<String>),
+    structure: Option<&crate::engine::sim::category::CategorySet>,
+    out: &mut WorldViews,
+) {
+    let WorldViews { ops, hidden, entities, poses } = out;
+    let mut placed = Vec::new();
+    match owners {
+        Some(owners) => hidden_bones(world, owners, hidden, &mut placed),
+        None => hidden.clear(),
+    }
+    let (clip_ids, clips) = clips;
+    match manips {
+        Some(m) => manipulator_poses(m, weapons, world, |path| intern_clip(clip_ids, clips, path), ops),
+        None => ops.clear(),
+    }
+    if !placed.is_empty() {
+        ops.extend(placed);
+        ops.sort_by_key(|(owner, _)| *owner);
+    }
+    let posed = |id: u32| ops.binary_search_by_key(&id, |(o, _)| *o).is_ok() || hidden.binary_search_by_key(&id, |(o, _)| *o).is_ok();
+    build_where(world, structure, entities, |e| e.kind != EntityKind::Prop || posed(e.id));
+    attach_poses(entities, ops, hidden, poses);
+}
+
+/// `RTS_SNAPSHOT_CHECK=1`: every snapshot's entity side and effects are
+/// built again serially and must match field for field (testing the
+/// parallel builders against the plain path).
+fn check_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RTS_SNAPSHOT_CHECK").is_ok_and(|v| v != "0"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_against_serial(
+    world: &EntityWorld,
+    owners: Option<&mut HiddenBoneOwners>,
+    manips: Option<&crate::engine::sim::manipulator::Manipulators>,
+    weapons: Option<&crate::engine::sim::weapon::Weapons>,
+    clips: (&mut std::collections::HashMap<String, u32>, &mut Vec<String>),
+    structure: Option<&crate::engine::sim::category::CategorySet>,
+    presentation: Option<&crate::engine::sim::presentation::Presentation>,
+    beams: Option<&crate::engine::api::beam::Beams>,
+    built: &WorldViews,
+    effects: &[EffectView],
+    curves: &[EffectCurve],
+) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CHECKED: AtomicU64 = AtomicU64::new(0);
+    FORCE_SERIAL.store(true, Ordering::Relaxed);
+    let mut serial = WorldViews { ops: Vec::new(), hidden: Vec::new(), entities: Vec::new(), poses: Vec::new() };
+    world_views_serial(world, owners, manips, weapons, clips, structure, &mut serial);
+    let (mut serial_effects, mut serial_curves) = (Vec::new(), Vec::new());
+    if let Some(p) = presentation {
+        effect_views_with(world, p, beams, &mut serial_effects, &mut serial_curves);
+    }
+    FORCE_SERIAL.store(false, Ordering::Relaxed);
+    let same = |what: &str, a: String, b: String| assert!(a == b, "snapshot check: {what} differ from the serial build");
+    same("pose ops", format!("{:?}", built.ops), format!("{:?}", serial.ops));
+    same("hidden bones", format!("{:?}", built.hidden), format!("{:?}", serial.hidden));
+    same("entity views", format!("{:?}", built.entities), format!("{:?}", serial.entities));
+    same("poses", format!("{:?}", built.poses), format!("{:?}", serial.poses));
+    same("effects", format!("{:?}", effects), format!("{:?}", serial_effects));
+    same("effect curves", format!("{:?}", curves), format!("{:?}", serial_curves));
+    let n = CHECKED.fetch_add(1, Ordering::Relaxed) + 1;
+    if n % 1000 == 0 {
+        tracing::info!(snapshots = n, entities = built.entities.len(), effects = effects.len(), "snapshot check: parallel build matches the serial one");
+    }
+}
+
 /// End of tick: offer a snapshot if a renderer is attached. `tick_time` is
 /// how long the tick took (for the renderer's status bar).
 pub fn publish(lua: &mlua::Lua, tick_time: std::time::Duration) {
@@ -2635,6 +2845,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
         }
         return;
     }
+    let head_span = crate::prof_span!("snapshot head");
     let request = sink.request.lock().map(|r| r.clone()).unwrap_or_default();
     // Who the snapshot shows the world to (fog of war), if anyone.
     let view = fog::view(lua, &request);
@@ -2642,6 +2853,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
     let structure = domain.as_ref().and_then(|d| d.named.get("STRUCTURE"));
     let mut snap = Snapshot { tick: sink.tick, sim_tick: crate::engine::api::sim_time::current_tick(lua), tick_ms: tick_time.as_secs_f32() * 1000.0, game_over: crate::engine::api::sim_time::has_ended(lua), ..Default::default() };
     // Props changed since the last delivered snapshot.
+    drop(head_span);
     let mut prop_ids = std::mem::take(&mut sink.pending_props);
     if let Some(mut w) = lua.app_data_mut::<EntityWorld>() {
         prop_ids.extend(w.take_prop_changes());
@@ -2649,51 +2861,47 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
         prop_ids.dedup();
     }
     if let Some(world) = lua.app_data_ref::<EntityWorld>() {
-        let mut hidden = std::mem::take(&mut sink.hidden);
-        let poses_span = crate::prof_span!("snapshot poses");
-        let mut placed = Vec::new();
-        match lua.app_data_mut::<HiddenBoneOwners>() {
-            Some(mut owners) => hidden_bones(&world, &mut owners, &mut hidden, &mut placed),
-            None => hidden.clear(),
-        }
-        let mut ops = std::mem::take(&mut sink.pose_ops);
-        if let Some(m) = lua.app_data_ref::<crate::engine::sim::manipulator::Manipulators>() {
-            let weapons = lua.app_data_ref::<crate::engine::sim::weapon::Weapons>();
-            let SnapshotSink { clip_ids, clips, .. } = &mut *sink;
-            // Exact path first (no allocation), then lowercased.
-            let intern = |path: &str| {
-                if let Some(&i) = clip_ids.get(path) {
-                    return i;
-                }
-                let lower = path.to_lowercase();
-                let i = match clip_ids.get(&lower) {
-                    Some(&i) => i,
-                    None => {
-                        let i = clips.len() as u32;
-                        clips.push(lower.clone());
-                        clip_ids.insert(lower, i);
-                        i
-                    }
-                };
-                clip_ids.insert(path.to_owned(), i);
-                i
-            };
-            manipulator_poses(&m, weapons.as_deref(), &world, intern, &mut ops);
-        } else {
-            ops.clear();
-        }
-        if !placed.is_empty() {
-            // After each owner's manipulator ops (a stable sort keeps them in order).
-            ops.extend(placed);
-            ops.sort_by_key(|(owner, _)| *owner);
-        }
-        let _ = poses_span;
+        let world: &EntityWorld = &world;
+        let mut owners = lua.app_data_mut::<HiddenBoneOwners>();
+        let manips = lua.app_data_ref::<crate::engine::sim::manipulator::Manipulators>();
+        let weapons = lua.app_data_ref::<crate::engine::sim::weapon::Weapons>();
+        let presentation = lua.app_data_ref::<crate::engine::sim::presentation::Presentation>();
+        let beams = lua.app_data_ref::<crate::engine::api::beam::Beams>();
+        let mut out = WorldViews { ops: std::mem::take(&mut sink.pose_ops), hidden: std::mem::take(&mut sink.hidden), entities: Vec::new(), poses: Vec::new() };
+        let (mut effects, mut curves) = (Vec::new(), Vec::new());
         {
-            let _s = crate::prof_span!("snapshot entities");
-            // Props only when posed (their ops must attach to a view here);
-            // the rest come in `props` when they change.
-            let posed = |id: u32| ops.binary_search_by_key(&id, |(o, _)| *o).is_ok() || hidden.binary_search_by_key(&id, |(o, _)| *o).is_ok();
-            build_where(&world, structure, &mut snap.entities, |e| e.kind != EntityKind::Prop || posed(e.id));
+            let SnapshotSink { clip_ids, clips, .. } = &mut *sink;
+            let (manips, weapons, presentation, beams) = (manips.as_deref(), weapons.as_deref(), presentation.as_deref(), beams.as_deref());
+            let mut owners = owners.as_deref_mut();
+            // The entity side and the effects read nothing of each other:
+            // built side by side (each splits further when large), so the
+            // sim thread doesn't wait for one after the other.
+            rayon::join(
+                || world_views(world, owners.as_deref_mut(), manips, weapons, (&mut *clip_ids, &mut *clips), structure, &mut out),
+                || {
+                    if let Some(p) = presentation {
+                        let _s = crate::prof_span!("snapshot effects");
+                        effect_views_with(world, p, beams, &mut effects, &mut curves);
+                    }
+                },
+            );
+            if check_enabled() {
+                check_against_serial(world, owners, manips, weapons, (clip_ids, clips), structure, presentation, beams, &out, &effects, &curves);
+            }
+        }
+        crate::prof_plot!("snapshot effects", effects.len());
+        crate::prof_plot!("snapshot effect curves", curves.len());
+        if let Some(p) = presentation.as_deref() {
+            snap.new_effect_assets = p.assets.iter().enumerate().skip(sink.sent_effect_assets).map(|(i, a)| (i as u32, a.clone())).collect();
+        }
+        snap.effects = effects;
+        snap.effect_curves = curves;
+        snap.entities = std::mem::take(&mut out.entities);
+        snap.poses = std::mem::take(&mut out.poses);
+        sink.pose_ops = out.ops;
+        sink.hidden = out.hidden;
+        {
+            let _b = crate::prof_span!("snapshot busy + props");
             if let Some(c) = lua.app_data_ref::<crate::engine::sim::command::Commands>() {
                 snap.busy.extend(c.busy_units());
                 snap.busy.sort_unstable();
@@ -2701,7 +2909,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
             }
             if !sink.sent_props {
                 let mut props = Vec::new();
-                build_where(&world, structure, &mut props, |e| e.kind == EntityKind::Prop);
+                build_where(world, structure, &mut props, |e| e.kind == EntityKind::Prop);
                 snap.props = Some(Arc::new(props));
             } else {
                 snap.prop_changes = prop_ids
@@ -2710,15 +2918,8 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
                     .collect();
             }
         }
-        attach_poses(&mut snap.entities, &ops, &hidden, &mut snap.poses);
-        sink.pose_ops = ops;
-        sink.hidden = hidden;
     }
-    if let (Some(world), Some(p)) = (lua.app_data_ref::<EntityWorld>(), lua.app_data_ref::<crate::engine::sim::presentation::Presentation>()) {
-        let _s = crate::prof_span!("snapshot effects");
-        effect_views(lua, &world, &p, &mut snap.effects, &mut snap.effect_curves);
-        snap.new_effect_assets = p.assets.iter().enumerate().skip(sink.sent_effect_assets).map(|(i, a)| (i as u32, a.clone())).collect();
-    }
+    let mid_span = crate::prof_span!("snapshot assets + armies");
     snap.new_clips = sink.clips.iter().enumerate().skip(sink.sent_clips).map(|(i, c)| (i as u32, c.clone())).collect();
     if let Some(t) = lua.app_data_ref::<Terrain>()
         && sink.terrain_version != Some(t.version) {
@@ -2787,6 +2988,8 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
             sink.sent_alliances = Some(armies.alliance_version());
         }
     }
+    drop(mid_span);
+    let pres_span = crate::prof_span!("snapshot splats + decals");
     if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
         snap.splats = std::mem::take(&mut p.fresh_splats)
             .into_iter()
@@ -2811,6 +3014,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
             snap.custom_names = Some(Arc::new(world.iter().filter(|e| !e.destroyed).filter_map(|e| Some((e.id, e.unit.as_deref()?.custom_name.clone()?))).collect()));
             sink.sent_custom_names = Some(p.custom_name_version);
         }
+        drop(pres_span);
         let _s = crate::prof_span!("snapshot sounds");
         // Nothing reads the shakes yet; don't let them pile up.
         p.camera_shakes.clear();
@@ -2839,6 +3043,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
                 .collect();
         }
     }
+    let tail_span = crate::prof_span!("snapshot placement");
     snap.placement = request
         .placement
         .iter()
@@ -2851,12 +3056,14 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
             (bp.clone(), *at, site, ok)
         })
         .collect();
+    drop(tail_span);
     snap.debug = {
         let _s = crate::prof_span!("snapshot debug + unit details");
         debug_data(lua, &request, &mut sink)
     };
     snap.debug.draw = crate::engine::api::debug_draw::current(lua);
     fog::apply(lua, &mut sink.fog, view, &mut snap);
+    let tail_span = crate::prof_span!("snapshot sync");
     let (terrain_version, blueprints) = (lua.app_data_ref::<Terrain>().map(|t| t.version), snap.blueprints.is_some());
     let full_props = snap.props.is_some();
     let (meshes, vfs) = (snap.new_meshes.last().map(|(i, _)| *i as usize + 1), snap.vfs.is_some());
@@ -2865,6 +3072,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
     let effect_assets = snap.new_effect_assets.last().map(|(i, _)| *i as usize + 1);
     let game_over = snap.game_over;
     snap.sync = lua.app_data_mut::<crate::engine::sync::PendingSync>().map(|mut p| std::mem::take(&mut p.0)).unwrap_or_default();
+    drop(tail_span);
     let _send = crate::prof_span!("snapshot send");
     sink.in_flight.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     snap.ticket = Some(Ticket(sink.in_flight.clone()));
@@ -3240,5 +3448,64 @@ mod decal_tests {
         p.add_decal(decal("Normals"));
         let out = ground_decals(&p);
         assert_eq!(out.iter().map(|d| d.cutoff).collect::<Vec<_>>(), [75.0, 30.0]);
+    }
+}
+
+#[cfg(test)]
+mod parallel_build_tests {
+    use super::*;
+    use crate::engine::api::blueprints::BlueprintKind;
+    use crate::engine::sim::manipulator::{ManipulatorKind, Manipulators, Rotator};
+    use crate::engine::sim::math::{Fx, FxQuat, FxVec3};
+
+    /// The entity side built in parallel (hidden bones, pose ops and views
+    /// side by side, props dropped after) is the serial build, field for
+    /// field: units, props posed and not, wrecks in a copied pose, bones
+    /// following other entities, past every parallel threshold.
+    #[test]
+    fn parallel_world_views_match_the_serial_build() {
+        let mut world = EntityWorld::default();
+        let mut ids = Vec::new();
+        for i in 0..6000u32 {
+            let (kind, bk) = if i % 3 == 0 { (EntityKind::Prop, BlueprintKind::Prop) } else { (EntityKind::Unit, BlueprintKind::Unit) };
+            let at = FxVec3 { x: Fx::from_num(i % 97), y: Fx::ZERO, z: Fx::from_num(i / 97) };
+            ids.push(world.spawn(kind, bk, String::new(), Some(1 + i % 4), at, FxQuat::IDENTITY));
+        }
+        let mut manips = Manipulators::default();
+        for (n, &id) in ids.iter().enumerate().filter(|(n, _)| n % 2 == 0) {
+            for k in 0..(1 + n as u32 % 3) {
+                let r = Rotator { bone: Some(k), axis: "y".into(), angle: Fx::from_num(k * 10 + n as u32 % 7), goal: None, speed: Fx::ZERO, accel: Fx::ZERO, target_speed: Fx::ZERO, spin: Fx::ZERO };
+                manips.add(id, ManipulatorKind::Rotator(r));
+            }
+        }
+        let mut owners = Vec::new();
+        for (n, &id) in ids.iter().enumerate().filter(|(n, _)| n % 7 == 1 || n % 11 == 3) {
+            let e = world.get_mut(id).unwrap();
+            if n % 7 == 1 {
+                e.cold.hidden_bones.insert(2);
+                e.cold.copied_pose = (0..3).map(|b| (b, (FxVec3 { x: Fx::from_num(b), y: Fx::ONE, z: Fx::ZERO }, FxQuat::IDENTITY))).collect();
+            } else {
+                // Following the next entity's origin, or a gone one's.
+                e.cold.bone_links.push((1, ids[(n + 1) % ids.len()], None));
+                e.cold.bone_links.push((4, u32::MAX - 5, None));
+            }
+            owners.push(id);
+        }
+        let build = |parallel: bool| {
+            let mut owners: HiddenBoneOwners = owners.iter().copied().collect();
+            let (mut clip_ids, mut clips) = (Default::default(), Vec::new());
+            let mut out = WorldViews { ops: Vec::new(), hidden: Vec::new(), entities: Vec::new(), poses: Vec::new() };
+            if parallel {
+                world_views(&world, Some(&mut owners), Some(&manips), None, (&mut clip_ids, &mut clips), None, &mut out);
+            } else {
+                FORCE_SERIAL.store(true, std::sync::atomic::Ordering::Relaxed);
+                world_views_serial(&world, Some(&mut owners), Some(&manips), None, (&mut clip_ids, &mut clips), None, &mut out);
+                FORCE_SERIAL.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+            format!("{:?}\n{:?}\n{:?}\n{:?}", out.ops, out.hidden, out.entities, out.poses)
+        };
+        let (a, b) = (build(true), build(false));
+        assert!(a.len() > 100_000, "a real build");
+        assert!(a == b, "parallel entity side differs from the serial build");
     }
 }

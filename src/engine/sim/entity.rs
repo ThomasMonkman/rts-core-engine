@@ -945,6 +945,13 @@ impl EntityWorld {
         ids.sort_unstable();
     }
 
+    /// Whether the XZ box [min, max] overlaps every unit grid cell: a grid
+    /// query for it visits exactly the units [`Entity::in_grid`] (any
+    /// order), so a pass over [`EntityWorld::units`] can stand in for it.
+    pub fn unit_grid_covered(&self, min_x: Fx, min_z: Fx, max_x: Fx, max_z: Fx) -> bool {
+        self.grid.covers_all(min_x, min_z, max_x, max_z)
+    }
+
     /// Each unit in the grid cells under the XZ box [min, max] (unfiltered,
     /// in no particular order: callers apply the exact test and mustn't
     /// depend on the order), without a buffer.
@@ -1370,6 +1377,12 @@ impl EntityWorld {
 impl Entity {
     pub fn position(&self) -> FxVec3 {
         self.position
+    }
+
+    /// Whether the spatial grid lists this entity (a live unit or prop):
+    /// what a query over every cell would visit.
+    pub fn in_grid(&self) -> bool {
+        self.grid_cell != NOT_INDEXED
     }
 
     /// The point of this unit's build skirt nearest `from`, world space (its

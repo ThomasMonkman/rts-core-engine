@@ -1023,8 +1023,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// and a killed unit's `NoCost` are read off the current order and
         /// the kill when asked ([`crate::engine::api::command::order_state`]),
         /// so nothing has to set them on every unit each tick.
-        IsUnitState = |lua, (this, state): (Obj<moho::Unit>, String)| {
-        let Some(index) = crate::engine::sim::unit_state::UnitStates::index(&state) else { return Ok(false) };
+        IsUnitState = |lua, (this, state): (Obj<moho::Unit>, LuaString)| {
+        // (The name read in place: no `String` made per call.)
+        let Some(index) = crate::engine::sim::unit_state::UnitStates::index(&state.to_str()?) else { return Ok(false) };
         if with_unit(lua, &this, |u| u.states.contains(index))? {
             return Ok(true);
         }

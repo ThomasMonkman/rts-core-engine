@@ -17,10 +17,14 @@ use crate::engine::sim::army::{Alliance, Armies};
 use crate::engine::sim::math::FxVec3;
 use crate::engine::sim::threat::{ThreatMap, ThreatType};
 
-fn threat_type(t: Option<String>) -> LuaResult<ThreatType> {
+fn threat_type(t: Option<LuaString>) -> LuaResult<ThreatType> {
+    // (Read in place: no `String` made per query.)
     match t {
         None => Ok(ThreatType::Overall),
-        Some(s) => ThreatType::parse(&s).ok_or_else(|| LuaError::runtime(format!("unknown threat type '{s}'"))),
+        Some(s) => {
+            let s = s.to_str()?;
+            ThreatType::parse(&s).ok_or_else(|| LuaError::runtime(format!("unknown threat type '{}'", &*s)))
+        }
     }
 }
 
@@ -89,14 +93,20 @@ fn query<R>(
         Some(x) => a == x && alliance(x) != Alliance::Ally,
         None => alliance(a) == Alliance::Enemy,
     };
-    Ok(f(&map, me, &counts))
+    // The map asks once per cell and army: answer the session's armies
+    // from a mask made once here, not an alliance-map lookup each time
+    // (any other index, as before).
+    let known = (armies.list.len() as u32).min(63);
+    let mask = (0..=known).filter(|&a| counts(a)).fold(0u64, |m, a| m | 1 << a);
+    let fast = |a: u32| if a <= known { mask >> a & 1 != 0 } else { counts(a) };
+    Ok(f(&map, me, &fast))
 }
 
 pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::AIBrain,
         /// Centre of the cell (plus `ring` neighbours) with the most threat (y = 0), and
         /// that threat; ties (and an empty map) go to the cell nearest the brain's start.
-        GetHighestThreatPosition = |lua, (brain, ring, _restriction, ty, army): (Obj<moho::AIBrain>, f64, Option<bool>, Option<String>, Option<u32>)| {
+        GetHighestThreatPosition = |lua, (brain, ring, _restriction, ty, army): (Obj<moho::AIBrain>, f64, Option<bool>, Option<LuaString>, Option<u32>)| {
             let ty = threat_type(ty)?;
             let ArmyHandle(me) = script_object::handle(&brain)?;
             let start = lua.app_data_ref::<Armies>().and_then(|a| a.get(me).and_then(|a| a.start)).unwrap_or_default();
@@ -107,7 +117,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::AIBrain,
         /// Threat of type `ty` (default overall) within `radius` threat-map cells of `pos`, from the
         /// brain's enemies (or only army `army`).
-        GetThreatAtPosition = |lua, (brain, pos, radius, _restriction, ty, army): (Obj<moho::AIBrain>, shapes::Vector, f64, Option<bool>, Option<String>, Option<u32>)| {
+        GetThreatAtPosition = |lua, (brain, pos, radius, _restriction, ty, army): (Obj<moho::AIBrain>, shapes::Vector, f64, Option<bool>, Option<LuaString>, Option<u32>)| {
             let (ty, p) = (threat_type(ty)?, position(&pos)?);
             let t = query(lua, &brain, army, |m, me, counts| m.threat_at(p, rings(radius), ty, me, counts))?;
             Ok(t.to_num::<f64>())
@@ -115,7 +125,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     )?;
     lua_method!(lua, moho::AIBrain,
         /// `{ {x, z, threat}, ... }` for cells with threat, highest threat first.
-        GetThreatsAroundPosition = |lua, (brain, pos, radius, _restriction, ty, army): (Obj<moho::AIBrain>, shapes::Vector, f64, Option<bool>, Option<String>, Option<u32>)| {
+        GetThreatsAroundPosition = |lua, (brain, pos, radius, _restriction, ty, army): (Obj<moho::AIBrain>, shapes::Vector, f64, Option<bool>, Option<LuaString>, Option<u32>)| {
             let (ty, p) = (threat_type(ty)?, position(&pos)?);
             let cells = query(lua, &brain, army, |m, me, counts| m.around(p, rings(radius), ty, me, counts))?;
             let out = lua.create_table_with_capacity(cells.len(), 0)?;
@@ -132,7 +142,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::AIBrain,
         /// Threat of type `ty` (default overall) along the line from `a` to `b`, from the brain's
         /// enemies (or only army `army`).
-        GetThreatBetweenPositions = |lua, (brain, a, b, _restriction, ty, army): (Obj<moho::AIBrain>, shapes::Vector, shapes::Vector, Option<bool>, Option<String>, Option<u32>)| {
+        GetThreatBetweenPositions = |lua, (brain, a, b, _restriction, ty, army): (Obj<moho::AIBrain>, shapes::Vector, shapes::Vector, Option<bool>, Option<LuaString>, Option<u32>)| {
             let (ty, a, b) = (threat_type(ty)?, position(&a)?, position(&b)?);
             let t = query(lua, &brain, army, |m, me, counts| m.between(a, b, ty, me, counts))?;
             Ok(t.to_num::<f64>())
@@ -141,7 +151,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::AIBrain,
         /// Threat the brain believes is at `pos` from the next map update on, losing `decay` x
         /// `threat` per update while positive (a negative amount stays and subtracts).
-        AssignThreatAtPosition = |lua, (brain, pos, threat, decay, ty): (Obj<moho::AIBrain>, shapes::Vector, f64, Option<f64>, Option<String>)| {
+        AssignThreatAtPosition = |lua, (brain, pos, threat, decay, ty): (Obj<moho::AIBrain>, shapes::Vector, f64, Option<f64>, Option<LuaString>)| {
             let ArmyHandle(me) = script_object::handle(&brain)?;
             let (ty, p) = (threat_type(ty)?, position(&pos)?);
             if let Some(mut m) = lua.app_data_mut::<ThreatMap>() {

@@ -210,9 +210,22 @@ pub struct Commands {
     /// by unit ([`Commands::cycle_ground_attacks`]).
     #[serde(default)]
     ground_fired: BTreeMap<EntityId, (CommandId, u64)>,
+    /// The live `BuildMobile` commands' ids (the keys of `map` whose kind
+    /// is `BuildMobile`): [`Commands::pending_builds`] visits these, not
+    /// every command. Kept in step where `map` gains or loses a command.
+    #[serde(default)]
+    builds: std::collections::BTreeSet<CommandId>,
 }
 
 impl Commands {
+    /// Adds command `c` (id `id`) to the map and the build index.
+    fn insert_command(&mut self, id: CommandId, c: Command) {
+        if c.kind == CommandKind::BuildMobile {
+            self.builds.insert(id);
+        }
+        self.map.insert(id, c);
+    }
+
     /// Re-indexes `unit` by its current command's kind, and notes a new
     /// current command as not yet dispatched.
     fn sync(&mut self, unit: EntityId) {
@@ -307,7 +320,7 @@ impl Commands {
         }
         // A command nobody received is done at once.
         if !members.is_empty() {
-            self.map.insert(id, Command { id, kind, target, blueprint, count, issued: members.len() as u32, units: members.clone(), formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count, patrol_home: false, gather: None });
+            self.insert_command(id, Command { id, kind, target, blueprint, count, issued: members.len() as u32, units: members.clone(), formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count, patrol_home: false, gather: None });
         }
         for u in members {
             self.sync(u);
@@ -367,7 +380,11 @@ impl Commands {
     /// Live `BuildMobile` commands (queued on some unit, current or not),
     /// in id order.
     pub fn pending_builds(&self) -> impl Iterator<Item = &Command> {
-        self.map.values().filter(|c| c.kind == CommandKind::BuildMobile)
+        debug_assert!(
+            self.builds.iter().copied().eq(self.map.values().filter(|c| c.kind == CommandKind::BuildMobile).map(|c| c.id)),
+            "build command index out of step"
+        );
+        self.builds.iter().filter_map(|id| self.map.get(id))
     }
 
     /// Done once no unit has it queued (or it never existed).
@@ -457,9 +474,11 @@ impl Commands {
     fn release(&mut self, unit: EntityId, id: CommandId) {
         if let Some(c) = self.map.get_mut(&id) {
             c.units.retain(|&u| u != unit);
-            if c.units.is_empty()
-                && let Some(f) = self.map.remove(&id).and_then(|c| c.focus) {
-                self.dropped_focus.push(f);
+            if c.units.is_empty() {
+                self.builds.remove(&id);
+                if let Some(f) = self.map.remove(&id).and_then(|c| c.focus) {
+                    self.dropped_focus.push(f);
+                }
             }
         }
     }
@@ -482,7 +501,7 @@ impl Commands {
         let id = self.next_id;
         self.next_id += 1;
         self.queues.entry(unit).or_default().push_front(id);
-        self.map.insert(id, Command { id, kind, target, blueprint, count, issued: 1, units: vec![unit], formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count, patrol_home: false, gather: None });
+        self.insert_command(id, Command { id, kind, target, blueprint, count, issued: 1, units: vec![unit], formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count, patrol_home: false, gather: None });
         self.sync(unit);
         id
     }
@@ -560,7 +579,7 @@ impl Commands {
         copy.id = new;
         copy.units = vec![unit];
         copy.issued = 1;
-        self.map.insert(new, copy);
+        self.insert_command(new, copy);
         if let Some(slot) = self.queues.get_mut(&unit).and_then(|q| q.iter_mut().find(|q| **q == id)) {
             *slot = new;
         }
@@ -683,7 +702,7 @@ impl Commands {
             }
             self.factory_queues.entry(f).or_default().push(id);
         }
-        self.map.insert(id, Command { id, kind, target, blueprint: None, count: 0, issued: 1, units: members, formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: 0, patrol_home: false, gather: None });
+        self.insert_command(id, Command { id, kind, target, blueprint: None, count: 0, issued: 1, units: members, formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: 0, patrol_home: false, gather: None });
         id
     }
 
