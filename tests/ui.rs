@@ -29,6 +29,31 @@ fn user_init_runs() {
     let Some(_vm) = vm() else { return };
 }
 
+/// `__EngineStats` has moho's `Frame` / `FPS` node, kept up by the frame
+/// loop: AI-Uveso's interface hook formats it as a number (`%02d`).
+#[test]
+fn engine_stats_has_the_frame_rate() {
+    let Some(vm) = vm() else { return };
+    let read = r#"
+        for _, a in __EngineStats.Children do
+            if a.Name == 'Frame' then
+                for _, b in a.Children do
+                    if b.Name == 'FPS' then return b.Value end
+                end
+            end
+        end
+    "#;
+    let before: Option<f64> = vm.lua().load(read).eval().unwrap();
+    assert_eq!(before, Some(0.0));
+    for _ in 0..70 {
+        vm.frame(1.0 / 50.0).expect("frame");
+    }
+    let after: f64 = vm.lua().load(read).eval().unwrap();
+    assert_eq!(after, 50.0);
+    let s: String = vm.lua().load(format!("return string.format('FPS: %02d', (function() {read} end)())")).eval().unwrap();
+    assert_eq!(s, "FPS: 50");
+}
+
 /// FAF's in-game tabs label their exit `_Exit_to_Windows`: Windows
 /// keeps that; elsewhere it reads like the main menu's `_Exit`.
 #[test]

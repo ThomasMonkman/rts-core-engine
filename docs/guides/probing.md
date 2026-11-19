@@ -65,6 +65,17 @@ grep PROBE probe_fight.log
 
 Then diff the `PROBE` lines from the two logs.
 
+### All-AI games and mods
+
+A probe map's optional `launch_args.txt` adds to the game's command line. With
+`/probeai <key>[,<key>...]` the `ui_hooks` `SinglePlayerLaunch.lua` hook starts every army as that
+AI (a list is cycled by army) instead of the stock `/map` launch (army 1 human, the rest 'rush'),
+set up as ours sets up `--session --ai`: the same options with the lobby defaults (the mods' AI
+options included), factions UEF, Aeon, Cybran, Seraphim by army. `/probemod <uid>[,<uid>...]` runs
+those sim mods (they must be in the game's mods folder) instead of the game prefs' active mods.
+Give the probe scenario the real map's `name`: game code picks plans by it (FAF's AI has a plan
+only for `"Seton's Clutch"`).
+
 ### Interface probes
 
 A map folder's `ui_probe.lua` runs in the real game's user layer once its interface is up. In ours,

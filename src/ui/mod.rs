@@ -282,6 +282,14 @@ fn write_unit_basics(lua: &Lua, data: &LuaTable, u: &UnitInfo) -> LuaResult<(Lua
 #[derive(Default)]
 struct WrittenDetails(std::collections::BTreeMap<u32, crate::engine::snapshot::UnitDetail>);
 
+/// The frames counted towards `__EngineStats`' next `FPS` value
+/// ([`UserVm::frame`]). Interface only: never sim state.
+#[derive(Default)]
+struct FrameRate {
+    frames: u32,
+    elapsed: f32,
+}
+
 /// Units whose queue holds an order predicted at issue
 /// ([`UserVm::command_issued`]), by when (interface seconds): the sim's
 /// queue replaces it when it changes, or after 2 s if it never does.
@@ -1889,7 +1897,46 @@ impl UserVm {
         self.lua.set_app_data(world_draw::FrameDelta(dt));
         controls::on_frame(&self.lua, dt)?;
         movie::tick(&self.lua, dt)?;
+        self.update_frame_rate(dt)?;
         cursor::update(&self.lua)
+    }
+
+    /// `__EngineStats`' `Frame` / `FPS`: the frames shown over the last
+    /// second or so, written once that much time has gone by.
+    fn update_frame_rate(&self, dt: f32) -> LuaResult<()> {
+        let fps = {
+            let mut c = match self.lua.app_data_mut::<FrameRate>() {
+                Some(c) => c,
+                None => {
+                    self.lua.set_app_data(FrameRate::default());
+                    self.lua.app_data_mut::<FrameRate>().expect("just set")
+                }
+            };
+            c.frames += 1;
+            c.elapsed += dt.max(0.0);
+            if c.elapsed < 1.0 {
+                return Ok(());
+            }
+            let fps = c.frames as f32 / c.elapsed;
+            *c = FrameRate::default();
+            fps
+        };
+        let Some(stats) = self.lua.globals().raw_get::<Option<LuaTable>>("__EngineStats")? else { return Ok(()) };
+        let Some(children) = stats.raw_get::<Option<LuaTable>>("Children")? else { return Ok(()) };
+        for node in children.sequence_values::<LuaTable>() {
+            let node = node?;
+            if node.raw_get::<Option<String>>("Name")?.as_deref() != Some("Frame") {
+                continue;
+            }
+            let Some(entries) = node.raw_get::<Option<LuaTable>>("Children")? else { continue };
+            for entry in entries.sequence_values::<LuaTable>() {
+                let entry = entry?;
+                if entry.raw_get::<Option<String>>("Name")?.as_deref() == Some("FPS") {
+                    entry.raw_set("Value", fps.round())?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The cursor FAF wants (the renderer makes it the window's cursor).

@@ -1202,8 +1202,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             end
             return source + 1
         end
-        -- Engine-populated globals (/engine/Library.lua).
-        rawset(_G, '__EngineStats', rawget(_G, '__EngineStats') or { Children = {} })
+        -- Engine-populated globals (/engine/Library.lua). `__EngineStats` is
+        -- moho's stats tree (`{Name, Value, Children}` nodes); ours has the
+        -- frame rate, `Frame` / `FPS`, which the frame loop keeps up
+        -- (`UserVm::frame`). Mods format it (AI-Uveso's interface hook).
+        rawset(_G, '__EngineStats', rawget(_G, '__EngineStats') or {
+            Name = 'Root', Children = { { Name = 'Frame', Children = { { Name = 'FPS', Value = 0 } } } },
+        })
         rawset(_G, 'LaunchDir', rawget(_G, 'LaunchDir') or '')
         -- Input capture: controls that take all input (modal dialogs), last
         -- added first.
