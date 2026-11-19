@@ -226,6 +226,11 @@ pub(crate) fn bone_position(lua: &Lua, this: &LuaTable, bone: Option<LuaValue>) 
         Some(b) if !b.is_nil() => crate::engine::api::manipulator::resolve_bone(lua, id, b)?,
         _ => None,
     };
+    // No bone: the origin, as `pose::bone_world` gives it, without looking
+    // up the manipulators it would not read (plain `GetPosition` is hot).
+    if index.is_none() {
+        return Ok(world(lua).get(id).map(|e| e.position()).unwrap_or_default());
+    }
     Ok(world(lua).get(id).map(|e| posed_bone(lua, e, index).0).unwrap_or_default())
 }
 
