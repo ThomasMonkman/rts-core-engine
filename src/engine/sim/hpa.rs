@@ -18,9 +18,9 @@
 //! Connectivity comes for free: local regions joined through portal links
 //! form the map's connected components, which replace whole-map labelling.
 //!
-//! Changes are local: a changed cell dirties its sector, and a refresh
-//! rebuilds dirty sectors plus their neighbours (their shared borders'
-//! portals may have moved). Links name the twin's *cell*, never a node
+//! Changes are local: a changed cell dirties its sector, and its
+//! neighbour too when it lies on their shared border (the portals there may
+//! have moved); a refresh rebuilds the dirty sectors. Links name the twin's *cell*, never a node
 //! index, so sectors rebuild independently. Everything is integer and built
 //! in sector order (in parallel, merged by index), so the graph is the same
 //! on every machine.
@@ -164,49 +164,57 @@ impl Hier {
         self.sector_rect(self.sector_of(x, z))
     }
 
-    /// Cells in `r` changed.
+    /// The graph is stale (queries see none) until the next refresh, even
+    /// if no cell changed.
+    pub fn touch(&mut self) {
+        self.any_dirty = true;
+    }
+
+    /// Cells in `r` changed: their sectors need rebuilding, and so does a
+    /// neighbour when `r` reaches the cells along their shared border (the
+    /// only cells of a sector its neighbours' builds read: their portals).
     pub fn mark(&mut self, r: Rect) {
-        if r.x0 >= r.x1 || r.z0 >= r.z1 {
+        if r.x0 >= r.x1 || r.z0 >= r.z1 || r.x0 >= self.w || r.z0 >= self.h {
             return;
         }
         let (sx0, sz0) = (r.x0 / SECTOR, r.z0 / SECTOR);
         let (sx1, sz1) = ((r.x1 - 1) / SECTOR, (r.z1 - 1) / SECTOR);
         for sz in sz0..=sz1.min(self.sh - 1) {
             for sx in sx0..=sx1.min(self.sw - 1) {
-                self.dirty[(sz * self.sw + sx) as usize] = true;
-                self.any_dirty = true;
+                let s = (sz * self.sw + sx) as usize;
+                let sr = self.sector_rect(s);
+                self.dirty[s] = true;
+                if sx > 0 && r.x0 <= sr.x0 {
+                    self.dirty[s - 1] = true;
+                }
+                if sx + 1 < self.sw && r.x1 >= sr.x1 {
+                    self.dirty[s + 1] = true;
+                }
+                if sz > 0 && r.z0 <= sr.z0 {
+                    self.dirty[s - self.sw as usize] = true;
+                }
+                if sz + 1 < self.sh && r.z1 >= sr.z1 {
+                    self.dirty[s + self.sw as usize] = true;
+                }
             }
         }
+        self.any_dirty = true;
     }
 
-    /// Rebuilds the dirty sectors and their neighbours, then the components.
-    /// Returns the number of sectors rebuilt.
+    /// Rebuilds the sectors marked (`mark`), then the components. Sectors
+    /// not marked read only unchanged cells, so they are what a rebuild
+    /// would give. Returns the number of sectors rebuilt.
     pub fn refresh(&mut self, open: &(impl Fn(u32, u32) -> bool + Sync)) -> usize {
         use rayon::prelude::*;
         if !self.any_dirty {
             return 0;
         }
-        let mut rebuild = vec![false; self.sectors.len()];
-        for s in 0..self.sectors.len() {
-            if !self.dirty[s] {
-                continue;
-            }
-            let (sx, sz) = (s as u32 % self.sw, s as u32 / self.sw);
-            rebuild[s] = true;
-            if sx > 0 {
-                rebuild[s - 1] = true;
-            }
-            if sx + 1 < self.sw {
-                rebuild[s + 1] = true;
-            }
-            if sz > 0 {
-                rebuild[s - self.sw as usize] = true;
-            }
-            if sz + 1 < self.sh {
-                rebuild[s + self.sw as usize] = true;
-            }
+        self.any_dirty = false;
+        let list: Vec<usize> = (0..self.sectors.len()).filter(|&s| self.dirty[s]).collect();
+        if list.is_empty() {
+            // Touched but no cell changed: the graph already matches.
+            return 0;
         }
-        let list: Vec<usize> = (0..self.sectors.len()).filter(|&s| rebuild[s]).collect();
         let _s = crate::prof_span!("hpa rebuild sectors", sectors = list.len());
         let this = &*self;
         let built: Vec<Sector> = if list.len() >= PARALLEL_MIN {
@@ -221,9 +229,8 @@ impl Hier {
         };
         for (&s, sector) in list.iter().zip(built) {
             self.sectors[s] = sector;
+            self.dirty[s] = false;
         }
-        self.dirty.iter_mut().for_each(|d| *d = false);
-        self.any_dirty = false;
         self.node_base.clear();
         let mut total = 0u32;
         for sector in &self.sectors {
