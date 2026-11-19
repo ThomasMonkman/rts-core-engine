@@ -1203,11 +1203,27 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             return source + 1
         end
         -- Engine-populated globals (/engine/Library.lua). `__EngineStats` is
-        -- moho's stats tree (`{Name, Value, Children}` nodes); ours has the
-        -- frame rate, `Frame` / `FPS`, which the frame loop keeps up
-        -- (`UserVm::frame`). Mods format it (AI-Uveso's interface hook).
+        -- moho's stats tree (`{Name, Type, Value, Children}` nodes), with
+        -- only the nodes FAF and mods read, kept up by the engine
+        -- (`ui::engine_stats`): `Frame` / `FPS` (AI-Uveso's interface hook,
+        -- FAF's debug FPS panel), `EntityCount` (FAF's performance
+        -- tracking samples `Unit`), `Camera` / `Cursor` (FAF's
+        -- `GetMouseTerrainElevation`: the water depth indicator, the
+        -- context-based build templates), `Heap` (FAF's session logger, AI-Uveso),
+        -- `Instance Counts` (AI-Uveso's hook; only the classes ours has).
+        -- The cursor's are 0 until the mouse is first over a world view.
+        local function stat(name, type) return { Name = name, Type = type, Value = 0 } end
         rawset(_G, '__EngineStats', rawget(_G, '__EngineStats') or {
-            Name = 'Root', Children = { { Name = 'Frame', Children = { { Name = 'FPS', Value = 0 } } } },
+            Name = 'Root', Children = {
+                { Name = 'Frame', Children = { stat('FPS', 'Float') } },
+                { Name = 'EntityCount', Children = { stat('Prop', 'Integer'), stat('Unit', 'Integer'), stat('Projectile', 'Integer'), stat('Shield', 'Integer'), stat('Other', 'Integer') } },
+                { Name = 'Instance Counts', Children = {
+                    stat('class Moho::Entity', 'Integer'), stat('class Moho::Prop', 'Integer'), stat('class Moho::Unit', 'Integer'),
+                    stat('class Moho::CPlatoon', 'Integer'), stat('class Moho::CDecalHandle', 'Integer'), stat('class Moho::CLuaTask', 'Integer'),
+                } },
+                { Name = 'Heap', Children = { { Name = 'Committed', Type = 'String', Value = '0.000M' }, { Name = 'Total', Type = 'String', Value = '0.000M' }, { Name = 'InUse', Type = 'String', Value = '0.000M' } } },
+                { Name = 'Camera', Children = { { Name = 'Cursor', Children = { { Name = 'Position', Type = 'String', Value = 'x=0.00,y=0.00,z=0.00' }, stat('Elevation', 'Float') } } } },
+            },
         })
         rawset(_G, 'LaunchDir', rawget(_G, 'LaunchDir') or '')
         -- Input capture: controls that take all input (modal dialogs), last

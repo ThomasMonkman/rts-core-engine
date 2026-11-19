@@ -56,6 +56,15 @@ impl Platoons {
         id
     }
 
+    /// Live platoons (the armies' pools too).
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
     pub fn get(&self, id: PlatoonId) -> Option<&Platoon> {
         self.map.get(&id)
     }

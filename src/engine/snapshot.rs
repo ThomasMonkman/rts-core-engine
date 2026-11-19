@@ -1013,6 +1013,47 @@ pub struct Snapshot {
     /// The game is over (`EndGame` in an earlier tick): the sim no longer
     /// advances. The user layer's `SessionIsGameOver`, `NoteGameOver`.
     pub game_over: bool,
+    /// The sim's counts for the interface's `__EngineStats`.
+    pub engine_counts: EngineCounts,
+}
+
+/// The sim's counts for the interface's `__EngineStats` (moho's engine
+/// statistics tree), this tick: live entities by kind, the whole sim, not
+/// the view army's share. Display only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EngineCounts {
+    pub units: u32,
+    pub projectiles: u32,
+    pub props: u32,
+    /// Shield bubbles.
+    pub shields: u32,
+    /// Blueprint-less script entities (collision beams, flares, ...):
+    /// moho's `Other`.
+    pub other: u32,
+    /// AI platoons (`CPlatoon`).
+    pub platoons: u32,
+    /// Live decal handles (`CreateDecal`'s `CDecalHandle`s).
+    pub decals: u32,
+    /// The sim's live Lua threads (`ForkThread`: moho's `CLuaTask`).
+    pub lua_threads: u32,
+}
+
+impl EngineCounts {
+    /// Every live entity in `world`.
+    pub fn of(world: &EntityWorld) -> Self {
+        let mut c = EngineCounts::default();
+        for e in world.iter().filter(|e| !e.destroyed) {
+            let n = match e.kind {
+                EntityKind::Unit => &mut c.units,
+                EntityKind::Projectile => &mut c.projectiles,
+                EntityKind::Prop => &mut c.props,
+                EntityKind::Shield => &mut c.shields,
+                EntityKind::Script => &mut c.other,
+            };
+            *n += 1;
+        }
+        c
+    }
 }
 
 /// An army as the interface describes it (sent with the first snapshot).
@@ -2935,6 +2976,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
         snap.entities = std::mem::take(&mut out.entities);
         snap.poses = std::mem::take(&mut out.poses);
         sink.pose_ops = out.ops;
+        snap.engine_counts = EngineCounts::of(world);
         sink.hidden = out.hidden;
         {
             let _b = crate::prof_span!("snapshot busy + props");
@@ -3111,6 +3153,9 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
     drop(tail_span);
     let _send = crate::prof_span!("snapshot send");
     sink.in_flight.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    snap.engine_counts.platoons = lua.app_data_ref::<crate::engine::sim::platoon::Platoons>().map_or(0, |p| p.len() as u32);
+    snap.engine_counts.decals = lua.app_data_ref::<crate::engine::sim::presentation::Presentation>().map_or(0, |p| p.decals.len() as u32);
+    snap.engine_counts.lua_threads = lua.app_data_ref::<crate::engine::sim::scheduler::Scheduler>().map_or(0, |s| s.task_count() as u32);
     snap.ticket = Some(Ticket(sink.in_flight.clone()));
     // In lockstep with the consumer every snapshot goes (it waits for room).
     let sent = match &sink.consumer {

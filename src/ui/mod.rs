@@ -13,6 +13,7 @@
 pub mod clipboard;
 pub mod controls;
 pub mod cursor;
+mod engine_stats;
 pub mod fonts;
 pub mod movie;
 pub mod net_lobby;
@@ -1898,17 +1899,21 @@ impl UserVm {
         controls::on_frame(&self.lua, dt)?;
         movie::tick(&self.lua, dt)?;
         self.update_frame_rate(dt)?;
+        engine_stats::update_cursor(&self.lua)?;
+        engine_stats::update_lua_tasks(&self.lua)?;
         cursor::update(&self.lua)
     }
 
     /// `__EngineStats`' `Frame` / `FPS`: the frames shown over the last
-    /// second or so, written once that much time has gone by.
+    /// second or so, written once that much time has gone by; the `Heap`
+    /// figures then too (and on the first frame).
     fn update_frame_rate(&self, dt: f32) -> LuaResult<()> {
         let fps = {
             let mut c = match self.lua.app_data_mut::<FrameRate>() {
                 Some(c) => c,
                 None => {
                     self.lua.set_app_data(FrameRate::default());
+                    engine_stats::update_heap(&self.lua)?;
                     self.lua.app_data_mut::<FrameRate>().expect("just set")
                 }
             };
@@ -1921,22 +1926,14 @@ impl UserVm {
             *c = FrameRate::default();
             fps
         };
-        let Some(stats) = self.lua.globals().raw_get::<Option<LuaTable>>("__EngineStats")? else { return Ok(()) };
-        let Some(children) = stats.raw_get::<Option<LuaTable>>("Children")? else { return Ok(()) };
-        for node in children.sequence_values::<LuaTable>() {
-            let node = node?;
-            if node.raw_get::<Option<String>>("Name")?.as_deref() != Some("Frame") {
-                continue;
-            }
-            let Some(entries) = node.raw_get::<Option<LuaTable>>("Children")? else { continue };
-            for entry in entries.sequence_values::<LuaTable>() {
-                let entry = entry?;
-                if entry.raw_get::<Option<String>>("Name")?.as_deref() == Some("FPS") {
-                    entry.raw_set("Value", fps.round())?;
-                }
-            }
-        }
-        Ok(())
+        engine_stats::set(&self.lua, engine_stats::Stat::Fps, fps.round().into())?;
+        engine_stats::update_heap(&self.lua)
+    }
+
+    /// The sim's counts in `__EngineStats` (`EntityCount`, `Instance
+    /// Counts`), from the latest snapshot.
+    pub fn set_engine_counts(&self, counts: &crate::engine::snapshot::EngineCounts) -> LuaResult<()> {
+        engine_stats::set_counts(&self.lua, counts)
     }
 
     /// The cursor FAF wants (the renderer makes it the window's cursor).

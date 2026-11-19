@@ -4,6 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use mlua::prelude::*;
 use rts_core_engine::debug_ui::DebugUiState;
 use rts_core_engine::engine;
 use rts_core_engine::ui::controls::DrawItem;
@@ -52,6 +53,237 @@ fn engine_stats_has_the_frame_rate() {
     assert_eq!(after, 50.0);
     let s: String = vm.lua().load(format!("return string.format('FPS: %02d', (function() {read} end)())")).eval().unwrap();
     assert_eq!(s, "FPS: 50");
+}
+
+/// The node `group` / `name` of `__EngineStats` as `(Type, Value)`,
+/// found as FAF's readers find it (by name, any order).
+fn engine_stat(vm: &UserVm, path: &[&str]) -> (Option<String>, LuaValue) {
+    let names = path.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", ");
+    vm.lua()
+        .load(format!(
+            "local node = __EngineStats
+            for _, name in {{ {names} }} do
+                local found
+                for _, c in node.Children or {{}} do
+                    if c.Name == name then found = c break end
+                end
+                if not found then return nil, nil end
+                node = found
+            end
+            return node.Type, node.Value"
+        ))
+        .eval()
+        .unwrap()
+}
+
+/// `__EngineStats`' `EntityCount` holds the sim's counts, carried in the
+/// snapshot: FAF's performance tracking (`/lua/system/performance.lua`)
+/// samples `Unit` once a second, as read here with its own loop.
+#[test]
+fn engine_stats_count_the_sims_entities() {
+    if !rts_core_engine::test_data::require_game("UI tests") {
+        return;
+    }
+    let mut engine = engine::Engine::new(INIT_LUA_PATH, FA_PATH, Arc::new(Mutex::new(DebugUiState::new()))).expect("engine");
+    let session = engine::session::SessionConfig { ticks: Some(0), create_initial_units: false, ai: false, ..Default::default() };
+    engine.start(&session).expect("session");
+    let (sink, rx, _request) = engine::snapshot::channel();
+    engine.set_snapshot_sink(sink);
+    engine
+        .sim_lua()
+        .load("for i = 1, 3 do CreateUnitHPR('uel0201', 'ARMY_1', 400 + 5 * i, GetTerrainHeight(400, 640), 640, 0, 0, 0) end")
+        .exec()
+        .unwrap();
+    let mut counts = None;
+    for _ in 0..3 {
+        engine.tick().expect("tick");
+        while let Ok(mut snap) = rx.try_recv() {
+            drop(snap.ticket.take());
+            counts = Some(snap.engine_counts);
+        }
+    }
+    let counts = counts.expect("a snapshot");
+    assert_eq!(counts.units, 3);
+    assert!(counts.props > 0, "the map's props: {counts:?}");
+
+    let vm = UserVm::with_cache(engine.vfs.clone(), engine.script_cache.clone()).expect("user vm");
+    vm.init().expect("userInit.lua");
+    for name in ["Unit", "Projectile", "Prop", "Shield", "Other"] {
+        assert_eq!(engine_stat(&vm, &["EntityCount", name]), (Some("Integer".into()), LuaValue::Number(0.0)), "{name}");
+    }
+    vm.set_engine_counts(&counts).unwrap();
+    let unit_count: f64 = vm
+        .lua()
+        .load(
+            r#"
+            local engineStats = __EngineStats
+            local unitCount = 0
+            for k, stat in engineStats.Children do
+                if stat.Name == 'EntityCount' then
+                    for _, entry in stat.Children do
+                        if entry.Name == 'Unit' then
+                            unitCount = entry.Value
+                        end
+                    end
+                end
+            end
+            return unitCount
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(unit_count, 3.0);
+    assert_eq!(engine_stat(&vm, &["EntityCount", "Prop"]).1, LuaValue::Number(counts.props.into()));
+}
+
+/// `__EngineStats`' `Camera` / `Cursor`: over water `Position` is on the
+/// surface and `Elevation` the sea floor under it, as in the real game
+/// (FAF probe `probe_engine_stats` on Seton's: surface 17.5, elevation
+/// 4.75). FAF's `GetMouseTerrainElevation` (userInit.lua) and the water
+/// depth indicator's read (`/lua/ui/game/cursor/depth.lua`) get numbers.
+#[test]
+fn engine_stats_cursor_is_over_the_sea_floor() {
+    use glam::Vec3;
+    use rts_core_engine::engine::snapshot::TerrainView;
+    use rts_core_engine::ui::world_pick::PickView;
+    let Some(vm) = vm() else { return };
+    let elevation = "return GetMouseTerrainElevation()";
+    assert_eq!(vm.lua().load(elevation).eval::<f64>().unwrap(), 0.0, "a number before the mouse is over the world");
+    // A camera 50 above (10, 3, 20) looking straight down at a sea floor
+    // at 3 under water at 10; the mouse in the middle of the view.
+    let eye = Vec3::new(10.0, 53.0, 20.0);
+    let view = glam::camera::rh::view::look_at_mat4(eye, Vec3::new(10.0, 3.0, 20.0), Vec3::NEG_Z);
+    let proj = glam::camera::rh::proj::directx::perspective(1.0, 1.0, 1.0, 1000.0);
+    let terrain = TerrainView { width: 64, height: 64, heights: vec![3.0; 65 * 65], water: Some(10.0), map: None };
+    vm.set_pick_views(vec![PickView { camera: "WorldCamera".into(), origin: [0.0, 0.0], view_proj: proj * view, inv_view_proj: (proj * view).inverse(), screen: [200.0, 200.0], ui_scale: 2.0, target_y: 3.0, distance: 50.0, terrain: Some(Arc::new(terrain)) }]);
+    vm.lua().load("rawset(_G, '__engine_mouse_x', 50) rawset(_G, '__engine_mouse_y', 50)").exec().unwrap();
+    vm.frame(1.0 / 60.0).unwrap();
+    let got: f64 = vm.lua().load(elevation).eval().unwrap();
+    assert!((got - 3.0).abs() < 1e-4, "{got}");
+    assert_eq!(engine_stat(&vm, &["Camera", "Cursor", "Elevation"]).0.as_deref(), Some("Float"));
+    let (kind, position) = engine_stat(&vm, &["Camera", "Cursor", "Position"]);
+    assert_eq!(kind.as_deref(), Some("String"));
+    assert_eq!(position.as_string().map(|s| s.to_string_lossy()).as_deref(), Some("x=10.00,y=10.00,z=20.00"));
+    // depth.lua's read: every entry of the cursor node by name.
+    let depth: f64 = vm
+        .lua()
+        .load(
+            r#"
+            local cursor = { }
+            for _, a in __EngineStats.Children do
+                if a.Name == 'Camera' then
+                    for _, b in a.Children do
+                        if b.Name == 'Cursor' then
+                            for _, c in b.Children do
+                                cursor[c.Name] = c.Value
+                            end
+                            break
+                        end
+                    end
+                end
+            end
+            return cursor.Elevation
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!((depth - 3.0).abs() < 1e-4, "{depth}");
+}
+
+/// `__EngineStats`' `Heap` / `Committed`, `Total` and `InUse` are moho's strings
+/// (`315.3M`), here the process's memory, from the first frame: FAF's
+/// session logger (`/lua/system/logger.lua`) formats them with `%s`.
+#[test]
+fn engine_stats_heap_is_the_process_memory() {
+    let Some(vm) = vm() else { return };
+    vm.frame(1.0 / 60.0).unwrap();
+    for name in ["Committed", "Total", "InUse"] {
+        let (kind, value) = engine_stat(&vm, &["Heap", name]);
+        assert_eq!(kind.as_deref(), Some("String"));
+        let value = value.as_string().map(|s| s.to_string_lossy()).unwrap_or_default();
+        let mb: f64 = value.strip_suffix('M').and_then(|v| v.parse().ok()).unwrap_or_else(|| panic!("{name}: {value}"));
+        assert!(mb > 1.0, "{name}: {value}");
+    }
+    let line: String = vm
+        .lua()
+        .load(
+            r#"
+            local heapCommitted, heapTotal = 0, 0
+            for _, a in pairs(__EngineStats.Children) do
+                if a.Name == 'Heap' then
+                    for _, b in pairs(a.Children) do
+                        if b.Name == 'Committed' then heapCommitted = b.Value end
+                        if b.Name == 'Total' then heapTotal = b.Value end
+                    end
+                end
+            end
+            return string.format("Heap: %s / %s", heapTotal, heapCommitted)
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(line.starts_with("Heap: ") && line.ends_with('M') && !line.contains("0.000M"), "{line}");
+}
+
+/// AI-Uveso's interface hook (`hook/lua/ui/game/gamemain.lua`) reads
+/// `Instance Counts`, `Heap` and `Frame` and formats them once a game
+/// minute; its own code, cut from the mod, runs once here and gets
+/// numbers for every `%d` (missing classes stay its 0). Skipped without
+/// the mod (`../faf-vault/mods/AI-Uveso`).
+#[test]
+fn engine_stats_feed_ai_uvesos_report() {
+    let Ok(hook) = std::fs::read_to_string("../faf-vault/mods/AI-Uveso/hook/lua/ui/game/gamemain.lua") else {
+        eprintln!("skipped: no AI-Uveso in ../faf-vault");
+        return;
+    };
+    if !rts_core_engine::test_data::require_game("UI tests") {
+        return;
+    }
+    let mut engine = engine::Engine::new(INIT_LUA_PATH, FA_PATH, Arc::new(Mutex::new(DebugUiState::new()))).expect("engine");
+    let session = engine::session::SessionConfig { ticks: Some(0), create_initial_units: false, ai: false, ..Default::default() };
+    engine.start(&session).expect("session");
+    let (sink, rx, _request) = engine::snapshot::channel();
+    engine.set_snapshot_sink(sink);
+    engine
+        .sim_lua()
+        .load("CreateUnitHPR('uel0201', 'ARMY_1', 400, GetTerrainHeight(400, 640), 640, 0, 0, 0) ForkThread(function() WaitSeconds(100) end)")
+        .exec()
+        .unwrap();
+    let mut counts = None;
+    for _ in 0..3 {
+        engine.tick().expect("tick");
+        while let Ok(mut snap) = rx.try_recv() {
+            drop(snap.ticket.take());
+            counts = Some(snap.engine_counts);
+        }
+    }
+    let counts = counts.expect("a snapshot");
+    assert!(counts.lua_threads >= 1 && counts.platoons >= 1, "{counts:?}");
+    let vm = UserVm::with_cache(engine.vfs.clone(), engine.script_cache.clone()).expect("user vm");
+    vm.init().expect("userInit.lua");
+    vm.set_engine_counts(&counts).unwrap();
+    for _ in 0..70 {
+        vm.frame(1.0 / 50.0).unwrap();
+    }
+    // The thread's body from its counters to its report, run once, an
+    // hour and two minutes in.
+    let start = hook.find("local CTask, CTaskThread").expect("the hook's counters");
+    let end = hook.find(",Entity, Prop, CScriptObject, CTask, CTaskThread, CLuaTask, CDecalHandle, ReconBlip))").expect("the hook's report") + ",Entity, Prop, CScriptObject, CTask, CTaskThread, CLuaTask, CDecalHandle, ReconBlip))".len();
+    let body = hook[start..end].replacen("while true do", "do", 1);
+    let chunk = format!(
+        "local out = {{}}
+        local function SPEW(s) table.insert(out, s) end
+        local function GetGameTimeSeconds() return 3725.5 end
+        {body}
+        end end
+        return out[1], out[2]"
+    );
+    let (first, second): (String, String) = vm.lua().load(chunk).eval().expect("AI-Uveso's report");
+    eprintln!("{first}\n{second}");
+    assert!(first.contains("Unit: 01") && first.contains("FPS: 50") && !first.contains("Memory: 0.000M"), "{first}");
+    let entities = counts.units + counts.projectiles + counts.props + counts.shields + counts.other;
+    assert!(second.contains(&format!("Entity: {entities:05}")) && second.contains(&format!("Prop: {:05}", counts.props)), "{second}");
+    assert!(second.contains("CTask: 00000") && second.contains("ReconBlip: 00000"), "{second}");
 }
 
 /// FAF's in-game tabs label their exit `_Exit_to_Windows`: Windows
