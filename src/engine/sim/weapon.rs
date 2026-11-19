@@ -696,6 +696,108 @@ pub struct Weapons {
     /// Posed muzzles (and clip-posed barrel pitches) of the last
     /// [`Weapons::pose_muzzles`], reused.
     posed: Vec<Option<(FxVec3, Option<crate::engine::sim::pose::AimBase>)>>,
+    /// The armies in each unit grid cell this step, reused.
+    #[serde(skip)]
+    cells: ArmyCells,
+}
+
+/// Which armies have units in each unit grid cell, and which armies each
+/// is hostile to, as of this step (rebuilt before it; the world doesn't
+/// change during it). A unit search only takes a hostile unit, so a search
+/// whose cells hold none of its army's enemies can find nothing: it skips
+/// the walk over its candidates (most searches late in a game: a base's
+/// defences and idle units with only friends about).
+pub struct ArmyCells {
+    /// Per unit grid cell, a bit per army (armies 0..64) with a unit listed
+    /// in it.
+    masks: Vec<u64>,
+    /// The armies with a unit in some cell.
+    present: u64,
+    /// Per army in `present`, the armies in `present` it's hostile to.
+    enemies: [u64; 64],
+    /// A unit with an army of 64 or more is listed: no skipping.
+    off: bool,
+    /// Cell index buffer.
+    scratch: Vec<u32>,
+}
+
+impl Default for ArmyCells {
+    fn default() -> Self {
+        ArmyCells { masks: Vec::new(), present: 0, enemies: [0; 64], off: false, scratch: Vec::new() }
+    }
+}
+
+impl ArmyCells {
+    fn build(&mut self, world: &EntityWorld, armies: Option<&Armies>) {
+        let _s = crate::prof_span!("weapons army cells");
+        self.masks.clear();
+        self.present = 0;
+        self.off = false;
+        self.scratch.clear();
+        let (lo, hi) = (Fx::MIN, Fx::MAX);
+        world.unit_cells_in(lo, lo, hi, hi, &mut self.scratch);
+        let n = self.scratch.iter().copied().max().map_or(0, |m| m as usize + 1);
+        self.masks.resize(n, 0);
+        for &c in &self.scratch {
+            let mut m = 0u64;
+            for &id in world.unit_cell(c) {
+                if let Some(a) = world.get(id).and_then(|e| e.army) {
+                    if a >= 64 {
+                        self.off = true;
+                    } else {
+                        m |= 1 << a;
+                    }
+                }
+            }
+            self.masks[c as usize] = m;
+            self.present |= m;
+        }
+        let mut bits = self.present;
+        while bits != 0 {
+            let a = bits.trailing_zeros();
+            bits &= bits - 1;
+            let mut e = 0u64;
+            let mut others = self.present;
+            while others != 0 {
+                let b = others.trailing_zeros();
+                others &= others - 1;
+                if hostile_to(Some(a), Some(b), armies) {
+                    e |= 1 << b;
+                }
+            }
+            self.enemies[a as usize] = e;
+        }
+    }
+
+    /// The armies hostile to `army` that a search over the box could meet
+    /// (a superset of the hostile armies among its candidates), or `None`
+    /// when that isn't known.
+    fn enemies_in(&self, world: &EntityWorld, army: Option<u32>, (x0, z0, x1, z1): (Fx, Fx, Fx, Fx), scratch: &mut Vec<u32>) -> Option<u64> {
+        if self.off {
+            return None;
+        }
+        let Some(a) = army else { return Some(0) };
+        if a >= 64 || self.present & (1 << a) == 0 {
+            return None;
+        }
+        scratch.clear();
+        world.unit_cells_in(x0, z0, x1, z1, scratch);
+        let mut m = 0u64;
+        for &c in scratch.iter() {
+            m |= self.masks.get(c as usize).copied()?;
+        }
+        Some(m & self.enemies[a as usize])
+    }
+}
+
+/// Whether army `a`'s weapons treat army `b` as an enemy (the search's
+/// rule: no armies known, only other armies).
+fn hostile_to(a: Option<u32>, b: Option<u32>, armies: Option<&Armies>) -> bool {
+    match (a, b, armies) {
+        (Some(a), Some(b), Some(armies)) => armies.alliance(a, b) == Alliance::Enemy,
+        (Some(a), Some(b), None) => a != b,
+        _ => false,
+    }
 }
 
 /// Candidates moho's target search passes over (MohoEngine.dll 0x101c4ca0).
@@ -941,8 +1043,10 @@ pub fn step(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Armies>,
 /// ([`Terrain::blocks_fire`]); none, no test.
 pub fn step_with(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Armies>, intel: Option<&IntelGrids>, terrain: Option<&Terrain>, out: &mut Vec<WeaponEvent>, parallel_min: usize) {
     use rayon::prelude::*;
-    let Weapons { list, scratch, ordered, projectiles, tick, water, filters, .. } = weapons;
+    let Weapons { list, scratch, ordered, projectiles, tick, water, filters, cells, .. } = weapons;
     let (ordered, projectiles, tick, water, filters) = (&*ordered, &projectiles[..], *tick, *water, &*filters);
+    cells.build(world, armies);
+    let cells = &*cells;
     scratch.clear();
     scratch.resize(list.len(), [None; 3]);
     // Weapons that follow their unit's primary weapon run after the rest,
@@ -953,11 +1057,11 @@ pub fn step_with(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Arm
             .zip(scratch.par_iter_mut())
             .with_min_len(64)
             .filter(|(w, _)| !follows(w))
-            .for_each_init(|| (Vec::new(), crate::prof_span!("weapons advance (worker)")), |(buf, _), (w, ev)| *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, buf));
+            .for_each_init(|| (Vec::new(), crate::prof_span!("weapons advance (worker)")), |(buf, _), (w, ev)| *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, cells, buf));
     } else {
         let mut buf = Vec::new();
         for (w, ev) in list.iter_mut().zip(scratch.iter_mut()).filter(|(w, _)| !follows(w)) {
-            *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, &mut buf);
+            *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, cells, &mut buf);
         }
     }
     // Followers. The list is sorted by unit, then index: a unit's first
@@ -995,11 +1099,11 @@ pub fn step_with(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Arm
                 .zip(scratch.par_iter_mut())
                 .with_min_len(64)
                 .filter(|(w, _)| ready(w))
-                .for_each_init(|| (Vec::new(), crate::prof_span!("weapons follower (worker)")), |(buf, _), (w, ev)| *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, buf));
+                .for_each_init(|| (Vec::new(), crate::prof_span!("weapons follower (worker)")), |(buf, _), (w, ev)| *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, cells, buf));
         } else {
             let mut buf = Vec::new();
             for (w, ev) in list.iter_mut().zip(scratch.iter_mut()).filter(|(w, _)| ready(w)) {
-                *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, &mut buf);
+                *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, cells, &mut buf);
             }
         }
     }
@@ -1011,7 +1115,7 @@ pub fn step_with(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Arm
         for (i, (w, ev)) in list[start..end].iter_mut().zip(scratch[start..end].iter_mut()).enumerate() {
             if follows(w) {
                 w.primary_target = if i == 0 { None } else { primary };
-                *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, &mut buf);
+                *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, cells, &mut buf);
             }
             if i == 0 {
                 primary = entity_target(w);
@@ -1165,10 +1269,11 @@ fn advance(
     water: Option<Fx>,
     filters: &SearchFilters,
     terrain: Option<&Terrain>,
+    cells: &ArmyCells,
     buf: &mut Vec<EntityId>,
 ) -> [Option<WeaponEventKind>; 3] {
     let before = w.target;
-    let events = advance_target(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, buf);
+    let events = advance_target(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, cells, buf);
     if let Some(m) = w.retarget.as_deref_mut().filter(|_| w.target != before) {
         m.misses = 0;
         if w.target.is_some() && !m.ignored.is_empty() {
@@ -1192,6 +1297,7 @@ fn advance_target(
     water: Option<Fx>,
     filters: &SearchFilters,
     terrain: Option<&Terrain>,
+    cells: &ArmyCells,
     buf: &mut Vec<EntityId>,
 ) -> [Option<WeaponEventKind>; 3] {
     let mut events = [None; 3];
@@ -1242,11 +1348,7 @@ fn advance_target(
     // posed one, below).
     let frame = unit.bone_world_rotation(w.aim_bone);
     let army = unit.army;
-    let hostile = |other: Option<u32>| match (army, other, armies) {
-        (Some(a), Some(b), Some(armies)) => armies.alliance(a, b) == Alliance::Enemy,
-        (Some(a), Some(b), None) => a != b,
-        _ => false,
-    };
+    let hostile = |other: Option<u32>| hostile_to(army, other, armies);
     // Blueprint target restrictions.
     let allowed = |cat: Option<u32>| restrictions_allow(&w.only_allow, &w.disallow, cat);
     let water_targets = (w.above_water_targets_only, w.below_water_targets_only);
@@ -1515,6 +1617,7 @@ fn advance_target(
     if enabled && !order_reset && w.target.is_none() && !w.manual_fire && w.targets_projectiles && !holding_fire {
         // Projectiles move fast: searched every tick, nearest first (ties to
         // the lowest id).
+        let _search = crate::prof_span!("weapons search projectiles");
         let best = projectiles
             .iter()
             .filter(|v| projectile_ok(v) && range_of(v.position) == Reach::InRange)
@@ -1540,6 +1643,7 @@ fn advance_target(
             // Searches every `target_check_ticks` (a 0.5 s check: ticks 4, 9,
             // 14..., dev/probes probe_sight in FAF).
             w.check_countdown = w.target_check_ticks.max(1) - 1;
+            let _search = crate::prof_span!("weapons search units");
             // A moving shooter forgets the targets it gave up on (moho's
             // target task, MohoEngine.dll 0x101c5faf); the rest are passed
             // over (0x101c4f2e).
@@ -1631,8 +1735,20 @@ fn advance_target(
             // better than the best so far is passed over before the costly
             // checks (targetable, intel), which can't change the least.
             let mut best: Option<SearchKey> = None;
-            if !w.priorities.is_empty() {
+            // Only a hostile unit passes (`targetable`): with none in the
+            // box's cells the walk finds nothing, and a candidate of an army
+            // that isn't an enemy is passed over first.
+            let enemies = cells.enemies_in(world, army, (x0, z0, x1, z1), buf);
+            let enemy = |e: &crate::engine::sim::entity::Entity| match (enemies, e.army) {
+                (None, _) => true,
+                (Some(m), Some(b)) => b < 64 && m & (1 << b) != 0,
+                (Some(_), None) => false,
+            };
+            if !w.priorities.is_empty() && enemies != Some(0) {
                 world.for_each_unit_candidate(x0, z0, x1, z1, |id| {
+                    if !world.get(id).is_some_and(enemy) {
+                        return;
+                    }
                     let Some((k, e)) = key(id, best) else { return };
                     if passes(id, e) {
                         best = Some(k);

@@ -534,6 +534,31 @@ fn weapons(c: &mut Criterion) {
             })
         });
     }
+    // Target searches with only friends about (a late game's bases and
+    // idle groups): 2000 units of one army packed as above, an enemy army
+    // far off, every weapon without a target and due to search.
+    {
+        let (mut world, mut ws) = battle(1000);
+        let ids: Vec<_> = world.iter().map(|e| e.id).collect();
+        for (i, &id) in ids.iter().enumerate() {
+            let (x, z) = if i % 2 == 0 { (300.0 + (i % 64) as f64 * 1.5, 300.0 + (i / 64) as f64 * 1.5) } else { (900.0, 900.0) };
+            world.set_position(id, rts_core_engine::engine::sim::math::FxVec3::from_f64(x, 0.0, z));
+            ws.get_mut(id, 1).max_radius = Fx::from_num(30);
+        }
+        let keys: Vec<_> = ws.iter().map(|w| (w.unit, w.index)).collect();
+        let mut out = Vec::new();
+        g.bench_function(BenchmarkId::new("friendly_search", 2000), |b| {
+            b.iter(|| {
+                for &(u, i) in &keys {
+                    let w = ws.get_mut(u, i);
+                    w.target = None;
+                    w.check_countdown = 0;
+                }
+                out.clear();
+                weapon::step_with(&mut ws, &world, None, None, None, &mut out, usize::MAX);
+            })
+        });
+    }
     // `range_for` (moho's `GetTargetWeapon`), per targeting unit per tick
     // in the movement stage: 2000 units of four weapons each, only the last
     // able to hit a land target, so each scans all four.
