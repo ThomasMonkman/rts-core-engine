@@ -5,30 +5,25 @@ use mlua::prelude::*;
 use crate::engine::sim::scheduler::{ResumeOutcome, Scheduler, TaskId, Yield};
 use crate::lua_api::{FnEntry, LuaArgs, Scope, Status, lua_fn};
 
-/// Profiling builds (`--features lua-profile`, which implies `tracy`): each
-/// Lua thread resume is a Tracy zone named by the function the thread was
-/// forked with (`file:line`), inside the `LuaThreads` stage span, so a trace
-/// shows which scripts (AI managers, unit behaviours, ...) the stage's time
-/// goes to, tick by tick. A separate feature from `tracy` because it costs
-/// a lookup per fork and resume. Profiling never reads into sim state.
-#[cfg(feature = "lua-profile")]
+/// Tracy level 3 (`engine::tracy`): each Lua thread resume is a zone named
+/// by where the thread's function was defined (`file:line`), inside the
+/// `LuaThreads` stage span, so a trace shows which scripts (AI managers,
+/// unit behaviours, ...) the stage's time goes to. It costs a function info
+/// read per fork and a lookup by thread per resume. Profiling never reads
+/// into sim state.
+#[cfg(feature = "tracy")]
+// Lookups by thread pointer only, never iterated.
+#[allow(clippy::disallowed_types)]
 pub mod profile {
     use std::collections::HashMap;
-    use std::rc::Rc;
 
     use mlua::prelude::*;
 
-    /// Where a live thread's function was defined.
-    struct Origin {
-        /// `file:line`, the zone name.
-        name: Rc<str>,
-        file: Rc<str>,
-        line: u32,
-    }
+    use crate::engine::tracy::{Location, Zone};
 
-    /// Live threads' origins, by coroutine pointer.
+    /// Live threads' origins (zone locations), by coroutine pointer.
     #[derive(Default)]
-    pub struct ThreadOrigins(HashMap<usize, Origin>);
+    pub struct ThreadOrigins(HashMap<usize, &'static Location>);
 
     /// Records where a newly forked thread's function was defined.
     pub fn forked(lua: &Lua, f: &LuaFunction, thread: &LuaThread) {
@@ -36,10 +31,9 @@ pub mod profile {
             lua.set_app_data(ThreadOrigins::default());
         }
         let i = f.info();
-        let file: Rc<str> = Rc::from(i.source.as_deref().unwrap_or("?"));
-        let line = i.line_defined.unwrap_or(0) as u32;
-        let origin = Origin { name: Rc::from(format!("{file}:{line}")), file, line };
-        lua.app_data_mut::<ThreadOrigins>().unwrap().0.insert(thread.to_pointer() as usize, origin);
+        let name = format!("{}:{}", i.source.as_deref().unwrap_or("?"), i.line_defined.unwrap_or(0));
+        let loc = crate::engine::tracy::location("lua thread", &name);
+        lua.app_data_mut::<ThreadOrigins>().unwrap().0.insert(thread.to_pointer() as usize, loc);
     }
 
     /// Forgets a killed thread's origin.
@@ -49,15 +43,12 @@ pub mod profile {
         }
     }
 
-    /// Runs `resume` inside a Tracy zone named by the thread's origin. The
+    /// Runs `resume` inside a zone named by the thread's origin. The
     /// origins aren't borrowed while Lua runs.
     pub fn zoned<R>(lua: &Lua, thread: &LuaThread, resume: impl FnOnce() -> R) -> R {
-        let Some(client) = tracy_client::Client::running() else { return resume() };
         let key = thread.to_pointer() as usize;
-        let zone = match lua.app_data_ref::<ThreadOrigins>().and_then(|o| o.0.get(&key).map(|o| (o.name.clone(), o.file.clone(), o.line))) {
-            Some((name, file, line)) => client.span_alloc(Some(&name), "lua thread", &file, line, 0),
-            None => client.span_alloc(Some("lua thread (unknown origin)"), "lua thread", "?", 0, 0),
-        };
+        let loc = lua.app_data_ref::<ThreadOrigins>().and_then(|o| o.0.get(&key).copied());
+        let zone = Zone::begin(loc.unwrap_or_else(|| crate::engine::tracy::location("lua thread", "(unknown origin)")));
         let result = resume();
         drop(zone);
         if thread.status() != LuaThreadStatus::Resumable {
@@ -79,13 +70,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// Runs `f(...)` as a new thread, starting at the next scheduling
         /// point; returns the thread.
         ForkThread = |lua, (f, args): (LuaFunction, LuaMultiValue)| {
-            #[cfg(feature = "lua-profile")]
-            let thread = {
+            #[cfg(feature = "tracy")]
+            let thread = if crate::engine::tracy::on(3) {
                 let thread = lua.create_thread(f.clone())?;
                 profile::forked(lua, &f, &thread);
                 thread
+            } else {
+                lua.create_thread(f)?
             };
-            #[cfg(not(feature = "lua-profile"))]
+            #[cfg(not(feature = "tracy"))]
             let thread = lua.create_thread(f)?;
             lua.app_data_mut::<Scheduler>()
                 .expect("Scheduler not in app_data")
@@ -104,8 +97,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             lua.app_data_mut::<Scheduler>()
                 .expect("Scheduler not in app_data")
                 .kill(&thread);
-            #[cfg(feature = "lua-profile")]
-            profile::killed(lua, &thread);
+            #[cfg(feature = "tracy")]
+            if crate::engine::tracy::on(3) {
+                profile::killed(lua, &thread);
+            }
             // Free the coroutine's stack now. A running thread can't be closed;
             // it is simply never resumed again once it yields.
             if thread.status() != LuaThreadStatus::Running {
@@ -210,9 +205,13 @@ fn resume(lua: &Lua, id: TaskId) -> LuaResult<()> {
         else {
             return Ok(());
         };
-        #[cfg(feature = "lua-profile")]
-        let result = profile::zoned(lua, &thread, || thread.resume::<LuaMultiValue>(args));
-        #[cfg(not(feature = "lua-profile"))]
+        #[cfg(feature = "tracy")]
+        let result = if crate::engine::tracy::on(3) {
+            profile::zoned(lua, &thread, || thread.resume::<LuaMultiValue>(args))
+        } else {
+            thread.resume::<LuaMultiValue>(args)
+        };
+        #[cfg(not(feature = "tracy"))]
         let result = thread.resume::<LuaMultiValue>(args);
         let outcome = match result {
             Ok(values) => match thread.status() {

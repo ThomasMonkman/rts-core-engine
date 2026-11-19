@@ -103,9 +103,6 @@ trim-paths = "all"
 
 [features]
 tracy = ["dep:tracing-tracy", "dep:tracy-client", "dep:tracy-client-sys", "dep:profiling", "profiling/profile-with-tracy"]
-# Tracy zone per Lua thread resume, named by the forked function (a lookup
-# per ForkThread and per thread resume, so separate from `tracy`).
-lua-profile = ["tracy"]
 
 [dependencies]
 serde = { version = "1", features = ["derive", "rc"] }

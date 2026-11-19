@@ -236,6 +236,18 @@ pub struct Cli {
     #[arg(long)]
     pub no_record: bool,
 
+    /// Headless: build every tick's render snapshot, as a window would, and
+    /// drop it (to time the Snapshot and Sync stages without a window).
+    #[arg(long)]
+    pub headless_snapshots: bool,
+
+    /// Tracy detail (`--features tracy` builds): 1 sim stages and coarse
+    /// spans; 2 adds a zone per engine function Lua calls and per script
+    /// callback; 3 adds a zone per Lua thread resume, named by its script,
+    /// and counter plots. See docs/guides/running.md.
+    #[arg(long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=3))]
+    pub tracy_level: u8,
+
     /// Replay a recorded game: its session (map, armies, seed, the lobby's
     /// options) and every player command, at their ticks.
     #[arg(long, value_name = "FILE")]
