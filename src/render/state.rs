@@ -175,9 +175,17 @@ pub struct RenderState {
     pub profile: crate::render::console::ProfileOptions,
     /// The unit under the cursor this frame (not over a panel).
     pub rollover: Option<u32>,
-    /// The cursor FAF wants, and the one the window has.
+    /// The cursor FAF wants, and the one the window has (`None`: not
+    /// known, e.g. egui-winit or the OS may have changed it; set again).
     pub ui_cursor: rts_core_engine::ui::cursor::Wanted,
-    pub os_cursor: rts_core_engine::ui::cursor::Wanted,
+    pub os_cursor: Option<rts_core_engine::ui::cursor::Wanted>,
+    /// What egui-winit last did to the main window's cursor ([`crate::render::app::EguiCursor`]).
+    pub egui_cursor: crate::render::app::EguiCursor,
+    /// The pointer is over an egui window: its cursor is egui's.
+    pub egui_owns_cursor: bool,
+    /// The pointer is in the main window (as egui-winit tracks it: since a
+    /// `CursorMoved`, until a `CursorLeft`).
+    pub pointer_in_main: bool,
     /// Hardware cursors made from FAF's textures, by path (`None`: failed).
     pub os_cursors: std::collections::BTreeMap<String, Option<winit::window::CustomCursor>>,
     /// The present modes the surface offers (FAF's Vertical Sync option
@@ -558,7 +566,10 @@ impl RenderState {
             show_status: true,
             bar: Default::default(),
             ui_cursor: rts_core_engine::ui::cursor::Wanted::System,
-            os_cursor: rts_core_engine::ui::cursor::Wanted::System,
+            os_cursor: None,
+            egui_cursor: Default::default(),
+            egui_owns_cursor: false,
+            pointer_in_main: false,
             os_cursors: Default::default(),
             prefs: options.prefs.clone(),
             present_modes: surface_caps.present_modes.clone(),
