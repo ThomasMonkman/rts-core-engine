@@ -1620,7 +1620,9 @@ fn advance_target(
         let _search = crate::prof_span!("weapons search projectiles");
         let best = projectiles
             .iter()
-            .filter(|v| projectile_ok(v) && range_of(v.position) == Reach::InRange)
+            // The range test first: it passes over the many far off
+            // without an alliance lookup (both pure: the same result).
+            .filter(|v| range_of(v.position) == Reach::InRange && projectile_ok(v))
             .map(|v| (dist2_xz(v.position, at), v))
             .min_by_key(|&(d, v)| (d, v.id));
         if let Some((_, v)) = best {
