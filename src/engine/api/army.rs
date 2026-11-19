@@ -515,16 +515,30 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
         /// match `category`, optionally only those with the given alliance
         /// (see `GetUnitsAroundPoint`).
         GetNumUnitsAroundPoint = |lua, (brain, category, position, radius, alliance): (Obj<moho::AIBrain>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>, shapes::Vector, f64, Option<String>)| {
-            Ok(units_around(lua, &brain, &category.0, &position, radius, alliance)?.len())
+            let mut n = 0usize;
+            units_around(lua, &brain, &category.0, &position, radius, alliance, |_| n += 1)?;
+            Ok(n)
         })?;
     /// Units around a point for `GetUnitsAroundPoint` / `GetNumUnitsAroundPoint`:
     /// strictly within an XZ circle, matching `category`, optionally only those with
-    /// the given alliance to this brain; in entity id order. Takes intel into
+    /// the given alliance to this brain; `visit`ed in entity id order when the
+    /// circle's box covers the whole unit grid (a pass over the units), in grid
+    /// order otherwise (callers needing id order sort). Takes intel into
     /// account (FAF's docs): units of other non-allied armies count only
     /// while this brain detects them (seen or on radar / sonar / omni), and
     /// structures it has ever seen, which keep a blip once sight is lost
     /// (dev/probes probe_unit_intel observer-gone; the threat map's rule).
-    fn units_around(lua: &Lua, brain: &LuaTable, category: &crate::engine::sim::category::CategorySet, position: &LuaTable, radius: f64, alliance: Option<String>) -> LuaResult<Vec<u32>> {
+    /// Returns whether the visits were in id order.
+    fn units_around(
+        lua: &Lua,
+        brain: &LuaTable,
+        category: &crate::engine::sim::category::CategorySet,
+        position: &LuaTable,
+        radius: f64,
+        alliance: Option<String>,
+        mut visit: impl FnMut(u32),
+    ) -> LuaResult<bool> {
+        use crate::engine::sim::entity::Entity;
         let ArmyHandle(index) = script_object::handle(brain)?;
         let alliance = alliance
             .map(|a| Alliance::parse(&a).ok_or_else(|| LuaError::runtime(format!("unknown alliance '{a}'"))))
@@ -534,35 +548,46 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
         let world = crate::engine::api::entity::world(lua);
         let armies = lua.app_data_ref::<Armies>().expect("Armies");
         let intel = lua.app_data_ref::<crate::engine::sim::vision::IntelGrids>();
-        let structures = crate::engine::api::categories::domain(lua)?.named.get("STRUCTURE").cloned();
-        let remembered = |g: &crate::engine::sim::vision::IntelGrids, e: &crate::engine::sim::entity::Entity| {
-            structures.as_ref().zip(e.category_index).is_some_and(|(s, i)| s.contains(i)) && g.ever_seen(index, e.id)
-        };
+        let domain = crate::engine::api::categories::domain(lua)?;
+        let structures = domain.named.get("STRUCTURE");
+        // This brain's stance to each army, looked up once per call.
+        let stances: Vec<Alliance> = (0..=armies.list.len() as u32).map(|a| armies.alliance(index, a)).collect();
+        let stance = |army: u32| stances.get(army as usize).copied().unwrap_or_else(|| armies.alliance(index, army));
         // Strictly inside: a unit exactly `radius` away is out, and r = 0
         // finds nothing (dev/probes probe_ai_brain).
         let r2 = r.saturating_mul(r);
-        let inside = |e: &crate::engine::sim::entity::Entity| {
+        let keep = |e: &Entity| {
+            if !e.category_index.is_some_and(|i| category.contains(i)) {
+                return false;
+            }
             let p = e.position();
             let (dx, dz) = (p.x - cx, p.z - cz);
-            dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)) < r2
-        };
-        Ok(world
-            .units_in_circle(cx, cz, r)
-            .into_iter()
-            .filter_map(|id| world.get(id))
-            .filter(|e| inside(e))
-            .filter(|e| e.category_index.is_some_and(|i| category.contains(i)))
-            .filter(|e| match (alliance, e.army) {
-                (None, _) => true,
-                (Some(want), Some(army)) => armies.alliance(index, army) == want,
-                (Some(_), None) => false,
-            })
-            .filter(|e| match (e.army, &intel) {
-                (Some(army), Some(g)) if e.unit.is_some() && army != index && armies.alliance(index, army) != Alliance::Ally => g.detect(index, e).any() || remembered(g, e),
+            if dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)) >= r2 {
+                return false;
+            }
+            let rel = e.army.map(stance);
+            if alliance.is_some_and(|want| rel != Some(want)) {
+                return false;
+            }
+            match (e.army, &intel) {
+                (Some(army), Some(g)) if e.unit.is_some() && army != index && rel != Some(Alliance::Ally) => {
+                    g.detects(index, e) || (structures.zip(e.category_index).is_some_and(|(s, i)| s.contains(i)) && g.ever_seen(index, e.id))
+                }
                 _ => true,
-            })
-            .map(|e| e.id)
-            .collect())
+            }
+        };
+        let (x0, z0, x1, z1) = (cx - r, cz - r, cx + r, cz + r);
+        if world.unit_grid_covered(x0, z0, x1, z1) {
+            // Every grid cell: the grid's units, read in id order.
+            world.units().filter(|e| e.in_grid() && keep(e)).for_each(|e| visit(e.id));
+            return Ok(true);
+        }
+        world.for_each_unit_candidate(x0, z0, x1, z1, |id| {
+            if world.get(id).is_some_and(keep) {
+                visit(id);
+            }
+        });
+        Ok(false)
     }
     lua_method!(lua, moho::AIBrain,
         /// Units around `position` (within `radius` on the XZ plane) matching
@@ -572,7 +597,10 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
         /// once it has seen them.
         GetUnitsAroundPoint = |lua,
          (brain, category, position, radius, alliance): (Obj<moho::AIBrain>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>, shapes::Vector, f64, Option<String>)| {
-            let ids = units_around(lua, &brain, &category.0, &position, radius, alliance)?;
+            let mut ids = Vec::new();
+            if !units_around(lua, &brain, &category.0, &position, radius, alliance, |id| ids.push(id))? {
+                ids.sort_unstable();
+            }
             crate::engine::api::entity::objects_table::<moho::Unit>(lua, &ids)
         })?;
     /// Registers global `<name>(army1, army2)`: is army1's stance to army2 `want`?

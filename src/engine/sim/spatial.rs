@@ -96,6 +96,11 @@ impl SpatialGrid {
         }
     }
 
+    /// Whether the XZ box [min, max] overlaps every cell.
+    pub fn covers_all(&self, min_x: Fx, min_z: Fx, max_x: Fx, max_z: Fx) -> bool {
+        self.rect_of(min_x, min_z, max_x, max_z) == CellRect { x0: 0, z0: 0, x1: self.cols - 1, z1: self.rows - 1 }
+    }
+
     /// Lists `id` in every cell of `r` (for something bigger than a cell).
     pub fn insert_rect(&mut self, id: EntityId, r: CellRect) {
         for z in r.z0..=r.z1 {

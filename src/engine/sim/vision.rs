@@ -955,6 +955,27 @@ impl IntelGrids {
         self.detection_with(army, e.position(), layer, self.hidden(e))
     }
 
+    /// `detect(army, e).any()`, stopping at the first intel found and
+    /// reading `e`'s counter-intel only when coverage makes it matter (the
+    /// unit queries ask this of every enemy unit).
+    pub fn detects(&self, army: u32, e: &crate::engine::sim::entity::Entity) -> bool {
+        let layer = e.unit.as_deref().map(|u| u.layer).unwrap_or_default();
+        let p = e.position();
+        let s = |t: IntelType| self.covered(army, sensor_index(t).expect("sensor"), p);
+        if s(IntelType::Omni) {
+            return true;
+        }
+        let wet = matches!(layer, Layer::Water | Layer::Sub | Layer::Seabed);
+        let under = matches!(layer, Layer::Sub | Layer::Seabed);
+        let mut hidden = None;
+        let mut hidden = || *hidden.get_or_insert_with(|| self.hidden(e));
+        // As in `detection_with`; once not seen, stealth alone decides radar / sonar.
+        let optical = if under { s(IntelType::WaterVision) } else { s(IntelType::Vision) || (wet && s(IntelType::WaterVision)) };
+        (optical && hidden() & CLOAK == 0)
+            || (!under && s(IntelType::Radar) && hidden() & RADAR_STEALTH == 0)
+            || (wet && s(IntelType::Sonar) && hidden() & SONAR_STEALTH == 0)
+    }
+
     /// The jammer fakes `army` believes in now ([`Fake::believed_by`]: on
     /// its radar, not known fake), id order.
     pub fn fake_blips(&self, army: u32) -> impl Iterator<Item = &Fake> + '_ {
