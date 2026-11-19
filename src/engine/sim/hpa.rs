@@ -245,19 +245,28 @@ impl Hier {
     fn build_sector(&self, s: usize, open: &impl Fn(u32, u32) -> bool) -> Sector {
         let r = self.sector_rect(s);
         let (rw, rh) = (r.width(), r.height());
+        // The rect's open cells, read once, with a closed ring round them
+        // (row stride `pw`): the fill and the in-sector searches below then
+        // need no bounds checks and no calls back into the grid.
+        let pw = rw as usize + 2;
+        let pad = |x: u32, z: u32| (z as usize + 1) * pw + x as usize + 1;
+        let mut cells = vec![false; pw * (rh as usize + 2)];
+        let mut full = true;
+        for z in 0..rh {
+            for x in 0..rw {
+                let o = open(r.x0 + x, r.z0 + z);
+                cells[pad(x, z)] = o;
+                full &= o;
+            }
+        }
         // Local regions, 4-connected, labelled in scan order.
         let mut local = vec![0u16; (rw * rh) as usize];
         let mut regions = 0u16;
         let mut stack: Vec<(u32, u32)> = Vec::new();
-        let mut full = true;
         for z in 0..rh {
             for x in 0..rw {
                 let i = (z * rw + x) as usize;
-                if local[i] != 0 {
-                    continue;
-                }
-                if !open(r.x0 + x, r.z0 + z) {
-                    full = false;
+                if local[i] != 0 || !cells[pad(x, z)] {
                     continue;
                 }
                 regions += 1;
@@ -267,7 +276,7 @@ impl Hier {
                     for (nx, nz) in [(cx.wrapping_sub(1), cz), (cx + 1, cz), (cx, cz.wrapping_sub(1)), (cx, cz + 1)] {
                         if nx < rw && nz < rh {
                             let j = (nz * rw + nx) as usize;
-                            if local[j] == 0 && open(r.x0 + nx, r.z0 + nz) {
+                            if local[j] == 0 && cells[pad(nx, nz)] {
                                 local[j] = regions;
                                 stack.push((nx, nz));
                             }
@@ -326,21 +335,34 @@ impl Hier {
             border(rw, &|k| (r.x0 + k, r.z1 - 1), &|k| (r.x0 + k, r.z1));
         }
         // In-sector costs between nodes of the same region: octile when the
-        // sector is all open, else a Dijkstra from each node.
+        // sector is all open, else a Dijkstra from each node, stopped once
+        // the later nodes of its region (the only costs it gives) are
+        // settled: settled costs are final, so they are what a full search
+        // gives.
         let xy = |cell: u32| (cell % w, cell / w);
+        let at = |cell: u32| pad(cell % w - r.x0, cell / w - r.z0);
         let mut dist = Vec::new();
         let mut heap = BinaryHeap::new();
+        // Node index by padded cell (u16::MAX: none).
+        let mut node_at = vec![u16::MAX; if full { 0 } else { cells.len() }];
+        if !full {
+            for (k, n) in nodes.iter().enumerate() {
+                node_at[at(n.cell)] = k as u16;
+            }
+        }
         for i in 0..nodes.len() {
             if !full {
-                let (x, z) = xy(nodes[i].cell);
-                dijkstra(r, open, (x, z), &mut dist, &mut heap);
+                let later = nodes[i + 1..].iter().filter(|n| n.region == nodes[i].region).count();
+                if later > 0 {
+                    padded_dijkstra(&cells, pw, at(nodes[i].cell), &node_at, i as u16, later, &mut dist, &mut heap);
+                }
             }
             for j in i + 1..nodes.len() {
                 if nodes[i].region != nodes[j].region {
                     continue;
                 }
                 let ((ax, az), (bx, bz)) = (xy(nodes[i].cell), xy(nodes[j].cell));
-                let cost = if full { octile(ax, az, bx, bz) } else { dist[((bz - r.z0) * rw + bx - r.x0) as usize] };
+                let cost = if full { octile(ax, az, bx, bz) } else { dist[at(nodes[j].cell)] };
                 if cost == u32::MAX {
                     continue;
                 }
@@ -584,6 +606,46 @@ impl Hier {
     }
 }
 
+/// [`dijkstra`] over a sector's padded open cells (`cells`, rows of `pw`,
+/// a closed ring round the rect) from padded cell `from`, stopping once
+/// `targets` cells with a node index (`node_at`) above `after` are settled.
+/// `dist` is by padded cell; costs settled before the stop are exact.
+#[allow(clippy::too_many_arguments)]
+fn padded_dijkstra(cells: &[bool], pw: usize, from: usize, node_at: &[u16], after: u16, mut targets: usize, dist: &mut Vec<u32>, heap: &mut BinaryHeap<(Reverse<u32>, u32)>) {
+    dist.clear();
+    dist.resize(cells.len(), u32::MAX);
+    heap.clear();
+    dist[from] = 0;
+    heap.push((Reverse(0), from as u32));
+    while let Some((Reverse(d), i)) = heap.pop() {
+        let i = i as usize;
+        if d > dist[i] {
+            continue;
+        }
+        let k = node_at[i];
+        if k != u16::MAX && k > after {
+            targets -= 1;
+            if targets == 0 {
+                return;
+            }
+        }
+        // (The ring is closed, so every neighbour index is in the buffer.)
+        let (w, e, s, n) = (i - 1, i + 1, i - pw, i + pw);
+        for (j, step) in [(w, 10), (e, 10), (s, 10), (n, 10)] {
+            if cells[j] && d + step < dist[j] {
+                dist[j] = d + step;
+                heap.push((Reverse(d + step), j as u32));
+            }
+        }
+        for (j, a, b) in [(s - 1, s, w), (s + 1, s, e), (n - 1, n, w), (n + 1, n, e)] {
+            if cells[j] && cells[a] && cells[b] && d + 14 < dist[j] {
+                dist[j] = d + 14;
+                heap.push((Reverse(d + 14), j as u32));
+            }
+        }
+    }
+}
+
 /// Dijkstra over the open cells of `r` from `from` (8-connected, no corner
 /// cutting, 10 / 14): `dist` holds every cell's cost (row-major in `r`;
 /// `u32::MAX` = unreached). Returns the cells settled.
@@ -631,4 +693,40 @@ fn dijkstra_from(r: Rect, open: &impl Fn(u32, u32) -> bool, seeds: &[((u32, u32)
         }
     }
     settled
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every in-sector edge is the exact shortest in-sector cost (a full
+    /// Dijkstra over the grid), on grids from open to mostly closed, with
+    /// sectors cut short by the map edge.
+    #[test]
+    fn sector_edges_are_exact_in_sector_costs() {
+        let mut rng = crate::engine::sim::rng::SimRng::new(7);
+        for density in [0u64, 5, 20, 40, 60] {
+            let (w, h) = (80u32, 70u32);
+            let cells: Vec<bool> = (0..w * h).map(|_| rng.next_u64() % 100 >= density).collect();
+            let open = |x: u32, z: u32| x < w && z < h && cells[(z * w + x) as usize];
+            let mut g = Hier::new(w, h);
+            g.refresh(&open);
+            let (mut dist, mut heap) = (Vec::new(), BinaryHeap::new());
+            for (s, sector) in g.sectors.iter().enumerate() {
+                let r = g.sector_rect(s);
+                for (i, a) in sector.nodes.iter().enumerate() {
+                    dijkstra(r, &open, (a.cell % w, a.cell / w), &mut dist, &mut heap);
+                    for (j, b) in sector.nodes.iter().enumerate() {
+                        let want = dist[((b.cell / w - r.z0) * r.width() + b.cell % w - r.x0) as usize];
+                        let got = a.intra.iter().find(|e| e.0 as usize == j).map(|e| e.1);
+                        if i == j || want == u32::MAX {
+                            assert_eq!(got, None);
+                        } else {
+                            assert_eq!(got, Some(want), "density {density} sector {s} nodes {i} -> {j}");
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
