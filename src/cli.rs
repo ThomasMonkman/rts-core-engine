@@ -248,6 +248,14 @@ pub struct Cli {
     #[arg(long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=3))]
     pub tracy_level: u8,
 
+    /// Headless (implies --headless) with the interface running: FAF's
+    /// interface Lua gets every tick's snapshot and Sync, and what it sends
+    /// (orders, SimCallbacks such as the nuke launch ping) reaches the sim
+    /// as a window's would. One interface beat and frame per tick, so runs
+    /// repeat exactly (a window's frame-paced run may differ).
+    #[arg(long)]
+    pub headless_with_ui: bool,
+
     /// Replay a recorded game: its session (map, armies, seed, the lobby's
     /// options) and every player command, at their ticks.
     #[arg(long, value_name = "FILE")]
@@ -532,6 +540,7 @@ impl Cli {
         if let Err(e) = AiChoice::parse(&cli.ai) {
             return Err(Self::command().error(clap::error::ErrorKind::ValueValidation, e));
         }
+        cli.headless |= cli.headless_with_ui;
         cli.session |= cli.headless || SESSION_OPTIONS.iter().any(|id| matches.value_source(id) == Some(ValueSource::CommandLine));
         Ok(cli)
     }
@@ -650,6 +659,9 @@ mod tests {
     fn headless_defaults_to_setup_only_and_rejects_typos() {
         let c = Cli::try_parse_from(["rts", "--headless"]).unwrap();
         assert_eq!(c.session().ticks, Some(0));
+        assert!(!c.headless_with_ui);
+        let ui = Cli::try_parse_args(["rts", "--headless-with-ui"]).unwrap();
+        assert!(ui.headless && ui.session, "--headless-with-ui is a headless session");
         assert_eq!(c.speed, None);
         assert_eq!(c.pace(true), None, "headless runs flat out by default");
         assert_eq!(c.log, None, "install::default_log places game.log");

@@ -1094,6 +1094,10 @@ pub struct SnapshotSink {
     fog: fog::FogSink,
     /// A snapshot saying the game is over was delivered.
     sent_game_over: bool,
+    /// Lockstep with the consumer (`--headless-with-ui`): every snapshot is
+    /// delivered (none dropped), and after each tick the sim waits for the
+    /// consumer to say it has handled it ([`await_consumer`]).
+    consumer: Option<Receiver<u64>>,
 }
 
 /// A connected sink/receiver pair (capacity: a few snapshots) and the
@@ -1120,13 +1124,45 @@ pub fn channel() -> (SnapshotSink, Receiver<Snapshot>, SharedDebugRequest) {
 
 impl SnapshotSink {
     fn new(tx: SyncSender<Snapshot>, in_flight: Arc<std::sync::atomic::AtomicUsize>, request: SharedDebugRequest) -> Self {
-        SnapshotSink { in_flight, tx, tick: 0, terrain_version: None, sent_blueprints: false, sent_alliances: None, sent_focus_army: None, sent_army_display: None, sent_decals: None, sent_custom_names: None, sent_props: false, pending_props: Vec::new(), sent_meshes: 0, sent_projectile_icons: 0, sent_vfs: false, clip_ids: Default::default(), clips: Vec::new(), sent_clips: 0, sent_effect_assets: 0, pose_ops: Vec::new(), hidden: Vec::new(), request, grid_key: None, grid: None, fog: Default::default(), sent_game_over: false }
+        SnapshotSink { in_flight, tx, tick: 0, terrain_version: None, sent_blueprints: false, sent_alliances: None, sent_focus_army: None, sent_army_display: None, sent_decals: None, sent_custom_names: None, sent_props: false, pending_props: Vec::new(), sent_meshes: 0, sent_projectile_icons: 0, sent_vfs: false, clip_ids: Default::default(), clips: Vec::new(), sent_clips: 0, sent_effect_assets: 0, pose_ops: Vec::new(), hidden: Vec::new(), request, grid_key: None, grid: None, fog: Default::default(), sent_game_over: false, consumer: None }
     }
 
     /// The same channel to the renderer for another session, with nothing
     /// sent yet (the next engine's assets, terrain and meshes all go again).
     pub fn renew(self) -> Self {
-        Self::new(self.tx, self.in_flight, self.request)
+        Self { consumer: self.consumer, ..Self::new(self.tx, self.in_flight, self.request) }
+    }
+
+    /// Runs the sim in lockstep with the consumer: it sends the tick of
+    /// each snapshot it has handled (and anything it does in reply, such as
+    /// player commands, before that) on the returned sender, and the sim
+    /// waits for it after each tick. A consumer that goes away ends the
+    /// lockstep.
+    pub fn lockstep(&mut self) -> std::sync::mpsc::Sender<u64> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.consumer = Some(rx);
+        tx
+    }
+}
+
+/// Between ticks, in lockstep with the consumer ([`SnapshotSink::lockstep`]):
+/// waits until it has handled the latest tick's snapshot, so what it sends
+/// back in reply lands on the next tick whatever the wall clock does.
+/// `waiting` runs every second of the wait (the stall watchdog's beat).
+pub fn await_consumer(lua: &mlua::Lua, waiting: impl Fn()) {
+    let Some(mut sink) = lua.app_data_mut::<SnapshotSink>() else { return };
+    let tick = sink.tick;
+    let Some(rx) = &sink.consumer else { return };
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+            Ok(handled) if handled >= tick => return,
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => waiting(),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                sink.consumer = None;
+                return;
+            }
+        }
     }
 }
 
@@ -2835,7 +2871,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
     // The renderer is behind (game speed above its frame rate): this
     // snapshot couldn't be sent, so don't build it. One-off data and Sync
     // tables go with the next one; sounds too, the latest few.
-    if sink.in_flight.load(std::sync::atomic::Ordering::Acquire) >= CHANNEL_SLOTS {
+    if sink.consumer.is_none() && sink.in_flight.load(std::sync::atomic::Ordering::Acquire) >= CHANNEL_SLOTS {
         if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
             let excess = p.sounds.len().saturating_sub(crate::engine::sim::presentation::MAX_PENDING_SOUNDS);
             p.sounds.drain(..excess);
@@ -3076,7 +3112,12 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
     let _send = crate::prof_span!("snapshot send");
     sink.in_flight.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     snap.ticket = Some(Ticket(sink.in_flight.clone()));
-    match sink.tx.try_send(snap) {
+    // In lockstep with the consumer every snapshot goes (it waits for room).
+    let sent = match &sink.consumer {
+        Some(_) => sink.tx.send(snap).map_err(|e| TrySendError::Disconnected(e.0)),
+        None => sink.tx.try_send(snap),
+    };
+    match sent {
         Ok(()) => {
             // Only mark one-off data as delivered once it actually went out.
             if terrain_version.is_some() {

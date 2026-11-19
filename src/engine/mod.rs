@@ -335,6 +335,8 @@ impl Engine {
             self.step()?;
             self.after_step()?;
             self.note_net_tick(step_started);
+            // `--headless-with-ui`: the interface handles this tick first.
+            snapshot::await_consumer(&self.sim_lua, || self.watchdog.beat());
             if let Some(control) = &pace {
                 self.sync_net_speed(control);
             }
@@ -469,6 +471,8 @@ impl Engine {
             self.step()?;
             self.after_step()?;
             self.note_net_tick(step_started);
+            // `--headless-with-ui`: the interface handles this tick first.
+            snapshot::await_consumer(&self.sim_lua, || self.watchdog.beat());
             self.sync_net_speed(&control);
             let speed = self.net_pace(control.shown());
             if speed != snapshot::SimControl::MAX {
