@@ -104,6 +104,7 @@ pub mod console;
 pub mod debug_lines;
 pub mod frame;
 pub mod globals;
+pub mod headless_ui;
 pub mod gpu_prof;
 pub mod memory;
 pub mod models;

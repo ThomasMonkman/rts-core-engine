@@ -39,6 +39,10 @@ whole `gamemain.CreateUI`) and `StopLoadingDialog()`.
 
 Restarting or leaving a session: [replays.md](replays.md#recordings).
 
+**Without a window** (`--headless-with-ui`), `render::headless_ui` boots it the same way and runs it in
+lockstep with the sim: one beat and one frame per tick
+([running.md](../guides/running.md#headless)).
+
 ## Controls, layout and drawing
 
 `InternalCreateFrame/Group/Bitmap/Text/...` (`ui::controls`) make a native control for the Lua object

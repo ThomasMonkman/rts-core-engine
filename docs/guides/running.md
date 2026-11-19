@@ -162,6 +162,16 @@ Every 1000 ticks, and at the end of a `--ticks` run, the log gets:
 `--headless-snapshots` builds every tick's render snapshot (and the user layer's `Sync` copy), as a
 window would, and drops it, so the `Snapshot` and `Sync` stages can be timed without a window.
 
+`--headless-with-ui` (implies `--headless`; no window, GPU or audio) also runs FAF's interface Lua on
+those snapshots (`src/render/headless_ui.rs`). Its orders and `SimCallback`s go to the sim as a
+window's do. An all-AI game sends some: the nuke launch ping (`SpawnSpecialPing`) is one. Interface
+errors are logged as they are with a window, and each callback sent is logged
+(`grep "interface SimCallback"`). The sim waits for the interface after every tick, and the
+interface runs one beat and one 0.1 s frame per tick, so two runs of a game give the same
+checksums. A windowed run is paced by frames, so its commands can land on other ticks and its
+checksums can differ. Not run: cameras, picks, the draw list, sounds. `--ui-lua` and `--record`
+work.
+
 **Stall watchdog.** If no tick completes for `--stall-timeout` seconds (default 30; `0` turns it
 off), the engine logs `ERROR ... sim stalled` with the tick and the stage. If Lua is spinning, it
 also logs the Lua traceback and errors out of that script, and the sim carries on. A headless run
