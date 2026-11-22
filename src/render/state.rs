@@ -78,8 +78,6 @@ pub struct RenderState {
     pub ui_selection: Vec<u32>,
     /// The `Game.prefs` the interface loads and saves to.
     pub prefs: rts_core_engine::install::Prefs,
-    /// Ground under the cursor before this frame's zoom.
-    pub zoom_anchor: Option<glam::Vec3>,
     /// Cameras following entities (`UI_TrackUnit` the main one,
     /// `TrackEntities` any), each until moved by hand or every entity it
     /// follows is gone.
@@ -539,7 +537,6 @@ impl RenderState {
             projectile_follows: Vec::new(),
             camera_moves: Vec::new(),
             camera_waiting: Vec::new(),
-            zoom_anchor: None,
             ui_resized: false,
             scale_factor,
             ui_items: Vec::new(),

@@ -80,8 +80,8 @@ goes back to every army. A player in a live game keeps their own army's view (ch
 
 | Input | Action |
 |---|---|
-| WASD / arrow keys, middle-drag | pan |
-| mouse wheel | zoom toward the cursor; straight down when zoomed out, tilting to 40 degrees close in (moho's camera curve) |
+| WASD / arrow keys (Ctrl: 4x faster), middle-drag | pan |
+| mouse wheel | an eased zoom, in toward the cursor and out about the middle of the view; straight down when zoomed out, tilting to 40 degrees close in (moho's camera curve) |
 | left-click / left-drag | select a unit / box-select (shift adds; click empty ground to clear) |
 | double-click | every unit of that type (and army) on screen |
 | right-click | order by what's under the cursor: attack an enemy, reclaim a prop (engineers), repair a damaged / guard an own unit, else move |

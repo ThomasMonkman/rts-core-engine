@@ -103,18 +103,17 @@ fn update_camera(s: &mut RenderState, head: usize, dt: f32) {
     let pointer_here = !two || s.cursor_head == head;
     let cursor = s.input.cursor.map(|(x, y)| (x as f32, y as f32)).filter(|_| pointer_here);
     let main_here = owner(s, crate::render::camera::MAIN) == head;
-    // The ground under the cursor before a zoom (kept under it after).
-    s.zoom_anchor = match (pointer_here && s.input.wheel != 0.0, cursor) {
-        (true, Some((x, y))) => s.world.ground_at(x, y),
-        _ => None,
-    };
     let keys = &s.input.keys;
     let axis = |neg: &[K], pos: &[K]| -> f32 {
         (pos.iter().any(|k| keys.contains(k)) as i32 - neg.iter().any(|k| keys.contains(k)) as i32) as f32
     };
-    // Fractions of the zoom (the view's width) a second: the same feel as
-    // before zoom meant ground width (0.9 eye distances on a 16:9 view).
-    let speed = 0.45 * dt;
+    // The keys pan `ui_KeyboardPanSpeed` pixels of ground a (60 Hz) frame,
+    // `ui_KeyboardPanAccelerateMultiplier` times that with Ctrl (moho's
+    // world view, SupremeCommander.exe 0x876d6f); the camera's pan
+    // (0x7ae490) takes a pixel as zoom / the view's width.
+    let main_width = s.world.head_views(head).iter().find(|v| v.camera.eq_ignore_ascii_case(crate::render::camera::MAIN)).map_or(1.0, |v| v.size()[0]).max(1.0);
+    let accelerate = if s.input.mods.ctrl { crate::render::camera::KEYBOARD_PAN_ACCELERATE } else { 1.0 };
+    let speed = crate::render::camera::KEYBOARD_PAN_SPEED * accelerate * dt * 60.0 / main_width;
     let (px, pz) = match main_here {
         true => (axis(&[K::KeyA, K::ArrowLeft], &[K::KeyD, K::ArrowRight]), axis(&[K::KeyW, K::ArrowUp], &[K::KeyS, K::ArrowDown])),
         false => (0.0, 0.0),
@@ -154,9 +153,8 @@ fn update_camera(s: &mut RenderState, head: usize, dt: f32) {
         // not with Alt, FAF's Alt-Delete is a debug key). It stays turned.
         if turn != 0.0 && !s.input.mods.alt {
             let step = crate::render::camera::KEYBOARD_ROTATE_SPEED * if s.input.mods.ctrl { crate::render::camera::KEYBOARD_ROTATE_ACCELERATE } else { 1.0 } * dt * 60.0;
-            let width = s.world.head_views(head).iter().find(|v| v.camera.eq_ignore_ascii_case(crate::render::camera::MAIN)).map_or(1.0, |v| v.size()[0]);
             if let Some(cam) = s.world.camera_mut() {
-                cam.spin(turn * step, 0.0, width);
+                cam.spin(turn * step, 0.0, main_width);
             }
         }
     }
@@ -206,7 +204,9 @@ fn update_camera(s: &mut RenderState, head: usize, dt: f32) {
     if let Some(view) = pointer
         && let Some(cam) = s.world.cameras.get_mut(&view.camera) {
         if wheel != 0.0 {
-            cam.zoom(wheel);
+            // Toward the cursor (not for a followed camera, which stays on
+            // what it follows).
+            cam.zoom(wheel, cursor.filter(|_| !pointer_tracked));
         }
         if dx != 0.0 || dy != 0.0 {
             // The ground follows the cursor: zoom spans the longer side.
@@ -215,25 +215,32 @@ fn update_camera(s: &mut RenderState, head: usize, dt: f32) {
             cam.pan(-(dx as f32) / long, -(dy as f32) / long);
         }
     }
-    // Every camera stays over the map, its look-at height easing toward
-    // the ground under it.
+    // Wheel zooms ease to their goals. One closing in keeps the ground that
+    // was under the wheel's cursor under it; zooming out leaves the look-at
+    // point alone (moho's camera update, 0x7b0b80).
+    let zooming: Vec<String> = s.world.cameras.iter().filter(|(name, c)| c.zoom_goal() != c.zoom && owner(s, name) == head).map(|(n, _)| n.to_owned()).collect();
+    for name in zooming {
+        let Some(before) = s.world.cameras.get(&name).copied() else { continue };
+        let mut cam = before;
+        if let Some((x, y)) = cam.step_zoom(dt)
+            && let Some(view) = s.world.head_views(head).iter().find(|v| v.camera.eq_ignore_ascii_case(&name))
+            && let (Some(was), Some(now)) = (s.world.ground_through(view, &before, x, y), s.world.ground_through(view, &cam, x, y)) {
+            cam.target.x += was.x - now.x;
+            cam.target.z += was.z - now.z;
+        }
+        s.world.cameras.insert(&name, cam);
+    }
+    // Every camera stays over the map (nearer its middle the further out
+    // it is), its look-at height easing toward the ground under it.
+    let free = s.cam_free;
     let mine: Vec<bool> = s.world.cameras.iter().map(|(name, _)| owner(s, name) == head).collect();
     let heights: Vec<f32> = s.world.cameras.iter().map(|(_, c)| s.world.height_at(c.target.x, c.target.z)).collect();
     for (((_, cam), h), mine) in s.world.cameras.iter_mut().zip(heights).zip(mine) {
         if mine {
             cam.step_revert(dt);
-            cam.clamp_to(map.0, map.1);
+            cam.clamp_to(map.0, map.1, free);
             cam.target.y += (h - cam.target.y) * (dt * 5.0).min(1.0);
         }
-    }
-    // Zoom toward the cursor: the ground under it stays under it (not for
-    // a followed camera, which stays on what it follows).
-    if let (Some((x, y)), Some(before), true, false) = (cursor, s.zoom_anchor.take(), wheel != 0.0, pointer_tracked)
-        && let Some(after) = s.world.ground_at(x, y)
-        && let Some(cam) = s.world.camera_at_mut(x, y) {
-        cam.target.x += before.x - after.x;
-        cam.target.z += before.z - after.z;
-        cam.clamp_to(map.0, map.1);
     }
 }
 

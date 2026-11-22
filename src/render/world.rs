@@ -552,12 +552,6 @@ impl World {
         move |p| views.iter().any(|(v, c)| v.project(c, p).is_some_and(|[x, y]| x >= v.rect[0] && y >= v.rect[1] && x <= v.rect[2] && y <= v.rect[3]))
     }
 
-    /// The camera of the view under window pixel (x, y) (see `view_at`).
-    pub fn camera_at_mut(&mut self, x: f32, y: f32) -> Option<&mut Camera> {
-        let name = self.view_at(x, y)?.0.camera.clone();
-        self.cameras.get_mut(&name)
-    }
-
     /// The interpolated entities last frame.
     pub fn entities(&self) -> &[EntityView] {
         &self.frame.entities
