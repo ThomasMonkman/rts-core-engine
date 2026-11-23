@@ -46,6 +46,22 @@ pub struct Camera {
     /// Easing back to the zoom's pitch and the default heading (moho's
     /// +0x33e, set by `RevertRotation`).
     reverting: bool,
+    /// A wheel zoom under way: `zoom` is easing to its goal.
+    wheel: Option<WheelZoom>,
+}
+
+/// A wheel zoom the camera is easing through (moho's target zoom, camera
+/// +0x358, which the zoom the view uses, +0x354, chases each frame).
+#[derive(Clone, Copy, Debug)]
+struct WheelZoom {
+    goal: f32,
+    /// The zoom the ease last left. A zoom set since by anything else (a
+    /// timed move, `SetZoom`, a restored view) ends the ease.
+    at: f32,
+    /// The window pixel the cursor is on (moho's +0x36c, set through
+    /// vtable +0x78 at the wheel, 0x8764d3, and by each mouse move over the
+    /// view after, 0x8766be): zooming in closes on the ground under it.
+    cursor: Option<(f32, f32)>,
 }
 
 /// Moho's LOD plane (`GeomCamera3::LODBasis`, the view plane times the LOD
@@ -113,6 +129,18 @@ pub const KEYBOARD_ROTATE_ACCELERATE: f32 = 2.0;
 /// .rdata 0xe4cea4). Moho steps it each camera update, so it is taken as
 /// a 60 Hz frame's here.
 pub const REVERT_STEP: f32 = 0.1;
+/// `cam_ZoomSpeedSmall` / `cam_ZoomSpeedLarge` ("How fast the camera
+/// actually moves in response to a small / large zoom", .data 0xfb7eb0 /
+/// 0xfb7eb4): a wheel zoom closes its gap at small + large x gap, in
+/// doublings of the zoom a second.
+pub const ZOOM_SPEED_SMALL: f32 = 0.5;
+pub const ZOOM_SPEED_LARGE: f32 = 5.0;
+/// `ui_KeyboardPanSpeed` ("How fast arrow keys pans camera", .data
+/// 0xfb7968): pixels of ground the keys move the view a frame (the world
+/// view's frame, 0x876d6f, with no frame time: taken as a 60 Hz frame's
+/// here), times `ui_KeyboardPanAccelerateMultiplier` (0xfb796c) with Ctrl.
+pub const KEYBOARD_PAN_SPEED: f32 = 90.0;
+pub const KEYBOARD_PAN_ACCELERATE: f32 = 4.0;
 
 impl Camera {
     pub fn new(map_w: f32, map_h: f32) -> Self {
@@ -134,6 +162,7 @@ impl Camera {
             held_pitch: 0.0,
             rotation_held: false,
             reverting: false,
+            wheel: None,
         };
         c.fit_map(map_w, map_h);
         c.zoom = c.max_zoom;
@@ -319,17 +348,65 @@ impl Camera {
         self.target += (r * right + d * down) * self.zoom;
     }
 
-    /// Zoom by wheel steps (positive = in): the zoom scales by
-    /// 2^(-cam_ZoomAmount * steps) (moho: exp(amount * wheel * -ln 2),
-    /// SupremeCommander.exe 0x7af7f0).
-    pub fn zoom(&mut self, steps: f32) {
-        self.zoom = (self.zoom * (-self.zoom_amount * steps).exp2()).clamp(self.min_zoom, self.max_zoom);
+    /// The zoom the camera is heading for: a wheel zoom's goal while one is
+    /// under way, else its zoom.
+    pub fn zoom_goal(&self) -> f32 {
+        self.wheel.filter(|w| w.at == self.zoom).map_or(self.zoom, |w| w.goal)
     }
 
-    /// Keeps the target on the map.
-    pub fn clamp_to(&mut self, map_w: f32, map_h: f32) {
-        self.target.x = self.target.x.clamp(0.0, map_w);
-        self.target.z = self.target.z.clamp(0.0, map_h);
+    /// Zoom by wheel steps (positive = in) with the cursor on window pixel
+    /// `cursor`: the zoom's goal scales by 2^(-cam_ZoomAmount * steps)
+    /// (moho: target zoom +0x358 *= exp(amount * wheel * -ln 2), clamped,
+    /// SupremeCommander.exe 0x7af7f0) and [`Camera::step_zoom`] eases the
+    /// zoom to it.
+    pub fn zoom(&mut self, steps: f32, cursor: Option<(f32, f32)>) {
+        let goal = (self.zoom_goal() * (-self.zoom_amount * steps).exp2()).clamp(self.min_zoom, self.max_zoom);
+        self.wheel = Some(WheelZoom { goal, at: self.zoom, cursor });
+    }
+
+    /// The cursor moved to window pixel `cursor` over this camera's view: a
+    /// wheel zoom under way closes on the ground under it there from now
+    /// on (moho's world view hands the camera every mouse move, 0x8766be).
+    pub fn zoom_cursor(&mut self, cursor: (f32, f32)) {
+        if let Some(w) = self.wheel.as_mut().filter(|w| w.cursor.is_some()) {
+            w.cursor = Some(cursor);
+        }
+    }
+
+    /// Eases a wheel zoom by `dt` seconds (moho's camera update, 0x7b0b80):
+    /// with the gap to the goal in doublings (log2), the zoom closes
+    /// (`cam_ZoomSpeedSmall` + `cam_ZoomSpeedLarge` x gap) x dt of it, so a
+    /// notch takes about a third of a second and a long spin not much
+    /// longer (FAF probe `probe_camzoom`: 0.50 and 5.00 fitted, the settle
+    /// times to the frame). Gives the cursor's pixel when the zoom closed in: the
+    /// ground under it is to stay under it (moho moves the look-at point
+    /// toward that ground by new / old zoom, 0x7b0ca1..0x7b0da3; zooming
+    /// out leaves the look-at point alone).
+    pub fn step_zoom(&mut self, dt: f32) -> Option<(f32, f32)> {
+        let w = self.wheel.take().filter(|w| w.at == self.zoom)?;
+        let (from, to) = (self.zoom.max(1e-3).log2(), w.goal.max(1e-3).log2());
+        let gap = to - from;
+        let step = (gap.abs() * ZOOM_SPEED_LARGE + ZOOM_SPEED_SMALL) * dt;
+        let old = self.zoom;
+        if step >= gap.abs() {
+            self.zoom = w.goal;
+        } else {
+            self.zoom = (from + step.copysign(gap)).exp2().clamp(self.min_zoom, self.max_zoom);
+            self.wheel = Some(WheelZoom { at: self.zoom, ..w });
+        }
+        w.cursor.filter(|_| self.zoom < old)
+    }
+
+    /// Keeps the target over the map, nearer its middle the further out the
+    /// zoom (moho 0x7b08b0): it stays the zoom's share of the farthest zoom
+    /// times half the map's size from each edge, so fully zoomed out the
+    /// view is centred on the map and fully in it reaches the edges. `free`
+    /// (`cam_Free`, which skips moho's clamp) only keeps it on the map.
+    pub fn clamp_to(&mut self, map_w: f32, map_h: f32, free: bool) {
+        let share = if free { 0.0 } else { (self.zoom / self.max_zoom.max(1e-3)).clamp(0.0, 1.0) * 0.5 };
+        let (mx, mz) = (map_w * share, map_h * share);
+        self.target.x = self.target.x.clamp(mx, map_w - mx);
+        self.target.z = self.target.z.clamp(mz, map_h - mz);
     }
 
     /// World position -> screen pixels (`None` if behind the camera).
@@ -729,8 +806,12 @@ mod tests {
         let fit = cam.max_zoom / MAX_ZOOM_MULT;
         cam.set_max_zoom_mult(1.4);
         assert!((cam.max_zoom - fit * 1.4).abs() < 0.01);
-        cam.zoom(-100.0);
-        assert!((cam.zoom - fit * 1.4).abs() < 0.01, "zooms out to the new limit");
+        cam.zoom(-100.0, None);
+        assert!((cam.zoom_goal() - fit * 1.4).abs() < 0.01, "zooms out to the new limit");
+        while cam.zoom_goal() != cam.zoom {
+            cam.step_zoom(1.0 / 60.0);
+        }
+        assert!((cam.zoom - fit * 1.4).abs() < 0.01);
         cam.set_max_zoom_mult(1.0);
         assert!((cam.zoom - fit).abs() < 0.01, "a lower limit pulls the camera in");
     }
@@ -749,6 +830,72 @@ mod tests {
         assert!((cam.target.x - (x0 + 100.0) / 2.0).abs() < 0.01);
         assert!(m.step(&mut cam, 0.5), "arrived");
         assert_eq!((cam.target.x, cam.target.z, cam.zoom), (100.0, 400.0, 40.0));
+    }
+
+    /// The wheel moves the zoom's goal and the zoom eases to it (moho
+    /// 0x7af7f0 / 0x7b0b80): a notch is 2^-0.4, closed at 0.5 + 5 x the gap
+    /// doublings a second, so in about ln(5) / 5 seconds; only zooming in
+    /// asks for the ground under the cursor to be kept.
+    #[test]
+    fn wheel_zoom_eases_to_its_goal() {
+        let mut c = Camera::new(1024.0, 1024.0);
+        c.zoom = 200.0;
+        c.zoom(1.0, Some((10.0, 20.0)));
+        assert_eq!(c.zoom, 200.0, "nothing moves until the camera steps");
+        let goal = 200.0 * (-0.4f32).exp2();
+        assert!((c.zoom_goal() - goal).abs() < 1e-3);
+        // The first 60 Hz frame closes (0.4 x 5 + 0.5) / 60 doublings.
+        assert_eq!(c.step_zoom(1.0 / 60.0), Some((10.0, 20.0)));
+        assert!((c.zoom.log2() - (200.0f32.log2() - 2.5 / 60.0)).abs() < 1e-4, "{}", c.zoom);
+        let mut frames = 1;
+        while c.zoom_goal() != c.zoom {
+            c.step_zoom(1.0 / 60.0);
+            frames += 1;
+            assert!(frames < 100);
+        }
+        assert!((c.zoom - goal).abs() < 1e-3);
+        assert!((frames as f32 / 60.0 - 5.0f32.ln() / 5.0).abs() < 0.05, "{frames} frames");
+        assert_eq!(c.step_zoom(1.0 / 60.0), None, "arrived");
+        // The cursor moving mid-zoom moves what it closes on.
+        c.zoom(1.0, Some((10.0, 20.0)));
+        c.zoom_cursor((30.0, 40.0));
+        assert_eq!(c.step_zoom(1.0 / 60.0), Some((30.0, 40.0)));
+        c.zoom(-1.0, Some((30.0, 40.0)));
+        while c.zoom_goal() != c.zoom {
+            c.step_zoom(1.0 / 60.0);
+        }
+        // More notches before it arrives add up.
+        c.zoom(-1.0, Some((10.0, 20.0)));
+        c.step_zoom(1.0 / 60.0);
+        c.zoom(-1.0, Some((10.0, 20.0)));
+        assert!((c.zoom_goal() - goal * 0.8f32.exp2()).abs() < 1e-2);
+        // Zooming out doesn't close on the cursor.
+        assert_eq!(c.step_zoom(1.0 / 60.0), None);
+        assert!(c.zoom > goal);
+        // A zoom set by anything else ends the ease.
+        c.zoom = 50.0;
+        assert_eq!(c.zoom_goal(), 50.0);
+        c.step_zoom(1.0);
+        assert_eq!(c.zoom, 50.0);
+    }
+
+    /// The look-at point keeps the zoom's share of half the map from each
+    /// edge (moho 0x7b08b0): centred fully zoomed out, to the edges zoomed
+    /// in; `cam_Free` only keeps it on the map.
+    #[test]
+    fn clamp_centres_the_view_as_it_zooms_out() {
+        let mut c = Camera::new(1000.0, 500.0);
+        c.zoom = c.max_zoom;
+        c.target = Vec3::new(900.0, 0.0, 10.0);
+        c.clamp_to(1000.0, 500.0, false);
+        assert!((c.target.x - 500.0).abs() < 1e-3 && (c.target.z - 250.0).abs() < 1e-3, "{}", c.target);
+        c.zoom = c.max_zoom * 0.25;
+        c.target = Vec3::new(990.0, 0.0, 10.0);
+        c.clamp_to(1000.0, 500.0, false);
+        assert!((c.target.x - 875.0).abs() < 1e-3 && (c.target.z - 62.5).abs() < 1e-3, "{}", c.target);
+        c.target = Vec3::new(1200.0, 0.0, 10.0);
+        c.clamp_to(1000.0, 500.0, true);
+        assert_eq!((c.target.x, c.target.z), (1000.0, 10.0));
     }
 
     /// Straight down zoomed out, `cam_NearPitch` fully in, linear in log
