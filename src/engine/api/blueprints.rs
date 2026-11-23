@@ -109,8 +109,8 @@ enum Default {
 ///   structure for an upgrade. (`UpgradesTo` stays nil: FAF's AI tests it
 ///   with `if not upgradeId`.)
 /// - `MaxSpeed`, `MaxAcceleration` 0 and
-///   `MaxBuildDistance` 5: what the sim already assumes when they're absent (`TurnRate` isn't filled: the sim
-///   assumes 90, and 0 would change movement).
+///   `MaxBuildDistance` 5: what the sim already assumes when they're absent
+///   (`TurnRate` 0 is in [`REFLECTED_DEFAULTS`]).
 /// - `Transport`: every field of moho's `RUnitBlueprintTransport` with its
 ///   constructor default (`MohoEngine.dll` 0x1010e1d0; `InitBlueprint`
 ///   0x100fb300 merges the reflected struct back into the Lua table, so
