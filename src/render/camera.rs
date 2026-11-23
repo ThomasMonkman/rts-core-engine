@@ -58,9 +58,9 @@ struct WheelZoom {
     /// The zoom the ease last left. A zoom set since by anything else (a
     /// timed move, `SetZoom`, a restored view) ends the ease.
     at: f32,
-    /// The window pixel the cursor was on at the wheel (moho's +0x36c, set
-    /// through vtable +0x78 before the zoom): zooming in closes on the
-    /// ground under it.
+    /// The window pixel the cursor is on (moho's +0x36c, set through
+    /// vtable +0x78 at the wheel, 0x8764d3, and by each mouse move over the
+    /// view after, 0x8766be): zooming in closes on the ground under it.
     cursor: Option<(f32, f32)>,
 }
 
@@ -364,11 +364,21 @@ impl Camera {
         self.wheel = Some(WheelZoom { goal, at: self.zoom, cursor });
     }
 
+    /// The cursor moved to window pixel `cursor` over this camera's view: a
+    /// wheel zoom under way closes on the ground under it there from now
+    /// on (moho's world view hands the camera every mouse move, 0x8766be).
+    pub fn zoom_cursor(&mut self, cursor: (f32, f32)) {
+        if let Some(w) = self.wheel.as_mut().filter(|w| w.cursor.is_some()) {
+            w.cursor = Some(cursor);
+        }
+    }
+
     /// Eases a wheel zoom by `dt` seconds (moho's camera update, 0x7b0b80):
     /// with the gap to the goal in doublings (log2), the zoom closes
     /// (`cam_ZoomSpeedSmall` + `cam_ZoomSpeedLarge` x gap) x dt of it, so a
     /// notch takes about a third of a second and a long spin not much
-    /// longer. Gives the wheel's cursor pixel when the zoom closed in: the
+    /// longer (FAF probe `probe_camzoom`: 0.50 and 5.00 fitted, the settle
+    /// times to the frame). Gives the cursor's pixel when the zoom closed in: the
     /// ground under it is to stay under it (moho moves the look-at point
     /// toward that ground by new / old zoom, 0x7b0ca1..0x7b0da3; zooming
     /// out leaves the look-at point alone).
@@ -846,6 +856,14 @@ mod tests {
         assert!((c.zoom - goal).abs() < 1e-3);
         assert!((frames as f32 / 60.0 - 5.0f32.ln() / 5.0).abs() < 0.05, "{frames} frames");
         assert_eq!(c.step_zoom(1.0 / 60.0), None, "arrived");
+        // The cursor moving mid-zoom moves what it closes on.
+        c.zoom(1.0, Some((10.0, 20.0)));
+        c.zoom_cursor((30.0, 40.0));
+        assert_eq!(c.step_zoom(1.0 / 60.0), Some((30.0, 40.0)));
+        c.zoom(-1.0, Some((30.0, 40.0)));
+        while c.zoom_goal() != c.zoom {
+            c.step_zoom(1.0 / 60.0);
+        }
         // More notches before it arrives add up.
         c.zoom(-1.0, Some((10.0, 20.0)));
         c.step_zoom(1.0 / 60.0);

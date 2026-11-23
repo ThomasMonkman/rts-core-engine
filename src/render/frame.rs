@@ -216,12 +216,16 @@ fn update_camera(s: &mut RenderState, head: usize, dt: f32) {
         }
     }
     // Wheel zooms ease to their goals. One closing in keeps the ground that
-    // was under the wheel's cursor under it; zooming out leaves the look-at
+    // was under the cursor under it; zooming out leaves the look-at
     // point alone (moho's camera update, 0x7b0b80).
     let zooming: Vec<String> = s.world.cameras.iter().filter(|(name, c)| c.zoom_goal() != c.zoom && owner(s, name) == head).map(|(n, _)| n.to_owned()).collect();
     for name in zooming {
         let Some(before) = s.world.cameras.get(&name).copied() else { continue };
         let mut cam = before;
+        // It closes on where the cursor is now, not where the wheel turned.
+        if let Some((x, y)) = cursor.filter(|&(x, y)| s.world.view_at(x, y).is_some_and(|(v, _)| v.camera.eq_ignore_ascii_case(&name))) {
+            cam.zoom_cursor((x, y));
+        }
         if let Some((x, y)) = cam.step_zoom(dt)
             && let Some(view) = s.world.head_views(head).iter().find(|v| v.camera.eq_ignore_ascii_case(&name))
             && let (Some(was), Some(now)) = (s.world.ground_through(view, &before, x, y), s.world.ground_through(view, &cam, x, y)) {
