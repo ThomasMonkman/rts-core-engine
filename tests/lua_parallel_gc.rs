@@ -6,6 +6,10 @@
 //! Plain Luau VMs, no game data. One test only: the setting is the
 //! process's.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
 use mlua::prelude::*;
 use rts_core_engine::engine::lua::heap_snapshot;
 use rts_core_engine::engine::sim::gc;
@@ -25,6 +29,8 @@ local K = setmetatable({}, { __mode = "k" })
 local V = setmetatable({}, { __mode = "v" })
 local KV = setmetatable({}, { __mode = "kv" })
 local live = {}
+-- one metatable for many objects, as a class's instances share theirs
+local CLASS = { __index = {} }
 ROOT = { live = live, K = K, V = V, KV = KV }
 local all = {}
 for i = 1, N do
@@ -50,8 +56,10 @@ for i = 1, N do
     elseif kind == 7 then
         o = newproxy(true)
         getmetatable(o).ref = earlier
-    else
+    elseif i % 2 == 0 then
         o = setmetatable({}, { __index = earlier })
+    else
+        o = setmetatable({ earlier }, CLASS)
     end
     all[#all + 1] = o
     if rnd(3) == 1 then live[#live + 1] = o end
@@ -80,17 +88,25 @@ fn new_lua() -> Lua {
     lua
 }
 
-/// What is left of [`BUILD`]'s heap after one collection: every object
-/// (gcid, type) and every string.
-fn survivors(objects: u32) -> (Vec<(u32, u8)>, Vec<Vec<u8>>) {
+fn build(objects: u32) -> Lua {
     let lua = new_lua();
     lua.load(BUILD).call::<()>(objects).expect("build");
-    heap_snapshot::collect(&lua).expect("collect");
-    heap_snapshot::validate(&lua).expect("heap valid");
-    let (mut objects, mut strings) = heap_snapshot::contents(&lua).expect("contents");
+    lua
+}
+
+/// What is left of a heap after one collection: every object (gcid, type)
+/// and every string.
+fn collect(lua: &Lua) -> (Vec<(u32, u8)>, Vec<Vec<u8>>) {
+    heap_snapshot::collect(lua).expect("collect");
+    heap_snapshot::validate(lua).expect("heap valid");
+    let (mut objects, mut strings) = heap_snapshot::contents(lua).expect("contents");
     objects.sort_unstable();
     strings.sort_unstable();
     (objects, strings)
+}
+
+fn survivors(objects: u32) -> (Vec<(u32, u8)>, Vec<Vec<u8>>) {
+    collect(&build(objects))
 }
 
 #[test]
@@ -105,6 +121,26 @@ fn parallel_mark_frees_what_the_serial_one_does() {
         let parallel = survivors(OBJECTS);
         assert_eq!(serial.0.len(), parallel.0.len(), "run {run}: objects kept");
         assert!(serial == parallel, "run {run}: the parallel mark kept different objects or strings");
+    }
+
+    // With pool threads busy (a window's renderer shares the pool): all but
+    // one, so one thread runs the workers one after another, the later ones
+    // after the mark is done; and all, so the calling thread marks alone.
+    let threads = rayon::current_num_threads();
+    for busy in [threads - 1, threads] {
+        let lua = build(OBJECTS);
+        let started = Arc::new(AtomicUsize::new(0));
+        for _ in 0..busy {
+            let started = started.clone();
+            rayon::spawn(move || {
+                started.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(200));
+            });
+        }
+        while started.load(Ordering::SeqCst) < busy {
+            std::thread::yield_now();
+        }
+        assert!(serial == collect(&lua), "{busy} of {threads} pool threads busy: the parallel mark kept different objects or strings");
     }
 }
 

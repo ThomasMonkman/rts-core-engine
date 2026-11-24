@@ -37,8 +37,10 @@ unsafe extern "C" {
 }
 
 /// Runs the collector's `n` mark workers: the first on this thread, the rest
-/// on rayon's pool. A worker whose pool thread is busy starts late or finds
-/// the mark already done; the others don't wait for it.
+/// on rayon's pool. The mark doesn't wait for a worker whose pool thread is
+/// busy: it starts late, or finds the mark done and returns at once. This
+/// call does wait for each to have run, so with the whole pool busy it
+/// returns when one pool thread comes free.
 unsafe extern "C" fn rayon_run(n: c_int, f: Worker, ctx: *mut c_void) {
     let ctx = ctx as usize;
     rayon::in_place_scope(|s| {
@@ -60,10 +62,13 @@ pub fn parallel(min_bytes: usize) {
 }
 
 /// Turns the automatic collector off (from VM creation), and parallel
-/// marking on.
+/// marking on. `RTS_GC_PARALLEL_MIN=bytes` replaces [`PARALLEL_MIN`] (0: every
+/// collection on the pool, so the tests' small heaps take that path too).
 pub fn manual(lua: &Lua) {
+    static MIN: std::sync::LazyLock<usize> =
+        std::sync::LazyLock::new(|| std::env::var("RTS_GC_PARALLEL_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(PARALLEL_MIN));
     lua.gc_stop();
-    parallel(PARALLEL_MIN);
+    parallel(*MIN);
 }
 
 /// A full collection, leaving the automatic collector off (a collection

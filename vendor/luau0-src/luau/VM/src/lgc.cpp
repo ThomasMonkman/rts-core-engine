@@ -1276,22 +1276,47 @@ void lua_rts_gcparallel(lua_ParallelRun run, int threads, size_t minbytes)
     parrun.store(threads > 1 ? run : nullptr);
 }
 
+// Workers read and write mark bytes through these (plain loads and stores
+// to the processor, and no data race to the language).
+static inline std::atomic<uint8_t>& pmarked(GCObject* o)
+{
+    return *reinterpret_cast<std::atomic<uint8_t>*>(&o->gch.marked);
+}
+
+static inline bool pwhite(GCObject* o)
+{
+    return (pmarked(o).load(std::memory_order_relaxed) & kWhite) != 0;
+}
+
+// Only the worker that claimed `o` sets or clears other bits than white.
+static inline void psetbits(GCObject* o, uint8_t set, uint8_t clear)
+{
+    std::atomic<uint8_t>& m = pmarked(o);
+    m.store(uint8_t((m.load(std::memory_order_relaxed) | set) & ~clear), std::memory_order_relaxed);
+}
+
 static inline bool pclaim(GCObject* o)
 {
-    uint8_t old = reinterpret_cast<std::atomic<uint8_t>*>(&o->gch.marked)->fetch_and(uint8_t(~kWhite), std::memory_order_relaxed);
+    uint8_t old = pmarked(o).fetch_and(uint8_t(~kWhite), std::memory_order_relaxed);
     return (old & kWhite) != 0;
+}
+
+// `isdeadside` for workers
+static inline bool pdeadside(int tt, GCObject* o)
+{
+    return tt > LUA_TSTRING && tt != LUA_TDEADKEY && pwhite(o);
 }
 
 static void pmark(ParWorker& w, GCObject* o);
 
 #define pmarkvalue(w, o) \
     { \
-        if (iscollectable(o) && iswhite(gcvalue(o))) \
+        if (iscollectable(o) && pwhite(gcvalue(o))) \
             pmark(w, gcvalue(o)); \
     }
 #define pmarkobject(w, t) \
     { \
-        if (iswhite(obj2gco(t))) \
+        if (pwhite(obj2gco(t))) \
             pmark(w, obj2gco(t)); \
     }
 
@@ -1301,16 +1326,15 @@ static void pmark(ParWorker& w, GCObject* o)
     {
     case LUA_TSTRING:
     {
-        uint8_t m = o->gch.marked;
-        if (m & kWhite)
-            o->gch.marked = m & uint8_t(~kWhite);
+        if (pwhite(o))
+            psetbits(o, 0, kWhite);
         return;
     }
     case LUA_TUSERDATA:
     {
         if (!pclaim(o))
             return;
-        o->gch.marked |= kBlack;
+        psetbits(o, kBlack, 0);
         LuaTable* mt = gco2u(o)->metatable;
         if (mt)
             pmarkobject(w, mt);
@@ -1323,13 +1347,13 @@ static void pmark(ParWorker& w, GCObject* o)
         UpVal* uv = gco2uv(o);
         pmarkvalue(w, uv->v);
         if (!upisopen(uv))
-            o->gch.marked |= kBlack;
+            psetbits(o, kBlack, 0);
         return;
     }
     case LUA_TBUFFER:
     {
         if (pclaim(o))
-            o->gch.marked |= kBlack;
+            psetbits(o, kBlack, 0);
         return;
     }
     case LUA_TFUNCTION:
@@ -1353,20 +1377,31 @@ static int pmarkentry(ParWorker& w, LuaNode* n, int weakkey)
     GCObject* strong = weakkey ? gval(n)->value.gc : gkey(n)->value.gc;
     GCObject* weak = weakkey ? gkey(n)->value.gc : gval(n)->value.gc;
 
-    if (!isdeadside(strongtt, strong))
+    if (!pdeadside(strongtt, strong))
         return 1;
     // the weak side may be marked by another worker right after this:
     // `convergeephemerons` decides the entry then
-    if (isdeadside(weaktt, weak))
+    if (pdeadside(weaktt, weak))
         return 0;
     pmark(w, strong);
     return 1;
 }
 
+// `gettablemode` for workers: it doesn't note a missing `__mode` in the
+// metatable's cache, which tables on other workers share.
+static const char* ptablemode(global_State* g, LuaTable* h)
+{
+    LuaTable* mt = h->metatable;
+    if (!mt || (mt->tmcache & (1u << TM_MODE)))
+        return NULL;
+    const TValue* mode = luaH_getstr(mt, g->tmname[TM_MODE]);
+    return ttisstring(mode) ? svalue(mode) : NULL;
+}
+
 // What `propagatemark` does to a gray object, for one a worker claimed.
 static void ptraverse(global_State* g, ParWorker& w, GCObject* o)
 {
-    o->gch.marked |= kBlack;
+    psetbits(o, kBlack, 0);
     switch (o->gch.tt)
     {
     case LUA_TTABLE:
@@ -1377,7 +1412,7 @@ static void ptraverse(global_State* g, ParWorker& w, GCObject* o)
         int weakvalue = 0;
         if (h->metatable)
             pmarkobject(w, cast_to(LuaTable*, h->metatable));
-        if (const char* modev = gettablemode(g, h))
+        if (const char* modev = ptablemode(g, h))
         {
             weakkey = (strchr(modev, 'k') != NULL);
             weakvalue = (strchr(modev, 'v') != NULL);
@@ -1409,7 +1444,7 @@ static void ptraverse(global_State* g, ParWorker& w, GCObject* o)
         if (weakkey || weakvalue)
         {
             (pending ? w.ephemeron : w.weak).push_back(o);
-            o->gch.marked &= uint8_t(~kBlack); // weak tables stay gray
+            psetbits(o, 0, kBlack); // weak tables stay gray
         }
         return;
     }
@@ -1447,7 +1482,7 @@ static void ptraverse(global_State* g, ParWorker& w, GCObject* o)
         if (active)
         {
             w.again.push_back(o);
-            o->gch.marked &= uint8_t(~kBlack);
+            psetbits(o, 0, kBlack);
         }
         else
             clearstack(l);
