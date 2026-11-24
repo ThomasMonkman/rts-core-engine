@@ -112,6 +112,7 @@ saved_types! {
     // would have, or every later gcid shifts.
     "footprints" => api::construction::Footprints,
     "decay_rates" => api::construction::DecayRates,
+    "regen_assist_mults" => api::construction::RegenAssistMults,
     "lifetimes" => api::effect::Lifetimes,
     "buildable" => api::build::BuildableCache,
 }

@@ -40,9 +40,13 @@
 //! The progress step is moho's (the build-task work step, MohoEngine.dll
 //! 0x101e1ace..0x101e1af9: `BuildRate / BuildTime x GetResourceConsumed x
 //! 0.1`). Repairing an aircraft also refuels it, at half speed for both while
-//! it's damaged (`assists`). Not done: assisting a shield generator
-//! regenerating its bubble (0x101e1b33..0x101e1c76: `RegenRate x BuildRate /
-//! Defense.Shield.RegenAssistMult`, needs the owner's shield link).
+//! it's damaged (`assists`). Repairing or guarding a `SHIELD` unit
+//! regenerates its focus entity (FAF focuses a shield unit on its shield) by
+//! `RegenRate x 0.1 x BuildRate / Defense.Shield.RegenAssistMult` a tick,
+//! the divisor doubled and the repair halved while the unit is damaged
+//! (0x101e1b33..0x101e1c76); at full health the work lasts until the shield
+//! is full, or ends at once when the script's `ShieldIsOn()` says it's off
+//! (FAF probe `probe_shield_assist`).
 //!
 //! Inferred, not verified against the binary: progress callbacks every tick,
 //! no site snapping.
@@ -1674,9 +1678,85 @@ fn work_target(lua: &Lua, kind: CommandKind, target: EntityId) -> Option<EntityI
         drop(w);
         // (Guard) a missile silo building a missile: the assister helps
         // build it (moho's repair task with `isSilo`).
-        is_enhancing(lua, target) || (kind == CommandKind::Guard && crate::engine::api::silo::is_building(lua, target))
+        is_enhancing(lua, target) || (kind == CommandKind::Guard && crate::engine::api::silo::is_building(lua, target)) || shield_needs_assist(lua, target)
     })
     .then_some(target)
+}
+
+/// A finished `SHIELD` unit's focus entity when it is below its max health:
+/// the shield assisting the unit regenerates (FAF focuses a shield unit on
+/// its shield, `Unit.CreateShield`). MohoEngine.dll 0x101e1b53..0x101e1bd2:
+/// category `SHIELD`, `GetFocusEntity`, focus health +0x90 < max +0x94.
+fn shield_to_regen(lua: &Lua, target: EntityId) -> Option<EntityId> {
+    let w = entity::world(lua);
+    let t = w.get(target).filter(|e| !e.destroyed && e.fraction_complete >= Fx::ONE)?;
+    let shield = t.unit.as_deref()?.focus?;
+    w.get(shield).filter(|s| !s.destroyed && s.health < s.max_health)?;
+    drop(w);
+    has_category(lua, target, "SHIELD").ok()?.then_some(shield)
+}
+
+/// Full health, a shield to regenerate and the script's `ShieldIsOn()`:
+/// work for a repair (off, moho's work step ends it: 0x101e1bb2..0x101e1bb9
+/// -> 0x101e17fd; it asks only while the unit is undamaged).
+fn shield_needs_assist(lua: &Lua, target: EntityId) -> bool {
+    if shield_to_regen(lua, target).is_none() {
+        return false;
+    }
+    let Ok(Some(obj)) = object(lua, target) else { return false };
+    match obj.get::<LuaValue>("ShieldIsOn").and_then(|f| match f {
+        LuaValue::Function(f) => f.call::<LuaValue>(obj.clone()),
+        _ => Ok(LuaValue::Nil),
+    }) {
+        Ok(on) => !matches!(on, LuaValue::Nil | LuaValue::Boolean(false)),
+        Err(e) => {
+            tracing::warn!(target: "lua", "ShieldIsOn: {e}");
+            false
+        }
+    }
+}
+
+/// `Defense.Shield.RegenAssistMult` per unit blueprint (0 without one), read
+/// once.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RegenAssistMults(BTreeMap<String, Fx>);
+crate::engine::api::blueprints::derived_cache!(RegenAssistMults);
+
+pub(crate) fn regen_assist_mult(lua: &Lua, bp_id: &str) -> LuaResult<Fx> {
+    if let Some(m) = lua.app_data_ref::<RegenAssistMults>().and_then(|d| d.0.get(bp_id).copied()) {
+        return Ok(m);
+    }
+    let bp = entity::blueprint_table(lua, crate::engine::api::blueprints::BlueprintKind::Unit, bp_id)?;
+    let mult = bp
+        .get::<Option<LuaTable>>("Defense")?
+        .and_then(|d| d.get::<Option<LuaTable>>("Shield").ok().flatten())
+        .and_then(|s| s.get::<Option<f64>>("RegenAssistMult").ok().flatten())
+        .map_or(Fx::ZERO, crate::engine::sim::math::from_lua);
+    lua.app_data_mut::<RegenAssistMults>().expect("RegenAssistMults").0.insert(bp_id.to_owned(), mult);
+    Ok(mult)
+}
+
+/// What one tick of `assister`'s work on finished `work` gives its shield:
+/// the shield, `RegenRate` (the shield's Lua field) x 0.1 x the assister's
+/// `BuildRate`, and the divisor `RegenAssistMult` (MohoEngine.dll
+/// 0x101e1bd8..0x101e1c76). None without a shield to regenerate or a
+/// multiplier (0).
+fn shield_regen(lua: &Lua, assister: EntityId, work: EntityId) -> LuaResult<Option<(EntityId, Fx, Fx)>> {
+    let Some(shield) = shield_to_regen(lua, work) else { return Ok(None) };
+    let (bp, build_rate) = {
+        let w = entity::world(lua);
+        let bp = w.get(work).map(|e| e.cold.blueprint_id.clone()).unwrap_or_default();
+        (bp, w.get(assister).and_then(|e| e.unit.as_deref()).map_or(Fx::ZERO, |u| u.build_rate))
+    };
+    let mult = regen_assist_mult(lua, &bp)?;
+    if mult == Fx::ZERO {
+        return Ok(None);
+    }
+    let rate = match object(lua, shield)? {
+        Some(s) => s.get::<Option<f64>>("RegenRate")?.map_or(Fx::ZERO, crate::engine::sim::math::from_lua),
+        None => Fx::ZERO,
+    };
+    Ok(Some((shield, rate * build_rate / Fx::from_num(10), mult)))
 }
 
 /// Stops an assister's current work (`OnStopBuild(target, 'Repair')`).
@@ -1944,6 +2024,7 @@ fn assists(lua: &Lua) -> LuaResult<()> {
         let time = build_time(lua, &a_obj, work)?;
         let served = entity::world(lua).get(assister).and_then(|e| e.unit.as_deref().map(|u| u.resource_consumed)).unwrap_or(Fx::ONE);
         let delta = dt / time * served;
+        let shield = if served > Fx::ZERO { shield_regen(lua, assister, work)? } else { None };
         let (finished_build, healed) = {
             let mut w = entity::world(lua);
             let Some(t) = w.get_mut(work) else { continue };
@@ -1954,14 +2035,29 @@ fn assists(lua: &Lua) -> LuaResult<()> {
                 t.health = (t.health + t.max_health * (new - old)).min(t.max_health);
                 (new >= Fx::ONE, false)
             } else {
+                let mut delta = delta;
+                let damaged = t.health < t.max_health;
+                // Assisting a shield unit regenerates its shield by
+                // `RegenRate x 0.1 x BuildRate / RegenAssistMult`; while the
+                // unit is damaged, the divisor doubles and the repair halves
+                // (MohoEngine.dll 0x101e1b33..0x101e1c76; FAF probe
+                // `probe_shield_assist`: a T1 engineer gives a T2 generator's
+                // shield 1 a tick, three 3, 0.5 while it's damaged). Only
+                // while served.
+                let shield = shield.map(|(s, gain, mult)| {
+                    if damaged {
+                        delta /= 2;
+                        (s, gain / (mult * 2))
+                    } else {
+                        (s, gain / mult)
+                    }
+                });
                 // Repairing something with fuel refuels it, at
                 // `Physics.FuelRechargeRate / FuelUseTime` a second of the
                 // tank; while it's damaged both that and the repair go at
                 // half speed (MohoEngine.dll 0x101e1c82..0x101e1d1b, unit bp
                 // +0x304 / +0x308 = Physics +0x8c / +0x90; fuel ratio unit
                 // +0x284, `GetFuelRatio` 0x10168c60). Only while served.
-                let mut delta = delta;
-                let damaged = t.health < t.max_health;
                 if let Some(u) = t.unit.as_deref_mut()
                     && served > Fx::ZERO
                     && u.fuel_use_time > Fx::ZERO
@@ -1974,9 +2070,17 @@ fn assists(lua: &Lua) -> LuaResult<()> {
                     u.fuel_ratio = (u.fuel_ratio + refuel).min(Fx::ONE);
                 }
                 t.health = (t.health + t.max_health * delta).min(t.max_health);
-                (false, t.health >= t.max_health)
+                let full = t.health >= t.max_health;
+                if let Some((s, gain)) = shield
+                    && let Some(s) = w.get_mut(s) {
+                    s.health = (s.health + gain).min(s.max_health);
+                }
+                (false, full)
             }
         };
+        // At full health, the work on a shield unit lasts until its shield
+        // is full too (0x101e1e1c..0x101e1ec9).
+        let healed = healed && shield_to_regen(lua, work).is_none();
         // Its own work lane shows the work's absolute progress, as the
         // builders' do: construction, else health.
         let lane = assist_progress(lua, work);
@@ -2067,6 +2171,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua.set_app_data(FaceToBuild::default());
     lua.set_app_data(DecayRates::default());
     lua.set_app_data(Footprints::default());
+    lua.set_app_data(RegenAssistMults::default());
     lua.set_app_data(Unfinished::default());
     fn with_unit<R: Default>(lua: &Lua, this: &LuaTable, f: impl FnOnce(&mut crate::engine::sim::entity::UnitData) -> R) -> LuaResult<R> {
         let id = entity::entity_id(this)?;

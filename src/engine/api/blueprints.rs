@@ -954,13 +954,14 @@ mod tests {
         lua.set_app_data(Arc::new(RwLock::new(Vfs::new(vec![MountPoint { source: dir.clone(), mountpoint: "/".into() }], vec![]).unwrap())));
         lua.set_app_data(construction::Footprints::default());
         lua.set_app_data(construction::DecayRates::default());
+        lua.set_app_data(construction::RegenAssistMults::default());
         lua.set_app_data(build::SkirtCache::default());
         lua.set_app_data(build::PlacementCache::default());
         lua.set_app_data(build::BuildableCache::default());
         lua.set_app_data(crate::engine::sim::projectile::Projectiles::default());
         lua.load(
             "__blueprints = {}
-            RegisterUnitBlueprint({ BlueprintId = 'b', Categories = { 'LAND' }, Footprint = { SizeX = 2, SizeZ = 2 }, Economy = { BuildCostMass = 10, BuildableCategory = { 'LAND' } } })
+            RegisterUnitBlueprint({ BlueprintId = 'b', Categories = { 'LAND' }, Footprint = { SizeX = 2, SizeZ = 2 }, Economy = { BuildCostMass = 10, BuildableCategory = { 'LAND' } }, Defense = { Shield = { RegenAssistMult = 60 } } })
             RegisterUnitBlueprint({ BlueprintId = 'n', Categories = { 'NAVAL' } })
             RegisterProjectileBlueprint({ BlueprintId = '/p.bp', Physics = { PositionX = 1 } })",
         )
@@ -968,7 +969,7 @@ mod tests {
         .unwrap();
         categories::build(&lua).unwrap();
 
-        // (footprint half x, decay cost (0.1 / rate), skirt width, builds `n`, effect lifetime, projectile offset x, placement half x)
+        // (footprint half x, decay cost (0.1 / rate), skirt width, builds `n`, effect lifetime, projectile offset x, placement half x, shield assist divisor)
         let read = |lua: &Lua| {
             let n = categories::domain(lua).unwrap().index_of("n").unwrap();
             let bp = lua.load("return __blueprints['/p.bp']").eval::<LuaTable>().unwrap();
@@ -981,14 +982,15 @@ mod tests {
                 effect::blueprint_lifetime(lua, EffectKind::Emitter, "/effects/e.bp"),
                 projectile::template_of(lua, "/p.bp", &bp).unwrap().position.x.to_num::<f64>(),
                 build::Placement::of(lua, "b").unwrap().half().0.to_num::<f64>(),
+                construction::regen_assist_mult(lua, "b").unwrap().to_num::<f64>(),
             )
         };
         let before = read(&lua);
-        assert_eq!(before, (1.0, 10.0, 2.0, false, Some(10.0), 1.0, 1.0));
+        assert_eq!(before, (1.0, 10.0, 2.0, false, Some(10.0), 1.0, 1.0, 60.0));
 
         reloading(&lua, || {
             lua.load(
-                "RegisterUnitBlueprint({ BlueprintId = 'b', Categories = { 'LAND' }, Footprint = { SizeX = 4, SizeZ = 4 }, Economy = { BuildCostMass = 20, BuildableCategory = { 'NAVAL' } } })
+                "RegisterUnitBlueprint({ BlueprintId = 'b', Categories = { 'LAND' }, Footprint = { SizeX = 4, SizeZ = 4 }, Economy = { BuildCostMass = 20, BuildableCategory = { 'NAVAL' } }, Defense = { Shield = { RegenAssistMult = 30 } } })
                 RegisterProjectileBlueprint({ BlueprintId = '/p.bp', Physics = { PositionX = 2 } })",
             )
             .exec()
@@ -998,8 +1000,8 @@ mod tests {
         categories::build(&lua).unwrap();
         forget_derived(&lua);
 
-        assert_eq!(read(&lua), (2.0, 20.0, 4.0, true, Some(20.0), 2.0, 2.0), "every cache reads the new values");
-        assert_eq!(inventory::iter::<DerivedCache>.into_iter().count(), 7, "a new DerivedCache: check it here too");
+        assert_eq!(read(&lua), (2.0, 20.0, 4.0, true, Some(20.0), 2.0, 2.0, 30.0), "every cache reads the new values");
+        assert_eq!(inventory::iter::<DerivedCache>.into_iter().count(), 8, "a new DerivedCache: check it here too");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

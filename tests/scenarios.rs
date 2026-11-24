@@ -279,6 +279,11 @@ fn repair_refuel() {
 }
 
 #[test]
+fn repair_shield() {
+    scenario("repair_shield", 600);
+}
+
+#[test]
 fn reclaim() {
     scenario("reclaim", 600);
 }
