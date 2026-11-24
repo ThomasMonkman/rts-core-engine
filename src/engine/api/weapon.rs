@@ -296,7 +296,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             && let Some(ps) = lua.app_data_ref::<crate::engine::sim::projectile::Projectiles>() {
             views.extend(ps.iter().filter_map(|p| {
                 let e = world.get(p.id).filter(|e| !e.destroyed)?;
-                Some(crate::engine::sim::weapon::ProjectileView { id: p.id, position: e.position(), velocity: p.velocity(), army: e.army, category: e.category_index })
+                Some(crate::engine::sim::weapon::ProjectileView { id: p.id, position: e.position(), velocity: p.velocity(), army: e.army, category: e.category_index, shooter_cap: p.shooter_cap, shooters: 0 })
             }));
         }
         weapons.projectiles = views;

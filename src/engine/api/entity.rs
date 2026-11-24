@@ -153,10 +153,16 @@ fn take_off(lua: &Lua, unit: EntityId, parent: Option<EntityId>) -> LuaResult<()
 
 /// A unit's `Attached` state, which moho's `Unit::AttachTo` sets
 /// (MohoEngine.dll 0x1028aab6: state bits +0x490 |= 0x4000, `Attached`) and
-/// `Unit::DetachFrom` clears (0x1028ab2d). No-op for other entities.
+/// `Unit::DetachFrom` clears (0x1028ab2d). No-op for other entities, and
+/// for a unit without motion (`RULEUMT_None`): `Unit::AttachTo` sets the
+/// bit only when the unit has a motion object (vt +0x30). So the Fatboy's
+/// external factory (`uel0401ef`, attached to its anchor unit for good)
+/// is never `Attached` and the dispatcher starts its build orders (FAF
+/// probe `probe_fatboy_water`: its states read `Building` only).
 fn set_attached(lua: &Lua, id: EntityId, on: bool) {
     let i = crate::engine::sim::unit_state::UnitStates::index("Attached").expect("unit state");
-    if let Some(u) = world(lua).get_mut(id).and_then(|e| e.unit.as_deref_mut()) {
+    if let Some(u) = world(lua).get_mut(id).and_then(|e| e.unit.as_deref_mut())
+        && (!on || u.motion_params.kind != crate::engine::sim::movement::MotionKind::None) {
         u.states.set(i, on);
     }
 }

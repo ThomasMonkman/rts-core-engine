@@ -857,9 +857,24 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         })?;
     lua_fn!(lua, global,
         /// Queues `count` (default 1, at least 1) of blueprint `bp` at a factory.
+        /// A factory that may not build it now (its `AddBuildRestriction`,
+        /// its army's, its blueprint) doesn't take the order: FAF probe
+        /// `probe_fatboy_water`, a Fatboy's external factory on the seabed
+        /// (FAF restricts it to nothing there) keeps an empty queue and
+        /// never enters `Building`.
         IssueBuildFactory = |lua, (units, bp, count): (shapes::Units, String, Option<f64>)| {
-            let units = units_of(lua, &units)?;
-            Ok(issue(lua, &units, K::BuildFactory, CommandTarget::None, Some(bp.to_lowercase()), count.unwrap_or(1.0).max(1.0) as u32))
+            let bp = bp.to_lowercase();
+            let mut units = units_of(lua, &units)?;
+            if unit_blueprint_known(lua, &bp) {
+                let mut allowed = Vec::with_capacity(units.len());
+                for u in units {
+                    if crate::engine::api::build::can_build(lua, u, &bp)? {
+                        allowed.push(u);
+                    }
+                }
+                units = allowed;
+            }
+            Ok(issue(lua, &units, K::BuildFactory, CommandTarget::None, Some(bp), count.unwrap_or(1.0).max(1.0) as u32))
         })?;
     lua_fn!(lua, global,
         /// Upgrades each unit into blueprint `bp`.

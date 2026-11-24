@@ -63,6 +63,9 @@ pub struct ProjectileTemplate {
     pub stay_upright: bool,
     pub velocity_align: bool,
     pub track_target: bool,
+    /// `DesiredShooterCap`: how many units may hold this projectile as a
+    /// weapon target at once (`sim::weapon`, the projectile search).
+    pub shooter_cap: u32,
     /// `LeadTarget` (default on): a homing projectile steers for where its
     /// target will be when it gets there.
     pub lead_target: bool,
@@ -135,6 +138,13 @@ pub enum ProjectileTarget {
     Ground(FxVec3),
 }
 
+/// Moho's default `DesiredShooterCap` (every entity blueprint's).
+pub const DEFAULT_SHOOTER_CAP: u32 = 3;
+
+fn default_shooter_cap() -> u32 {
+    DEFAULT_SHOOTER_CAP
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectileState {
     pub id: EntityId,
@@ -158,6 +168,9 @@ pub struct ProjectileState {
     pub stay_upright: bool,
     pub velocity_align: bool,
     pub track_target: bool,
+    /// See [`ProjectileTemplate::shooter_cap`].
+    #[serde(default = "default_shooter_cap")]
+    pub shooter_cap: u32,
     pub lead_target: bool,
     pub turn_rate: Fx,
     /// Zig-zag (see [`ProjectileTemplate::max_zigzag`]): the blueprint's,
@@ -258,6 +271,7 @@ impl ProjectileState {
             stay_upright: t.stay_upright,
             velocity_align: t.velocity_align,
             track_target: t.track_target,
+            shooter_cap: t.shooter_cap,
             lead_target: t.lead_target,
             turn_rate: t.turn_rate,
             max_zigzag: t.max_zigzag,
@@ -345,6 +359,10 @@ pub struct Projectiles {
     /// Projectiles that crossed the water surface last step, by id: `true`
     /// entering, `false` leaving (`OnEnterWater` / `OnExitWater`).
     pub water_crossings: Vec<(EntityId, bool)>,
+    /// Tracking projectiles whose target was found gone this step, id
+    /// order (`OnLostTarget`). Filled and emptied within the tick.
+    #[serde(skip)]
+    pub lost_targets: Vec<EntityId>,
     /// Where each of `water_crossings` was before the step (same order):
     /// the position its script sees in the callback.
     #[serde(default)]
@@ -770,8 +788,27 @@ pub fn step_with(
     parallel_min: usize,
 ) {
     use rayon::prelude::*;
-    let Projectiles { list, scratch, hit_scratch, turned_last_tick, colliding_last_tick, water_crossings, water_crossing_from, script_crossings, checks, checks_epoch, .. } = projectiles;
+    let Projectiles { list, scratch, hit_scratch, turned_last_tick, colliding_last_tick, water_crossings, water_crossing_from, script_crossings, checks, checks_epoch, lost_targets, .. } = projectiles;
     *checks_epoch = world.unit_epoch();
+    // A tracking projectile whose target entity is gone stops tracking and
+    // its script hears `OnLostTarget`, once: moho's `UpdateTracking`
+    // (MohoEngine.dll 0x1027db00), run only while `TrackTarget` is set,
+    // tests the target (0x1027db18), runs the callback (0x1027db57) and
+    // clears the flag (0x1027db63); the target itself is kept. FAF probe
+    // `probe_smd`: an interceptor whose nuke was destroyed hears it the
+    // next tick and flies straight on (FAF's script then ends it).
+    lost_targets.clear();
+    for p in list.iter_mut() {
+        // (Not one whose own impact ended it this tick: the interceptor
+        // that brought its target down hears nothing.)
+        if p.track_target
+            && let Some(ProjectileTarget::Entity(t)) = p.target
+            && world.get(t).is_none_or(|e| e.destroyed)
+            && world.get(p.id).is_some_and(|e| !e.destroyed) {
+            p.track_target = false;
+            lost_targets.push(p.id);
+        }
+    }
     water_crossings.clear();
     water_crossing_from.clear();
     script_crossings.clear();

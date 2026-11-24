@@ -373,7 +373,10 @@ pub struct WeaponState {
     pub max_storage: u32,
     /// A silo weapon already fired at its current target: moho sends
     /// counted weapons one `OnFire` per target (FAF's script then fires the
-    /// missile itself), not one per reload.
+    /// missile itself), not one per reload. Not a missile defence: it fires
+    /// again at the missile it holds once reloaded (FAF probe `probe_smd2`:
+    /// an SMD whose interceptor was destroyed launched another 21 ticks
+    /// after the first, at the same nuke).
     pub fired_at_target: bool,
 }
 
@@ -621,6 +624,10 @@ pub struct ProjectileView {
     pub velocity: FxVec3,
     pub army: Option<u32>,
     pub category: Option<u32>,
+    /// The blueprint's `DesiredShooterCap`.
+    pub shooter_cap: u32,
+    /// Units holding it as a weapon target ([`claims`]).
+    pub shooters: u32,
 }
 
 /// A missile silo weapon (`CountedProjectile`): fires only with ammo.
@@ -1044,6 +1051,7 @@ pub fn step(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Armies>,
 pub fn step_with(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Armies>, intel: Option<&IntelGrids>, terrain: Option<&Terrain>, out: &mut Vec<WeaponEvent>, parallel_min: usize) {
     use rayon::prelude::*;
     let Weapons { list, scratch, ordered, projectiles, tick, water, filters, cells, .. } = weapons;
+    let mut held = claims(list, projectiles, world);
     let (ordered, projectiles, tick, water, filters) = (&*ordered, &projectiles[..], *tick, *water, &*filters);
     cells.build(world, armies);
     let cells = &*cells;
@@ -1123,9 +1131,80 @@ pub fn step_with(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Arm
         }
     }
     drop(_followers);
+    settle_claims(list, scratch, projectiles, &mut held);
     for (w, ev) in list.iter().zip(scratch.iter()) {
         for kind in ev.iter().flatten() {
             out.push(WeaponEvent { unit: w.unit, index: w.index, kind: *kind });
+        }
+    }
+}
+
+/// Who holds which projectile as a weapon target: (projectile, unit), sorted,
+/// one entry a unit; each view's `shooters` is set from it. Moho keeps the
+/// list on the target entity (+0x218: `UnitWeapon::SetTarget`, MohoEngine.dll
+/// 0x102b1d90, adds the weapon's unit to the new target, 0x102b1fa6, and
+/// takes it off the old one, 0x102b1e16; destroyed and dead shooters are
+/// pruned, 0x1025ead0), and its projectile search (0x101c5270) passes over a
+/// projectile whose shooters number its blueprint's `DesiredShooterCap`
+/// (0x101c5491..0x101c54a9). FAF probe `probe_smd`: of three SMDs in range
+/// of one nuke (cap 1) one launches; a second nuke goes to another SMD.
+fn claims(list: &[WeaponState], projectiles: &mut [ProjectileView], world: &EntityWorld) -> Vec<(EntityId, EntityId)> {
+    if projectiles.is_empty() {
+        return Vec::new();
+    }
+    for v in projectiles.iter_mut() {
+        v.shooters = 0;
+    }
+    let mut held: Vec<(EntityId, EntityId)> = list
+        .iter()
+        .filter(|w| w.targets_projectiles)
+        .filter_map(|w| match w.target {
+            Some(WeaponTarget::Entity(t)) => Some((t, w.unit)),
+            _ => None,
+        })
+        .filter(|&(_, unit)| world.get(unit).is_some_and(|e| !e.destroyed && !e.cold.killed))
+        .collect();
+    held.sort_unstable();
+    held.dedup();
+    for &(t, _) in &held {
+        if let Ok(i) = projectiles.binary_search_by_key(&t, |v| v.id) {
+            projectiles[i].shooters += 1;
+        }
+    }
+    held
+}
+
+/// The weapons that took a projectile this tick each saw the claims as they
+/// stood before it, so several may have taken one with room for fewer: in
+/// list order (moho's weapon tasks run one after another, each seeing the
+/// last one's claim) those past the cap give it back and search again next
+/// tick.
+fn settle_claims(list: &mut [WeaponState], events: &mut [[Option<WeaponEventKind>; 3]], projectiles: &[ProjectileView], held: &mut Vec<(EntityId, EntityId)>) {
+    if projectiles.is_empty() {
+        return;
+    }
+    for (w, ev) in list.iter_mut().zip(events.iter_mut()) {
+        if !w.targets_projectiles || !ev.contains(&Some(WeaponEventKind::GotTarget)) {
+            continue;
+        }
+        let Some(WeaponTarget::Entity(t)) = w.target else { continue };
+        let Ok(view) = projectiles.binary_search_by_key(&t, |v| v.id) else { continue };
+        let at = match held.binary_search(&(t, w.unit)) {
+            // Another of the unit's weapons holds it already.
+            Ok(_) => continue,
+            Err(at) => at,
+        };
+        let start = held.partition_point(|&(p, _)| p < t);
+        let shooters = held[start..].partition_point(|&(p, _)| p == t);
+        if shooters as u32 >= projectiles[view].shooter_cap {
+            w.target = None;
+            let mut kept = [None; 3];
+            for (slot, kind) in kept.iter_mut().zip(ev.iter().flatten().filter(|k| !matches!(k, WeaponEventKind::GotTarget | WeaponEventKind::Fire))) {
+                *slot = Some(*kind);
+            }
+            *ev = kept;
+        } else {
+            held.insert(at, (t, w.unit));
         }
     }
 }
@@ -1614,15 +1693,23 @@ fn advance_target(
             push(&mut events, WeaponEventKind::LostTarget);
         }
     }
-    if enabled && !order_reset && w.target.is_none() && !w.manual_fire && w.targets_projectiles && !holding_fire {
+    // A counted weapon with an empty silo doesn't search (moho's projectile
+    // search returns at once, 0x102b13b0), so it claims nothing.
+    let loaded = match w.silo {
+        Some(SiloKind::Nuke) => data.nuke_ammo > 0,
+        Some(SiloKind::Tactical) => data.tactical_ammo > 0,
+        None => true,
+    };
+    if enabled && !order_reset && w.target.is_none() && !w.manual_fire && w.targets_projectiles && !holding_fire && loaded {
         // Projectiles move fast: searched every tick, nearest first (ties to
-        // the lowest id).
+        // the lowest id). One with its `DesiredShooterCap` of units on it
+        // already is passed over ([`claims`]).
         let _search = crate::prof_span!("weapons search projectiles");
         let best = projectiles
             .iter()
             // The range test first: it passes over the many far off
             // without an alliance lookup (both pure: the same result).
-            .filter(|v| range_of(v.position) == Reach::InRange && projectile_ok(v))
+            .filter(|v| v.shooters < v.shooter_cap && range_of(v.position) == Reach::InRange && projectile_ok(v))
             .map(|v| (dist2_xz(v.position, at), v))
             .min_by_key(|&(d, v)| (d, v.id));
         if let Some((_, v)) = best {
@@ -2037,7 +2124,7 @@ fn advance_target(
     let ready = if overcharging && w.target_from_order {
         !w.fired_at_target
     } else {
-        w.fire_clock == 0 && data.fire_state != 1 && ammo && !(w.silo.is_some() && w.fired_at_target)
+        w.fire_clock == 0 && data.fire_state != 1 && ammo && !(w.silo.is_some() && w.fired_at_target && !w.targets_projectiles)
     };
     // Not while the unit is `Busy` (moho's `CanFire`, FAF's
     // `engine/Sim/UnitWeapon.lua`): FAF's firing state holds it through a
@@ -3011,8 +3098,45 @@ mod tests {
         s.targets_projectiles = true;
         s.yaw_only_on_target = true;
         let missile = w.spawn(EntityKind::Projectile, BlueprintKind::Projectile, String::new(), Some(2), FxVec3::from_f64(0.0, 0.0, 10.0), FxQuat::IDENTITY);
-        ws.projectiles = vec![ProjectileView { id: missile, position: FxVec3::from_f64(0.0, 0.0, 10.0), velocity: FxVec3::default(), army: Some(2), category: None }];
+        ws.projectiles = vec![ProjectileView { id: missile, position: FxVec3::from_f64(0.0, 0.0, 10.0), velocity: FxVec3::default(), army: Some(2), category: None, shooter_cap: 1, shooters: 0 }];
         assert_eq!(shots(&mut ws, &w), vec![false, true, false, false], "projectile: the step after");
+    }
+
+    /// A projectile is taken by no more units than its `DesiredShooterCap`
+    /// ([`claims`]): of three defences in range of a missile with cap 1 the
+    /// first in the list takes it, with cap 2 the first two; once it is
+    /// gone another takes the next.
+    #[test]
+    fn projectile_shooter_cap() {
+        for cap in [1u32, 2, 3] {
+            let mut w = EntityWorld::default();
+            let mut ws = Weapons::default();
+            let units: Vec<_> = (0..3).map(|i| unit(&mut w, 1, i as f64 * 2.0, 0.0)).collect();
+            for &u in &units {
+                gun(&mut ws, u);
+                let s = ws.get_mut(u, 1);
+                s.targets_projectiles = true;
+                s.yaw_only_on_target = true;
+            }
+            let at = FxVec3::from_f64(2.0, 0.0, 10.0);
+            let missile = w.spawn(EntityKind::Projectile, BlueprintKind::Projectile, String::new(), Some(2), at, FxQuat::IDENTITY);
+            let view = |id| ProjectileView { id, position: at, velocity: FxVec3::default(), army: Some(2), category: None, shooter_cap: cap, shooters: 0 };
+            ws.projectiles = vec![view(missile)];
+            let holders = |ws: &Weapons, id| units.iter().filter(|&&u| ws.get(u, 1).unwrap().target == Some(WeaponTarget::Entity(id))).count();
+            let mut out = Vec::new();
+            for _ in 0..4 {
+                step(&mut ws, &w, None, None, &mut out);
+                assert_eq!(holders(&ws, missile), cap as usize, "cap {cap}");
+            }
+            assert_eq!(out.iter().filter(|e| e.kind == WeaponEventKind::GotTarget).count(), cap as usize, "cap {cap}: one OnGotTarget a holder");
+            assert_eq!(ws.get(units[0], 1).unwrap().target, Some(WeaponTarget::Entity(missile)), "the first in the list holds it");
+            // A second missile: those without one take it, up to its cap.
+            let second = w.spawn(EntityKind::Projectile, BlueprintKind::Projectile, String::new(), Some(2), at, FxQuat::IDENTITY);
+            ws.projectiles = vec![view(missile), view(second)];
+            step(&mut ws, &w, None, None, &mut out);
+            assert_eq!(holders(&ws, missile), cap as usize);
+            assert_eq!(holders(&ws, second), (3 - cap as usize).min(cap as usize), "cap {cap}: the rest take the second");
+        }
     }
 
     #[test]

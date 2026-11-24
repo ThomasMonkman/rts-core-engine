@@ -1696,3 +1696,19 @@ fn upgrade_on_slope() {
 fn drowning() {
     scenario("drowning", 160);
 }
+
+#[test]
+fn smd_shared_nuke() {
+    scenario("smd_shared_nuke", 1700);
+}
+
+#[test]
+fn fatboy_seabed_build() {
+    scenario("fatboy_seabed_build", 1500);
+}
+
+/// A Fatboy made at a shore cliff's edge walks round, not down it.
+#[test]
+fn fatboy_shore_cliff() {
+    scenario("fatboy_shore_cliff", 400);
+}
