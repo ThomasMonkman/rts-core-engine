@@ -4,7 +4,8 @@
 -- launches, the others in range keep their interceptors. An SMD with none
 -- takes nothing, and the one holding the nuke launches again once reloaded
 -- if its interceptor is lost. An interceptor whose nuke is gone hears
--- `OnLostTarget` once and FAF's script ends it.
+-- `OnLostTarget` once and FAF's script ends it. The Yolona Oss's missile has
+-- cap 2 and the health for two interceptors: two SMDs take it (probe_smd3).
 rawset(_G, "ScenarioResult", { done = false, failures = {}, notes = {} })
 local function check(ok, msg) if not ok then table.insert(ScenarioResult.failures, msg) end end
 local function make(bp, army, x, z)
@@ -138,5 +139,37 @@ ForkThread(function()
         check(sh.lost == 1, 'OnLostTarget once: ' .. sh.lost)
         check(sh.gone and sh.gone - destroyed <= 12, 'the interceptor is gone soon after: ' .. tostring(sh.gone and sh.gone - destroyed))
     end
+
+    -- The Yolona Oss's missile (`DesiredShooterCap = 2`, 60000 health, an
+    -- interceptor does 30000): two of three loaded SMDs launch one each
+    -- (real game: smd1 and smd3, 4 ticks apart) and the second hit ends it.
+    silo:Destroy()
+    local yolona = make('xsb2401', 'ARMY_2', 650.5, 190.5)
+    wrap(yolona, 'yolona', 'N')
+    WaitTicks(5)
+    for _, u in smds do load(u, 3) end
+    shots = {}
+    yolona:GiveNukeSiloAmmo(1)
+    IssueNuke({yolona}, site:GetPosition())
+    local health = {}
+    follow(function()
+        local nuke = of('N')[1]
+        if nuke and not nuke.p:BeenDestroyed() then
+            local h = nuke.p:GetHealth()
+            if h ~= health[table.getn(health)] then table.insert(health, h) end
+            nuke.at = nuke.p:GetPosition()
+        end
+    end)
+    WaitTicks(20)
+    interceptors = of('I')
+    check(table.getn(interceptors) == 2, 'three SMDs, one Yolona Oss missile: two interceptors, got ' .. table.getn(interceptors))
+    if interceptors[2] then
+        check(interceptors[1].from ~= interceptors[2].from, 'from two SMDs: ' .. interceptors[1].from .. ', ' .. interceptors[2].from)
+        check(interceptors[2].tick - interceptors[1].tick <= 8, 'together, not a reload apart: ' .. interceptors[2].tick - interceptors[1].tick)
+    end
+    check(ammo() == 7, 'two interceptors spent of nine: ' .. ammo() .. ' left')
+    check(health[1] == 60000 and health[2] == 30000 and not health[3], 'the missile took one hit and died on the second: ' .. table.concat(health, ', '))
+    local nuke = of('N')[1]
+    check(nuke and nuke.at and nuke.at[2] > 100, 'it was brought down high up: ' .. tostring(nuke and nuke.at and nuke.at[2]))
     ScenarioResult.done = true
 end)

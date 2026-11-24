@@ -1699,7 +1699,7 @@ fn drowning() {
 
 #[test]
 fn smd_shared_nuke() {
-    scenario("smd_shared_nuke", 1200);
+    scenario("smd_shared_nuke", 1700);
 }
 
 #[test]
