@@ -11,6 +11,11 @@
 //! therefore off for good; it collects fully after each start-up stage
 //! ([`collect`]) and every [`EVERY`] ticks at the end of the tick ([`tick`]),
 //! the same on every machine.
+//!
+//! A collection stops the sim for its whole length, which grows with the
+//! heap, so its mark phase runs on rayon's pool ([`parallel`]).
+
+use std::ffi::{c_int, c_void};
 
 use mlua::prelude::*;
 
@@ -19,9 +24,46 @@ use mlua::prelude::*;
 /// collecting about every 25 s.
 pub const EVERY: u64 = 100;
 
-/// Turns the automatic collector off (from VM creation).
+/// Heap size from which a collection marks on rayon's threads
+/// ([`parallel`]). Below it waking the pool costs more than it saves: the
+/// two were level at 26 MB (4 ms) on 18 cores, `crossover` in
+/// `tests/lua_parallel_gc.rs`. A 1v1's heap is over 100 MB.
+pub const PARALLEL_MIN: usize = 32 << 20;
+
+type Worker = unsafe extern "C" fn(ctx: *mut c_void, index: c_int);
+
+unsafe extern "C" {
+    fn lua_rts_gcparallel(run: Option<unsafe extern "C" fn(n: c_int, f: Worker, ctx: *mut c_void)>, threads: c_int, min_bytes: usize);
+}
+
+/// Runs the collector's `n` mark workers: the first on this thread, the rest
+/// on rayon's pool. A worker whose pool thread is busy starts late or finds
+/// the mark already done; the others don't wait for it.
+unsafe extern "C" fn rayon_run(n: c_int, f: Worker, ctx: *mut c_void) {
+    let ctx = ctx as usize;
+    rayon::in_place_scope(|s| {
+        for i in 1..n {
+            s.spawn(move |_| unsafe { f(ctx as *mut c_void, i) });
+        }
+        unsafe { f(ctx as *mut c_void, 0) };
+    });
+}
+
+/// Full collections of heaps of `min_bytes` or more mark on rayon's pool,
+/// one worker per pool thread (`usize::MAX`: never). For every VM of the
+/// process. The mark finds what is reachable in whatever order, so a
+/// collection frees the same objects as on one thread: the thread count
+/// doesn't show in the sim (`tests/lua_parallel_gc.rs`).
+pub fn parallel(min_bytes: usize) {
+    let threads = if min_bytes == usize::MAX { 1 } else { rayon::current_num_threads() };
+    unsafe { lua_rts_gcparallel(Some(rayon_run), threads as c_int, min_bytes) };
+}
+
+/// Turns the automatic collector off (from VM creation), and parallel
+/// marking on.
 pub fn manual(lua: &Lua) {
     lua.gc_stop();
+    parallel(PARALLEL_MIN);
 }
 
 /// A full collection, leaving the automatic collector off (a collection
