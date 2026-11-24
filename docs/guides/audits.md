@@ -293,8 +293,8 @@ SPEED=4 dev/audit/watch.sh        # every engaged case in the golden, at 4x
   energy-charged weapons can fire. A weapon that comes from an enhancement gets that enhancement (and
   its prerequisites) after spawning.
 - **Special weapons:**
-  - OverCharge fires through `IssueOverCharge` (no sim effect yet, so those rows are
-    `no-target`); AutoOverCharge through `SetAutoOvercharge(true)`.
+  - OverCharge fires through `IssueOverCharge`; AutoOverCharge through
+    `SetAutoOvercharge(true)`.
   - Silo launchers get one missile and fire with `IssueNuke` / `IssueTactical`, the target at 0.9
     MaxRadius capped at 800.
   - Long-range guns (MaxRadius over 600) also get their target at 0.9 MaxRadius, clamped to 800 on
