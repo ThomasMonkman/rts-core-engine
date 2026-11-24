@@ -237,6 +237,10 @@ pub enum Shading {
     /// the albedo lit by the normal map and the sun (no specular, no
     /// shadow attenuation), alpha-tested at `0x70`.
     Clutter = 46,
+    /// `CommandFeedback3` (FAF's ping markers, `ping_nuke_marker`): order
+    /// feedback at the mesh's own size (`VertexNormalVS`), not fading
+    /// (`CommandFeedbackPS0(false)`), not alpha-tested.
+    CommandFeedback3 = 47,
 }
 
 /// How a technique's vertex shader moves the mesh's vertices over moho's
@@ -350,6 +354,7 @@ impl Shading {
             "TACloak" => Self::Cloak,
             "CommandFeedback" => Self::CommandFeedback,
             "CommandFeedback2" => Self::CommandFeedback2,
+            "CommandFeedback3" => Self::CommandFeedback3,
             "RallyPoint" => Self::RallyPoint,
             "MapImager" => Self::MapImager,
             "AeonCZAR" => Self::AeonCzar,
@@ -388,7 +393,7 @@ impl Shading {
             Self::ShieldImpact => P::Add,
             Self::PhalanxEffect => P::Premultiplied,
             Self::PhaseShieldUef | Self::PhaseShieldAeon | Self::PhaseShieldCybran | Self::PhaseShieldSeraphim => P::Overlay,
-            Self::CommandFeedback | Self::CommandFeedback2 | Self::RallyPoint => P::Feedback,
+            Self::CommandFeedback | Self::CommandFeedback2 | Self::CommandFeedback3 | Self::RallyPoint => P::Feedback,
             _ => return None,
         })
     }

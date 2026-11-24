@@ -1372,6 +1372,9 @@ fn phase_shield(i: MeshOut, age: f32, s1: f32, d1: vec2<f32>, s2: f32, d2: vec2<
             if (alpha <= 0.137) { discard; }
             c = vec4<f32>(a.rgb, alpha);
         }
+        // `CommandFeedback3` (ping markers): `CommandFeedbackPS0(false)`
+        // with no alpha test.
+        case 47u: { c = albedo_at(i.uv); }
         // `StunnedUnit`.
         default: { c = vec4<f32>(0.0, 0.0, 0.0, 0.66); }
     }
@@ -1407,6 +1410,7 @@ fn phase_shield(i: MeshOut, age: f32, s1: f32, d1: vec2<f32>, s2: f32, d2: vec2<
     let distance_scale = max(mix(1.0, 15.0, (depth - 10.5) * 0.001), 0.0);
     let scale_to = select(0.7, 1.1, u32(shading.x + 0.5) == 43u);
     let t = clamp(shading.w / max(params.z, 1e-3), 0.0, 1.0);
-    let scaled = pos * distance_scale * mix(1.0, scale_to, t);
+    // `CommandFeedback3` is `VertexNormalVS`: the mesh as it is.
+    let scaled = select(pos * distance_scale * mix(1.0, scale_to, t), pos, u32(shading.x + 0.5) == 47u);
     return mesh_vertex(scaled, normal, uv, bone, m0, m1, m2, m3, team, params, bones, tangent, binormal, uv1, shading);
 }
