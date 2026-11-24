@@ -857,6 +857,19 @@ pub fn find_path(grid: &NavGrid, search: &mut Search, layer: NavClass, start: Fx
     if s == g {
         return vec![goal];
     }
+    // A unit on a cell its class can't stand on (made by script at a cliff's
+    // edge, its footprint over the drop) first goes to the nearest cell it
+    // can, and its path starts there: searched from where it stands it
+    // would cross the closed cells to the goal. The real game's Fatboy made
+    // 2 from a shore cliff and sent into the water below backs off it and
+    // walks round by the beach (dev/probes probe_fatboy_path C).
+    let s = match grid.passable(layer, s.0, s.1) {
+        true => s,
+        false => nearest_open(grid, layer, s, SNAP_RADIUS).unwrap_or(s),
+    };
+    if s == g {
+        return vec![goal];
+    }
     // A goal on a blocked cell (a structure's footprint for a build or
     // guard order, a cliff) can never be reached, and searching for it
     // explores the whole reachable map before giving up (~150 ms on a 1024

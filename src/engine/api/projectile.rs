@@ -81,6 +81,12 @@ fn parse_template(lua: &Lua, bp: &LuaTable) -> LuaResult<ProjectileTemplate> {
         velocity_align: default_on("VelocityAlign")?,
         track_target: flag("TrackTarget")?,
         lead_target: default_on("LeadTarget")?,
+        // An entity blueprint field, beside `Physics` (FAF's blueprint
+        // loader fills it in for missiles and torpedoes: their health).
+        shooter_cap: match bp.get::<Option<f64>>("DesiredShooterCap")? {
+            Some(v) => v.max(0.0) as u32,
+            None => crate::engine::sim::projectile::DEFAULT_SHOOTER_CAP,
+        },
         turn_rate: num("TurnRate")?,
         max_zigzag: num("MaxZigZag")?,
         zigzag_frequency: num("ZigZagFrequency")?,
@@ -515,6 +521,15 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
     }
     projectiles(lua).water_crossings = crossings;
     projectiles(lua).water_crossing_from = from;
+    // Tracking projectiles whose target is gone (FAF's `OnLostTarget`
+    // retargets them or cuts their lifetime).
+    let lost = std::mem::take(&mut projectiles(lua).lost_targets);
+    for &id in &lost {
+        if let Some(obj) = crate::engine::api::entity::object(lua, id)? {
+            ProjectileCallbacks::on_lost_target(lua, &Obj::<moho::Projectile>::new(obj), "projectile")?;
+        }
+    }
+    projectiles(lua).lost_targets = lost;
     // Projectiles entering a script entity's sphere: the entity is asked
     // (`OnCollisionCheck(projectile)`); FAF's flares, missile redirectors
     // and depth charges retarget the projectile there and answer false.
