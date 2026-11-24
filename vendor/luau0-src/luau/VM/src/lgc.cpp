@@ -14,6 +14,12 @@
 
 #include <string.h>
 
+// RTS-CORE-ENGINE PARMARK
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <vector>
+
 /*
  * Luau uses an incremental non-generational non-moving mark&sweep garbage collector.
  *
@@ -862,7 +868,7 @@ static size_t clearupvals(lua_State* L)
     return work;
 }
 
-static size_t atomic(lua_State* L)
+static size_t atomic(lua_State* L, bool onego = false)
 {
     global_State* g = L->global;
     LUAU_ASSERT(g->gcstate == GCSatomic);
@@ -883,15 +889,22 @@ static size_t atomic(lua_State* L)
 #endif
 
     // remark weak tables
-    g->gray = g->weak;
-    g->weak = NULL;
-    // RTS-CORE-ENGINE EPHEMERON: and those with undecided entries (traversing
-    // a table again links it into one of the two lists again)
-    while (GCObject* e = g->ephemeron)
+    // RTS-CORE-ENGINE PARMARK: not in a collection done in one go (`onego`,
+    // `luaC_fullgc`). No script ran since the tables were traversed, so the
+    // ones in `weak` have nothing left to mark, and the ones in `ephemeron`
+    // are finished by `convergeephemerons` below.
+    if (!onego)
     {
-        g->ephemeron = gco2h(e)->gclist;
-        gco2h(e)->gclist = g->gray;
-        g->gray = e;
+        g->gray = g->weak;
+        g->weak = NULL;
+        // RTS-CORE-ENGINE EPHEMERON: and those with undecided entries (traversing
+        // a table again links it into one of the two lists again)
+        while (GCObject* e = g->ephemeron)
+        {
+            g->ephemeron = gco2h(e)->gclist;
+            gco2h(e)->gclist = g->gray;
+            g->gray = e;
+        }
     }
     LUAU_ASSERT(!iswhite(obj2gco(g->mainthread)));
     markobject(g, L); // mark running thread
@@ -1212,6 +1225,412 @@ size_t luaC_step(lua_State* L, bool assist)
     return actualstepsize;
 }
 
+/*
+** RTS-CORE-ENGINE PARMARK: the mark phase of a full collection on several
+** threads (`lua_rts_gcparallel`). Scripts are stopped for the whole of
+** `luaC_fullgc`, so the workers only race each other. An object is claimed
+** by clearing its white bits atomically; the claimer alone traverses it.
+** Strings refer to nothing and are marked without a claim (every writer
+** stores the same bits). What is marked is what is reachable, whatever the
+** order, so the collection frees the same objects as the serial one.
+** Not done by workers: the collector's lists (each worker keeps its own,
+** linked in afterwards) and shrinking coroutine stacks (it allocates).
+*/
+namespace
+{
+struct ParWorker
+{
+    std::vector<GCObject*> stack; // claimed, to traverse
+    std::vector<GCObject*> weak;
+    std::vector<GCObject*> ephemeron;
+    std::vector<GCObject*> again;
+    std::vector<lua_State*> shrink;
+    char pad[128]; // workers' vectors on separate cache lines
+};
+
+struct ParMark
+{
+    global_State* g = nullptr;
+    std::vector<ParWorker> workers;
+    std::mutex m;
+    std::condition_variable work;                // shared work, or done
+    std::vector<std::vector<GCObject*>> shared;  // handed over by busy workers
+    int joined = 1;                              // workers that have started
+    int idle = 0;                                // of those, waiting for work
+    bool done = false;
+    std::atomic<int> hungry{0}; // `idle`, readable without the mutex
+};
+
+const uint8_t kWhite = uint8_t(WHITEBITS);
+const uint8_t kBlack = uint8_t(bitmask(BLACKBIT));
+
+std::atomic<lua_ParallelRun> parrun{nullptr};
+std::atomic<int> parthreads{1};
+std::atomic<size_t> parminbytes{0};
+} // namespace
+
+void lua_rts_gcparallel(lua_ParallelRun run, int threads, size_t minbytes)
+{
+    parthreads.store(threads);
+    parminbytes.store(minbytes);
+    parrun.store(threads > 1 ? run : nullptr);
+}
+
+// Workers read and write mark bytes through these (plain loads and stores
+// to the processor, and no data race to the language).
+static inline std::atomic<uint8_t>& pmarked(GCObject* o)
+{
+    return *reinterpret_cast<std::atomic<uint8_t>*>(&o->gch.marked);
+}
+
+static inline bool pwhite(GCObject* o)
+{
+    return (pmarked(o).load(std::memory_order_relaxed) & kWhite) != 0;
+}
+
+// Only the worker that claimed `o` sets or clears other bits than white.
+static inline void psetbits(GCObject* o, uint8_t set, uint8_t clear)
+{
+    std::atomic<uint8_t>& m = pmarked(o);
+    m.store(uint8_t((m.load(std::memory_order_relaxed) | set) & ~clear), std::memory_order_relaxed);
+}
+
+static inline bool pclaim(GCObject* o)
+{
+    uint8_t old = pmarked(o).fetch_and(uint8_t(~kWhite), std::memory_order_relaxed);
+    return (old & kWhite) != 0;
+}
+
+// `isdeadside` for workers
+static inline bool pdeadside(int tt, GCObject* o)
+{
+    return tt > LUA_TSTRING && tt != LUA_TDEADKEY && pwhite(o);
+}
+
+static void pmark(ParWorker& w, GCObject* o);
+
+#define pmarkvalue(w, o) \
+    { \
+        if (iscollectable(o) && pwhite(gcvalue(o))) \
+            pmark(w, gcvalue(o)); \
+    }
+#define pmarkobject(w, t) \
+    { \
+        if (pwhite(obj2gco(t))) \
+            pmark(w, obj2gco(t)); \
+    }
+
+static void pmark(ParWorker& w, GCObject* o)
+{
+    switch (o->gch.tt)
+    {
+    case LUA_TSTRING:
+    {
+        if (pwhite(o))
+            psetbits(o, 0, kWhite);
+        return;
+    }
+    case LUA_TUSERDATA:
+    {
+        if (!pclaim(o))
+            return;
+        psetbits(o, kBlack, 0);
+        LuaTable* mt = gco2u(o)->metatable;
+        if (mt)
+            pmarkobject(w, mt);
+        return;
+    }
+    case LUA_TUPVAL:
+    {
+        if (!pclaim(o))
+            return;
+        UpVal* uv = gco2uv(o);
+        pmarkvalue(w, uv->v);
+        if (!upisopen(uv))
+            psetbits(o, kBlack, 0);
+        return;
+    }
+    case LUA_TBUFFER:
+    {
+        if (pclaim(o))
+            psetbits(o, kBlack, 0);
+        return;
+    }
+    case LUA_TFUNCTION:
+    case LUA_TTABLE:
+    case LUA_TTHREAD:
+    case LUA_TPROTO:
+    {
+        if (pclaim(o))
+            w.stack.push_back(o);
+        return;
+    }
+    default:
+        LUAU_ASSERT(0);
+    }
+}
+
+static int pmarkentry(ParWorker& w, LuaNode* n, int weakkey)
+{
+    int strongtt = weakkey ? ttype(gval(n)) : ttype(gkey(n));
+    int weaktt = weakkey ? ttype(gkey(n)) : ttype(gval(n));
+    GCObject* strong = weakkey ? gval(n)->value.gc : gkey(n)->value.gc;
+    GCObject* weak = weakkey ? gkey(n)->value.gc : gval(n)->value.gc;
+
+    if (!pdeadside(strongtt, strong))
+        return 1;
+    // the weak side may be marked by another worker right after this:
+    // `convergeephemerons` decides the entry then
+    if (pdeadside(weaktt, weak))
+        return 0;
+    pmark(w, strong);
+    return 1;
+}
+
+// `gettablemode` for workers: it doesn't note a missing `__mode` in the
+// metatable's cache, which tables on other workers share.
+static const char* ptablemode(global_State* g, LuaTable* h)
+{
+    LuaTable* mt = h->metatable;
+    if (!mt || (mt->tmcache & (1u << TM_MODE)))
+        return NULL;
+    const TValue* mode = luaH_getstr(mt, g->tmname[TM_MODE]);
+    return ttisstring(mode) ? svalue(mode) : NULL;
+}
+
+// What `propagatemark` does to a gray object, for one a worker claimed.
+static void ptraverse(global_State* g, ParWorker& w, GCObject* o)
+{
+    psetbits(o, kBlack, 0);
+    switch (o->gch.tt)
+    {
+    case LUA_TTABLE:
+    {
+        LuaTable* h = gco2h(o);
+        bool pending = false;
+        int weakkey = 0;
+        int weakvalue = 0;
+        if (h->metatable)
+            pmarkobject(w, cast_to(LuaTable*, h->metatable));
+        if (const char* modev = ptablemode(g, h))
+        {
+            weakkey = (strchr(modev, 'k') != NULL);
+            weakvalue = (strchr(modev, 'v') != NULL);
+        }
+        int i;
+        if (!weakvalue)
+        {
+            i = h->sizearray;
+            while (i--)
+                pmarkvalue(w, &h->array[i]);
+        }
+        i = (weakkey && weakvalue) ? 0 : sizenode(h);
+        while (i--)
+        {
+            LuaNode* n = gnode(h, i);
+            if (ttisnil(gval(n)))
+                removeentry(n);
+            else if (weakkey != weakvalue)
+            {
+                if (!pmarkentry(w, n, weakkey))
+                    pending = true;
+            }
+            else if (!weakkey)
+            {
+                pmarkvalue(w, gkey(n));
+                pmarkvalue(w, gval(n));
+            }
+        }
+        if (weakkey || weakvalue)
+        {
+            (pending ? w.ephemeron : w.weak).push_back(o);
+            psetbits(o, 0, kBlack); // weak tables stay gray
+        }
+        return;
+    }
+    case LUA_TFUNCTION:
+    {
+        Closure* cl = gco2cl(o);
+        pmarkobject(w, cl->env);
+        if (cl->isC)
+        {
+            for (int i = 0; i < cl->nupvalues; i++)
+                pmarkvalue(w, &cl->c.upvals[i]);
+        }
+        else
+        {
+            pmarkobject(w, cast_to(Proto*, cl->l.p));
+            for (int i = 0; i < cl->nupvalues; i++)
+                pmarkvalue(w, &cl->l.uprefs[i]);
+        }
+        return;
+    }
+    case LUA_TTHREAD:
+    {
+        lua_State* l = gco2th(o);
+        bool active = l->isactive || l == l->global->mainthread;
+        pmarkobject(w, l->gt);
+        if (l->namecall)
+            pmark(w, obj2gco(l->namecall));
+        for (StkId v = l->stack; v < l->top; v++)
+            pmarkvalue(w, v);
+        for (UpVal* uv = l->openupval; uv; uv = uv->u.open.threadnext)
+        {
+            uv->markedopen = 1;
+            pmarkobject(w, uv);
+        }
+        if (active)
+        {
+            w.again.push_back(o);
+            psetbits(o, 0, kBlack);
+        }
+        else
+            clearstack(l);
+        w.shrink.push_back(l);
+        return;
+    }
+    case LUA_TPROTO:
+    {
+        Proto* f = gco2p(o);
+        if (f->source)
+            pmark(w, obj2gco(f->source));
+        if (f->debugname)
+            pmark(w, obj2gco(f->debugname));
+        for (int i = 0; i < f->sizek; i++)
+            pmarkvalue(w, &f->k[i]);
+        for (int i = 0; i < f->sizeupvalues; i++)
+            if (f->upvalues[i])
+                pmark(w, obj2gco(f->upvalues[i]));
+        for (int i = 0; i < f->sizep; i++)
+            if (f->p[i])
+                pmarkobject(w, f->p[i]);
+        for (int i = 0; i < f->sizelocvars; i++)
+            if (f->locvars[i].varname)
+                pmark(w, obj2gco(f->locvars[i].varname));
+        return;
+    }
+    default:
+        LUAU_ASSERT(0);
+    }
+}
+
+// One marking thread. A worker may start late, or after the others have
+// finished (its thread was busy): the mark is done when every worker that
+// has started is out of work.
+static void parworker(void* ctx, int index)
+{
+    ParMark& p = *static_cast<ParMark*>(ctx);
+    ParWorker& w = p.workers[index];
+    if (index != 0) // worker 0 has the roots: counted from the start
+    {
+        std::lock_guard<std::mutex> lk(p.m);
+        if (p.done)
+            return;
+        p.joined++;
+    }
+    size_t count = 0;
+    for (;;)
+    {
+        while (!w.stack.empty())
+        {
+            GCObject* o = w.stack.back();
+            w.stack.pop_back();
+            ptraverse(p.g, w, o);
+            // someone is out of work: hand over the older half
+            if ((++count & 63) == 0 && p.hungry.load(std::memory_order_relaxed) > 0 && w.stack.size() >= 32)
+            {
+                size_t give = w.stack.size() / 2;
+                std::vector<GCObject*> chunk(w.stack.begin(), w.stack.begin() + give);
+                w.stack.erase(w.stack.begin(), w.stack.begin() + give);
+                {
+                    std::lock_guard<std::mutex> lk(p.m);
+                    p.shared.push_back(std::move(chunk));
+                }
+                p.work.notify_one();
+            }
+        }
+        std::unique_lock<std::mutex> lk(p.m);
+        for (;;)
+        {
+            if (!p.shared.empty())
+            {
+                w.stack = std::move(p.shared.back());
+                p.shared.pop_back();
+                break;
+            }
+            if (p.done)
+                return;
+            p.idle++;
+            p.hungry.fetch_add(1, std::memory_order_relaxed);
+            if (p.idle == p.joined)
+            {
+                p.done = true;
+                p.work.notify_all();
+                return;
+            }
+            p.work.wait(lk);
+            p.idle--;
+            p.hungry.fetch_sub(1, std::memory_order_relaxed);
+        }
+    }
+}
+
+// Marks everything reachable from the gray list (the roots) on `threads`
+// threads, this one included. Leaves nothing gray but what the collector's
+// lists hold, as the propagate phase does.
+static void parmark(lua_State* L, lua_ParallelRun run, int threads)
+{
+    global_State* g = L->global;
+    ParMark p;
+    p.g = g;
+    p.workers = std::vector<ParWorker>(threads);
+    for (GCObject* o = g->gray; o;)
+    {
+        GCObject* next;
+        switch (o->gch.tt)
+        {
+        case LUA_TTABLE:
+            next = gco2h(o)->gclist;
+            break;
+        case LUA_TFUNCTION:
+            next = gco2cl(o)->gclist;
+            break;
+        case LUA_TTHREAD:
+            next = gco2th(o)->gclist;
+            break;
+        default:
+            next = gco2p(o)->gclist;
+            break;
+        }
+        p.workers[0].stack.push_back(o);
+        o = next;
+    }
+    g->gray = NULL;
+
+    run(threads, parworker, &p);
+
+    for (ParWorker& w : p.workers)
+    {
+        for (GCObject* o : w.weak)
+        {
+            gco2h(o)->gclist = g->weak;
+            g->weak = o;
+        }
+        for (GCObject* o : w.ephemeron)
+        {
+            gco2h(o)->gclist = g->ephemeron;
+            g->ephemeron = o;
+        }
+        for (GCObject* o : w.again)
+        {
+            gco2th(o)->gclist = g->grayagain;
+            g->grayagain = o;
+        }
+        for (lua_State* th : w.shrink)
+            shrinkstack(th);
+    }
+}
+
 void luaC_fullgc(lua_State* L)
 {
     global_State* g = L->global;
@@ -1254,6 +1673,26 @@ void luaC_fullgc(lua_State* L)
 
     // run a full collection cycle
     markroot(L);
+    // RTS-CORE-ENGINE PARMARK: the propagate phase on the embedder's threads
+    if (lua_ParallelRun run = parrun.load())
+    {
+        if (g->totalbytes >= parminbytes.load())
+            parmark(L, run, parthreads.load());
+    }
+    while (g->gcstate == GCSpropagate || g->gcstate == GCSpropagateagain)
+        gcstep(L, SIZE_MAX);
+
+    // RTS-CORE-ENGINE PARMARK: `gcstep`'s atomic step, told it follows the
+    // mark directly
+    LUAU_ASSERT(g->gcstate == GCSatomic);
+#ifdef LUAI_GCMETRICS
+    g->gcmetrics.currcycle.atomicstarttimestamp = lua_clock();
+    g->gcmetrics.currcycle.atomicstarttotalsizebytes = g->totalbytes;
+#endif
+    g->gcstats.atomicstarttimestamp = lua_clock();
+    g->gcstats.atomicstarttotalsizebytes = g->totalbytes;
+    atomic(L, /* onego */ true);
+
     while (g->gcstate != GCSpause)
     {
         gcstep(L, SIZE_MAX);

@@ -116,6 +116,13 @@ DETERMINISM`):
 - **`GetSystemTimeSecondsOnlyForProfileUse` returns sim seconds** in the sim
   VM (`api/profiling.rs`): FAF formats it into log strings, and different
   string contents shift allocation.
+- **A full collection marks on several threads** (`lgc.cpp` `RTS-CORE-ENGINE
+  PARMARK`, `sim::gc::parallel`), one per thread of rayon's pool, on heaps
+  of 32 MB and more. Scripts are stopped, and the mark finds what is
+  reachable whatever the order, so the collection frees the same objects
+  with any thread count: peers with different core counts stay in step
+  (`tests/lua_parallel_gc.rs`). Only the mark is threaded; the sweep frees
+  on one thread, so the allocator is left the same too.
 
 How to find the next one: see "Determinism checks" in `docs/guides/testing.md`. The tell for GC
 trouble: with `collectgarbage` stopped, the heap size at each startup stage is the same in every
