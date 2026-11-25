@@ -140,7 +140,7 @@ pub struct WeaponState {
     pub arc: Option<AimArc>,
     /// `SlavedToBody`: the unit turns to face the target (a mobile unit
     /// engages targets outside the turret's arc and swings round to them;
-    /// see `movement::Env::face`).
+    /// see `movement::Env::face`). It doesn't hold the weapon's fire.
     pub slaved_to_body: bool,
     /// `SlavedToBodyArcRange` (radians; moho's default 1 degree): within
     /// this of the target the body counts as facing it.
@@ -2051,8 +2051,13 @@ fn advance_target(
                     w.aim_pitch = p;
                 }
                 w.aim_heading = heading;
-                // Fixed to the hull: fires once the body faces the target.
-                w.on_target = !w.slaved_to_body || heading.abs() <= w.slaved_arc.max(w.firing_tolerance);
+                // Body-slaved or not: what keeps a rack fixed to the hull
+                // from firing sideways is the range test's heading arc, not
+                // the body's facing (FAF probe probe_q_slaved /
+                // probe_q_fatboy: an immobile `ual0111`, `FiringTolerance`
+                // 5 and `HeadingArcRange` 60, fires at targets 0 to 50
+                // degrees off its nose and not at 60).
+                w.on_target = true;
                 // A fixed beam: only along its muzzle (the CZAR's, straight
                 // down), within the firing tolerance.
                 if let Some(muzzle) = w.fixed_beam_muzzle {

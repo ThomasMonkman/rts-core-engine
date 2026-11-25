@@ -1319,6 +1319,11 @@ fn build_abandon() {
 }
 
 #[test]
+fn slaved_rack_fires_in_arc() {
+    scenario("slaved_rack_fires_in_arc", 300);
+}
+
+#[test]
 fn patrol_single() {
     scenario("patrol_single", 400);
 }
