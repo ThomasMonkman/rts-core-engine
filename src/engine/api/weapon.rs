@@ -141,7 +141,6 @@ fn configure(lua: &Lua, st: &mut WeaponState, unit: EntityId, wbp: &LuaTable) ->
     st.below_water_fire_only = wbp.get::<Option<bool>>("BelowWaterFireOnly")?.unwrap_or(false);
     st.above_water_targets_only = wbp.get::<Option<bool>>("AboveWaterTargetsOnly")?.unwrap_or(false);
     st.below_water_targets_only = wbp.get::<Option<bool>>("BelowWaterTargetsOnly")?.unwrap_or(false);
-    st.need_prep = wbp.get::<Option<bool>>("NeedPrep")?.unwrap_or(false);
     st.cannot_attack_ground = wbp.get::<Option<bool>>("CannotAttackGround")?.unwrap_or(false);
     st.max_beam_length = num("MaximumBeamLength")?.filter(|&l| l > 0.0).map(crate::engine::sim::math::from_lua);
     st.fixed_beam_muzzle = None;
@@ -360,7 +359,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         match ev.kind {
             WeaponEventKind::HaltFire => WeaponCallbacks::on_halt_fire(lua, &obj, "weapon")?,
             WeaponEventKind::LostTarget => WeaponCallbacks::on_lost_target(lua, &obj, "weapon")?,
-            WeaponEventKind::GotTarget | WeaponEventKind::Prep => WeaponCallbacks::on_got_target(lua, &obj, "weapon")?,
+            WeaponEventKind::GotTarget => WeaponCallbacks::on_got_target(lua, &obj, "weapon")?,
             WeaponEventKind::Fire => {
                 // Moho calls `OnGotTarget` from the target task
                 // (`UnitWeapon::SetTarget`, MohoEngine.dll 0x102b1fc1), before
