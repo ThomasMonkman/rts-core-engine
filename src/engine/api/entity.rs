@@ -396,6 +396,9 @@ fn on_destroy(lua: &Lua, id: EntityId) -> LuaResult<()> {
         return Ok(());
     };
     EntityCallbacks::on_destroy(lua, &this, "entity")?;
+    // A builder destroyed at work: `OnFailedToBuild` after its `OnDestroy`
+    // (probe_q_build).
+    crate::engine::api::construction::builder_died(lua, id)?;
     let parent = world(lua).get(id).and_then(|e| e.attachment).map(|a| a.parent);
     if let Some(parent) = parent.map(|p| object(lua, p)).transpose()?.flatten() {
         EntityCallbacks::on_attached_destroyed(lua, &parent, "entity", Obj::new(this.clone()))?;
@@ -1483,6 +1486,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 _ => None,
             };
             crate::engine::api::unit_stats::unit_killed(lua, entity_id(&this)?, killer)?;
+            // Its build ends here, before `OnKilled` (probe_q_build).
+            crate::engine::api::construction::builder_died(lua, entity_id(&this)?)?;
             crate::engine::api::movement::start_falling(lua, entity_id(&this)?);
             let kind = kind.map(shapes::DamageType::into_inner).unwrap_or_else(|| LuaValue::String(lua.create_string("Normal").expect("string")));
             // Then the attachments hear of it (moho's `Entity::Kill`,

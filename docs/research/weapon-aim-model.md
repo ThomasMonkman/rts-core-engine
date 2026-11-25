@@ -105,8 +105,16 @@ SlavedToBody: the search accepts range codes 1 (too close) and 2 (outside headin
 is mobile (vtable+0x30) and the weapon is AutoInitiateAttackCommand or SlavedToBody, scored +4 (turreted)
 or x4 (distance²) and ranked behind code-0 targets; code 3 (beyond MaxRadius, inside TrackingRadius search
 radius) is always accepted with the same penalty: that is "tracking". Firing still needs code 0, so a
-slaved weapon fires only once the body has turned the target into its heading arc. Body turning itself
-goes through `Unit::HasSlavedWeaponTarget` (attacker vtable+0x54; not followed).
+slaved weapon fires only once the body has turned the target into its heading arc (and is not otherwise
+held by being slaved: FAF probe `probe_q_slaved`).
+Body turning (read; checked with `probe_q_slaved`): `CUnitMotion` (0x102a03df..0x102a0534) asks the
+attacker for its first weapon with a target whose blueprint is `SlavedToBody` (vtable+0x54, 0x101c4680).
+A unit with an `AttackAngle` (blueprint +0x4c4 > 0) always faces that target. Otherwise, only when
+`SlavedToBodyArcRange` < 180 (0x1076c6b0): with `a` the angle from the unit's heading to the weapon's
+target point, a flag at motion +0x91 is set when `a > arc` (x 0.0174533) and, once set, cleared when
+`a < arc / 2` (x 0.00872665, 0x1076c848); while it is set the unit turns to face the target. No target:
+the flag is cleared. So a turn starts outside the arc and ends inside half of it: the real `xsl0303`
+(arc 44, 9 degrees a tick) stops 21 and 17 degrees off.
 
 **Disabled weapons** (checked with `probe_aimtiming`): a disabled weapon keeps its target and its
 aim, but doesn't search or fire. A disabled aim freezes its angles and the weapon's on-target state,

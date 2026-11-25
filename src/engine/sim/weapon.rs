@@ -140,7 +140,7 @@ pub struct WeaponState {
     pub arc: Option<AimArc>,
     /// `SlavedToBody`: the unit turns to face the target (a mobile unit
     /// engages targets outside the turret's arc and swings round to them;
-    /// see `movement::Env::face`).
+    /// see `movement::Env::face`). It doesn't hold the weapon's fire.
     pub slaved_to_body: bool,
     /// `SlavedToBodyArcRange` (radians; moho's default 1 degree): within
     /// this of the target the body counts as facing it.
@@ -357,8 +357,8 @@ pub struct WeaponState {
     /// SupremeCommander.exe 0x6dc028, 0x6dc1b2).
     pub ignore_if_disabled: bool,
     /// A beam fixed to the hull (`Turreted = false`, e.g. the CZAR's Quantum
-    /// Beam Generator): its first muzzle bone, along which it fires; it fires
-    /// only at a target within `firing_tolerance` of that line.
+    /// Beam Generator): its first muzzle bone, along which it fires, at
+    /// any target in range (the firing tolerance doesn't gate it).
     pub fixed_beam_muzzle: Option<u32>,
     /// `MaximumBeamLength`: how far a collision beam reaches from its muzzle
     /// (`None` = `max_radius`). The Novax satellite's beam (200) has to span
@@ -378,6 +378,14 @@ pub struct WeaponState {
     /// an SMD whose interceptor was destroyed launched another 21 ticks
     /// after the first, at the same nuke).
     pub fired_at_target: bool,
+    /// The turret is turning: moho's aim manipulator +0xc4, set and
+    /// cleared by its update (0x1021a190) from whether the yaw bone turned
+    /// more than 0.001 rad this tick, with `OnStartTracking(label)` /
+    /// `OnStopTracking(label)` on each change. So tracking starts on the
+    /// first tick the turret turns and stops on the first it doesn't,
+    /// target or not; the swing back to rest is another pair, and a target
+    /// dead ahead gives none (FAF probe probe_q_track).
+    pub tracking: bool,
 }
 
 /// [`WeaponState::allows`] on the two fields (the targeting step's closure
@@ -406,6 +414,7 @@ impl WeaponState {
             silo: None,
             max_storage: 0,
             fired_at_target: false,
+            tracking: false,
             enabled: true,
             fire_target_layers: LayerMask::empty(),
             priorities: Vec::new(),
@@ -595,8 +604,19 @@ pub enum WeaponEventKind {
     HaltFire,
     LostTarget,
     GotTarget,
+    /// The turret began to turn / came to rest (`WeaponState::tracking`).
+    StartTracking,
+    StopTracking,
     Fire,
 }
+
+/// The most events one weapon raises in a tick: a target lost, another
+/// got, the turret starting or stopping, a shot.
+const MAX_EVENTS: usize = 4;
+
+/// A turret that turned its yaw more than this in a tick (radians) is
+/// tracking (moho's aim update, MohoEngine.dll 0x1071cd40).
+const TRACKING_EPSILON: Fx = Fx::from_bits(4_294_967); // 0.001
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WeaponEvent {
@@ -699,7 +719,7 @@ pub struct Weapons {
     /// What target searches pass over (set by the caller).
     pub filters: SearchFilters,
     /// Per-weapon events of the last pass, reused (indexed like `list`).
-    scratch: Vec<[Option<WeaponEventKind>; 3]>,
+    scratch: Vec<[Option<WeaponEventKind>; MAX_EVENTS]>,
     /// Posed muzzles (and clip-posed barrel pitches) of the last
     /// [`Weapons::pose_muzzles`], reused.
     posed: Vec<Option<(FxVec3, Option<crate::engine::sim::pose::AimBase>)>>,
@@ -1056,7 +1076,7 @@ pub fn step_with(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Arm
     cells.build(world, armies);
     let cells = &*cells;
     scratch.clear();
-    scratch.resize(list.len(), [None; 3]);
+    scratch.resize(list.len(), [None; MAX_EVENTS]);
     // Weapons that follow their unit's primary weapon run after the rest,
     // seeing its target from this tick as moho's in-order weapon tasks do.
     let follows = |w: &WeaponState| w.prefers_primary_target || w.stop_on_primary_busy;
@@ -1179,7 +1199,7 @@ fn claims(list: &[WeaponState], projectiles: &mut [ProjectileView], world: &Enti
 /// list order (moho's weapon tasks run one after another, each seeing the
 /// last one's claim) those past the cap give it back and search again next
 /// tick.
-fn settle_claims(list: &mut [WeaponState], events: &mut [[Option<WeaponEventKind>; 3]], projectiles: &[ProjectileView], held: &mut Vec<(EntityId, EntityId)>) {
+fn settle_claims(list: &mut [WeaponState], events: &mut [[Option<WeaponEventKind>; MAX_EVENTS]], projectiles: &[ProjectileView], held: &mut Vec<(EntityId, EntityId)>) {
     if projectiles.is_empty() {
         return;
     }
@@ -1198,7 +1218,7 @@ fn settle_claims(list: &mut [WeaponState], events: &mut [[Option<WeaponEventKind
         let shooters = held[start..].partition_point(|&(p, _)| p == t);
         if shooters as u32 >= projectiles[view].shooter_cap {
             w.target = None;
-            let mut kept = [None; 3];
+            let mut kept = [None; MAX_EVENTS];
             for (slot, kind) in kept.iter_mut().zip(ev.iter().flatten().filter(|k| !matches!(k, WeaponEventKind::GotTarget | WeaponEventKind::Fire))) {
                 *slot = Some(*kind);
             }
@@ -1350,7 +1370,7 @@ fn advance(
     terrain: Option<&Terrain>,
     cells: &ArmyCells,
     buf: &mut Vec<EntityId>,
-) -> [Option<WeaponEventKind>; 3] {
+) -> [Option<WeaponEventKind>; MAX_EVENTS] {
     let before = w.target;
     let events = advance_target(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, cells, buf);
     if let Some(m) = w.retarget.as_deref_mut().filter(|_| w.target != before) {
@@ -1378,10 +1398,10 @@ fn advance_target(
     terrain: Option<&Terrain>,
     cells: &ArmyCells,
     buf: &mut Vec<EntityId>,
-) -> [Option<WeaponEventKind>; 3] {
-    let mut events = [None; 3];
+) -> [Option<WeaponEventKind>; MAX_EVENTS] {
+    let mut events = [None; MAX_EVENTS];
     // Events in the order they happen this tick.
-    fn push(events: &mut [Option<WeaponEventKind>; 3], kind: WeaponEventKind) {
+    fn push(events: &mut [Option<WeaponEventKind>; MAX_EVENTS], kind: WeaponEventKind) {
         if let Some(slot) = events.iter_mut().find(|e| e.is_none()) {
             *slot = Some(kind);
         }
@@ -1398,6 +1418,10 @@ fn advance_target(
         if matches!(w.target, Some(WeaponTarget::Entity(_))) {
             w.target = None;
             push(&mut events, WeaponEventKind::LostTarget);
+        }
+        // Its turret stays where it is.
+        if std::mem::take(&mut w.tracking) {
+            push(&mut events, WeaponEventKind::StopTracking);
         }
         w.on_target = false;
         w.firing_solution = None;
@@ -1959,6 +1983,7 @@ fn advance_target(
     // A frozen aim leaves the weapon's on-target state as it was: FAF's
     // tank with its aim `Disable`d shoots on at the target it last faced.
     let activity = w.aim_activity;
+    let heading_before = w.aim_heading;
     if activity != AimActivity::Frozen {
         w.on_target = false;
         w.firing_solution = None;
@@ -2051,19 +2076,18 @@ fn advance_target(
                     w.aim_pitch = p;
                 }
                 w.aim_heading = heading;
-                // Fixed to the hull: fires once the body faces the target.
-                w.on_target = !w.slaved_to_body || heading.abs() <= w.slaved_arc.max(w.firing_tolerance);
-                // A fixed beam: only along its muzzle (the CZAR's, straight
-                // down), within the firing tolerance.
-                if let Some(muzzle) = w.fixed_beam_muzzle {
-                    let from = unit.bone_world_position(Some(muzzle));
-                    let along = unit.bone_world_rotation(Some(muzzle)).rotate(FxVec3 { x: Fx::ZERO, y: Fx::ZERO, z: Fx::ONE });
-                    let to = tp - from;
-                    let ahead = along.x * to.x + along.y * to.y + along.z * to.z;
-                    let length2 = to.x.saturating_mul(to.x).saturating_add(to.y.saturating_mul(to.y)).saturating_add(to.z.saturating_mul(to.z));
-                    let aside = sqrt(length2.saturating_sub(ahead.saturating_mul(ahead)).max(Fx::ZERO));
-                    w.on_target = atan2(aside, ahead) <= w.firing_tolerance;
-                }
+                // Body-slaved or not: what keeps a rack fixed to the hull
+                // from firing sideways is the range test's heading arc, not
+                // the body's facing (FAF probe probe_q_slaved /
+                // probe_q_fatboy: an immobile `ual0111`, `FiringTolerance`
+                // 5 and `HeadingArcRange` 60, fires at targets 0 to 50
+                // degrees off its nose and not at 60).
+                w.on_target = true;
+                // A beam fixed to the hull too (the CZAR's, straight down):
+                // it switches on for any target in range, however far off
+                // its line (FAF probe probe_q_czar: from 20 up, for targets
+                // 8 to 28 out, `FiringTolerance` 30), and hits what is
+                // under it (`api::beam`).
             }
             (Some(arc), Some(p)) => {
                 let dt = Fx::ONE / Fx::from_num(10);
@@ -2093,6 +2117,15 @@ fn advance_target(
     } else if let Some(arc) = w.arc.filter(|_| idle_long) {
         // Nothing to aim at for a while: the turret goes back to rest.
         return_to_rest(w, arc);
+    }
+
+    // Whether the turret turned this tick (see `tracking`).
+    if w.arc.is_some() {
+        let turned = wrap_angle(w.aim_heading - heading_before).abs() > TRACKING_EPSILON;
+        if turned != w.tracking {
+            w.tracking = turned;
+            push(&mut events, if turned { WeaponEventKind::StartTracking } else { WeaponEventKind::StopTracking });
+        }
     }
 
     // Fired on only in range (moho's fire task, MohoEngine.dll 0x102afd20,
@@ -2391,7 +2424,8 @@ mod tests {
         gun(&mut ws, me);
         let mut out = Vec::new();
         step(&mut ws, &w, None, None, &mut out);
-        assert_eq!(out, vec![WeaponEvent { unit: me, index: 1, kind: WeaponEventKind::GotTarget }]);
+        // (And its turret starts round to it.)
+        assert_eq!(out, vec![WeaponEvent { unit: me, index: 1, kind: WeaponEventKind::GotTarget }, WeaponEvent { unit: me, index: 1, kind: WeaponEventKind::StartTracking }]);
         assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(near)));
         let _ = far;
         // 90 degrees at 100 deg/s: first shot once the turret is round.
@@ -2405,6 +2439,45 @@ mod tests {
         }
         assert_eq!(fired.first(), Some(&9), "10 deg/tick from the acquiring tick: 88 deg (within 2) on tick 9");
         assert!(fired.windows(2).all(|p| p[1] - p[0] == 10), "RateOfFire 1 = every 10 ticks: {fired:?}");
+    }
+
+    /// Tracking follows the turret, not the target (FAF probe
+    /// probe_q_track): it starts on the first tick the turret turns and
+    /// stops on the first it doesn't, with the target still held; the swing
+    /// back to rest once the target is gone is another pair; and a target
+    /// dead ahead, which turns nothing, gives none.
+    #[test]
+    fn tracking_follows_the_turret_not_the_target() {
+        use WeaponEventKind::{StartTracking, StopTracking};
+        let run = |x: f64, z: f64| {
+            let mut w = EntityWorld::default();
+            w.set_bounds(256, 256);
+            let me = unit(&mut w, 1, 100.0, 100.0);
+            let enemy = unit(&mut w, 2, x, z);
+            let mut ws = Weapons::default();
+            gun(&mut ws, me);
+            let (mut out, mut log, mut fired) = (Vec::new(), Vec::new(), false);
+            for tick in 1..=80 {
+                if tick == 31 {
+                    w.destroy(enemy);
+                }
+                out.clear();
+                step(&mut ws, &w, None, None, &mut out);
+                let s = ws.get(me, 1).unwrap();
+                fired |= out.iter().any(|e| e.kind == WeaponEventKind::Fire);
+                log.extend(out.iter().filter(|e| matches!(e.kind, StartTracking | StopTracking)).map(|e| (tick, e.kind, s.target.is_some())));
+            }
+            assert!(fired, "it fired at its target");
+            assert!(!ws.get(me, 1).unwrap().tracking && ws.get(me, 1).unwrap().aim_heading == Fx::ZERO, "back at rest");
+            log
+        };
+        // 90 degrees to the right at 10 degrees a tick: turning on ticks 1
+        // to 9, at rest on its aim from tick 10.
+        let side = run(110.0, 100.0);
+        assert_eq!(side[..2], [(1, StartTracking, true), (10, StopTracking, true)], "{side:?}");
+        assert_eq!(side[2..].iter().map(|&(_, kind, target)| (kind, target)).collect::<Vec<_>>(), [(StartTracking, false), (StopTracking, false)], "the swing back: {side:?}");
+        assert!(side[2].0 > 31 && side[3].0 - side[2].0 == 9, "nine ticks back, after the hold: {side:?}");
+        assert_eq!(run(100.0, 110.0), [], "dead ahead: the turret never turns");
     }
 
     /// `HeadingArcCenter` / `HeadingArcRange`: a turret free to swing all
@@ -2684,7 +2757,7 @@ mod tests {
         for _ in 0..40 {
             step(&mut ws, &w, None, None, &mut out);
         }
-        assert_eq!(out.iter().map(|e| e.kind).collect::<Vec<_>>(), vec![WeaponEventKind::LostTarget], "a dying unit drops its target and never fires");
+        assert_eq!(out.iter().map(|e| e.kind).collect::<Vec<_>>(), vec![WeaponEventKind::LostTarget, WeaponEventKind::StopTracking], "a dying unit drops its target, its turret stops, and it never fires");
     }
 
     /// A script's `SetTargetGround` point lasts until the next target scan,
@@ -2973,7 +3046,8 @@ mod tests {
         let s = ws.get(me, 1).unwrap();
         assert_eq!(s.target, Some(WeaponTarget::Entity(enemy)), "kept");
         assert!(s.aim_heading.abs() < Fx::from_num(0.1), "followed it: {}", s.aim_heading);
-        assert!(out.is_empty(), "no events, no shots: {out:?}");
+        let kinds: Vec<_> = out.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, [WeaponEventKind::StartTracking, WeaponEventKind::StopTracking], "the turret's turn and nothing else: no shots");
         ws.get_mut(me, 1).enabled = true;
         for _ in 0..5 {
             step(&mut ws, &w, None, None, &mut out);

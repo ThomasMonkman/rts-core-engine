@@ -403,10 +403,11 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         let _section = crate::prof_span!("movement targets");
         // From one pass over the weapons (id order, by weapon index): each
         // unit's first target, as sorted lists (`UnitMap`):
-        // - body-slaved weapons' targets and arcs, to turn to face them;
+        // - body-slaved weapons' targets and arcs (start, stop), to turn
+        //   to face them;
         // - entity targets, for winged attack runs (and `engaged`);
         // - ground targets (attack-ground orders).
-        let mut face: movement::UnitMap<(FxVec3, Fx)> = movement::UnitMap::default();
+        let mut face: movement::UnitMap<(FxVec3, Fx, Fx)> = movement::UnitMap::default();
         let mut air_targets: movement::UnitMap<u32> = movement::UnitMap::default();
         let mut ground_targets: movement::UnitMap<FxVec3> = movement::UnitMap::default();
         if let Some(w) = lua.app_data_ref::<crate::engine::sim::weapon::Weapons>() {
@@ -437,7 +438,10 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                         None => None,
                     };
                     if let Some(at) = at {
-                        face.push_first(s.unit, (at, if attack_angle { Fx::PI / 180 } else { s.slaved_arc }));
+                        // A slaved weapon's turn starts outside its arc and
+                        // ends inside half of it (`movement::Env::face`).
+                        let one = Fx::PI / 180;
+                        face.push_first(s.unit, if attack_angle { (at, one, one) } else { (at, s.slaved_arc, s.slaved_arc / 2) });
                     }
                 }
             }
@@ -445,7 +449,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         // Builders turning to face their work before starting it
         // (`NeedToFaceTargetToBuild`): face it fully.
         if let Some(f) = lua.app_data_ref::<crate::engine::api::construction::FaceToBuild>().filter(|f| !f.0.is_empty()) {
-            let extra: Vec<_> = f.0.iter().filter(|(u, _)| face.get(u).is_none()).map(|&(u, p)| (u, (p, Fx::PI / 180))).collect();
+            let extra: Vec<_> = f.0.iter().filter(|(u, _)| face.get(u).is_none()).map(|&(u, p)| (u, (p, Fx::PI / 180, Fx::PI / 180))).collect();
             if !extra.is_empty() {
                 face.0.extend(extra);
                 face.0.sort_unstable_by_key(|f| f.0);

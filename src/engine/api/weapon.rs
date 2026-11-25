@@ -342,21 +342,27 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             tasks.fired(ev.unit, ev.index, now);
         }
         let Some(obj) = weapon_object(lua, ev.unit, ev.index)? else { continue };
-        // The turret starts / stops tracking with its target (FAF: barrel
-        // spin sounds); the argument is the tracking aim controller's label,
-        // so weapons without one (missile launchers) aren't told.
-        // (Read by the event's unit and index: the weapon list, not the
-        // script object's handle.)
-        let label = if matches!(ev.kind, WeaponEventKind::LostTarget | WeaponEventKind::GotTarget) {
+        // The turret starts / stops turning (FAF: turret and barrel
+        // sounds; `sim::weapon` `WeaponState::tracking`); the argument is
+        // the aim controller's label, so weapons without one (missile
+        // launchers) aren't told. (Read by the event's unit and index: the
+        // weapon list, not the script object's handle.)
+        let label = if matches!(ev.kind, WeaponEventKind::StartTracking | WeaponEventKind::StopTracking) {
             lua.app_data_ref::<Weapons>().and_then(|w| w.get(ev.unit, ev.index).and_then(|w| w.fire_control.clone().or_else(|| w.first_aim.clone())))
         } else {
             None
         };
         let obj = Obj::<moho::Weapon>::new(obj);
-        if let (WeaponEventKind::LostTarget, Some(l)) = (ev.kind, &label) {
-            WeaponCallbacks::on_stop_tracking(lua, &obj, "weapon", l.clone())?;
-        }
         match ev.kind {
+            WeaponEventKind::StartTracking | WeaponEventKind::StopTracking => {
+                if let Some(l) = label {
+                    if ev.kind == WeaponEventKind::StartTracking {
+                        WeaponCallbacks::on_start_tracking(lua, &obj, "weapon", l)?;
+                    } else {
+                        WeaponCallbacks::on_stop_tracking(lua, &obj, "weapon", l)?;
+                    }
+                }
+            }
             WeaponEventKind::HaltFire => WeaponCallbacks::on_halt_fire(lua, &obj, "weapon")?,
             WeaponEventKind::LostTarget => WeaponCallbacks::on_lost_target(lua, &obj, "weapon")?,
             WeaponEventKind::GotTarget => WeaponCallbacks::on_got_target(lua, &obj, "weapon")?,
@@ -388,9 +394,6 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                     WeaponCallbacks::on_fire(lua, &obj, "weapon")?;
                 }
             }
-        }
-        if let (WeaponEventKind::GotTarget, Some(l)) = (ev.kind, label) {
-            WeaponCallbacks::on_start_tracking(lua, &obj, "weapon", l)?;
         }
     }
     Ok(())

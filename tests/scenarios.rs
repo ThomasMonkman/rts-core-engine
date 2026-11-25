@@ -988,7 +988,7 @@ fn aa_attack_ground() {
 
 #[test]
 fn czar_beam() {
-    scenario("czar_beam", 250);
+    scenario("czar_beam", 400);
 }
 
 #[test]
@@ -1301,6 +1301,26 @@ fn issue_stop() {
 #[test]
 fn build_cancel() {
     scenario("build_cancel", 300);
+}
+
+#[test]
+fn damage_ring_edges() {
+    scenario("damage_ring_edges", 100);
+}
+
+#[test]
+fn creation_terrain_type() {
+    scenario("creation_terrain_type", 100);
+}
+
+#[test]
+fn build_abandon() {
+    scenario("build_abandon", 300);
+}
+
+#[test]
+fn slaved_rack_fires_in_arc() {
+    scenario("slaved_rack_fires_in_arc", 300);
 }
 
 #[test]

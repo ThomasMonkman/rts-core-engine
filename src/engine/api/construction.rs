@@ -30,7 +30,9 @@
 //! A builder whose order was cleared stops (`OnStopBuild`, then
 //! `OnFailedToBuild`; a factory the other way round, and a cancelled
 //! upgrade `OnFailedToBuild` then `OnStopBuild`, dev/probes
-//! probe_unit_build G2-G4) and leaves the half-built unit standing, to decay while nobody works on it (`decay`). Jobs are kept by builder id, so callbacks run
+//! probe_unit_build G2-G4; a mobile build inside `IssueClearCommands`,
+//! and with `OnFailedToBuild` alone when its builder is killed or
+//! destroyed, probe_q_build: `orders_cleared`, `builder_died`) and leaves the half-built unit standing, to decay while nobody works on it (`decay`). Jobs are kept by builder id, so callbacks run
 //! in a fixed order.
 //! A builder (or assister) whose structure is destroyed unfinished gets
 //! `OnFailedToBuild` then `OnStopBuild(target, order)`, as moho's build stop
@@ -978,6 +980,68 @@ pub fn targets_destroyed(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
+/// A builder's orders were cleared from script (`IssueClearCommands`): a
+/// mobile build it was on ends inside the call, `OnStopBuild` then
+/// `OnFailedToBuild` (FAF probe probe_q_build `clear`, `newbuild`: both come
+/// before the call returns, the structure hears nothing and is left to
+/// decay). Factory builds and upgrades end in [`tick`], as before: only the
+/// mobile build was probed.
+pub fn orders_cleared(lua: &Lua, builder: EntityId) -> LuaResult<()> {
+    let target = lua.app_data_ref::<Builds>().and_then(|b| b.0.get(&builder).filter(|j| j.order == BuildOrder::Mobile).map(|j| j.target));
+    let Some(target) = target else { return Ok(()) };
+    let live = {
+        let w = entity::world(lua);
+        w.get(builder).is_some_and(|e| !e.destroyed && !e.cold.killed) && w.get(target).is_some_and(|e| !e.destroyed)
+    };
+    // A lost target is `targets_destroyed`'s; a dead builder's build has
+    // ended already.
+    if live {
+        cancel_mobile(lua, builder, true)?;
+    }
+    Ok(())
+}
+
+/// A mobile build cancelled: `OnStopBuild`, then `OnFailedToBuild` when the
+/// structure is unfinished (dev/probes probe_unit_build G2, G8).
+fn cancel_mobile(lua: &Lua, builder: EntityId, builder_alive: bool) -> LuaResult<()> {
+    let Some(job) = stop(lua, builder, builder_alive)? else { return Ok(()) };
+    let unfinished = entity::world(lua).get(job.target).is_some_and(|e| e.fraction_complete < Fx::ONE);
+    if builder_alive && unfinished
+        && let Some(b) = object(lua, builder)? {
+        UnitCallbacks::on_failed_to_build(lua, &b, "unit")?;
+    }
+    Ok(())
+}
+
+/// A builder was killed (`Kill`, before its `OnKilled`) or destroyed (the
+/// end of the beat, after its `OnDestroy`): a mobile build it was on ends
+/// there with `OnFailedToBuild` and no `OnStopBuild`, and it does no more
+/// work on it (FAF probe probe_q_build `kill`: `OnFailedToBuild`, `OnKilled`
+/// inside the call, nothing more at its `OnDestroy` two ticks on; `destroy`:
+/// `OnDestroy`, `OnFailedToBuild` in the tick of the call; the structure
+/// stays at the fraction it had). Factories and upgrades are not probed and
+/// end in [`tick`] as before.
+pub fn builder_died(lua: &Lua, builder: EntityId) -> LuaResult<()> {
+    let job = {
+        let Some(mut builds) = lua.app_data_mut::<Builds>() else { return Ok(()) };
+        if builds.0.get(&builder).is_none_or(|j| j.order != BuildOrder::Mobile) {
+            return Ok(());
+        }
+        builds.0.remove(&builder).expect("job")
+    };
+    if let Some(u) = entity::world(lua).get_mut(builder).and_then(|e| e.unit.as_deref_mut()) {
+        u.focus = None;
+        u.work_progress = Fx::ZERO;
+    }
+    set_state(lua, builder, job.order.state(), false);
+    let finished = entity::world(lua).get(job.target).is_some_and(|e| !e.destroyed && e.fraction_complete >= Fx::ONE);
+    if !finished
+        && let Some(b) = object(lua, builder)? {
+        UnitCallbacks::on_failed_to_build(lua, &b, "unit")?;
+    }
+    Ok(())
+}
+
 /// A factory's finished unit takes the factory's command queue (its rally
 /// orders: moves, patrols, attack-moves, shift-queued in a chain) — or, for
 /// a factory assisting another, the queue at the top of its assist chain
@@ -1081,6 +1145,11 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
     for builder in candidates {
         let job = lua.app_data_ref::<Builds>().and_then(|b| b.0.get(&builder).cloned());
         let Some(job) = job else {
+            // A killed builder starts nothing more (its build ended with
+            // the kill, `builder_died`).
+            if entity::world(lua).get(builder).is_none_or(|e| e.cold.killed) {
+                continue;
+            }
             if let Some((order, command, bp, site)) = ready_to_start(lua, builder)? {
                 // Props in the way (tree groups, rocks): reclaim them first;
                 // units standing in the footprint: order them out (the
@@ -1163,12 +1232,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         // A mobile build cancelled unfinished: `OnStopBuild`, then
         // `OnFailedToBuild` (dev/probes probe_unit_build G2, G8).
         if !builder_alive || !order_current {
-            stop(lua, builder, builder_alive)?;
-            let unfinished = entity::world(lua).get(job.target).is_some_and(|e| e.fraction_complete < Fx::ONE);
-            if builder_alive && unfinished
-                && let Some(b) = object(lua, builder)? {
-                UnitCallbacks::on_failed_to_build(lua, &b, "unit")?;
-            }
+            cancel_mobile(lua, builder, builder_alive)?;
             continue;
         }
         let (Some(builder_obj), Some(target_obj)) = (object(lua, builder)?, object(lua, job.target)?) else { continue };

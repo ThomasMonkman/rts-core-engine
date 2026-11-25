@@ -928,7 +928,7 @@ fn movement(c: &mut Criterion) {
             world.get_mut(id).unwrap().unit.as_mut().unwrap().motion_params =
                 MotionParams { kind: MotionKind::Land, max_speed: Fx::from_num(3.4), turn_rate: Fx::from_num(90) * Fx::PI / 180, ..Default::default() };
             let p = world.get(id).unwrap().position();
-            face.insert(id, (FxVec3 { x: p.x - Fx::from_num(10), y: p.y, z: p.z - Fx::from_num(10) }, Fx::PI / 180));
+            face.insert(id, (FxVec3 { x: p.x - Fx::from_num(10), y: p.y, z: p.z - Fx::from_num(10) }, Fx::PI / 180, Fx::PI / 360));
         }
         let commands = Commands::default();
         let face: movement::UnitMap<_> = face.into();
