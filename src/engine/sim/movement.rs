@@ -428,6 +428,11 @@ pub struct MotionState {
     pub arrival: Arrival,
     /// Surface units: stopped to turn where it can't drive on ([`Pivot`]).
     pub pivot: Pivot,
+    /// Turning to face a body-slaved weapon's target (moho's `CUnitMotion`
+    /// +0x91): set once the target is outside the weapon's
+    /// `SlavedToBodyArcRange`, cleared once it is within half of it or
+    /// there is no such target (see `Env::face`).
+    pub facing: bool,
 }
 
 /// A surface unit that can't turn where it is going stops, backs up a step
@@ -1557,10 +1562,11 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     // Turn still needed to face a body-slaved weapon's target, or keep a
     // target at the unit's `AttackAngle` (winged aircraft make attack runs
     // instead).
+    let mut facing_now = false;
     let face = if winged || immobile {
         None
     } else {
-        env.face.and_then(|m| m.get(&unit)).and_then(|&(at, arc)| {
+        env.face.and_then(|m| m.get(&unit)).and_then(|&(at, arc, stop)| {
             let (dx, dz) = (at.x - pos.x, at.z - pos.z);
             if dx == Fx::ZERO && dz == Fx::ZERO {
                 return None;
@@ -1571,9 +1577,13 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
             // facing point is the target direction turned by -/+ the angle,
             // by the side of the unit's forward axis it's on).
             let err = if p.attack_angle > Fx::ZERO { wrap(if err >= Fx::ZERO { err - p.attack_angle } else { err + p.attack_angle }) } else { err };
-            (err.abs() > arc).then_some(err)
+            // Once turning it turns on to inside the stop arc.
+            facing_now = if stop < arc && state.facing { err.abs() >= stop } else { err.abs() > arc };
+            facing_now.then_some(err)
         })
     };
+    let facing_changed = facing_now != state.facing;
+    let state = MotionState { facing: facing_now, ..state };
     // A hovering aircraft on the ground sits there until given an order,
     // then takes off.
     let landed = data.layer != crate::engine::sim::layer::Layer::Air && (!p.winged || state.landing.is_some());
@@ -1628,7 +1638,8 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
     let wobbles = p.kind == MotionKind::Hover && p.ground.wobble_factor > Fx::ZERO && terrain.is_some();
     let settling = wobbles || (p.kind == MotionKind::Hover && terrain.is_some() && leaning(state.bank));
     if goal.is_none() && state.speed == Fx::ZERO && !climbing && face.is_none() && !settling {
-        return None;
+        // (Its turn to face a target just ended: only that is written.)
+        return facing_changed.then(|| still(unit, e, state));
     }
     let mut breaking = false;
     // Heading error to where it steers and that distance (a winged
@@ -1800,7 +1811,7 @@ fn advance_unit(unit: EntityId, world: &EntityWorld, commands: &Commands, env: E
             // Already there and stopped: nothing changes (no transform write;
             // a holding aircraft counts down to landing).
             if state.speed == Fx::ZERO && !arrived && data.path.is_none() && face.is_none() && !settling && !holding {
-                return None;
+                return facing_changed.then(|| still(unit, e, state));
             }
         } else {
             if arrival == Arrival::Coasting {
@@ -3301,10 +3312,20 @@ pub struct Env<'a> {
     /// `api::movement` picks them): they close to weapon range of it.
     pub chases: Option<&'a UnitMap<EntityId>>,
     /// Units with a weapon slaved to the body (`SlavedToBody`) on a target:
-    /// the point it's at and the weapon's `SlavedToBodyArcRange` (radians).
-    /// A unit holding still (no goal, or at it) turns to face a target
-    /// outside that arc at its `TurnRate`.
-    pub face: Option<&'a UnitMap<(FxVec3, Fx)>>,
+    /// the point it's at, the arc (radians) outside which it starts to
+    /// turn and the arc inside which it stops. A unit holding still (no
+    /// goal, or at it) turns to face the target at its `TurnRate`.
+    ///
+    /// Moho's `CUnitMotion` (MohoEngine.dll 0x102a0451..0x102a0534), for
+    /// the unit's first weapon with a target that is `SlavedToBody`
+    /// (0x101c4680) and has a `SlavedToBodyArcRange` under 180: not yet
+    /// turning, it starts when the target is more than the arc off its
+    /// nose; turning (+0x91), it stops when the target is less than half
+    /// the arc off (x 0.00872665, 0x1076c848). FAF probe probe_q_slaved:
+    /// an idle `xsl0303` (arc 44, 9 degrees a tick) stops with the target
+    /// 21 and 17 degrees off, the first step under 22. Other callers pass
+    /// the same arc twice: no memory.
+    pub face: Option<&'a UnitMap<(FxVec3, Fx, Fx)>>,
     /// Last tick's avoidance index: a group sent to one point settles in a
     /// clump (`avoidance::blocked_at_goal`).
     pub crowd: Option<&'a crate::engine::sim::avoidance::Index>,
@@ -3567,6 +3588,8 @@ pub fn candidates(world: &EntityWorld, commands: &Commands, out: &mut Vec<Entity
                     && e.unit.as_deref().is_some_and(|u| {
                         u.motion_state.speed != Fx::ZERO
                             || u.navigator_goal.is_some()
+                            // Was turning to face a target: the turn ends.
+                            || u.motion_state.facing
                             // Diving or surfacing, or levelling off after.
                             || u.dive.is_some()
                             || dive_tilting(u.dive_tilt)
@@ -4771,7 +4794,7 @@ mod tests {
         let ship = tank(&mut w, 0.0, 0.0);
         w.get_mut(ship).unwrap().unit.as_mut().unwrap().motion_params.attack_angle = Fx::FRAC_PI_2;
         // Dead ahead (+z): it turns either way to put it abeam, and holds.
-        let face: UnitMap<(FxVec3, Fx)> = std::collections::BTreeMap::from([(ship, (FxVec3::from_f64(0.0, 0.0, 10.0), Fx::PI / 180))]).into();
+        let face: UnitMap<(FxVec3, Fx, Fx)> = std::collections::BTreeMap::from([(ship, (FxVec3::from_f64(0.0, 0.0, 10.0), Fx::PI / 180, Fx::PI / 180))]).into();
         let (mut cands, mut moved, mut events) = (vec![ship], Vec::new(), Vec::new());
         for _ in 0..40 {
             step(&w, &c, Env { face: Some(&face), ..Env::default() }, &cands, usize::MAX, &mut moved);
@@ -4781,6 +4804,60 @@ mod tests {
         let heading = facing(w.get(ship).unwrap()).to_num::<f64>();
         assert!((heading.abs() - std::f64::consts::FRAC_PI_2).abs() < 0.03, "broadside on: heading {heading}");
         assert_eq!(w.get(ship).unwrap().position(), FxVec3::default(), "turned on the spot");
+    }
+
+    /// A unit holding still turns to a body-slaved weapon's target once it
+    /// is outside the weapon's arc, and then on to within half the arc
+    /// (FAF probe probe_q_slaved: `xsl0303`, arc 44 and 9 degrees a tick,
+    /// stops with a target that started 120 degrees off 21 off, one at 179
+    /// 17 off). A target inside the arc from the start doesn't turn it.
+    #[test]
+    fn slaved_turn_starts_outside_the_arc_and_stops_inside_half_of_it() {
+        let deg = |d: f64| Fx::from_num(d.to_radians());
+        let run = |bearing: f64| -> (f64, bool) {
+            let mut w = EntityWorld::default();
+            let mut c = Commands::default();
+            let t = tank(&mut w, 0.0, 0.0);
+            w.get_mut(t).unwrap().unit.as_mut().unwrap().motion_params.turn_rate = deg(90.0);
+            let r = bearing.to_radians();
+            let at = FxVec3::from_f64(r.sin() * 16.0, 0.0, r.cos() * 16.0);
+            let face: UnitMap<(FxVec3, Fx, Fx)> = std::collections::BTreeMap::from([(t, (at, deg(44.0), deg(22.0)))]).into();
+            let (mut cands, mut moved, mut events) = (vec![t], Vec::new(), Vec::new());
+            for _ in 0..40 {
+                step(&w, &c, Env { face: Some(&face), ..Env::default() }, &cands, usize::MAX, &mut moved);
+                apply(&mut w, &mut c, &moved, &mut events);
+                cands = vec![t];
+            }
+            let e = w.get(t).unwrap();
+            assert_eq!(e.position(), FxVec3::default(), "turned on the spot");
+            (bearing - facing(e).to_num::<f64>().to_degrees(), e.unit.as_ref().unwrap().motion_state.facing)
+        };
+        let (off, turning) = run(120.0);
+        assert!((off - 21.0).abs() < 0.1 && !turning, "from 120: {off} off");
+        let (off, turning) = run(179.0);
+        assert!((off - 17.0).abs() < 0.1 && !turning, "from 179: {off} off");
+        let (off, turning) = run(40.0);
+        assert!((off - 40.0).abs() < 0.1 && !turning, "inside the arc: {off} off");
+        // The target gone, the turn is over: a new one inside the arc
+        // doesn't carry it on.
+        let mut w = EntityWorld::default();
+        let mut c = Commands::default();
+        let t = tank(&mut w, 0.0, 0.0);
+        w.get_mut(t).unwrap().unit.as_mut().unwrap().motion_params.turn_rate = deg(90.0);
+        let face: UnitMap<(FxVec3, Fx, Fx)> = std::collections::BTreeMap::from([(t, (FxVec3::from_f64(16.0, 0.0, 0.0), deg(44.0), deg(22.0)))]).into();
+        let (cands, mut moved, mut events) = (vec![t], Vec::new(), Vec::new());
+        step(&w, &c, Env { face: Some(&face), ..Env::default() }, &cands, usize::MAX, &mut moved);
+        apply(&mut w, &mut c, &moved, &mut events);
+        let state = |w: &EntityWorld| w.get(t).unwrap().unit.as_ref().unwrap().motion_state;
+        assert!(state(&w).facing, "turning");
+        step(&w, &c, Env::default(), &cands, usize::MAX, &mut moved);
+        apply(&mut w, &mut c, &moved, &mut events);
+        assert!(!state(&w).facing, "the turn ended with the target");
+        let heading = facing(w.get(t).unwrap());
+        let inside: UnitMap<(FxVec3, Fx, Fx)> = std::collections::BTreeMap::from([(t, (FxVec3::from_f64(16.0, 0.0, 16.0), deg(44.0), deg(22.0)))]).into();
+        step(&w, &c, Env { face: Some(&inside), ..Env::default() }, &cands, usize::MAX, &mut moved);
+        apply(&mut w, &mut c, &moved, &mut events);
+        assert!(!state(&w).facing && facing(w.get(t).unwrap()) == heading, "36 degrees off, inside the arc: no turn");
     }
 
     /// Moho's spline (0x101a231d..0x101a2407): reverse past 120 degrees off
