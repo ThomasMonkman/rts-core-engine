@@ -435,13 +435,21 @@ fn palette_bind_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, buf
 pub const INTERFACE_BASE: u32 = 1 << 30;
 
 /// Reads one model's files and uploads its textures (worker thread).
-fn load(gpu: &(wgpu::Device, wgpu::Queue), shared: &super::texture_load::Cache, share_all: bool, vfs: &RwLock<Vfs>, index: u32, asset: &RenderAsset, bc: bool) -> Loaded {
+/// `base`: for a far level of detail, its LOD0's `.scm`, whose bones the
+/// mesh is rebound to ([`MeshData::rebind`]).
+#[allow(clippy::too_many_arguments)]
+fn load(gpu: &(wgpu::Device, wgpu::Queue), shared: &super::texture_load::Cache, share_all: bool, vfs: &RwLock<Vfs>, index: u32, asset: &RenderAsset, base: Option<&str>, bc: bool) -> Loaded {
     let _s = rts_core_engine::prof_span!("load model");
     let read = |path: &str| vfs.read().ok().and_then(|v| v.read(path).ok());
-    let mesh = match read(&asset.mesh) {
+    let mut mesh = match read(&asset.mesh) {
         Some(b) => scm::read_mesh(&b),
         None => Err(std::io::Error::new(std::io::ErrorKind::NotFound, asset.mesh.clone())),
     };
+    if let (Ok(m), Some(base)) = (&mut mesh, base.filter(|b| !b.eq_ignore_ascii_case(&asset.mesh)))
+        && let Some(Ok(bones)) = read(base).map(|b| scm::read_bones(&b))
+    {
+        m.rebind(bones);
+    }
     // The model's own textures' GPU copies go in one submit (shared ones
     // are submitted as they load, before another model can use them).
     let mut encoder = gpu.0.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(&format!("upload: model textures {}", asset.mesh)) });
@@ -777,9 +785,11 @@ impl Models {
             Slot::Idle => {
                 let (Some(vfs), Some(asset)) = (self.vfs.clone(), self.asset(index).cloned()) else { return None };
                 *self.slot_mut(index)? = Slot::Loading;
+                // A far level of detail: the LOD0 mesh it belongs to.
+                let base = self.assets.iter().enumerate().find_map(|(i, a)| a.as_ref().filter(|a| i as u32 != index && a.lods.iter().any(|l| l.1 == index)).map(|a| a.mesh.clone()));
                 let (tx, bc, gpu, shared, share_all) = (self.done_tx.clone(), self.bc, self.gpu.clone(), self.shared.clone(), self.share_all);
                 rayon::spawn(move || {
-                    let _ = tx.send(Done::Model(load(&gpu, &shared, share_all, &vfs, index, &asset, bc)));
+                    let _ = tx.send(Done::Model(load(&gpu, &shared, share_all, &vfs, index, &asset, base.as_deref(), bc)));
                 });
                 return None;
             }
