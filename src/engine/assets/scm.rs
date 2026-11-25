@@ -190,21 +190,8 @@ pub fn read_mesh(b: &[u8]) -> io::Result<MeshData> {
         m.uvs1.push([f(14)?, f(15)?]);
         m.bone.push(*b.get(o + 64).ok_or_else(|| invalid("scm vertices truncated"))?);
     }
-    let bone_offset = i32_at(b, 8)?.max(0) as usize;
-    let total = i32_at(b, 44)?.max(0) as usize;
-    for i in 0..total {
-        let p = bone_offset + i * 108 + 64;
-        let r = p + 12;
-        let name_off = i32_at(b, r + 16)? as usize;
-        let tail = b.get(name_off..).ok_or_else(|| invalid("bad bone name offset"))?;
-        let len = tail.iter().position(|&c| c == 0).ok_or_else(|| invalid("unterminated bone name"))?;
-        m.bones.push(RenderBone {
-            name: String::from_utf8_lossy(&tail[..len]).to_lowercase(),
-            parent: u32::try_from(i32_at(b, r + 20)?).ok(),
-            position: [f32_at(b, p)?, f32_at(b, p + 4)?, f32_at(b, p + 8)?],
-            rotation: [f32_at(b, r)?, f32_at(b, r + 4)?, f32_at(b, r + 8)?, f32_at(b, r + 12)?],
-        });
-    }
+    m.bones = read_bones(b)?;
+    let total = m.bones.len();
     if let Some(&bad) = m.bone.iter().find(|&&v| v as usize >= total.max(1)) {
         return Err(invalid(format!("scm vertex bone {bad} out of range")));
     }
@@ -218,4 +205,93 @@ pub fn read_mesh(b: &[u8]) -> io::Result<MeshData> {
         m.indices.push(idx);
     }
     Ok(m)
+}
+
+/// An `.scm`'s bones alone (see [`read_mesh`]).
+pub fn read_bones(b: &[u8]) -> io::Result<Vec<RenderBone>> {
+    if b.get(0..4) != Some(b"MODL") {
+        return Err(invalid("not an scm (bad magic)"));
+    }
+    let bone_offset = i32_at(b, 8)?.max(0) as usize;
+    let total = i32_at(b, 44)?.max(0) as usize;
+    let mut bones = Vec::with_capacity(total);
+    for i in 0..total {
+        let p = bone_offset + i * 108 + 64;
+        let r = p + 12;
+        let name_off = i32_at(b, r + 16)? as usize;
+        let tail = b.get(name_off..).ok_or_else(|| invalid("bad bone name offset"))?;
+        let len = tail.iter().position(|&c| c == 0).ok_or_else(|| invalid("unterminated bone name"))?;
+        bones.push(RenderBone {
+            name: String::from_utf8_lossy(&tail[..len]).to_lowercase(),
+            parent: u32::try_from(i32_at(b, r + 20)?).ok(),
+            position: [f32_at(b, p)?, f32_at(b, p + 4)?, f32_at(b, p + 8)?],
+            rotation: [f32_at(b, r)?, f32_at(b, r + 4)?, f32_at(b, r + 8)?, f32_at(b, r + 12)?],
+        });
+    }
+    Ok(bones)
+}
+
+impl MeshData {
+    /// Makes a far level of detail's mesh follow its LOD0's bones (`base`).
+    ///
+    /// A unit is posed by bone index into its LOD0 skeleton, and a far
+    /// level's `.scm` lists fewer bones in another order (the Fatboy's LOD1:
+    /// 16 of LOD0's 82; nearly every far level in the game differs), so
+    /// posing it by those indices moves the wrong parts. Each vertex is
+    /// rebound to the LOD0 bone of the same name, or of its nearest named
+    /// ancestor, or the root (a far level's root has its own name,
+    /// `lod1_<unit>`), and the mesh takes the LOD0 bones: both meshes are
+    /// modelled in the same space, so LOD0's skinning matrices fit.
+    pub fn rebind(&mut self, base: Vec<RenderBone>) {
+        if base.is_empty() || base.len() > 256 {
+            return;
+        }
+        let map: Vec<u8> = (0..self.bones.len())
+            .map(|i| {
+                let mut at = Some(i as u32);
+                for _ in 0..self.bones.len() {
+                    let Some(bone) = at.and_then(|j| self.bones.get(j as usize)) else { break };
+                    if let Some(k) = base.iter().position(|b| b.name == bone.name) {
+                        return k as u8;
+                    }
+                    at = bone.parent;
+                }
+                0
+            })
+            .collect();
+        for v in &mut self.bone {
+            *v = map.get(*v as usize).copied().unwrap_or(0);
+        }
+        self.bones = base;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bone(name: &str, parent: Option<u32>) -> RenderBone {
+        RenderBone { name: name.into(), parent, ..Default::default() }
+    }
+
+    fn mesh(bone: Vec<u8>, bones: Vec<RenderBone>) -> MeshData {
+        // (The other vertex data doesn't matter here.)
+        MeshData { positions: Vec::new(), normals: Vec::new(), tangents: Vec::new(), binormals: Vec::new(), uvs: Vec::new(), uvs1: Vec::new(), indices: Vec::new(), bone, bones }
+    }
+
+    /// A far level's vertices follow the LOD0 bone of the same name; a bone
+    /// LOD0 lacks follows its nearest named ancestor, and the level's own
+    /// root (`lod1_<unit>`) the LOD0 root.
+    #[test]
+    fn a_far_level_is_rebound_to_its_lod0_bones_by_name() {
+        let base = vec![bone("tank", None), bone("hull", Some(0)), bone("turret", Some(1)), bone("barrel", Some(2)), bone("track", Some(0))];
+        let mut level = mesh(vec![0, 1, 2, 3, 4], vec![bone("lod1_tank", None), bone("track", Some(0)), bone("turret", Some(0)), bone("muzzle", Some(2)), bone("antenna", Some(0))]);
+        level.rebind(base.clone());
+        assert_eq!(level.bone, vec![0, 4, 2, 2, 0], "root, track, turret, muzzle -> turret, antenna -> root");
+        assert_eq!(level.bones, base);
+        // Nothing to follow: left as it was.
+        let mut alone = mesh(vec![1], vec![bone("a", None), bone("b", Some(0))]);
+        alone.rebind(Vec::new());
+        assert_eq!((alone.bone, alone.bones.len()), (vec![1], 2));
+    }
 }
