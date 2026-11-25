@@ -108,7 +108,15 @@ pub fn sphere_touches(c: FxVec3, r: Fx, pos: FxVec3, orientation: FxQuat, shape:
             // the nearest point of the box.
             let l = orientation.conjugate().rotate(c - pos) - center;
             let d = FxVec3 { x: l.x - l.x.clamp(-half.x, half.x), y: l.y - l.y.clamp(-half.y, half.y), z: l.z - l.z.clamp(-half.z, half.z) };
-            dot(d, d) <= r.saturating_mul(r)
+            // A box face exactly `r` away isn't touched (FAF probe
+            // probe_q_api: `DamageRing(3, 6)` hits a wall whose face is
+            // exactly 3.0 out, which its inner sphere would otherwise
+            // rule out, and misses one exactly 6.0 out; the ring and the
+            // area gather call the same shape test, vtable +0x20 at
+            // 0x102f59b2 / 0x102f5eac). A point (`r` 0) still counts
+            // inside the box.
+            let d2 = dot(d, d);
+            if r > Fx::ZERO { d2 < r.saturating_mul(r) } else { d2 == Fx::ZERO }
         }
     }
 }
@@ -158,6 +166,13 @@ mod tests {
         assert!(sphere_touches(v(0.0, 2.4, 0.0), Fx::from_num(0.5), FxVec3::default(), FxQuat::IDENTITY, &ball));
         assert!(!sphere_touches(v(0.0, 2.6, 0.0), Fx::from_num(0.5), FxVec3::default(), FxQuat::IDENTITY, &ball));
         assert!(!sphere_touches(FxVec3::default(), Fx::from_num(5), FxVec3::default(), FxQuat::IDENTITY, &CollisionShape::None));
+        // A face exactly the radius away isn't touched, a hair nearer is
+        // (FAF probe `probe_q_api`, `DamageRing` against a wall).
+        let wall = CollisionShape::Box { center: v(0.0, 0.5, 0.0), half: v(0.5, 0.5, 0.5) };
+        let touch = |x: f64, r: f64| sphere_touches(v(x, 0.5, 0.0), Fx::from_num(r), FxVec3::default(), FxQuat::IDENTITY, &wall);
+        assert!(!touch(3.5, 3.0) && touch(3.499, 3.0));
+        assert!(!touch(6.5, 6.0) && touch(6.499, 6.0));
+        assert!(touch(0.2, 0.0) && !touch(0.6, 0.0), "a point counts inside the box only");
         // Above radius 3 a sphere is met exactly or by the blast's cube (FAF probe
         // `probe_re3_wpn_b`, `uea0203`'s sphere of 1.6 against a blast of 5:
         // 6.594 along x, 7.258 diagonally in xz, 8.891 along (1, 1, 1)).

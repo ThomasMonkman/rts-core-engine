@@ -1304,6 +1304,11 @@ fn build_cancel() {
 }
 
 #[test]
+fn damage_ring_edges() {
+    scenario("damage_ring_edges", 100);
+}
+
+#[test]
 fn patrol_single() {
     scenario("patrol_single", 400);
 }

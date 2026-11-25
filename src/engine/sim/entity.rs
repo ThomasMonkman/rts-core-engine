@@ -843,7 +843,9 @@ impl EntityWorld {
     /// radius `r` but not the one of radius `min_r` (none when `min_r` is 0),
     /// in id order: moho's `DamageRing` gather (MohoEngine.dll 0x102f5d30
     /// skips an entity whose shape meets the inner sphere, then keeps it if
-    /// it meets the outer one). An entity without a shape counts if its
+    /// it meets the outer one). A box exactly a radius away isn't touched,
+    /// so one on the inner edge is hit and one on the outer edge is not
+    /// (FAF probe probe_q_api). An entity without a shape counts if its
     /// origin is in the shell.
     pub fn touching_shell(&self, which: Indexed, center: FxVec3, min_r: Fx, r: Fx) -> Vec<EntityId> {
         let reach = r + match which {

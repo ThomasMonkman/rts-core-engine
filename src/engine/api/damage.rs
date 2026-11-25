@@ -327,7 +327,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             damage_shell(lua, instigator.into_inner(), location.into_inner(), 0.0, radius, amount, kind.into_inner(), damage_friendly, damage_self.unwrap_or(false))
         })?;
     lua_fn!(lua, global,
-        /// Like `DamageArea`, but hits only `min_radius` < distance <= `max_radius`.
+        /// Like `DamageArea`, but hits only `min_radius` <= distance < `max_radius`.
         /// Takes 7 or 8 arguments (usage string
         /// "DamageRing(instigator,location,minRadius,maxRadius,amount,damageType,damageFriendly,[damageSelf])").
         DamageRing = |lua, Arity((instigator, location, min_radius, max_radius, amount, kind, damage_friendly, damage_self)): Arity<7, 8, (shapes::Instigator, shapes::Vector, f64, f64, f64, shapes::DamageType, bool, Option<bool>)>| {
