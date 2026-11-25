@@ -1,6 +1,6 @@
 -- Scenario test (tests/scenarios.rs): OnProductionActive / InActive and
 -- OnConsumptionActive / InActive when the setters change the state, and a
--- weapon's OnStartTracking(label) / OnStopTracking(label) with its target.
+-- weapon's OnStartTracking(label) / OnStopTracking(label) as its turret turns.
 rawset(_G, "ScenarioResult", { done = false, failures = {}, notes = {} })
 local function check(ok, msg) if not ok then table.insert(ScenarioResult.failures, msg) end end
 ForkThread(function()
@@ -22,24 +22,28 @@ ForkThread(function()
     check(got == 'OnProductionInActive OnProductionActive OnConsumptionActive OnConsumptionInActive',
         'one call per change: ' .. got)
 
-    local tank = CreateUnitHPR('uel0201', 'ARMY_1', 400, GetTerrainHeight(400, 600), 600, 0, 0, 0)
-    local w = tank:GetWeapon(1)
-    local tracking = {}
-    local start, stop = w.OnStartTracking, w.OnStopTracking
-    w.OnStartTracking = function(self, label) table.insert(tracking, 'start:' .. tostring(label)); return start(self, label) end
-    w.OnStopTracking = function(self, label) table.insert(tracking, 'stop:' .. tostring(label)); return stop(self, label) end
-    local enemy = CreateUnitHPR('uel0201', 'ARMY_2', 410, GetTerrainHeight(410, 600), 600, 0, 0, 0)
-    for _ = 1, 50 do
-        WaitTicks(1)
-        if tracking[1] then break end
+    -- Tracking follows the turret, not the target (dev/probes probe_q_track):
+    -- start on the first tick it turns, stop when it comes to rest on its
+    -- aim, and another pair for the swing back once the target is gone.
+    local function watch(x, z, ex, ez)
+        local tank = CreateUnitHPR('uel0201', 'ARMY_1', x, GetTerrainHeight(x, z), z, 0, 0, 0)
+        local w = tank:GetWeapon(1)
+        local seen = {}
+        local start, stop = w.OnStartTracking, w.OnStopTracking
+        w.OnStartTracking = function(self, label) table.insert(seen, 'start:' .. tostring(label) .. ':' .. tostring(self:WeaponHasTarget())); return start(self, label) end
+        w.OnStopTracking = function(self, label) table.insert(seen, 'stop:' .. tostring(label) .. ':' .. tostring(self:WeaponHasTarget())); return stop(self, label) end
+        local enemy = CreateUnitHPR('uel0201', 'ARMY_2', ex, GetTerrainHeight(ex, ez), ez, 0, 0, 0)
+        enemy:SetFireState(1)
+        enemy:SetMaxHealth(1000000) enemy:SetHealth(nil, 1000000)
+        return { seen = seen, enemy = enemy }
     end
-    check(tracking[1] and string.find(tracking[1], '^start:') and tracking[1] ~= 'start:nil',
-        'started tracking with a label: ' .. table.concat(tracking, ' '))
-    enemy:Destroy()
-    for _ = 1, 50 do
-        WaitTicks(1)
-        if tracking[2] then break end
-    end
-    check(tracking[2] and string.find(tracking[2], '^stop:'), 'stopped tracking when the target went: ' .. table.concat(tracking, ' '))
+    local side = watch(400, 600, 412, 600)
+    WaitTicks(40)
+    check(table.concat(side.seen, ' ') == 'start:Default:true stop:Default:true',
+        'a target to the side: start, then stop on reaching the aim, target still held: ' .. table.concat(side.seen, ' '))
+    side.enemy:Destroy()
+    WaitTicks(40)
+    check(table.concat(side.seen, ' ') == 'start:Default:true stop:Default:true start:Default:false stop:Default:false',
+        'the swing back to rest is another pair: ' .. table.concat(side.seen, ' '))
     ScenarioResult.done = true
 end)
