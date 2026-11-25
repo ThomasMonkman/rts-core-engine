@@ -55,7 +55,7 @@
 45|uaa0304|1|-|non-attack|0|0
 46|uaa0304|2|uab1101|pass|1|3000
 47|uaa0304|3|-|non-attack|0|0
-48|uaa0310|1|uab1101|pass|11|333
+48|uaa0310|1|uab1101|pass|37|333
 49|uaa0310|2|uaa0101|pass|3|300
 50|uaa0310|3|uaa0101|pass|2|300
 51|uaa0310|4|uaa0101|pass|2|300

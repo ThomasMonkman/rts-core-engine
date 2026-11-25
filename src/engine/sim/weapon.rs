@@ -357,8 +357,8 @@ pub struct WeaponState {
     /// SupremeCommander.exe 0x6dc028, 0x6dc1b2).
     pub ignore_if_disabled: bool,
     /// A beam fixed to the hull (`Turreted = false`, e.g. the CZAR's Quantum
-    /// Beam Generator): its first muzzle bone, along which it fires; it fires
-    /// only at a target within `firing_tolerance` of that line.
+    /// Beam Generator): its first muzzle bone, along which it fires, at
+    /// any target in range (the firing tolerance doesn't gate it).
     pub fixed_beam_muzzle: Option<u32>,
     /// `MaximumBeamLength`: how far a collision beam reaches from its muzzle
     /// (`None` = `max_radius`). The Novax satellite's beam (200) has to span
@@ -2058,17 +2058,11 @@ fn advance_target(
                 // 5 and `HeadingArcRange` 60, fires at targets 0 to 50
                 // degrees off its nose and not at 60).
                 w.on_target = true;
-                // A fixed beam: only along its muzzle (the CZAR's, straight
-                // down), within the firing tolerance.
-                if let Some(muzzle) = w.fixed_beam_muzzle {
-                    let from = unit.bone_world_position(Some(muzzle));
-                    let along = unit.bone_world_rotation(Some(muzzle)).rotate(FxVec3 { x: Fx::ZERO, y: Fx::ZERO, z: Fx::ONE });
-                    let to = tp - from;
-                    let ahead = along.x * to.x + along.y * to.y + along.z * to.z;
-                    let length2 = to.x.saturating_mul(to.x).saturating_add(to.y.saturating_mul(to.y)).saturating_add(to.z.saturating_mul(to.z));
-                    let aside = sqrt(length2.saturating_sub(ahead.saturating_mul(ahead)).max(Fx::ZERO));
-                    w.on_target = atan2(aside, ahead) <= w.firing_tolerance;
-                }
+                // A beam fixed to the hull too (the CZAR's, straight down):
+                // it switches on for any target in range, however far off
+                // its line (FAF probe probe_q_czar: from 20 up, for targets
+                // 8 to 28 out, `FiringTolerance` 30), and hits what is
+                // under it (`api::beam`).
             }
             (Some(arc), Some(p)) => {
                 let dt = Fx::ONE / Fx::from_num(10);

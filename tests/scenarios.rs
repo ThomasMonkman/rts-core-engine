@@ -988,7 +988,7 @@ fn aa_attack_ground() {
 
 #[test]
 fn czar_beam() {
-    scenario("czar_beam", 250);
+    scenario("czar_beam", 400);
 }
 
 #[test]
