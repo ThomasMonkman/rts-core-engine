@@ -240,36 +240,12 @@ fn trace(lua: &Lua, beam: &Beam) -> (Vec<(&'static str, EntityId, FxVec3)>, (&'s
             hits.push((t, e.id, "Shield"));
         }
     }
-    // A projectile-shooting beam's (the Cybran TMD's zapper) hits enemy
-    // projectiles on it: their collision shape (FAF gives missiles a sphere,
-    // 0.11 x MaxSpeed for most), else `INTERCEPT_RADIUS` as a shot meeting
-    // one. FAF probe probe_tmd: the real zapper kills a tactical missile as
-    // it comes into range. Other beams pass through projectiles, as in the
-    // real game (FAF probe probe_beamhit: a Monkeylord's laser never
-    // reports a `Projectile` impact; the tank shells and missiles fired
-    // back down it reach the Monkeylord).
     if anti_projectile {
-        use crate::engine::sim::entity::CollisionShape;
-        let default = CollisionShape::Sphere { center: FxVec3::default(), radius: crate::engine::sim::projectile::INTERCEPT_RADIUS };
-        for e in w.iter().filter(|e| !e.destroyed && e.kind == crate::engine::sim::entity::EntityKind::Projectile) {
-            let shape = match e.collision_shape() {
-                CollisionShape::Sphere { radius, .. } if radius <= Fx::ZERO => default,
-                CollisionShape::None => default,
-                shape => shape,
-            };
-            let r = match shape {
-                CollisionShape::Sphere { center, radius } => radius + center.x.abs() + center.y.abs() + center.z.abs(),
-                CollisionShape::Box { center, half } => half.x + half.y + half.z + center.x.abs() + center.y.abs() + center.z.abs(),
-                CollisionShape::None => Fx::ZERO,
-            };
-            let c = e.position();
-            if c.x < from.x.min(to.x) - r || c.x > from.x.max(to.x) + r || c.z < from.z.min(to.z) - r || c.z > from.z.max(to.z) + r || allied(e.army) {
-                continue;
-            }
-            if let Some(t) = crate::engine::sim::collision::segment_hit(from, to, c, e.orientation, &shape) {
-                hits.push((t, e.id, "Projectile"));
-            }
-        }
+        let projectiles = lua.app_data_ref::<crate::engine::sim::projectile::Projectiles>();
+        // The projectile store lists every projectile entity, in id order:
+        // no walk over the whole world.
+        let flying = projectiles.iter().flat_map(|ps| ps.iter()).filter_map(|p| w.get(p.id));
+        projectile_hits(flying, from, to, allied, &mut hits);
     }
     hits.sort_by_key(|a| (a.0, a.1));
     // First ground / water contact, sampled every world unit.
@@ -294,6 +270,45 @@ fn trace(lua: &Lua, beam: &Beam) -> (Vec<(&'static str, EntityId, FxVec3)>, (&'s
     };
     let entities = hits.into_iter().filter(|(t, _, _)| *t <= stop).map(|(t, id, kind)| (kind, id, from + (to - from) * t)).collect();
     (entities, end)
+}
+
+/// The enemy projectiles among `flying` on the segment `from`..`to`, added
+/// to `hits` (how far along, id, "Projectile"). A projectile-shooting
+/// beam's (the Cybran TMD's zapper) hits them: their collision shape (FAF
+/// gives missiles a sphere, 0.11 x MaxSpeed for most), else
+/// `INTERCEPT_RADIUS` as a shot meeting one. FAF probe probe_tmd: the real
+/// zapper kills a tactical missile as it comes into range. Other beams pass
+/// through projectiles, as in the real game (FAF probe probe_beamhit: a
+/// Monkeylord's laser never reports a `Projectile` impact; the tank shells
+/// and missiles fired back down it reach the Monkeylord).
+pub fn projectile_hits<'a>(
+    flying: impl Iterator<Item = &'a crate::engine::sim::entity::Entity>,
+    from: FxVec3,
+    to: FxVec3,
+    allied: impl Fn(Option<u32>) -> bool,
+    hits: &mut Vec<(Fx, EntityId, &'static str)>,
+) {
+    use crate::engine::sim::entity::CollisionShape;
+    let default = CollisionShape::Sphere { center: FxVec3::default(), radius: crate::engine::sim::projectile::INTERCEPT_RADIUS };
+    for e in flying.filter(|e| !e.destroyed) {
+        let shape = match e.collision_shape() {
+            CollisionShape::Sphere { radius, .. } if radius <= Fx::ZERO => default,
+            CollisionShape::None => default,
+            shape => shape,
+        };
+        let r = match shape {
+            CollisionShape::Sphere { center, radius } => radius + center.x.abs() + center.y.abs() + center.z.abs(),
+            CollisionShape::Box { center, half } => half.x + half.y + half.z + center.x.abs() + center.y.abs() + center.z.abs(),
+            CollisionShape::None => Fx::ZERO,
+        };
+        let c = e.position();
+        if c.x < from.x.min(to.x) - r || c.x > from.x.max(to.x) + r || c.z < from.z.min(to.z) - r || c.z > from.z.max(to.z) + r || allied(e.army) {
+            continue;
+        }
+        if let Some(t) = crate::engine::sim::collision::segment_hit(from, to, c, e.orientation, &shape) {
+            hits.push((t, e.id, "Projectile"));
+        }
+    }
 }
 
 /// Per tick, after weapons: enabled beams trace on their interval and call

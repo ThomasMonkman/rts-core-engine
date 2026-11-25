@@ -62,7 +62,7 @@ fn deal(lua: &Lua, instigator: &LuaValue, direction: impl FnOnce(FxVec3) -> FxVe
             LuaValue::String(s) => s.to_str()?.to_string(),
             _ => "Normal".to_string(),
         };
-        amount * crate::engine::api::armor::mult(lua, target, &kind)?
+        crate::engine::api::armor::apply(lua, target, &kind, amount)?
     } else {
         amount
     };

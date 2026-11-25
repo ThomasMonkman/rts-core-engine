@@ -327,6 +327,10 @@ pub struct WeaponState {
     /// The unit's attack-order target as this weapon last saw it: a new one
     /// resets the weapon's target ([`advance_target`]).
     pub order_seen: Option<WeaponTarget>,
+    /// `NeedPrep`: an attack order runs the weapon's `OnGotTarget` at once
+    /// ([`advance_target`]).
+    #[serde(default)]
+    pub need_prep: bool,
     /// `ManualFire`: never picks its own targets.
     pub manual_fire: bool,
     /// `OverChargeWeapon`: an overcharge order fires it (the first such
@@ -484,6 +488,7 @@ impl WeaponState {
             target_from_order: false,
             ground_set: false,
             order_seen: None,
+            need_prep: false,
             damage: None,
         }
     }
@@ -595,6 +600,9 @@ pub enum WeaponEventKind {
     HaltFire,
     LostTarget,
     GotTarget,
+    /// A `NeedPrep` weapon's unit took an attack order: `OnGotTarget`,
+    /// with no target set and nothing tracked yet.
+    Prep,
     Fire,
 }
 
@@ -1536,7 +1544,11 @@ fn advance_target(
     // one target, ordered at tick 30 to attack another, has no target at
     // 31 and the new one at 32 (a weapon with no target takes the order's
     // as before: FAF probe probe_firsttick). Silo launches aren't attack
-    // orders.
+    // orders. A `NeedPrep` weapon (blueprint +0x11b, 0x101c48f1) then hears
+    // `OnGotTarget` (0x101c4918) when the order's target is a point or a
+    // live entity (0x101cf640), in range or not and with no target set:
+    // FAF's idle state readies the weapon (unpacks it) on the way in, and
+    // the target task's `OnGotTarget` follows when it takes the target.
     let order_target = ordered.get(&w.unit).filter(|o| o.silo.is_none()).map(|o| o.target);
     let new_order = order_target.is_some() && order_target != w.order_seen;
     w.order_seen = order_target;
@@ -1550,6 +1562,16 @@ fn advance_target(
         w.target_from_order = false;
         w.check_countdown = 0;
         push(&mut events, WeaponEventKind::LostTarget);
+    }
+    if new_order && w.need_prep {
+        let valid = match order_target {
+            Some(WeaponTarget::Entity(id)) => world.get(id).is_some_and(|e| !e.destroyed),
+            Some(WeaponTarget::Ground(_)) => true,
+            None => false,
+        };
+        if valid {
+            push(&mut events, WeaponEventKind::Prep);
+        }
     }
 
     // The primary weapon's target, while it's still a live unit (moho's
@@ -2746,6 +2768,48 @@ mod tests {
             }
         }
         assert_eq!(fired, vec![20, 30], "first shot as the stun ends, then every reload");
+    }
+
+    /// MohoEngine.dll 0x101c48f1: an attack order runs a `NeedPrep` weapon's
+    /// `OnGotTarget` at once, in range or not.
+    #[test]
+    fn need_prep_weapon_is_told_of_an_attack_order() {
+        for need_prep in [false, true] {
+            let mut w = EntityWorld::default();
+            let me = unit(&mut w, 1, 0.0, 0.0);
+            let near = unit(&mut w, 2, 5.0, 0.0);
+            let far = unit(&mut w, 2, 500.0, 0.0);
+            let mut ws = Weapons::default();
+            gun(&mut ws, me);
+            ws.get_mut(me, 1).need_prep = need_prep;
+            let mut out = Vec::new();
+            step(&mut ws, &w, None, None, &mut out);
+            assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(near)));
+            // Ordered onto a target far out of range: the held one is
+            // dropped, and the weapon is told to get ready.
+            ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(far), silo: None, overcharge: None });
+            out.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            let kinds: Vec<_> = out.iter().map(|e| e.kind).collect();
+            if need_prep {
+                assert_eq!(kinds, [WeaponEventKind::LostTarget, WeaponEventKind::Prep]);
+            } else {
+                assert_eq!(kinds, [WeaponEventKind::LostTarget]);
+            }
+            assert_eq!(ws.get(me, 1).unwrap().target, None);
+            // Once an order, not every step of it.
+            out.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            assert!(!out.iter().any(|e| e.kind == WeaponEventKind::Prep), "{out:?}");
+            // Not for a target that's gone.
+            ws.ordered.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            w.destroy(far);
+            ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(far), silo: None, overcharge: None });
+            out.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            assert!(!out.iter().any(|e| e.kind == WeaponEventKind::Prep), "{out:?}");
+        }
     }
 
     #[test]

@@ -1792,6 +1792,41 @@ fn projectiles(c: &mut Criterion) {
 }
 
 /// Animator advance over 1000 playing animators.
+/// An anti-projectile beam's (the Cybran TMD's zapper) search for the
+/// projectiles on it, in a late game's world: 20k units and 500 projectiles
+/// in flight, taken from the projectile store.
+fn beams(c: &mut Criterion) {
+    use rts_core_engine::engine::api::blueprints::BlueprintKind;
+    use rts_core_engine::engine::sim::entity::{EntityKind, EntityWorld};
+    use rts_core_engine::engine::sim::math::{FxQuat, FxVec3};
+    use rts_core_engine::engine::sim::projectile::{ProjectileState, ProjectileTemplate, Projectiles};
+    let mut rng = SimRng::new(11);
+    let mut world = EntityWorld::default();
+    world.set_bounds(1024, 1024);
+    let mut ps = Projectiles::default();
+    let t = ProjectileTemplate::default();
+    let at = |rng: &mut SimRng, y: i32| FxVec3 { x: Fx::from_num((rng.next_u64() % 1024) as i32), y: Fx::from_num(y), z: Fx::from_num((rng.next_u64() % 1024) as i32) };
+    for i in 0..20_500usize {
+        if i % 41 == 0 {
+            let id = world.spawn(EntityKind::Projectile, BlueprintKind::Projectile, String::new(), Some(2), at(&mut rng, 30), FxQuat::IDENTITY);
+            ps.insert(ProjectileState::new(id, None, &t, FxVec3::from_f64(1.0, 0.0, 0.0)));
+        } else {
+            world.spawn(EntityKind::Unit, BlueprintKind::Unit, String::new(), Some(1 + (i % 2) as u32), at(&mut rng, 20), FxQuat::IDENTITY);
+        }
+    }
+    let (from, to) = (FxVec3::from_f64(500.0, 22.0, 500.0), FxVec3::from_f64(530.0, 30.0, 520.0));
+    let mut g = c.benchmark_group("beams");
+    let mut hits = Vec::new();
+    g.bench_function("projectile hits/20k units, 500 projectiles", |b| {
+        b.iter(|| {
+            hits.clear();
+            rts_core_engine::engine::api::beam::projectile_hits(ps.iter().filter_map(|p| world.get(p.id)), black_box(from), to, |army| army == Some(1), &mut hits);
+            hits.len()
+        })
+    });
+    g.finish();
+}
+
 fn manipulators(c: &mut Criterion) {
     use rts_core_engine::engine::api::blueprints::BlueprintKind;
     use rts_core_engine::engine::sim::entity::{EntityKind, EntityWorld};
@@ -2695,5 +2730,5 @@ fn audio(c: &mut Criterion) {
     eprintln!("audio bench: {} cues active", e.active());
 }
 
-criterion_group!(benches, scripts, blueprints, mods, categories, rng, bounded_props, terrain, trig, scheduler, sim_tick, entities, spatial, economy, checksum, unit_stats, projectiles, projectile_collision, projectile_refusals, weapons, threat, movement, avoidance, effects, attachments, intel, nav, snapshot, poses, models, map_render, manipulators, transport, construction, placement, lua_call_overhead, lua_table_shims, objects_table, lua_api, hot_accessors, lua_interrupt, interface, movies, audio);
+criterion_group!(benches, scripts, blueprints, mods, categories, rng, bounded_props, terrain, trig, scheduler, sim_tick, entities, spatial, economy, checksum, unit_stats, projectiles, projectile_collision, projectile_refusals, beams, weapons, threat, movement, avoidance, effects, attachments, intel, nav, snapshot, poses, models, map_render, manipulators, transport, construction, placement, lua_call_overhead, lua_table_shims, objects_table, lua_api, hot_accessors, lua_interrupt, interface, movies, audio);
 criterion_main!(benches);
