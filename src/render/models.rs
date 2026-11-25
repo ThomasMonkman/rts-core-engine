@@ -55,7 +55,9 @@ pub struct MeshInstance {
     /// overlay (0/1).
     pub params: [f32; 4],
     /// x = first palette entry ([`NO_BONES`]: unskinned), y =
-    /// [`crate::engine::api::mesh::VertexMotion`] (the vertex shader's sway).
+    /// [`crate::engine::api::mesh::VertexMotion`] (the vertex shader's sway),
+    /// z = 1 in the shadow casters' list for a Seraphim build-in mesh (its
+    /// shadow grows with it).
     pub bones: [u32; 4],
     /// x = [`crate::engine::api::mesh::Shading`] (FAF's pixel shader family).
     pub shading: [f32; 4],

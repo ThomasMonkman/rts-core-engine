@@ -1942,7 +1942,11 @@ impl Scene {
                         continue;
                     }
                     let i = list.len() as u32;
-                    list.push(*inst);
+                    let mut inst = *inst;
+                    // A Seraphim unit being built casts the shadow of what
+                    // is drawn of it (`bones.z`: see `vs_shadow`).
+                    inst.bones[2] = (m.build == Some(crate::engine::api::mesh::BuildShader::Seraphim)) as u32;
+                    list.push(inst);
                     match draws.last_mut() {
                         Some((last, r)) if last == mesh && r.end == i => r.end = i + 1,
                         _ => draws.push((*mesh, i..i + 1)),
