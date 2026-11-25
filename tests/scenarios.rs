@@ -1324,6 +1324,11 @@ fn slaved_rack_fires_in_arc() {
 }
 
 #[test]
+fn attack_order_waits_for_range() {
+    scenario("attack_order_waits_for_range", 400);
+}
+
+#[test]
 fn patrol_single() {
     scenario("patrol_single", 400);
 }

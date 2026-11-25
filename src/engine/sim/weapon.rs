@@ -324,9 +324,14 @@ pub struct WeaponState {
     /// update: it survives that update's target scan.
     #[serde(default)]
     pub ground_set: bool,
-    /// The unit's attack-order target as this weapon last saw it: a new one
-    /// resets the weapon's target ([`advance_target`]).
+    /// The unit's attack-order target once the attacker has come in range
+    /// of it (moho's desired target): setting it resets the weapon's target
+    /// ([`advance_target`]).
     pub order_seen: Option<WeaponTarget>,
+    /// `NeedPrep`: an attack order runs the weapon's `OnGotTarget` once the
+    /// attacker is in range ([`advance_target`]).
+    #[serde(default)]
+    pub need_prep: bool,
     /// `ManualFire`: never picks its own targets.
     pub manual_fire: bool,
     /// `OverChargeWeapon`: an overcharge order fires it (the first such
@@ -493,6 +498,7 @@ impl WeaponState {
             target_from_order: false,
             ground_set: false,
             order_seen: None,
+            need_prep: false,
             damage: None,
         }
     }
@@ -607,6 +613,9 @@ pub enum WeaponEventKind {
     /// The turret began to turn / came to rest (`WeaponState::tracking`).
     StartTracking,
     StopTracking,
+    /// A `NeedPrep` weapon's unit took an attack order: `OnGotTarget`,
+    /// with no target set and nothing tracked yet.
+    Prep,
     Fire,
 }
 
@@ -668,6 +677,11 @@ pub struct OrderedTarget {
     pub target: WeaponTarget,
     pub silo: Option<SiloKind>,
     pub overcharge: Option<u32>,
+    /// The attacker is in range of the target
+    /// ([`Weapons::in_attack_range`]): moho's attack task sets it as the
+    /// desired target only then ([`advance_target`]).
+    #[serde(default)]
+    pub in_range: bool,
 }
 
 /// A `ReTargetOnMiss` weapon's misses ([`WeaponState::retarget`]).
@@ -1038,6 +1052,37 @@ impl Weapons {
                 RangeTarget::Ground { layer } => w.fire_target_layers.intersects(layer),
             })
             .map(|w| w.max_radius)
+    }
+
+    /// Whether a unit with an attack order is in range of its target: when
+    /// moho's attack task sets it as the attacker's desired target
+    /// (`CUnitAttackTargetTask` state 3, MohoEngine.dll 0x101dfba5: the
+    /// attacker's vtable +0x44, 0x101c4460, for the weapon
+    /// [`Weapons::range_for`] picks). That runs the weapon's own range test
+    /// (0x102b1be0, the fire task's) on the target's position, a structure's
+    /// centre like any unit's, from the attacker's position: ours tests
+    /// `MaxRadius` in XZ. (Moho's test also fails inside `MinRadius`, beyond
+    /// the height limit, outside the weapon's heading arc and for a disabled
+    /// weapon; the task then keeps moving. Not modelled.) A unit that can't
+    /// move is never out of range: the task sets the target as it starts
+    /// (state 1, 0x101df850..0x101df903).
+    pub fn in_attack_range(&self, world: &EntityWorld, terrain: Option<&Terrain>, unit: EntityId, target: WeaponTarget) -> bool {
+        let Some(me) = world.get(unit) else { return false };
+        if me.unit.as_deref().is_some_and(|d| d.motion_params.kind == crate::engine::sim::movement::MotionKind::None) {
+            return true;
+        }
+        let (p, kind) = match target {
+            WeaponTarget::Entity(t) => {
+                let Some(e) = world.get(t).filter(|e| !e.destroyed) else { return false };
+                let Some(d) = e.unit.as_deref() else { return false };
+                (e.position(), RangeTarget::Unit { layer: d.layer.mask(), category: e.category_index })
+            }
+            WeaponTarget::Ground(p) => {
+                let water = terrain.is_some_and(|t| t.surface_at(p.x, p.z) > t.height_at(p.x, p.z));
+                (p, RangeTarget::Ground { layer: if water { LayerMask::WATER } else { LayerMask::LAND } })
+            }
+        };
+        self.range_for(unit, kind).is_some_and(|r| dist2_xz(p, me.position()) <= r.saturating_mul(r))
     }
 
     pub fn len(&self) -> usize {
@@ -1552,28 +1597,51 @@ fn advance_target(
     let projectile_ok = |v: &ProjectileView| hostile(v.army) && allowed(v.category);
     let view_of = |id: EntityId| projectiles.binary_search_by_key(&id, |v| v.id).ok().map(|i| &projectiles[i]);
 
-    // A new attack order resets every weapon's target: the attacker's
-    // `SetDesiredTarget` (vtable +0x20, MohoEngine.dll 0x101c4840) stores the
-    // order's target and calls `SetTarget(empty)` on each weapon
-    // (0x101c48b8, so `OnLostTarget`), and the target task takes the order's
-    // target on its next run. Real game (`probe_misc` AT): a tank shooting
-    // one target, ordered at tick 30 to attack another, has no target at
-    // 31 and the new one at 32 (a weapon with no target takes the order's
-    // as before: FAF probe probe_firsttick). Silo launches aren't attack
-    // orders.
-    let order_target = ordered.get(&w.unit).filter(|o| o.silo.is_none()).map(|o| o.target);
-    let new_order = order_target.is_some() && order_target != w.order_seen;
-    w.order_seen = order_target;
-    // A target an earlier order forced halts fire first, as when an order
-    // re-points (below).
-    if new_order && w.target_from_order && w.target.is_some() {
-        push(&mut events, WeaponEventKind::HaltFire);
-    }
-    let order_reset = new_order && w.target.take().is_some();
+    // An attack order resets every weapon's target once the attacker is in
+    // range of it: the attack task (`CUnitAttackTargetTask`, MohoEngine.dll
+    // 0x101df700) calls the attacker's `SetDesiredTarget` (vtable +0x20,
+    // 0x101c4840) only then (state 3, 0x101dfba5..0x101dfc03; `in_range` is
+    // [`Weapons::in_attack_range`]). It stores the order's target and calls
+    // `SetTarget(empty)` on each weapon (0x101c48b8, so `OnLostTarget`); a
+    // `NeedPrep` weapon (blueprint +0x11b, 0x101c48f1) then hears
+    // `OnGotTarget` (0x101c4918) when the target is a point or a live
+    // entity (0x101cf640), its own target still empty: FAF's idle state
+    // readies the weapon (unpacks it). The target task takes the desired
+    // target on its next run, ahead of any search (0x101c60e3), so on this
+    // update the weapon has no target and doesn't look for one. Real game
+    // (`probe_q_needprep`, `probe_q_needprep2`, `probe_q_needprep3`): ships
+    // ordered onto a ship 140 away keep shooting what they had on the way;
+    // the reset and the prep come on the tick the order's target is within
+    // range (xes0307: 79.9 of 80), the target is taken the tick after and
+    // fired on the tick after that; ordered in range, the reset is the tick
+    // after the order (`probe_misc` AT: ordered at 30, no target at 31, the
+    // new one at 32). Silo launches aren't attack orders. `order_seen` is
+    // the desired target: it stays set while the order lasts, in range or
+    // not.
+    let order = ordered.get(&w.unit).filter(|o| o.silo.is_none());
+    let seen = w.order_seen.filter(|s| order.is_some_and(|o| o.target == *s));
+    let desired = order.filter(|o| o.in_range || seen.is_some()).map(|o| o.target);
+    let order_reset = desired.is_some() && seen.is_none();
+    w.order_seen = desired;
     if order_reset {
-        w.target_from_order = false;
-        w.check_countdown = 0;
-        push(&mut events, WeaponEventKind::LostTarget);
+        // A target an earlier order forced halts fire first, as when an
+        // order re-points (below).
+        if w.target_from_order && w.target.is_some() {
+            push(&mut events, WeaponEventKind::HaltFire);
+        }
+        if w.target.take().is_some() {
+            w.target_from_order = false;
+            w.check_countdown = 0;
+            push(&mut events, WeaponEventKind::LostTarget);
+        }
+        let valid = match desired {
+            Some(WeaponTarget::Entity(id)) => world.get(id).is_some_and(|e| !e.destroyed),
+            Some(WeaponTarget::Ground(_)) => true,
+            None => false,
+        };
+        if w.need_prep && valid {
+            push(&mut events, WeaponEventKind::Prep);
+        }
     }
 
     // The primary weapon's target, while it's still a live unit (moho's
@@ -1631,13 +1699,15 @@ fn advance_target(
         }
     }
 
-    // An attack order points the weapon at its target once it's in reach
-    // (until then the weapon engages whatever is near); when the order stops
-    // forcing a target, that target is dropped.
+    // An attack order points the weapon at its target once it's the desired
+    // target (above; taken from the update after it's set) and in the
+    // weapon's reach; until then the weapon engages whatever is near. When
+    // the order stops forcing a target, that target is dropped.
     let reach = w.max_radius.saturating_mul(w.tracking_radius.max(Fx::ONE));
     let order = ordered.get(&w.unit);
     let overcharging = order.is_some_and(|o| o.overcharge == Some(w.index));
-    let forced = order.filter(|o| enabled && !order_reset && o.overcharge.map_or(o.silo == w.silo, |i| i == w.index) && from_primary.is_none()).map(|o| o.target).filter(|t| match *t {
+    let is_desired = |o: &OrderedTarget| o.silo.is_some() || w.order_seen == Some(o.target);
+    let forced = order.filter(|o| enabled && !order_reset && is_desired(o) && o.overcharge.map_or(o.silo == w.silo, |i| i == w.index) && from_primary.is_none()).map(|o| o.target).filter(|t| match *t {
         WeaponTarget::Entity(id) => world.get(id).is_some_and(|e| takes(e) && dist2_xz(e.position(), at) <= reach.saturating_mul(reach)),
         WeaponTarget::Ground(p) => !w.cannot_attack_ground && dist2_xz(p, at) <= reach.saturating_mul(reach),
     });
@@ -1664,6 +1734,9 @@ fn advance_target(
         if !w.retarget.as_deref_mut().is_some_and(|m| std::mem::take(&mut m.dropped_on_miss)) {
             push(&mut events, WeaponEventKind::GotTarget);
         }
+    } else if forced.is_some() {
+        // One it found itself before it was the order's: the order's now.
+        w.target_from_order = true;
     }
 
     // Search (moho's, MohoEngine.dll 0x101c4ca0): the first priority class
@@ -2548,7 +2621,9 @@ mod tests {
         grids.set_alliances(2, |_, _| false);
         grids.update(&w, |_| None);
         let mut out = Vec::new();
-        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(enemy), silo: None, overcharge: None });
+        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(enemy), silo: None, overcharge: None, in_range: true });
+        // Set as the desired target, then taken the step after.
+        step(&mut ws, &w, None, Some(&grids), &mut out);
         step(&mut ws, &w, None, Some(&grids), &mut out);
         assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "blind, ordered: taken");
         step(&mut ws, &w, None, Some(&grids), &mut out);
@@ -2574,7 +2649,9 @@ mod tests {
             step(&mut ws, &w, None, None, &mut out);
         }
         assert!(out.is_empty() && ws.get(me, 1).unwrap().target.is_none(), "holding fire: no target");
-        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(enemy), silo: None, overcharge: None });
+        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(enemy), silo: None, overcharge: None, in_range: true });
+        // Set as the desired target, then taken the step after.
+        step(&mut ws, &w, None, None, &mut out);
         step(&mut ws, &w, None, None, &mut out);
         assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "an ordered target is taken");
         ws.ordered.clear();
@@ -2736,7 +2813,9 @@ mod tests {
             step(&mut ws, &w, None, None, &mut out);
         }
         assert!(out.is_empty() && ws.get(me, 1).unwrap().target.is_none(), "no priorities: no target");
-        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(enemy), silo: None, overcharge: None });
+        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(enemy), silo: None, overcharge: None, in_range: true });
+        // Set as the desired target, then taken the step after.
+        step(&mut ws, &w, None, None, &mut out);
         step(&mut ws, &w, None, None, &mut out);
         assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "an ordered target is taken");
     }
@@ -2819,6 +2898,128 @@ mod tests {
             }
         }
         assert_eq!(fired, vec![20, 30], "first shot as the stun ends, then every reload");
+    }
+
+    /// MohoEngine.dll 0x101c48f1: an attack order runs a `NeedPrep` weapon's
+    /// `OnGotTarget` when the attacker is in range (moho's `SetDesiredTarget`,
+    /// real game `probe_q_needprep2` / `3`), the weapon's own target empty.
+    #[test]
+    fn need_prep_weapon_is_told_of_an_attack_order() {
+        for need_prep in [false, true] {
+            let mut w = EntityWorld::default();
+            let me = unit(&mut w, 1, 0.0, 0.0);
+            let near = unit(&mut w, 2, 5.0, 0.0);
+            let far = unit(&mut w, 2, 500.0, 0.0);
+            let mut ws = Weapons::default();
+            gun(&mut ws, me);
+            ws.get_mut(me, 1).need_prep = need_prep;
+            let mut out = Vec::new();
+            step(&mut ws, &w, None, None, &mut out);
+            assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(near)));
+            // Ordered onto a target out of range: nothing yet, the weapon
+            // keeps what it has on the way.
+            ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(far), silo: None, overcharge: None, in_range: false });
+            out.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            assert!(out.iter().all(|e| !matches!(e.kind, WeaponEventKind::LostTarget | WeaponEventKind::Prep)), "{out:?}");
+            assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(near)));
+            // In range of it: the held target is dropped, and the weapon is
+            // told to get ready.
+            ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(far), silo: None, overcharge: None, in_range: true });
+            out.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            let kinds: Vec<_> = out.iter().map(|e| e.kind).filter(|k| !matches!(k, WeaponEventKind::StartTracking | WeaponEventKind::StopTracking)).collect();
+            if need_prep {
+                assert_eq!(kinds, [WeaponEventKind::LostTarget, WeaponEventKind::Prep]);
+            } else {
+                assert_eq!(kinds, [WeaponEventKind::LostTarget]);
+            }
+            assert_eq!(ws.get(me, 1).unwrap().target, None);
+            // Once an order, not every step of it.
+            out.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            assert!(!out.iter().any(|e| e.kind == WeaponEventKind::Prep), "{out:?}");
+            // Not for a target that's gone.
+            ws.ordered.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            w.destroy(far);
+            ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(far), silo: None, overcharge: None, in_range: true });
+            out.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            assert!(!out.iter().any(|e| e.kind == WeaponEventKind::Prep), "{out:?}");
+        }
+    }
+
+    /// Real game `probe_q_attackrange` P / Q: destroyers with no target,
+    /// ordered onto a ship in range at T+0, take it at T+2 (the reset at
+    /// T+1 is silent), and not something nearer in between.
+    #[test]
+    fn an_order_in_range_is_taken_the_step_after_it_is_set() {
+        let mut w = EntityWorld::default();
+        let me = unit(&mut w, 1, 0.0, 0.0);
+        let _near = unit(&mut w, 2, 5.0, 0.0);
+        let ordered = unit(&mut w, 2, 0.0, 12.0);
+        let mut ws = Weapons::default();
+        gun(&mut ws, me);
+        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(ordered), silo: None, overcharge: None, in_range: true });
+        let mut out = Vec::new();
+        step(&mut ws, &w, None, None, &mut out);
+        assert_eq!(ws.get(me, 1).unwrap().target, None, "set as the desired target: no target, no search");
+        assert!(out.is_empty(), "{out:?}");
+        step(&mut ws, &w, None, None, &mut out);
+        let s = ws.get(me, 1).unwrap();
+        assert_eq!((s.target, s.target_from_order), (Some(WeaponTarget::Entity(ordered)), true));
+        assert_eq!(out.iter().filter(|e| e.kind == WeaponEventKind::GotTarget).count(), 1, "{out:?}");
+        // The desired target stays set when the attacker drifts out of range.
+        ws.ordered.get_mut(&me).unwrap().in_range = false;
+        out.clear();
+        step(&mut ws, &w, None, None, &mut out);
+        assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(ordered)));
+        assert!(!out.iter().any(|e| e.kind == WeaponEventKind::LostTarget), "{out:?}");
+        // An order onto another target, out of range: the forced one is
+        // dropped and the weapon looks for itself again.
+        let far = unit(&mut w, 2, 500.0, 0.0);
+        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(far), silo: None, overcharge: None, in_range: false });
+        out.clear();
+        step(&mut ws, &w, None, None, &mut out);
+        assert!(out.iter().any(|e| e.kind == WeaponEventKind::LostTarget), "{out:?}");
+        assert_ne!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(ordered)));
+        assert_eq!(ws.get(me, 1).unwrap().order_seen, None);
+    }
+
+    /// MohoEngine.dll 0x101c4460: in range is the attacking weapon's
+    /// `MaxRadius` from the attacker's centre to the target's, in XZ. Real
+    /// game (`probe_q_attackrange`): 79.7 of 80 and 59.2 of 60 onto power
+    /// generators of footprint 5 and 1 alike.
+    #[test]
+    fn attack_range_is_the_first_weapon_that_can_hit_centre_to_centre() {
+        use crate::engine::sim::movement::MotionKind;
+        let mut w = EntityWorld::default();
+        let me = unit(&mut w, 1, 0.0, 0.0);
+        w.get_mut(me).unwrap().unit.as_mut().unwrap().motion_params.kind = MotionKind::Water;
+        let inside = unit(&mut w, 2, 17.9, 0.0);
+        let outside = unit(&mut w, 2, 0.0, 18.1);
+        let high = unit(&mut w, 2, 17.9, 0.0);
+        w.set_position(high, FxVec3::from_f64(17.9, 40.0, 0.0));
+        let flying = unit(&mut w, 2, 5.0, 0.0);
+        w.get_mut(flying).unwrap().unit.as_mut().unwrap().layer = Layer::Air;
+        let mut ws = Weapons::default();
+        gun(&mut ws, me);
+        // A second, longer gun doesn't widen it.
+        ws.get_mut(me, 2).max_radius = Fx::from_num(40);
+        ws.get_mut(me, 2).fire_target_layers = LayerMask::LAND;
+        let at =|ws: &Weapons, w: &EntityWorld, t| ws.in_attack_range(w, None, me, t);
+        assert!(at(&ws, &w, WeaponTarget::Entity(inside)));
+        assert!(!at(&ws, &w, WeaponTarget::Entity(outside)));
+        assert!(at(&ws, &w, WeaponTarget::Entity(high)), "height doesn't count");
+        assert!(!at(&ws, &w, WeaponTarget::Entity(flying)), "no weapon for it");
+        assert!(at(&ws, &w, WeaponTarget::Ground(FxVec3::from_f64(0.0, 0.0, -18.0))));
+        assert!(!at(&ws, &w, WeaponTarget::Ground(FxVec3::from_f64(13.0, 0.0, -13.0))));
+        // A unit that can't move sets the target as the order starts.
+        w.get_mut(me).unwrap().unit.as_mut().unwrap().motion_params.kind = MotionKind::None;
+        assert!(at(&ws, &w, WeaponTarget::Entity(outside)));
+        w.destroy(outside);
+        assert!(at(&ws, &w, WeaponTarget::Entity(outside)));
     }
 
     #[test]
@@ -3149,7 +3350,7 @@ mod tests {
         // the order's taken the step after, fired on a step later.
         let b = unit(&mut w, 2, 100.0, 112.0);
         ws.get_mut(me, 1).fire_clock = 0;
-        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(b), silo: None, overcharge: None });
+        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(b), silo: None, overcharge: None, in_range: true });
         let mut out = Vec::new();
         step(&mut ws, &w, None, None, &mut out);
         assert_eq!(ws.get(me, 1).unwrap().target, None, "a new attack order resets the target");
