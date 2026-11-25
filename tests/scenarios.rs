@@ -1314,6 +1314,11 @@ fn creation_terrain_type() {
 }
 
 #[test]
+fn build_abandon() {
+    scenario("build_abandon", 300);
+}
+
+#[test]
 fn patrol_single() {
     scenario("patrol_single", 400);
 }
