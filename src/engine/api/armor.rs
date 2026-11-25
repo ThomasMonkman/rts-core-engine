@@ -14,6 +14,12 @@
 //! known armor type, take full damage, with no `Default` fallback
 //! (`Unit::ProcessArmorOnDamage` 0x102893a0 leaves the amount unchanged;
 //! `GetArmorMult` gives 1, 0x102894c8).
+//!
+//! The multipliers and the multiply are `f32`, as moho's are (its Lua
+//! numbers are floats too): `0.032` is stored as 0.0320000015, and a hit's
+//! amount is rounded to `f32` before the multiply, so the product is moho's
+//! bit for bit. One IEEE multiply, the same on every platform
+//! (`docs/architecture/determinism.md`).
 
 use std::collections::BTreeMap;
 
@@ -28,7 +34,7 @@ use crate::lua_api::{Obj, lua_method};
 #[derive(Default)]
 pub struct ArmorTable {
     loaded: bool,
-    types: BTreeMap<String, BTreeMap<String, f64>>,
+    types: BTreeMap<String, BTreeMap<String, f32>>,
 }
 
 fn ensure_loaded(lua: &Lua) -> LuaResult<()> {
@@ -53,7 +59,7 @@ fn ensure_loaded(lua: &Lua) -> LuaResult<()> {
             for row in rows {
                 let row = row?;
                 let mut parts = row.split_whitespace();
-                if let (Some(kind), Some(Ok(m))) = (parts.next(), parts.next().map(str::parse::<f64>)) {
+                if let (Some(kind), Some(Ok(m))) = (parts.next(), parts.next().map(str::parse::<f32>)) {
                     mults.insert(kind.to_string(), m);
                 }
             }
@@ -64,19 +70,25 @@ fn ensure_loaded(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
-/// Multiplier `unit` takes from `damage_type` (1 when unknown).
-pub fn mult(lua: &Lua, unit: EntityId, damage_type: &str) -> LuaResult<f64> {
+/// `amount` of `damage_type` after `unit`'s armour (unchanged when the
+/// armour doesn't list the type).
+pub fn apply(lua: &Lua, unit: EntityId, damage_type: &str, amount: f64) -> LuaResult<f64> {
+    Ok(mult(lua, unit, damage_type)?.map_or(amount, |m| f64::from(amount as f32 * m)))
+}
+
+/// Multiplier `unit` takes from `damage_type` (none when unknown).
+fn mult(lua: &Lua, unit: EntityId, damage_type: &str) -> LuaResult<Option<f32>> {
     ensure_loaded(lua)?;
     let armor = world(lua).get(unit).and_then(|e| e.unit.as_deref()).and_then(|u| u.armor_type.clone());
-    let Some(armor) = armor else { return Ok(1.0) };
+    let Some(armor) = armor else { return Ok(None) };
     let table = lua.app_data_ref::<ArmorTable>().expect("ArmorTable");
     // `armor_type` is kept lowercase (`api::unit`), as the table's names.
-    Ok(table.types.get(&*armor).and_then(|t| t.get(damage_type)).copied().unwrap_or(1.0))
+    Ok(table.types.get(&*armor).and_then(|t| t.get(damage_type)).copied())
 }
 
 pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::Unit, GetArmorMult = |lua, (this, kind): (Obj<moho::Unit>, Option<String>)| {
-        mult(lua, entity_id(&this)?, kind.as_deref().unwrap_or("Normal"))
+        Ok(mult(lua, entity_id(&this)?, kind.as_deref().unwrap_or("Normal"))?.map_or(1.0, f64::from))
     })?;
     Ok(())
 }
