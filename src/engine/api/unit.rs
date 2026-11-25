@@ -683,21 +683,20 @@ pub fn spawn_unit_built_by(
     // Before `OnCreate` (FAF's `Unit.OnLayerChange` checks for old == 'None'
     // and sets up weapon target layers from it).
     UnitCallbacks::on_layer_change(lua, &obj, &bp_id, layer.as_str(), "None")?;
-    UnitCallbacks::on_create(lua, &obj, &bp_id)?;
-    // The terrain type it starts on: FAF only learns it from this callback
-    // (`Unit.TerrainType`, which its tread marks need), from its default
-    // type (`GetTerrainType(-1, -1)`).
-    let terrain = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>().map(|t| {
-        let p = position;
-        (t.type_at(p.x, p.z), t.type_at(-Fx::ONE, -Fx::ONE))
-    });
-    if let Some((code, default)) = terrain {
+    // The terrain type it starts on, before `OnCreate` and from no type
+    // (`old` = nil): FAF only learns it from this callback
+    // (`Unit.TerrainType`, which its tread marks need). FAF probe
+    // probe_q_api: `OnPreCreate`, `OnLayerChange`, `OnTerrainTypeChange(new,
+    // nil)`, `OnCreate`.
+    let terrain = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>().map(|t| t.type_at(position.x, position.z));
+    if let Some(code) = terrain {
         if let Some(u) = world(lua).get_mut(id).and_then(|e| e.unit.as_deref_mut()) {
             u.terrain_type = Some(code);
         }
-        let entry = |code| crate::engine::api::terrain::terrain_type_entry(lua, code).map(crate::lua_api::shapes::Loose::new);
-        UnitCallbacks::on_terrain_type_change(lua, &obj, &bp_id, entry(code)?, entry(default)?)?;
+        let new = crate::engine::api::terrain::terrain_type_entry(lua, code).map(crate::lua_api::shapes::Loose::new)?;
+        UnitCallbacks::on_terrain_type_change(lua, &obj, &bp_id, new, crate::lua_api::shapes::Loose::new(LuaValue::Nil))?;
     }
+    UnitCallbacks::on_create(lua, &obj, &bp_id)?;
     match builder {
         Some(b) => UnitCallbacks::on_start_being_built(lua, &obj, &bp_id, Obj::new(b.clone()), layer)?,
         None => {

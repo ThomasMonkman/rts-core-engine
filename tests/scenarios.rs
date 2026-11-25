@@ -1309,6 +1309,11 @@ fn damage_ring_edges() {
 }
 
 #[test]
+fn creation_terrain_type() {
+    scenario("creation_terrain_type", 100);
+}
+
+#[test]
 fn patrol_single() {
     scenario("patrol_single", 400);
 }
