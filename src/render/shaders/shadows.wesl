@@ -22,7 +22,13 @@ struct Out {
     if (bones.x != 0xffffffffu) {
         model = model * palette[bones.x + bone];
     }
-    var world = (model * vec4<f32>(pos, 1.0)).xyz;
+    // A Seraphim unit being built grows from a quarter size, and so does its
+    // shadow (moho's `SeraphimBuildDepthVS`, the `SeraphimBuild` techniques'
+    // depth technique; the other build techniques cast at full size).
+    // `bones.z` marks it (set for the caster list only), `team.a` is the
+    // fraction complete.
+    let p = pos * select(1.0, 0.25 + 0.75 * team.a, bones.z == 1u);
+    var world = (model * vec4<f32>(p, 1.0)).xyz;
     if (bones.y != STILL) {
         // Swaying casters sway in their shadows (moho's `UndulatingDepthClip`
         // depth technique, which the bloating pods use too: their shadow
