@@ -1611,6 +1611,9 @@ pub fn mark_unfinished(lua: &Lua, id: EntityId) {
 /// 0.0027 a tick and heard `OnDecayed` 371 ticks after it was started and
 /// cleared; a T1 power generator, 0.08 a tick, after 14).
 ///
+/// A killed one (a dead factory's unit, waiting for its death thread)
+/// keeps its fraction (FAF probe probe_q_build2 `fkill`).
+///
 /// Inferred, not verified against the binary: decay starts at once (the
 /// real game's starts a tick or so later), and a paused builder's job still
 /// holds it off.
@@ -1627,7 +1630,7 @@ fn decay(lua: &Lua) -> LuaResult<()> {
         let w = entity::world(lua);
         let mut unfinished = lua.app_data_mut::<Unfinished>().expect("Unfinished");
         unfinished.0.retain(|&id| w.get(id).is_some_and(|e| !e.destroyed && e.fraction_complete < Fx::ONE));
-        unfinished.0.iter().filter(|id| !worked.contains(id)).filter_map(|&id| w.get(id).map(|e| (id, e.cold.blueprint_id.clone()))).collect()
+        unfinished.0.iter().filter(|id| !worked.contains(id)).filter_map(|&id| w.get(id).filter(|e| !e.cold.killed).map(|e| (id, e.cold.blueprint_id.clone()))).collect()
     };
     for (id, bp) in idle {
         let rate = decay_rate(lua, &bp)?;
