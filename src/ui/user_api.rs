@@ -1092,8 +1092,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         end
         function GetIdleEngineers() return idle('ENGINEER - COMMAND') end
         function GetIdleFactories() return idle('FACTORY STRUCTURE') end
-        -- The game world is running (the interface exists only then).
-        function WorldIsPlaying() return true end
+        -- A session's world is loaded and running: moho's world state is
+        -- "playing" (6 of 0..8; the binding in SupremeCommander.exe compares
+        -- it), which pausing, the game ending and `SessionEndGame` leave
+        -- alone. False at the main menu, where there is no world.
+        function WorldIsPlaying() return rawget(_G, '__engine_ui_state') == 'game' end
         -- Selecting from the interface is synchronous, as in moho: the new
         -- selection is what `GetSelectedUnits()` returns on the next line and
         -- what selection orders given after it go to (FAF selects a factory,

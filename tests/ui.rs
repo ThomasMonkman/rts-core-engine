@@ -3470,6 +3470,19 @@ fn a_played_session_is_recorded() {
     assert_eq!(got, (true, false));
 }
 
+/// The world is playing in a game and not at the main menu (moho's world
+/// state, read from SupremeCommander.exe's `WorldIsPlaying`).
+#[test]
+fn the_world_plays_only_in_a_game() {
+    let Some(vm) = vm() else { return };
+    let playing = || vm.lua().load("return WorldIsPlaying()").eval::<bool>().unwrap();
+    assert!(playing());
+    vm.lua().load("SessionRequestPause()").exec().unwrap();
+    assert!(playing(), "paused is still playing");
+    vm.start_front_end().expect("main menu");
+    assert!(!playing(), "no world at the main menu");
+}
+
 /// An edit's limit is 1024 characters by default and `SetMaxChars` cuts
 /// the text to a new one (`probe_ui_controls` edit).
 #[test]
