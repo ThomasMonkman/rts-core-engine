@@ -980,23 +980,82 @@ pub fn targets_destroyed(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
-/// A builder's orders were cleared from script (`IssueClearCommands`): a
-/// mobile build it was on ends inside the call, `OnStopBuild` then
+/// A builder's orders were cleared from script (`IssueClearCommands`): the
+/// build it was on ends inside the call. A mobile build: `OnStopBuild` then
 /// `OnFailedToBuild` (FAF probe probe_q_build `clear`, `newbuild`: both come
 /// before the call returns, the structure hears nothing and is left to
-/// decay). Factory builds and upgrades end in [`tick`], as before: only the
-/// mobile build was probed.
+/// decay). A factory build or an upgrade: [`cancel_structure`] (FAF probe
+/// probe_q_build2 `fclear`, `uclear`: all of it before the call returns).
 pub fn orders_cleared(lua: &Lua, builder: EntityId) -> LuaResult<()> {
-    let target = lua.app_data_ref::<Builds>().and_then(|b| b.0.get(&builder).filter(|j| j.order == BuildOrder::Mobile).map(|j| j.target));
-    let Some(target) = target else { return Ok(()) };
+    let job = lua.app_data_ref::<Builds>().and_then(|b| b.0.get(&builder).cloned());
+    let Some(job) = job else { return Ok(()) };
     let live = {
         let w = entity::world(lua);
-        w.get(builder).is_some_and(|e| !e.destroyed && !e.cold.killed) && w.get(target).is_some_and(|e| !e.destroyed)
+        w.get(builder).is_some_and(|e| !e.destroyed && !e.cold.killed) && w.get(job.target).is_some_and(|e| !e.destroyed)
     };
     // A lost target is `targets_destroyed`'s; a dead builder's build has
     // ended already.
-    if live {
-        cancel_mobile(lua, builder, true)?;
+    if !live {
+        return Ok(());
+    }
+    match job.order {
+        BuildOrder::Mobile => cancel_mobile(lua, builder, true),
+        BuildOrder::Factory | BuildOrder::Upgrade if !job_order_current(lua, builder, &job) => cancel_structure(lua, builder, &job, true),
+        _ => Ok(()),
+    }
+}
+
+/// A factory build or an upgrade ending before it is done: its order went
+/// away (cleared or replaced) with the builder alive, or the builder was
+/// destroyed (a killed one ends in [`builder_died`]). With the builder
+/// alive, moho's failed build stop: the builder's `OnFailedToBuild` (FAF's
+/// `UpgradingState` one returns the structure to idle), the new unit's
+/// `OnFailedToBeBuilt`, the builder's `OnStopBuild(new, order)` (where FAF
+/// turns the upgrade's consumption off, and `FactoryUnit` destroys its
+/// unfinished unit); then an upgrade's new structure is destroyed: left
+/// standing it would stay invulnerable (FAF's `OnStartBuild` turns its
+/// collision and damage off until it completes). A destroyed builder hears
+/// nothing and neither does the new unit; an upgrade's new structure is
+/// destroyed all the same (FAF probe probe_q_build2: `fclear`, `uclear` in
+/// that order, instance hooks seeing the states' callbacks; `udestroy` no
+/// `OnFailedToBeBuilt`, the new structure's `OnDestroy` the tick after the
+/// old one's). An assist can finish the unit while the builder still holds
+/// it (paused): a stop at fraction 1 completes an upgrade instead (the
+/// builder's `OnStopBuild`, where FAF's script swaps the upgrade); failing
+/// it would take down a fully built structure.
+fn cancel_structure(lua: &Lua, builder: EntityId, job: &Job, builder_alive: bool) -> LuaResult<()> {
+    let finished = entity::world(lua).get(job.target).is_some_and(|e| e.fraction_complete >= Fx::ONE);
+    if finished {
+        if job.order == BuildOrder::Upgrade && builder_alive
+            && let (Some(b), Some(t)) = (object(lua, builder)?, object(lua, job.target)?) {
+            return complete(lua, builder, job, &b, &t);
+        }
+        stop(lua, builder, job.order == BuildOrder::Factory && builder_alive)?;
+        return Ok(());
+    }
+    let target_obj = object(lua, job.target)?;
+    if builder_alive {
+        if let Some(b) = object(lua, builder)? {
+            UnitCallbacks::on_failed_to_build(lua, &b, "unit")?;
+        }
+        if let Some(t) = &target_obj {
+            UnitCallbacks::on_failed_to_be_built(lua, t, "unit")?;
+        }
+    }
+    stop(lua, builder, builder_alive)?;
+    if job.order == BuildOrder::Upgrade {
+        destroy_unfinished(lua, job.target)?;
+    }
+    Ok(())
+}
+
+/// An upgrade's new structure, unfinished and not yet destroyed, destroyed
+/// through its script.
+fn destroy_unfinished(lua: &Lua, target: EntityId) -> LuaResult<()> {
+    let live = entity::world(lua).get(target).is_some_and(|e| !e.destroyed && e.fraction_complete < Fx::ONE);
+    if live
+        && let Some(t) = object(lua, target)? {
+        EntityCallbacks::destroy(lua, &t, "unit")?;
     }
     Ok(())
 }
@@ -1019,12 +1078,35 @@ fn cancel_mobile(lua: &Lua, builder: EntityId, builder_alive: bool) -> LuaResult
 /// work on it (FAF probe probe_q_build `kill`: `OnFailedToBuild`, `OnKilled`
 /// inside the call, nothing more at its `OnDestroy` two ticks on; `destroy`:
 /// `OnDestroy`, `OnFailedToBuild` in the tick of the call; the structure
-/// stays at the fraction it had). Factories and upgrades are not probed and
-/// end in [`tick`] as before.
+/// stays at the fraction it had).
+///
+/// A killed factory or upgrading structure stops at once too, but hears
+/// nothing (no `OnFailedToBuild`, no `OnStopBuild`) and neither does the
+/// unit it was building; a factory's unit stays at its fraction (FAF's
+/// `FactoryUnit.OnKilled` kills it), an upgrade's new structure is destroyed
+/// in the tick of the kill (FAF probe probe_q_build2 `fkill`, `ukill`). A
+/// destroyed one (not killed) is left to [`cancel_structure`] in [`tick`]:
+/// the real game destroys an upgrade's new structure the tick after
+/// (`udestroy`).
 pub fn builder_died(lua: &Lua, builder: EntityId) -> LuaResult<()> {
     let job = {
         let Some(mut builds) = lua.app_data_mut::<Builds>() else { return Ok(()) };
-        if builds.0.get(&builder).is_none_or(|j| j.order != BuildOrder::Mobile) {
+        let Some(order) = builds.0.get(&builder).map(|j| j.order) else { return Ok(()) };
+        if order != BuildOrder::Mobile {
+            let killed = entity::world(lua).get(builder).is_some_and(|e| e.cold.killed);
+            if !killed {
+                return Ok(());
+            }
+            let job = builds.0.remove(&builder).expect("job");
+            drop(builds);
+            if let Some(u) = entity::world(lua).get_mut(builder).and_then(|e| e.unit.as_deref_mut()) {
+                u.focus = None;
+                u.work_progress = Fx::ZERO;
+            }
+            set_state(lua, builder, job.order.state(), false);
+            if job.order == BuildOrder::Upgrade {
+                destroy_unfinished(lua, job.target)?;
+            }
             return Ok(());
         }
         builds.0.remove(&builder).expect("job")
@@ -1167,62 +1249,10 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         let builder_alive = entity::world(lua).get(builder).is_some_and(|e| !e.destroyed);
         let order_current = job_order_current(lua, builder, &job);
         let target_alive = entity::world(lua).get(job.target).is_some_and(|e| !e.destroyed);
-        // An upgrade that stops unfinished (order cancelled, or the old
-        // structure destroyed) takes its half-built structure with it, as in
-        // FA: left standing it would stay invulnerable (FAF's OnStartBuild
-        // turns its collision and damage off until it completes). The old
-        // structure, if alive, is told it failed so FAF leaves the
-        // upgrading state, and stops (its consumption ends). An assist can finish it while the builder still
-        // holds it (paused): a stop at fraction 1 completes it instead —
-        // the builder's `OnStopBuild`, where FAF's script swaps the
-        // upgrade — failing it would take down a fully built structure.
-        if job.order == BuildOrder::Upgrade && target_alive && (!builder_alive || !order_current) {
-            let finished = entity::world(lua).get(job.target).is_some_and(|e| e.fraction_complete >= Fx::ONE);
-            if finished && builder_alive
-                && let (Some(b), Some(t)) = (object(lua, builder)?, object(lua, job.target)?) {
-                complete(lua, builder, &job, &b, &t)?;
-                continue;
-            }
-            if finished {
-                stop(lua, builder, false)?;
-                continue;
-            }
-            // Moho's build stop, as for any failed build: `OnFailedToBuild`
-            // (FAF's `UpgradingState` one, which returns the structure to
-            // its idle state), then `OnStopBuild(new, 'Upgrade')`, where FAF
-            // turns the upgrade's consumption off. The real game logs the
-            // new structure's `OnFailedToBeBuilt` first, `OnStopBuild` after
-            // and the new one's `OnDestroy` last (dev/probes probe_unit_build
-            // G4 `upcancel`; the probe's class hook can't see the state's
-            // `OnFailedToBuild`, but `OnStopBuild` only reaches the class
-            // once the state has gone back to idle).
-            let target_obj = object(lua, job.target)?;
-            if let Some(t) = &target_obj {
-                UnitCallbacks::on_failed_to_be_built(lua, t, "unit")?;
-            }
-            if builder_alive
-                && let Some(b) = object(lua, builder)? {
-                UnitCallbacks::on_failed_to_build(lua, &b, "unit")?;
-            }
-            stop(lua, builder, builder_alive)?;
-            if let Some(t) = &target_obj {
-                EntityCallbacks::destroy(lua, t, "unit")?;
-            }
-            continue;
-        }
-        // A cancelled one: the factory's `OnFailedToBuild`, then its
-        // `OnStopBuild` (dev/probes probe_unit_build G3).
-        if job.order == BuildOrder::Factory && target_alive && (!builder_alive || !order_current) {
-            let unfinished = entity::world(lua).get(job.target).is_some_and(|e| e.fraction_complete < Fx::ONE);
-            if unfinished && builder_alive
-                && let Some(b) = object(lua, builder)? {
-                UnitCallbacks::on_failed_to_build(lua, &b, "unit")?;
-            }
-            stop(lua, builder, builder_alive)?;
-            if unfinished
-                && let Some(t) = object(lua, job.target)? {
-                UnitCallbacks::on_failed_to_be_built(lua, &t, "unit")?;
-            }
+        // A factory build or an upgrade whose order went away, or whose
+        // builder was destroyed: [`cancel_structure`].
+        if matches!(job.order, BuildOrder::Factory | BuildOrder::Upgrade) && target_alive && (!builder_alive || !order_current) {
+            cancel_structure(lua, builder, &job, builder_alive)?;
             continue;
         }
         if !target_alive {
@@ -1581,6 +1611,9 @@ pub fn mark_unfinished(lua: &Lua, id: EntityId) {
 /// 0.0027 a tick and heard `OnDecayed` 371 ticks after it was started and
 /// cleared; a T1 power generator, 0.08 a tick, after 14).
 ///
+/// A killed one (a dead factory's unit, waiting for its death thread)
+/// keeps its fraction (FAF probe probe_q_build2 `fkill`).
+///
 /// Inferred, not verified against the binary: decay starts at once (the
 /// real game's starts a tick or so later), and a paused builder's job still
 /// holds it off.
@@ -1597,7 +1630,7 @@ fn decay(lua: &Lua) -> LuaResult<()> {
         let w = entity::world(lua);
         let mut unfinished = lua.app_data_mut::<Unfinished>().expect("Unfinished");
         unfinished.0.retain(|&id| w.get(id).is_some_and(|e| !e.destroyed && e.fraction_complete < Fx::ONE));
-        unfinished.0.iter().filter(|id| !worked.contains(id)).filter_map(|&id| w.get(id).map(|e| (id, e.cold.blueprint_id.clone()))).collect()
+        unfinished.0.iter().filter(|id| !worked.contains(id)).filter_map(|&id| w.get(id).filter(|e| !e.cold.killed).map(|e| (id, e.cold.blueprint_id.clone()))).collect()
     };
     for (id, bp) in idle {
         let rate = decay_rate(lua, &bp)?;
