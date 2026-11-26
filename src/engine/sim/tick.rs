@@ -192,7 +192,7 @@ pub fn step(lua: &Lua) -> LuaResult<()> {
     contain(lua, tick, crate::engine::sim::gc::tick(lua, now))?;
     // Renderer attached (windowed only): hand it this tick's state.
     enter(Phase::Snapshot);
-    crate::engine::snapshot::publish(lua, started.elapsed());
+    crate::engine::snapshot::publish(lua, started);
     enter(Phase::Idle);
     crate::engine::tracy::sim_tick_mark();
     if let Some(wd) = &wd {

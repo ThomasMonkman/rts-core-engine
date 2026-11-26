@@ -840,8 +840,9 @@ pub struct Snapshot {
     pub tick: u64,
     /// The sim's own tick (`GetGameTick`), the clock effects are timed in.
     pub sim_tick: u64,
-    /// Wall time the sim spent on this tick, ms (display only: measured
-    /// outside sim state, never fed back into it).
+    /// Wall time the sim spent on this tick, ms, up to sending this
+    /// snapshot (display only: measured outside sim state, never fed back
+    /// into it).
     pub tick_ms: f32,
     pub entities: Vec<EntityView>,
     /// Present when the terrain changed since the last snapshot (and in the
@@ -2866,13 +2867,15 @@ fn check_against_serial(
     }
 }
 
-/// End of tick: offer a snapshot if a renderer is attached. `tick_time` is
-/// how long the tick took (for the renderer's status bar).
-pub fn publish(lua: &mlua::Lua, tick_time: std::time::Duration) {
+/// End of tick: offer a snapshot if a renderer is attached. `started` is
+/// when the tick began: the snapshot's `tick_ms` (the renderer's status bar)
+/// is taken as the last thing before it is sent, so it covers the whole
+/// tick, this build included.
+pub fn publish(lua: &mlua::Lua, started: std::time::Instant) {
     // Renderer-only work: it must not move the gcid counter (a run with a
     // window and one without are the same game; `docs/architecture/replays.md`).
     let _frozen = has_sink(lua).then(|| crate::engine::lua::heap_snapshot::FrozenGcids::new(lua));
-    offer(lua, tick_time, true);
+    offer(lua, Some(started), true);
 }
 
 /// Offers the current tick's snapshot again (no tick advance): while the sim
@@ -2880,7 +2883,7 @@ pub fn publish(lua: &mlua::Lua, tick_time: std::time::Duration) {
 /// still reaches the renderer.
 pub fn republish(lua: &mlua::Lua) {
     let _frozen = has_sink(lua).then(|| crate::engine::lua::heap_snapshot::FrozenGcids::new(lua));
-    offer(lua, std::time::Duration::ZERO, false);
+    offer(lua, None, false);
 }
 
 /// The game is over and the renderer (if any) has been told: nothing more
@@ -2894,7 +2897,7 @@ pub fn game_over_delivered(lua: &mlua::Lua) -> bool {
     lua.app_data_ref::<SnapshotSink>().is_none_or(|s| s.sent_game_over)
 }
 
-fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
+fn offer(lua: &mlua::Lua, started: Option<std::time::Instant>, advance: bool) {
     let Some(mut sink) = lua.app_data_mut::<SnapshotSink>() else {
         // No renderer to hear them.
         if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
@@ -2928,7 +2931,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
     let view = fog::view(lua, &request);
     let domain = crate::engine::api::categories::domain(lua).ok();
     let structure = domain.as_ref().and_then(|d| d.named.get("STRUCTURE"));
-    let mut snap = Snapshot { tick: sink.tick, sim_tick: crate::engine::api::sim_time::current_tick(lua), tick_ms: tick_time.as_secs_f32() * 1000.0, game_over: crate::engine::api::sim_time::has_ended(lua), ..Default::default() };
+    let mut snap = Snapshot { tick: sink.tick, sim_tick: crate::engine::api::sim_time::current_tick(lua), game_over: crate::engine::api::sim_time::has_ended(lua), ..Default::default() };
     // Props changed since the last delivered snapshot.
     drop(head_span);
     let mut prop_ids = std::mem::take(&mut sink.pending_props);
@@ -3157,6 +3160,10 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
     snap.engine_counts.decals = lua.app_data_ref::<crate::engine::sim::presentation::Presentation>().map_or(0, |p| p.decals.len() as u32);
     snap.engine_counts.lua_threads = lua.app_data_ref::<crate::engine::sim::scheduler::Scheduler>().map_or(0, |s| s.task_count() as u32);
     snap.ticket = Some(Ticket(sink.in_flight.clone()));
+    // The whole tick, up to here (a held tick's repeats: none).
+    if let Some(started) = started {
+        snap.tick_ms = started.elapsed().as_secs_f32() * 1000.0;
+    }
     // In lockstep with the consumer every snapshot goes (it waits for room).
     let sent = match &sink.consumer {
         Some(_) => sink.tx.send(snap).map_err(|e| TrySendError::Disconnected(e.0)),
