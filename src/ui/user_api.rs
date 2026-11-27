@@ -948,47 +948,6 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             if key then return GetPreference(opts .. '.' .. key) end
             return GetPreference(opts, {})
         end
-        -- Range overlays (the military / intel rings): filters defined by
-        -- name, then the active set chosen. Kept, not drawn yet.
-        local overlayFilters, activeOverlays, overlayVersion = {}, {}, 0
-        function SetOverlayFilter(name, categories, normal, select, rollover, innerMin, innerMax, outerMin, outerMax)
-            overlayFilters[name] = { Categories = categories, NormalColor = normal, SelectColor = select, RolloverColor = rollover,
-                Inner = { innerMin, innerMax }, Outer = { outerMin, outerMax } }
-            overlayVersion = overlayVersion + 1
-        end
-        function SetOverlayFilters(names) activeOverlays = names or {} overlayVersion = overlayVersion + 1 end
-        function __engine_overlay_version() return overlayVersion end
-        -- The active filters for the renderer: colours, thicknesses, which
-        -- of `ids` (blueprints) each covers, and which range kinds (OVERLAY<kind>
-        -- categories) it takes in: those whose every blueprint it covers, so
-        -- the anti-air filter doesn't also draw a destroyer's guns.
-        function __engine_overlay_filters(ids, kinds)
-            local out = {}
-            for _, name in activeOverlays do
-                local f = overlayFilters[name]
-                if f and f.Categories then
-                    local members = {}
-                    for i, id in ids do members[i] = EntityCategoryContains(f.Categories, id) end
-                    local mask = 0
-                    for k, kind in kinds do
-                        local cat = categories['OVERLAY' .. kind]
-                        local any, all = false, true
-                        if cat then
-                            for i, id in ids do
-                                if EntityCategoryContains(cat, id) then
-                                    any = true
-                                    if not members[i] then all = false break end
-                                end
-                            end
-                        end
-                        if any and all then mask = mask + 2 ^ (k - 1) end
-                    end
-                    table.insert(out, { name = name, normal = f.NormalColor, select = f.SelectColor, rollover = f.RolloverColor,
-                        inner = f.Inner, outer = f.Outer, members = members, kinds = mask })
-                end
-            end
-            return out
-        end
         -- Units added to the selection from the interface (a transport's
         -- carried units in the construction panel), by entity id. Kept;
         -- orders don't go to them yet.
@@ -1000,64 +959,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         -- the renderer (`ui::console`).
         function ConExecute(command) __engine_con_execute(command) end
         function ConExecuteSave(command) __engine_con_execute(command) end
-        -- The player's selection, set by the engine from the renderer's
-        -- selection (`UserVm::set_selection`): a new table each call, nil
-        -- when nothing is selected, as moho's. FAF adds to the table it gets
-        -- (`AppendSetToSelection`) and tells calls apart by table identity
-        -- (selection sets' double tap).
-        -- Interface ground decals (`UserDecal`: FAF's range rings under the
-        -- cursor): a texture, a centre and a size, drawn on the terrain.
-        -- The engine reads them when `version` moves (`UserVm::user_decals`).
-        do
-            local decals, nextId, version = {}, 0, 0
-            local function bump() version = version + 1 end
-            function _c_CreateDecal(self)
-                nextId = nextId + 1
-                rawset(self, '_decal', nextId)
-                decals[nextId] = { x = 0, y = 0, z = 0, sx = 1, sy = 1, sz = 1 }
-                bump()
-            end
-            local m = moho.userDecal_methods
-            local function of(self) return decals[rawget(self, '_decal') or 0] end
-            m.SetTexture = function(self, tex) local d = of(self) if d then d.texture = tex bump() end end
-            m.SetPosition = function(self, v) local d = of(self) if d and v then d.x, d.y, d.z = v[1] or v.x, v[2] or v.y, v[3] or v.z bump() end end
-            m.SetPositionByScreen = function(self, v)
-                local p = v and UnProject(nil, { v[1] or v.x, v[2] or v.y })
-                if p then m.SetPosition(self, p) end
-            end
-            m.SetScale = function(self, v) local d = of(self) if d and v then d.sx, d.sy, d.sz = v[1] or v.x, v[2] or v.y, v[3] or v.z bump() end end
-            m.Destroy = function(self) local id = rawget(self, '_decal') if id and decals[id] then decals[id] = nil bump() end end
-            -- (version, { texture, x, y, z, sx, sy, sz, ... }) of the textured ones, id order.
-            function __engine_user_decals()
-                local out = {}
-                for id = 1, nextId do
-                    local d = decals[id]
-                    if d and d.texture then
-                        for _, v in { d.texture, d.x, d.y, d.z, d.sx, d.sy, d.sz } do table.insert(out, v) end
-                    end
-                end
-                return version, out
-            end
-        end
         -- The command-graph waypoint under the mouse (the engine sets it each
         -- frame), nil when none.
         function GetHighlightCommand() return rawget(_G, '__engine_highlight_command') end
-        -- Build templates (`UIBuildTemplate`: { width, height, { bp, id, x, z },
-        -- ... }, x / z offsets from the cursor). The active one is placed in
-        -- build mode, every structure at once (render/frame.rs); FAF mutates
-        -- what it gets (rotating), so copies go both ways.
-        local function copy_template(t)
-            if type(t) ~= 'table' then return {} end
-            local out = { t[1], t[2] }
-            for i = 3, table.getn(t) do
-                local e = t[i]
-                if type(e) == 'table' then out[i] = { e[1], e[2], e[3], e[4] } end
-            end
-            return out
-        end
-        function SetActiveBuildTemplate(t) rawset(_G, '__engine_build_template', copy_template(t)) end
-        function GetActiveBuildTemplate() return copy_template(rawget(_G, '__engine_build_template')) end
-        function ClearBuildTemplates() rawset(_G, '__engine_build_template', nil) end
         -- The selected structures as a template, offsets from the first one
         -- (inferred: FAF re-centres on the first entry's footprint itself).
         function GenerateBuildTemplateFromSelection()
@@ -1125,6 +1029,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             end
             select_units(units)
         end
+        -- The player's selection, set by the engine from the renderer's
+        -- selection (`UserVm::set_selection`): a new table each call, nil
+        -- when nothing is selected, as moho's. FAF adds to the table it gets
+        -- (`AppendSetToSelection`) and tells calls apart by table identity
+        -- (selection sets' double tap).
         function GetSelectedUnits()
             local sel = rawget(_G, '__engine_selection')
             if not sel or not sel[1] then return nil end
@@ -1403,28 +1312,6 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         end
         function GetAttachedUnitsList(units) return gather(units, 'cargo') end
         function GetAssistingUnitsList(units) return gather(units, 'assisters') end
-        -- Key maps (key name -> action), the most recently added first.
-        local keymaps = {}
-        function IN_AddKeyMapTable(map) table.insert(keymaps, map) end
-        function IN_RemoveKeyMapTable(map)
-            for i = table.getn(keymaps), 1, -1 do
-                if keymaps[i] == map then table.remove(keymaps, i) end
-            end
-        end
-        function IN_ClearKeyMap() keymaps = {} end
-        --- The action bound to the first of `names` found (newest map first).
-        function __engine_key_action(names)
-            for i = table.getn(keymaps), 1, -1 do
-                for _, name in names do
-                    local entry = keymaps[i][name]
-                    if entry then
-                        if type(entry) == 'table' then return entry.action end
-                        return entry
-                    end
-                end
-            end
-            return nil
-        end
         "#,
         "=[engine user strings]",
     )?;

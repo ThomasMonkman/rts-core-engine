@@ -10,14 +10,18 @@
 //! controls become a draw list the renderer batches into one draw call,
 //! as SupCom does (one texture atlas for the whole interface).
 
+pub mod build_template;
 pub mod clipboard;
 pub mod controls;
 pub mod cursor;
+pub mod decals;
 mod engine_stats;
 pub mod fonts;
+pub mod keymap;
 pub mod movie;
 pub mod net_lobby;
 pub mod orders;
+pub mod overlays;
 pub mod prefs;
 pub mod replay;
 pub mod session;
@@ -445,6 +449,10 @@ impl UserVm {
         user_api::register(&lua)?;
         session::register(&lua)?;
         orders::register(&lua)?;
+        overlays::register(&lua)?;
+        decals::register(&lua)?;
+        keymap::register(&lua)?;
+        build_template::register(&lua)?;
         api::core::register(&lua)?;
         world_pick::register(&lua)?;
         world_draw::register(&lua)?;
@@ -1037,14 +1045,7 @@ impl UserVm {
     /// The active build template's structures (blueprint, x / z offset from
     /// the cursor), if one is set (`SetActiveBuildTemplate`).
     pub fn build_template(&self) -> LuaResult<Option<Vec<(String, f32, f32)>>> {
-        let Some(t) = self.lua.globals().raw_get::<Option<LuaTable>>("__engine_build_template")? else { return Ok(None) };
-        let mut out = Vec::new();
-        for i in 3..=t.raw_len() as i64 {
-            let Some(e) = t.raw_get::<Option<LuaTable>>(i)? else { continue };
-            let (Some(bp), Some(x), Some(z)) = (e.raw_get::<Option<String>>(1)?, e.raw_get::<Option<f32>>(3)?, e.raw_get::<Option<f32>>(4)?) else { continue };
-            out.push((bp.to_lowercase(), x, z));
-        }
-        Ok((!out.is_empty()).then_some(out))
+        Ok(build_template::structures(&self.lua))
     }
 
     /// How this client takes part: watching a recording (`SessionIsReplay`),
@@ -1058,26 +1059,14 @@ impl UserVm {
     /// The interface's ground decals when they changed since the last call
     /// (`None`: unchanged): map decals, corner-placed, albedo.
     pub fn user_decals(&self) -> LuaResult<Option<Vec<crate::engine::assets::scmap::Decal>>> {
-        let f: LuaFunction = self.lua.globals().get("__engine_user_decals")?;
-        let (version, list): (i64, LuaTable) = f.call(())?;
-        let seen: Option<i64> = self.lua.named_registry_value("ui.decals_seen")?;
-        if seen == Some(version) {
-            return Ok(None);
-        }
-        self.lua.set_named_registry_value("ui.decals_seen", version)?;
-        let values: Vec<LuaValue> = list.sequence_values::<LuaValue>().collect::<LuaResult<_>>()?;
-        let num = |v: &LuaValue| match v {
-            LuaValue::Integer(i) => *i as f32,
-            LuaValue::Number(n) => *n as f32,
-            _ => 0.0,
-        };
+        let Some(decals) = decals::take_changed(&self.lua) else { return Ok(None) };
         let mut out = Vec::new();
-        for c in values.chunks_exact(7) {
-            let LuaValue::String(tex) = &c[0] else { continue };
-            let (x, y, z, sx, sy, sz) = (num(&c[1]), num(&c[2]), num(&c[3]), num(&c[4]), num(&c[5]), num(&c[6]));
+        for d in decals {
+            let Some(tex) = d.texture else { continue };
+            let ([x, y, z], [sx, sy, sz]) = (d.position, d.scale);
             out.push(crate::engine::assets::scmap::Decal {
                 kind: crate::engine::assets::scmap::decal_kind::ALBEDO,
-                textures: vec![tex.to_str()?.to_lowercase()],
+                textures: vec![tex.to_lowercase()],
                 scale: [sx, sy, sz],
                 position: [x - sx / 2.0, y, z - sz / 2.0],
                 rotation: [0.0; 3],
@@ -1926,33 +1915,7 @@ impl UserVm {
     /// The active range overlay filters when they've changed since the last
     /// call (`None`: unchanged), for the renderer's `blueprints` order.
     pub fn take_overlay_filters(&self, blueprints: &[String]) -> LuaResult<Option<Vec<OverlayFilter>>> {
-        let g = self.lua.globals();
-        let version: i64 = g.get::<LuaFunction>("__engine_overlay_version")?.call(())?;
-        let key = (version, blueprints.len() as i64);
-        let last: Option<(i64, i64)> = self.lua.named_registry_value::<Option<LuaTable>>("ui.overlay_seen")?.map(|t| (t.raw_get(1).unwrap_or(-1), t.raw_get(2).unwrap_or(-1)));
-        if last == Some(key) {
-            return Ok(None);
-        }
-        self.lua.set_named_registry_value("ui.overlay_seen", self.lua.create_sequence_from([key.0, key.1])?)?;
-        let ids = self.lua.create_sequence_from(blueprints.iter().map(String::as_str))?;
-        let kinds = self.lua.create_sequence_from(crate::engine::snapshot::RANGE_KINDS)?;
-        let list: LuaTable = g.get::<LuaFunction>("__engine_overlay_filters")?.call((ids, kinds))?;
-        let color = |v: Option<String>| overlay_color(&v.unwrap_or_default());
-        let pair = |t: Option<LuaTable>| -> [f32; 2] { t.map_or([0.0; 2], |t| [t.raw_get::<Option<f32>>(1).ok().flatten().unwrap_or(0.0), t.raw_get::<Option<f32>>(2).ok().flatten().unwrap_or(0.0)]) };
-        let mut out = Vec::new();
-        for f in list.sequence_values::<LuaTable>() {
-            let f = f?;
-            let members: LuaTable = f.raw_get("members")?;
-            out.push(OverlayFilter {
-                name: f.raw_get("name")?,
-                colors: [color(f.raw_get("normal")?), color(f.raw_get("select")?), color(f.raw_get("rollover")?)],
-                inner: pair(f.raw_get("inner")?),
-                outer: pair(f.raw_get("outer")?),
-                kinds: f.raw_get::<f64>("kinds")? as u16,
-                members: (1..=blueprints.len()).map(|i| members.raw_get::<Option<bool>>(i).ok().flatten().unwrap_or(false)).collect(),
-            });
-        }
-        Ok(Some(out))
+        overlays::take_changed(&self.lua, blueprints)
     }
 
     /// Each range kind's style (by `snapshot::RANGE_KINDS`), from FAF's
@@ -2039,8 +2002,7 @@ impl UserVm {
                 }
             }
         }
-        let find: LuaFunction = self.lua.globals().get("__engine_key_action")?;
-        let Some(action) = find.call::<Option<String>>(names.clone())? else { return Ok(false) };
+        let Some(action) = keymap::action(&self.lua, &names)? else { return Ok(false) };
         if let Err(e) = self.console(&action) {
             tracing::warn!(target: "lua", key = %names[0], action, "key action failed: {e}");
         }
