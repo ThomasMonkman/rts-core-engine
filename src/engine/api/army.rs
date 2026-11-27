@@ -236,13 +236,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_fn!(lua, global,
-        /// `SetAlliedVictory(army, state)`: the army's allied-victory flag.
-        /// Scripts can't read it back, and the victory rules don't use it
-        /// (they are Lua's, from `brain.RequestingAlliedVictory`).
+        /// `SetAlliedVictory(army, state)`: sets the army's brain's
+        /// `RequestingAlliedVictory`, the field FAF's victory rules read
+        /// (FA exe 0x709920: `SetBoolean("RequestingAlliedVictory", state)`
+        /// on the brain's script object). The engine keeps no flag itself.
         SetAlliedVictory = |lua, (army, state): (shapes::Army, bool)| {
             let army = resolve_army(lua, &army)?;
-            if let Some(a) = lua.app_data_mut::<Armies>().expect("Armies").get_mut(army) {
-                a.allied_victory = state;
+            if let Some(brain) = brain_obj(lua, army)? {
+                brain.raw_set("RequestingAlliedVictory", state)?;
             }
             Ok(())
         })?;
@@ -1078,7 +1079,6 @@ pub fn create_armies(lua: &Lua) -> LuaResult<()> {
             plans: None,
             ai_initialized: false,
             resource_sharing: true,
-            allied_victory: false,
             economy: Economy::default(),
             stats: Default::default(),
             stat_triggers: Default::default(),
@@ -1221,10 +1221,12 @@ mod tests {
         crate::engine::api::moho::register(&lua).unwrap();
         super::register(&lua).unwrap();
         lua.app_data_mut::<Armies>().unwrap().list.push(Army { index: 1, name: "UEF".into(), ..Default::default() });
+        let brain = lua.create_table().unwrap();
+        super::brains(&lua).unwrap().raw_set(1, &brain).unwrap();
         lua.load("SetAlliedVictory(1, true)").exec().unwrap();
-        assert!(lua.app_data_ref::<Armies>().unwrap().get(1).unwrap().allied_victory);
+        assert_eq!(brain.raw_get::<Option<bool>>("RequestingAlliedVictory").unwrap(), Some(true));
         lua.load("SetAlliedVictory('UEF', false)").exec().unwrap();
-        assert!(!lua.app_data_ref::<Armies>().unwrap().get(1).unwrap().allied_victory);
+        assert_eq!(brain.raw_get::<Option<bool>>("RequestingAlliedVictory").unwrap(), Some(false));
         assert!(lua.load("SetAlliedVictory(9, true)").exec().is_err());
     }
 }

@@ -33,10 +33,6 @@ pub struct Army {
     /// for a new army, as moho's `CEconomy` constructor; FAF's `simInit`
     /// sets it from the lobby's `TeamShareOverflow`).
     pub resource_sharing: bool,
-    /// The engine's allied-victory flag (`SetAlliedVictory`). Kept, as moho
-    /// keeps it, but nothing reads it: the victory rules are Lua's, from
-    /// `brain.RequestingAlliedVictory`.
-    pub allied_victory: bool,
     pub economy: Economy,
     /// Army statistics (`brain:SetArmyStat` / `GetArmyStat`), name-ordered.
     pub stats: BTreeMap<String, StatValue>,
@@ -334,7 +330,6 @@ mod tests {
             plans: None,
             ai_initialized: false,
             resource_sharing: true,
-            allied_victory: false,
             economy: Economy::default(),
             stats: BTreeMap::new(),
             stat_triggers: Vec::new(),
