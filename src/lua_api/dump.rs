@@ -1,6 +1,7 @@
 //! `--dump-api <DIR>`: builds both VMs' engine API (no game files needed) and
 //! writes, per VM, the Luau definitions and EmmyLua annotations, the list of
-//! undocumented functions (`undocumented.md`), plus the
+//! undocumented functions (`undocumented.md`), the API browser
+//! (`index.html`, with its data as `api.json`: see [`browser`]), plus the
 //! comparison with FAF's annotations with `--faf-compare`.
 //! The output isn't checked in: `cargo run -- --dump-api docs/api`
 //! (`docs/api/` is ignored by git).
@@ -11,7 +12,7 @@ use std::sync::{Arc, RwLock};
 use mlua::prelude::*;
 
 use super::registry::ApiRegistry;
-use super::{compare, emit};
+use super::{browser, compare, emit};
 use crate::engine::lua::script_cache::ScriptCache;
 use crate::engine::vfs::Vfs;
 
@@ -49,6 +50,9 @@ pub fn generate(faf: Option<&Path>) -> LuaResult<Vec<(String, String)>> {
         let sim_reg = sim.app_data_ref::<ApiRegistry>().ok_or_else(|| LuaError::runtime("no ApiRegistry"))?;
         let user_reg = user.lua().app_data_ref::<ApiRegistry>().ok_or_else(|| LuaError::runtime("no ApiRegistry"))?;
         files.push(("undocumented.md".into(), emit::undocumented(&[("sim", &sim_reg), ("user", &user_reg)])));
+        let data = browser::data(&[("sim", &sim_reg), ("user", &user_reg)]);
+        files.push(("api.json".into(), serde_json::to_string_pretty(&data).map_err(LuaError::external)? + "\n"));
+        files.push(("index.html".into(), browser::page(&data)));
     }
     for (vm, lua, faf_dir) in [("sim", &sim, "Sim"), ("user", user.lua(), "User")] {
         let reg = lua.app_data_ref::<ApiRegistry>().ok_or_else(|| LuaError::runtime("no ApiRegistry"))?;

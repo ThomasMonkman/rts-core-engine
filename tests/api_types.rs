@@ -13,7 +13,7 @@ fn generated_definitions_are_deterministic() {
     let a = dump::generate(None).expect("generate");
     let b = dump::generate(None).expect("generate again");
     let names: Vec<&str> = a.iter().map(|(n, _)| n.as_str()).collect();
-    for want in ["sim.d.luau", "user.d.luau", "sim.lua", "user.lua"] {
+    for want in ["sim.d.luau", "user.d.luau", "sim.lua", "user.lua", "api.json", "index.html"] {
         assert!(names.contains(&want), "missing {want}: {names:?}");
     }
     for ((name, x), (_, y)) in a.iter().zip(&b) {
@@ -85,5 +85,51 @@ fn declared_signatures_are_used_once() {
             }
         }
     }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// `api.json` (the API browser's data) has both VMs, and every function,
+/// callback and type says where it is declared: a file in this repo and a
+/// line in it, so the browser's source links land somewhere.
+#[test]
+fn api_json_points_at_real_source_lines() {
+    let files = dump::generate(None).expect("generate");
+    let json = &files.iter().find(|(n, _)| n == "api.json").expect("api.json").1;
+    let data: serde_json::Value = serde_json::from_str(json).expect("valid JSON");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut lines: BTreeMap<String, usize> = BTreeMap::new();
+    let mut problems = Vec::new();
+    let mut check = |what: String, item: &serde_json::Value| {
+        let (Some(file), Some(line)) = (item["src"]["file"].as_str(), item["src"]["line"].as_u64()) else {
+            return problems.push(format!("{what}: no src"));
+        };
+        let count = *lines.entry(file.to_string()).or_insert_with(|| std::fs::read_to_string(root.join(file)).map_or(0, |t| t.lines().count()));
+        if line == 0 || line as usize > count {
+            problems.push(format!("{what}: {file}:{line} isn't a line of that file"));
+        }
+    };
+    let vms = data["vms"].as_array().expect("vms");
+    assert_eq!(vms.iter().map(|v| v["name"].as_str().unwrap_or_default()).collect::<Vec<_>>(), ["sim", "user"]);
+    let mut functions = 0;
+    for vm in vms {
+        let name = vm["name"].as_str().unwrap_or_default();
+        for class in vm["classes"].as_array().expect("classes") {
+            for f in class["methods"].as_array().into_iter().chain(class["callbacks"].as_array()).flatten() {
+                functions += 1;
+                check(format!("{name} {}:{}", class["name"], f["name"]), f);
+            }
+        }
+        for table in vm["tables"].as_array().expect("tables") {
+            for f in table["functions"].as_array().into_iter().flatten() {
+                functions += 1;
+                check(format!("{name} {}.{}", table["name"], f["name"]), f);
+            }
+        }
+        for f in vm["globals"].as_array().into_iter().chain(vm["types"].as_array()).flatten() {
+            functions += 1;
+            check(format!("{name} {}", f["name"]), f);
+        }
+    }
+    assert!(functions > 1000, "only {functions} entries");
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }

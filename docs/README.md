@@ -39,7 +39,7 @@ New here? Read [CONTRIBUTING.md](../CONTRIBUTING.md) first, then [the architectu
 |---|---|
 | [moho-api.md](reference/moho-api.md) | The moho binding surface: orders, economy, weapons |
 | [crates.md](reference/crates.md) | Every dependency and why it's there |
-| `api/` | Generated output, not checked in (git-ignored): the Luau and EmmyLua types for the whole Lua API (`cargo run -- --dump-api docs/api`) and the audit scripts' reports ([audits.md](guides/audits.md)) |
+| `api/` | Generated output, not checked in (git-ignored): the Luau and EmmyLua types for the whole Lua API and the API browser (`cargo run -- --dump-api docs/api`, then open `docs/api/index.html`) and the audit scripts' reports ([audits.md](guides/audits.md)) |
 
 ## What's missing or unconfirmed
 

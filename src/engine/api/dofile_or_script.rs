@@ -45,7 +45,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     ] {
         crate::lua_api::registry::record(
             lua,
-            FnEntry { scope: Scope::Global, name: name.into(), params: Some(&[Some("path"), Some("env")]), args: <(String, Option<std::collections::BTreeMap<String, LuaValue>>) as LuaArgs>::types, rets: <LuaMultiValue as LuaArgs>::types, doc, status: Status::Implemented },
+            FnEntry { scope: Scope::Global, name: name.into(), params: Some(&[Some("path"), Some("env")]), args: <(String, Option<std::collections::BTreeMap<String, LuaValue>>) as LuaArgs>::types, rets: <LuaMultiValue as LuaArgs>::types, doc, status: Status::Implemented, src: crate::lua_api::Src { file: file!(), line: line!() } },
         );
     }
     #[cfg(feature = "tracy")]

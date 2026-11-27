@@ -165,6 +165,7 @@ fn lua_enum(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let c = container_attrs(&input.attrs)?;
     let name = c.name.clone().unwrap_or_else(|| ident.to_string());
     let doc = doc_of(&input.attrs);
+    let src = src_of(ident);
     let Data::Enum(e) = &input.data else {
         return Err(syn::Error::new_spanned(ident, "LuaEnum needs an enum"));
     };
@@ -223,7 +224,7 @@ fn lua_enum(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
         impl crate::lua_api::LuaType for #ident {
             fn ty() -> crate::lua_api::LuaTy {
-                static INFO: crate::lua_api::EnumInfo = crate::lua_api::EnumInfo { name: #name, doc: #doc, variants: &[#(#strs),*] };
+                static INFO: crate::lua_api::EnumInfo = crate::lua_api::EnumInfo { name: #name, doc: #doc, variants: &[#(#strs),*], src: #src };
                 crate::lua_api::LuaTy::Enum(&INFO)
             }
         }
@@ -234,6 +235,18 @@ fn lua_enum(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
         crate::lua_api::inventory::submit! { crate::lua_api::TypeDecl(<#ident as crate::lua_api::LuaType>::ty) }
     })
+}
+
+/// `crate::lua_api::Src` for where `ident` is written (the API browser's
+/// source links): the file being compiled and the identifier's own line.
+fn src_of(ident: &Ident) -> TokenStream2 {
+    match ident.span().unwrap().line() {
+        0 => quote!(crate::lua_api::Src { file: ::core::file!(), line: ::core::line!() }),
+        line => {
+            let line = line as u32;
+            quote!(crate::lua_api::Src { file: ::core::file!(), line: #line })
+        }
+    }
 }
 
 // ---------------------------------------------------------------- LuaTable
@@ -262,6 +275,7 @@ fn lua_table(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let c = container_attrs(&input.attrs)?;
     let name = c.name.clone().unwrap_or_else(|| ident.to_string());
     let doc = doc_of(&input.attrs);
+    let src = src_of(ident);
     let Data::Struct(s) = &input.data else {
         return Err(syn::Error::new_spanned(ident, "LuaTable needs a struct"));
     };
@@ -387,7 +401,7 @@ fn lua_table(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
         impl #impl_g crate::lua_api::LuaType for #ident #ty_g {
             fn ty() -> crate::lua_api::LuaTy {
-                static INFO: crate::lua_api::StructInfo = crate::lua_api::StructInfo { name: #name, doc: #doc, fields: &[#(#infos),*] };
+                static INFO: crate::lua_api::StructInfo = crate::lua_api::StructInfo { name: #name, doc: #doc, fields: &[#(#infos),*], src: #src };
                 crate::lua_api::LuaTy::Struct(&INFO)
             }
         }
@@ -524,10 +538,11 @@ pub fn lua_fn(input: TokenStream) -> TokenStream {
         Target::Global { raw } => (quote!(__lua.globals()), quote!(""), raw),
         Target::Table { table, scope, raw } => (quote!(::core::clone::Clone::clone(&#table)), quote!(#scope), raw),
     };
+    let src = src_of(&name);
     quote! {{
         let __lua: &::mlua::Lua = #lua;
         let __target: ::mlua::Table = #table;
-        crate::lua_api::register_fn(__lua, &__target, #scope, #name_s, #params, #doc, #status, #raw, #f)
+        crate::lua_api::register_fn_at(__lua, &__target, #scope, #name_s, #params, #doc, #status, #raw, #src, #f)
     }}
     .into()
 }
@@ -573,8 +588,9 @@ pub fn lua_method(input: TokenStream) -> TokenStream {
     let doc = doc_of(&attrs);
     let name_s = name.to_string();
     let params = params_tokens(&f);
+    let src = src_of(&name);
     quote! {
-        crate::lua_api::register_method::<#class, _, _, _>(#lua, #name_s, #params, #doc, #status, #f)
+        crate::lua_api::add_class_fn_at(#lua, <#class as crate::lua_api::MohoClass>::CLASS, #name_s, #params, #doc, #status, #src, #f)
     }
     .into()
 }
@@ -664,6 +680,7 @@ pub fn callbacks(input: TokenStream) -> TokenStream {
             let fn_name = format_ident!("{}", heck::ToSnakeCase::to_snake_case(lua_name.as_str()));
             let doc = doc_of(&c.attrs);
             let doc_attr = if doc.is_empty() { format!("Calls `obj:{lua_name}(...)` if the script defines it.") } else { doc.clone() };
+            let src = src_of(&c.name);
             let pnames: Vec<&Ident> = c.params.iter().map(|(p, _)| p).collect();
             let ptypes: Vec<&Type> = c.params.iter().map(|(_, t)| t).collect();
             let pname_strs: Vec<String> = pnames.iter().map(|p| p.to_string().trim_start_matches('_').to_string()).collect();
@@ -680,6 +697,7 @@ pub fn callbacks(input: TokenStream) -> TokenStream {
                     params: &[#(#pname_strs),*],
                     args: <(#(#ptypes,)*) as crate::lua_api::LuaArgs>::types,
                     doc: #doc,
+                    src: #src,
                 }
             });
         }
@@ -786,6 +804,7 @@ pub fn signatures(input: TokenStream) -> TokenStream {
         let one = |d: &SigDecl, overloads: TokenStream2| {
             let name = d.name.to_string();
             let doc = doc_of(&d.attrs);
+            let src = src_of(&d.name);
             let pnames: Vec<String> = d.params.iter().map(|(p, _)| p.to_string().trim_start_matches('_').to_string()).collect();
             let ptypes: Vec<&Type> = d.params.iter().map(|(_, t)| t).collect();
             let ret = d.ret.as_ref().map_or(quote!(()), |t| quote!(#t));
@@ -796,6 +815,7 @@ pub fn signatures(input: TokenStream) -> TokenStream {
                     args: <(#(#ptypes,)*) as crate::lua_api::LuaArgs>::param_types,
                     rets: <#ret as crate::lua_api::LuaArgs>::types,
                     doc: #doc,
+                    src: #src,
                     overloads: #overloads,
                 }
             }

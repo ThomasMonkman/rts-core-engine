@@ -16,7 +16,7 @@ use std::sync::{LazyLock, Mutex};
 
 use mlua::prelude::*;
 
-use super::registry::{self, FnEntry, Scope, Status};
+use super::registry::{self, FnEntry, Scope, Src, Status};
 use super::ty::LuaArgs;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -83,12 +83,14 @@ pub fn parse(source: &'static str) -> Vec<ScriptFn> {
 
 /// Records the functions `source` defines in `lua`'s registry. Parsed once
 /// per source for the process (VMs are made per session).
+#[track_caller]
 pub fn record(lua: &Lua, source: &'static str) {
     static PARSED: LazyLock<Mutex<BTreeMap<usize, &'static [ScriptFn]>>> = LazyLock::new(Default::default);
     let fns: &'static [ScriptFn] = {
         let mut parsed = PARSED.lock().unwrap_or_else(|e| e.into_inner());
         parsed.entry(source.as_ptr() as usize).or_insert_with(|| Box::leak(parse(source).into_boxed_slice()))
     };
+    let src = Src::caller();
     for f in fns {
         registry::record(lua, FnEntry {
             scope: f.scope.clone(),
@@ -98,12 +100,14 @@ pub fn record(lua: &Lua, source: &'static str) {
             rets: <LuaMultiValue as LuaArgs>::types,
             doc: f.doc,
             status: f.status,
+            src,
         });
     }
 }
 
 /// Records one Luau function a loader chunk returns (one that closes over
 /// native helpers, so it isn't a `function Name(` in a source).
+#[track_caller]
 pub fn record_one(lua: &Lua, scope: Scope, name: &'static str, doc: &'static str) {
     registry::record(lua, FnEntry {
         scope,
@@ -113,10 +117,12 @@ pub fn record_one(lua: &Lua, scope: Scope, name: &'static str, doc: &'static str
         rets: <LuaMultiValue as LuaArgs>::types,
         doc,
         status: Status::Implemented,
+        src: Src::caller(),
     });
 }
 
 /// Runs `source` (named `name`) and records the functions it defines.
+#[track_caller]
 pub fn exec(lua: &Lua, source: &'static str, name: &str) -> LuaResult<()> {
     lua.load(source).set_name(name).exec()?;
     record(lua, source);

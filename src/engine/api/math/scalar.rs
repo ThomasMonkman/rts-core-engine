@@ -39,6 +39,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             rets: <f64 as LuaArgs>::types,
             doc: "`MATH_Lerp(s, a, b)`: `a + (b - a) * s`, unclamped; or `MATH_Lerp(s, sMin, sMax, a, b)`, with `s` mapped from `sMin..sMax` to `0..1` first.",
             status: Status::Implemented,
+            src: crate::lua_api::Src { file: file!(), line: line!() },
         },
     );
     lua_fn!(lua, global,
