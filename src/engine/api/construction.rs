@@ -2034,6 +2034,12 @@ fn assists(lua: &Lua) -> LuaResult<()> {
                 _ => false,
             }
         });
+        // A builder standing inside a structure (a factory's new engineer
+        // on the pad) doesn't start work from there: it walks out first
+        // (`api::movement`; dev/probes probe_padassist).
+        let current = lua.app_data_ref::<Assists>().and_then(|a| a.0.get(&assister).copied());
+        let at = entity::world(lua).get(assister).map(|a| a.position());
+        let in_range = in_range && (current.is_some() || !at.is_some_and(|p| inside_structure(lua, assister, p)));
         // `GuardBusy` while a guard has work: from the order on when it
         // helps a builder (it walks to the site busy), once in range of a
         // factory it helps (the real engineer guarding a factory reads it
@@ -2046,7 +2052,6 @@ fn assists(lua: &Lua) -> LuaResult<()> {
                 && lua.app_data_ref::<Commands>().is_some_and(|c| c.current(target).is_some_and(|t| matches!(t.kind, CommandKind::BuildMobile)));
             set_state(lua, assister, "GuardBusy", to_build || (work.is_some() && (in_range || !factory_target)));
         }
-        let current = lua.app_data_ref::<Assists>().and_then(|a| a.0.get(&assister).copied());
         let Some(work) = work.filter(|_| in_range) else {
             if current.is_some() {
                 stop_assist(lua, assister)?;

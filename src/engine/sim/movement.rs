@@ -822,6 +822,9 @@ fn goal(cmd: Option<&crate::engine::sim::command::Command>, world: &EntityWorld,
         // A unit that can't build (a tank) guards the unit, never its work
         // (the real tank guarding a building engineer stays put: dev/probes
         // probe_re2_orders ST).
+        // A builder inside a structure leaves it first (`Env::build_sites`
+        // then holds the way out, marked `NO_REACH`).
+        K::Guard | K::Repair if build_site.is_some_and(|(_, s)| s == NO_REACH) => build_site.map(|(p, _)| (p, Fx::from_num(0.5), false)),
         K::Guard => {
             let builder = world.get(unit).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.build_rate > Fx::ZERO);
             let building = me.filter(|_| builder).and_then(|me| match cmd.target {

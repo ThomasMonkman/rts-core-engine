@@ -1329,6 +1329,11 @@ fn build_inside_structure() {
 }
 
 #[test]
+fn guard_inside_structure() {
+    scenario("guard_inside_structure", 300);
+}
+
+#[test]
 fn build_abandon_structure() {
     scenario("build_abandon_structure", 200);
 }
