@@ -9,7 +9,8 @@
   `api-data` script below (src/lua_api/browser.rs); opened as it is in the
   repo, it fetches `api.json` from beside it instead.
   Libraries come from a CDN, pinned: Preact + htm (rendering), fuzzysort
-  (search), marked + DOMPurify (the `///` docs are Markdown).
+  (search by name), MiniSearch (search in the docs), marked + DOMPurify (the
+  `///` docs are Markdown).
 -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -86,6 +87,8 @@ code, pre { font-family: var(--mono); font-size: 0.92em; }
 .results a:hover { text-decoration: none; background: var(--raise); }
 .results b { color: var(--accent); font-weight: 600; }
 .results .kind { color: var(--muted); font: 0.76rem var(--sans); margin-left: 0.5rem; }
+.results .snip { display: block; color: var(--muted); font: 0.8rem/1.4 var(--sans); margin-top: 0.1rem; }
+.results .snip b { color: var(--text); }
 .results .none, .results .other { padding: 0.5rem 1rem; color: var(--muted); font-size: 0.86rem; }
 
 /* ---------------------------------------------------------------- main */
@@ -184,18 +187,19 @@ const fail = (what) => {
 
 let lib;
 try {
-  const [p, fz, mk, dp] = await Promise.all([
+  const [p, fz, mk, dp, ms] = await Promise.all([
     import('https://esm.sh/htm@3.1.1/preact/standalone'),
     import('https://esm.sh/fuzzysort@3.1.0'),
     import('https://esm.sh/marked@15.0.12'),
     import('https://esm.sh/dompurify@3.2.6'),
+    import('https://esm.sh/minisearch@7.1.2'),
   ]);
-  lib = { ...p, fuzzysort: fz.default, marked: mk.marked, purify: dp.default };
+  lib = { ...p, fuzzysort: fz.default, marked: mk.marked, purify: dp.default, MiniSearch: ms.default };
 } catch (e) {
   fail('The page’s libraries could not be loaded from esm.sh (it needs a network connection). The same API is in <code>api.json</code>, <code>sim.d.luau</code> and <code>user.d.luau</code> beside this file.');
   throw e;
 }
-const { html, render, useState, useEffect, useMemo, useRef, fuzzysort, marked, purify } = lib;
+const { html, render, useState, useEffect, useMemo, useRef, fuzzysort, marked, purify, MiniSearch } = lib;
 
 async function loadData() {
   const inline = document.getElementById('api-data').textContent;
@@ -236,7 +240,7 @@ function index(vm) {
   };
   const sigTypes = (f) => [f, ...(f.overloads || [])].flatMap((s) => [...s.params.map((p) => p.type), ...(s.returns || [])]);
   const fn = (f, scope, label, kind) => {
-    const e = { kind, label, name: f.name, href: at(scope, f.name), fn: f };
+    const e = { kind, label, name: f.name, href: at(scope, f.name), doc: [f.doc, f.note].filter(Boolean).join(' ') };
     entries.push(e);
     uses(e, sigTypes(f));
   };
@@ -245,7 +249,7 @@ function index(vm) {
     entries.push({ kind: 'class', label: c.name, name: c.name, href: at(c.name) });
     for (const f of c.methods) fn(f, c.name, `${c.name}:${f.name}`, 'method');
     for (const cb of c.callbacks) {
-      const e = { kind: 'callback', label: `${c.name}:${cb.name}`, name: cb.name, href: at(c.name, 'on.' + cb.name) };
+      const e = { kind: 'callback', label: `${c.name}:${cb.name}`, name: cb.name, href: at(c.name, 'on.' + cb.name), doc: cb.doc };
       entries.push(e);
       uses(e, cb.params.map((p) => p.type));
     }
@@ -254,13 +258,22 @@ function index(vm) {
   for (const f of vm.globals) fn(f, 'globals', f.name, 'global');
   for (const t of vm.types) {
     names.set(t.name, at('types', t.name));
-    const e = { kind: 'type', label: t.name, name: t.name, href: at('types', t.name) };
+    const e = { kind: 'type', label: t.name, name: t.name, href: at('types', t.name), doc: [t.doc, ...(t.fields || []).map((f) => f.doc)].filter(Boolean).join(' ') };
     entries.push(e);
     uses(e, [t.type || '', ...(t.fields || []).map((f) => f.type)]);
   }
   const byLabel = new Map(entries.map((e) => [e.label, e.href]));
   const classes = new Map(vm.classes.map((c) => [c.name, c]));
-  return { vm, entries, names, usedBy, byLabel, classes, at };
+  // What the docs say, for search (built the first time it's needed).
+  let text;
+  const docs = () => {
+    if (!text) {
+      text = new MiniSearch({ fields: ['doc'], idField: 'i', searchOptions: { prefix: true, fuzzy: 0.15, combineWith: 'AND' } });
+      text.addAll(entries.map((e, i) => ({ i, doc: e.doc || '' })).filter((d) => d.doc));
+    }
+    return text;
+  };
+  return { vm, entries, names, usedBy, byLabel, classes, at, docs };
 }
 const VMS = new Map(DATA.vms.map((vm) => [vm.name, index(vm)]));
 const VM_NAMES = [...VMS.keys()];
@@ -572,18 +585,52 @@ function Nav({ ix, scope }) {
 
 const KIND_LABEL = { class: 'class', type: 'type', callback: 'callback', method: '', global: '', function: '' };
 
+/// The part of `doc` around the first word the search matched, with the
+/// matched words marked.
+function Snippet({ doc, terms }) {
+  const plain = doc.replace(/\s+/g, ' ');
+  const words = [...new Set(terms)].sort((a, b) => b.length - a.length).map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (!words.length) return plain.slice(0, 110);
+  const re = new RegExp(`\\b(${words.join('|')})`, 'gi');
+  const first = plain.search(re);
+  const from = Math.max(0, first - 40);
+  const cut = plain.slice(from, from + 130);
+  const out = [];
+  let last = 0;
+  for (const m of cut.matchAll(re)) {
+    out.push(cut.slice(last, m.index), html`<b>${m[0]}</b>`);
+    last = m.index + m[0].length;
+  }
+  out.push(cut.slice(last));
+  return html`${from > 0 ? '…' : ''}${out}${from + 130 < plain.length ? '…' : ''}`;
+}
+
+/// Names first (fuzzy), then what the docs say (whole words, any order).
 function Results({ ix, query, sel, setCount, onPick }) {
-  const found = useMemo(() => fuzzysort.go(query, ix.entries, { key: 'label', limit: 60, threshold: 0.3 }), [ix, query]);
-  useEffect(() => setCount(found.length), [found]);
-  const others = VM_NAMES.filter((n) => n !== ix.vm.name).map((n) => ({ n, total: fuzzysort.go(query, VMS.get(n).entries, { key: 'label', threshold: 0.3 }).length }));
+  const { named, inDocs } = useMemo(() => {
+    const named = fuzzysort.go(query, ix.entries, { key: 'label', limit: 40, threshold: 0.5 });
+    const have = new Set(named.map((r) => r.obj));
+    const inDocs = query.length < 3 ? [] : ix.docs().search(query).map((r) => ({ obj: ix.entries[r.id], terms: r.terms })).filter((r) => !have.has(r.obj)).slice(0, 40);
+    return { named, inDocs };
+  }, [ix, query]);
+  useEffect(() => setCount(named.length + inDocs.length), [named, inDocs]);
+  const others = VM_NAMES.filter((n) => n !== ix.vm.name).map((n) => ({ n, total: fuzzysort.go(query, VMS.get(n).entries, { key: 'label', threshold: 0.5 }).length }));
   return html`<div class="results" role="listbox">
-    ${found.length === 0 && html`<div class="none">Nothing in the ${ix.vm.name} VM is called that.</div>`}
-    ${found.map(
-      (r, i) => html`<a href=${r.obj.href} class=${i === sel ? 'sel' : ''} role="option" aria-selected=${i === sel} data-i=${i} onClick=${onPick}>
+    ${named.length + inDocs.length === 0 && html`<div class="none">Nothing in the ${ix.vm.name} VM matches. Names are matched loosely; docs by whole words.</div>`}
+    ${named.map(
+      (r, i) => html`<a href=${r.obj.href} class=${i === sel ? 'sel' : ''} role="option" aria-selected=${i === sel} onClick=${onPick}>
         ${r.highlight((m) => html`<b>${m}</b>`)}<span class="kind">${KIND_LABEL[r.obj.kind]}</span>
       </a>`,
     )}
-    ${others.filter((o) => o.total).map((o) => html`<div class="other">${o.total} more in the ${o.n} VM. <a href=${`#${o.n}`} style="display:inline;padding:0">Search there</a></div>`)}
+    ${inDocs.length > 0 && html`<div class="nav-group">In the docs</div>`}
+    ${inDocs.map((r, j) => {
+      const i = named.length + j;
+      return html`<a href=${r.obj.href} class=${i === sel ? 'sel' : ''} role="option" aria-selected=${i === sel} onClick=${onPick}>
+        ${r.obj.label}<span class="kind">${KIND_LABEL[r.obj.kind]}</span>
+        <span class="snip"><${Snippet} doc=${r.obj.doc} terms=${r.terms} /></span>
+      </a>`;
+    })}
+    ${others.filter((o) => o.total).map((o) => html`<div class="other">${o.total} names match in the ${o.n} VM. <a href=${`#${o.n}`} style="display:inline;padding:0">Search there</a></div>`)}
   </div>`;
 }
 
@@ -669,7 +716,7 @@ function App() {
           ${VM_NAMES.map((n) => html`<button aria-pressed=${String(n === route.vm)} onClick=${() => (location.hash = `#${n}${route.scope && route.scope !== 'types' ? '/' + route.scope : ''}`)}>${n}</button>`)}
         </div>
         <div class="search">
-          <input ref=${input} type="search" value=${query} placeholder=${`Search ${ix.entries.length} names`} aria-label="Search the API" spellcheck="false" autocomplete="off"
+          <input ref=${input} type="search" value=${query} placeholder="Search names and docs" aria-label="Search the API" spellcheck="false" autocomplete="off"
             onInput=${(e) => { setQuery(e.target.value); setSel(0); }} onKeyDown=${onKey} />
           ${!query && html`<kbd>/</kbd>`}
         </div>
