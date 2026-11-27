@@ -17,6 +17,7 @@ mod engine_stats;
 pub mod fonts;
 pub mod movie;
 pub mod net_lobby;
+pub mod orders;
 pub mod prefs;
 pub mod replay;
 pub mod session;
@@ -443,6 +444,7 @@ impl UserVm {
         api::categories::register(&lua)?;
         user_api::register(&lua)?;
         session::register(&lua)?;
+        orders::register(&lua)?;
         api::core::register(&lua)?;
         world_pick::register(&lua)?;
         world_draw::register(&lua)?;
@@ -1224,67 +1226,15 @@ impl UserVm {
         Ok(())
     }
 
-    /// Orders the interface gave since the last call (its buttons and
-    /// panels: stop, factory builds, upgrades, ...), oldest first.
     /// Order feedback and world meshes (rally flags) to draw this frame.
     pub fn interface_meshes(&self) -> Vec<world_mesh::InterfaceMesh> {
         world_mesh::meshes(&self.lua)
     }
 
+    /// Orders the interface gave since the last call (its buttons and
+    /// panels: stop, factory builds, upgrades, ...), oldest first.
     pub fn take_orders(&self) -> LuaResult<Vec<UiOrder>> {
-        let list: LuaTable = self.lua.globals().raw_get("__engine_ui_orders")?;
-        let mut callbacks: Vec<Option<_>> = std::mem::take(&mut self.lua.app_data_mut::<user_api::PendingSimCallbacks>().expect("PendingSimCallbacks").0).into_iter().map(Some).collect();
-        let mut out = Vec::new();
-        for o in list.clone().sequence_values::<LuaTable>() {
-            let o = o?;
-            if let Some(index) = o.raw_get::<Option<usize>>("callback")? {
-                if let Some((callback, units)) = index.checked_sub(1).and_then(|i| callbacks.get_mut(i)).and_then(Option::take) {
-                    out.push(UiOrder { command: String::new(), units: Some(units), blueprint: None, count: 0, clear: false, toggle: None, script: Vec::new(), callback: Some(callback) });
-                }
-                continue;
-            }
-            let units = o.raw_get::<Option<LuaTable>>("units")?.map(|t| t.sequence_values::<LuaTable>().filter_map(|u| u.ok()?.raw_get::<Option<u32>>("_id").ok().flatten()).collect());
-            out.push(UiOrder {
-                command: o.raw_get::<Option<String>>("command")?.unwrap_or_default(),
-                units,
-                blueprint: o.raw_get::<Option<String>>("bp")?,
-                count: o.raw_get::<Option<f64>>("count")?.map_or(1, |c| c.max(1.0) as u32),
-                clear: o.raw_get::<Option<bool>>("clear")?.unwrap_or(false),
-                script: match o.raw_get::<LuaValue>("arg")? {
-                    LuaValue::Table(t) => {
-                        let mut kv: Vec<(String, String)> = t
-                            .pairs::<String, LuaValue>()
-                            .filter_map(|p| p.ok())
-                            .filter_map(|(k, v)| match v {
-                                LuaValue::String(s) => Some((k, s.to_str().ok()?.to_string())),
-                                _ => None,
-                            })
-                            .collect();
-                        kv.sort();
-                        kv
-                    }
-                    _ => Vec::new(),
-                },
-                toggle: {
-                    use crate::engine::sim::input::Toggle;
-                    let v = o.raw_get::<Option<f64>>("value")?.unwrap_or(0.0) as i32;
-                    match o.raw_get::<Option<String>>("toggle")?.as_deref() {
-                        Some("fire") => Some(Toggle::FireState(v)),
-                        Some("pause") => Some(Toggle::Paused(v != 0)),
-                        Some("repeat") => Some(Toggle::RepeatQueue(v != 0)),
-                        Some("vo") => Some(Toggle::StagingVo(v != 0)),
-                        Some("bit") => Some(Toggle::ScriptBit(o.raw_get::<Option<f64>>("bit")?.unwrap_or(0.0) as u8, v != 0)),
-                        Some("count") => Some(Toggle::BuildCount(o.raw_get::<Option<f64>>("index")?.unwrap_or(0.0) as u16, v)),
-                        Some("auto") => Some(Toggle::AutoMode(v != 0)),
-                        Some("autosurface") => Some(Toggle::AutoSurfaceMode(v != 0)),
-                        _ => None,
-                    }
-                },
-                callback: None,
-            });
-        }
-        list.clear()?;
-        Ok(out)
+        Ok(orders::take(&self.lua))
     }
 
     /// FAF's current command mode (`commandmode.GetCommandMode`): `("order",

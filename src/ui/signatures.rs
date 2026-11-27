@@ -148,7 +148,6 @@ signatures! {
         GetSessionClients() -> List<Shaped<SessionClientData>>;
         GetUnitById(id: String) -> Option<Obj<moho::UserUnit>>;
         GetUnitCommandDataOfUnit(unit: Obj<moho::UserUnit>) -> (Vec<String>, Vec<String>, EntityCategory);
-        GetUnitCommandFromCommandCap(rule: String) -> String;
         GpgNetSend(command: String, rest: mlua::Variadic<LuaValue>);
         /// Key name to action (a name, or a table with an `action`).
         IN_AddKeyMapTable(key_map_table: BTreeMap<String, mlua::Either<String, LuaTable>>);
@@ -160,14 +159,8 @@ signatures! {
         /// nil when the lobby can't be created (the network port is taken).
         InternalCreateLobby(lobby_com_class: LuaTable, protocol: String, local_port: f64, max_connections: f64, player_name: String, player_uid: Option<mlua::Either<String, f64>>, nat_traversal_provider: Option<LuaValue>) -> Option<Obj<moho::Lobby>>;
         InternalSaveGame(filename: String, friendlyname: String, oncompletion: LuaFunction);
-        IssueBlueprintCommand(command: String, blueprintid: String, count: f64, clear: Option<bool>);
-        IssueBlueprintCommandToUnit(unit: Obj<moho::UserUnit>, command: String, blueprintid: String, count: f64, clear: Option<bool>);
-        IssueBlueprintCommandToUnits(units: Vec<Obj<moho::UserUnit>>, command: String, blueprintid: String, count: f64, clear: Option<bool>);
         /// `lua_params` is any serialisable value, sent with the command.
-        IssueCommand(command: String, lua_params: Option<LuaValue>, clear: Option<bool>);
-        IssueDockCommand(clear: bool);
         /// `lua_params` is any serialisable value, sent with the command.
-        IssueUnitCommand(unit_list: Vec<Obj<moho::UserUnit>>, command: String, lua_params: Option<LuaValue>, clear: Option<bool>);
         KeycodeMSWToMaui(charcode: f64) -> f64;
         KeycodeMauiToMSW(charcode: f64) -> f64;
         LaunchGPGNet();
@@ -198,22 +191,15 @@ signatures! {
         SessionSendChatMessage(client: mlua::Either<f64, Vec<f64>>, message: mlua::Either<LuaTable, mlua::Either<f64, String>>);
         /// A `UIBuildTemplate`: `{ width, height, { blueprint, id, x, z }, ... }`.
         SetActiveBuildTemplate(template: Vec<LuaValue>);
-        SetAutoMode(units: Vec<Obj<moho::UserUnit>>, mode: bool);
-        SetAutoSurfaceMode(units: Vec<Obj<moho::UserUnit>>, mode: bool);
         /// The factory's queue, front first; nil when it's empty.
         SetCurrentFactoryForQueueDisplay(unit: Obj<moho::UserUnit>) -> Option<Vec<Shaped<QueueEntry>>>;
         SetCursor(cursor: Obj<moho::Cursor>);
-        SetFireState(units: Vec<Obj<moho::UserUnit>>, fire_state: FireState);
         SetInvertMidMouseButton(flag: bool);
         SetOverlayFilter(overlay: String, categories: EntityCategory, normal_color: Color, select_color: Color, rollover_color: Color, inner1: f64, inner2: f64, outer1: f64, outer2: f64);
         /// Range overlay names; an empty list turns them off.
         SetOverlayFilters(list: Vec<String>);
-        SetPaused(units: Vec<Obj<moho::UserUnit>>, pause: bool);
-        SetPausedOfUnit(unit: Obj<moho::UserUnit>, pause: bool);
         SetPreference(key: String, obj: LuaValue);
         SyncPlayableRect(region: Rect);
-        ToggleFireState(units: Vec<Obj<moho::UserUnit>>, fire_state: mlua::Either<String, f64>);
-        ToggleScriptBit(units: Vec<Obj<moho::UserUnit>>, bit: f64, state: bool);
         UISelectAndZoomTo(userunit: Obj<moho::UserUnit>, seconds: Option<f64>);
         UISelectionByCategory(expression: String, add_to_cur_sel: bool, in_view_frustum: bool, nearest_to_mouse: bool, must_be_idle: bool);
         UIZoomTo(units: Vec<Obj<moho::UserUnit>>, seconds: Option<f64>);
