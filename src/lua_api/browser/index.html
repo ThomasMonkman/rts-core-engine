@@ -71,10 +71,9 @@ code, pre { font-family: var(--mono); font-size: 0.92em; }
 .vms button { padding: 0.3rem 0; font: 500 0.9rem var(--cond); color: var(--muted); }
 .vms button + button { border-left: 1px solid var(--line); }
 .vms button[aria-pressed="true"] { background: var(--raise); color: var(--text); box-shadow: inset 0 -2px var(--accent); }
-.search { position: relative; }
-.search input { width: 100%; padding: 0.45rem 2rem 0.45rem 0.6rem; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font: 0.9rem var(--mono); }
-.search input::placeholder { color: var(--muted); }
-.search kbd { position: absolute; right: 0.5rem; top: 50%; translate: 0 -50%; font: 0.75rem var(--mono); color: var(--muted); border: 1px solid var(--line); border-radius: 3px; padding: 0 0.3rem; }
+.search { display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 0.42rem 0.5rem 0.42rem 0.65rem; background: var(--bg); color: var(--muted); border: 1px solid var(--line); border-radius: 4px; font-size: 0.88rem; }
+.search:hover { border-color: var(--accent); color: var(--text); }
+kbd { font: 0.74rem var(--mono); color: var(--muted); border: 1px solid var(--line); border-radius: 3px; padding: 0 0.3rem; }
 .side-body { overflow-y: auto; padding: 0.6rem 0 2rem; flex: 1; }
 .nav-group { font: 600 0.82rem var(--cond); color: var(--muted); padding: 0.9rem 1rem 0.25rem; }
 .nav a { display: flex; justify-content: space-between; gap: 0.5rem; padding: 0.14rem 1rem; color: var(--text); font: 0.86rem/1.5 var(--mono); border-left: 2px solid transparent; }
@@ -82,14 +81,25 @@ code, pre { font-family: var(--mono); font-size: 0.92em; }
 .nav a[aria-current="page"] { border-left-color: var(--accent); background: var(--raise); }
 .nav a .n { color: var(--muted); font-size: 0.78rem; }
 .nav a.plain { font-family: var(--sans); font-size: 0.9rem; }
-.results a { display: block; padding: 0.28rem 1rem; color: var(--text); font: 0.86rem/1.4 var(--mono); border-left: 2px solid transparent; overflow-wrap: anywhere; }
-.results a.sel { background: var(--raise); border-left-color: var(--accent); text-decoration: none; }
-.results a:hover { text-decoration: none; background: var(--raise); }
-.results b { color: var(--accent); font-weight: 600; }
-.results .kind { color: var(--muted); font: 0.76rem var(--sans); margin-left: 0.5rem; }
-.results .snip { display: block; color: var(--muted); font: 0.8rem/1.4 var(--sans); margin-top: 0.1rem; }
-.results .snip b { color: var(--text); }
-.results .none, .results .other { padding: 0.5rem 1rem; color: var(--muted); font-size: 0.86rem; }
+
+/* ---------------------------------------------------------------- palette */
+.palette { width: min(42rem, calc(100vw - 2rem)); max-height: min(34rem, 76vh); margin: 12vh auto 0; padding: 0; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 24px 70px #0009; overflow: hidden; }
+.palette[open] { display: flex; flex-direction: column; }
+.palette::backdrop { background: #060b1199; backdrop-filter: blur(2px); }
+.palette input { width: 100%; padding: 0.9rem 1.1rem; background: none; color: var(--text); border: 0; border-bottom: 1px solid var(--line); font: 1rem var(--mono); outline: none; }
+.palette input::placeholder { color: var(--muted); font-family: var(--sans); }
+.palette-list { overflow-y: auto; padding: 0.35rem 0; flex: 1; }
+.palette .group { font: 600 0.8rem var(--cond); color: var(--muted); padding: 0.7rem 1.1rem 0.2rem; }
+.palette-list button { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 1rem; width: 100%; text-align: left; padding: 0.34rem 1.1rem; border-left: 2px solid transparent; font: 0.88rem/1.45 var(--mono); }
+.palette-list button.sel { background: var(--raise); border-left-color: var(--accent); }
+.palette .what { overflow-wrap: anywhere; }
+.palette .what b { color: var(--accent); font-weight: 600; }
+.palette .hint { color: var(--muted); font: 0.76rem/1.9 var(--sans); }
+.palette .snip { grid-column: 1 / -1; color: var(--muted); font: 0.8rem/1.4 var(--sans); }
+.palette .snip b { color: var(--text); }
+.palette .none { padding: 1rem 1.1rem; margin: 0; color: var(--muted); font-size: 0.9rem; }
+.palette .keys { display: flex; gap: 1.2rem; padding: 0.5rem 1.1rem; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.78rem; }
+.palette .keys kbd { margin-right: 0.25rem; }
 
 /* ---------------------------------------------------------------- main */
 main { padding: 2.2rem clamp(1rem, 4vw, 3.5rem) 6rem; max-width: 62rem; min-width: 0; }
@@ -166,7 +176,7 @@ td.barcell { width: 40%; min-width: 7rem; vertical-align: middle; }
   .app { grid-template-columns: 1fr; }
   .side { position: static; height: auto; }
   .side-body { display: none; max-height: 60vh; }
-  .side.open .side-body, .side.searching .side-body { display: block; }
+  .side.open .side-body { display: block; }
   .menu { display: inline; color: var(--accent); font-size: 0.85rem; margin-top: 0.6rem; }
   main { padding-top: 1.4rem; }
   h1 { font-size: 1.7rem; }
@@ -605,33 +615,98 @@ function Snippet({ doc, terms }) {
   return html`${from > 0 ? '…' : ''}${out}${from + 130 < plain.length ? '…' : ''}`;
 }
 
-/// Names first (fuzzy), then what the docs say (whole words, any order).
-function Results({ ix, query, sel, setCount, onPick }) {
-  const { named, inDocs } = useMemo(() => {
-    const named = fuzzysort.go(query, ix.entries, { key: 'label', limit: 40, threshold: 0.5 });
+const RECENT = 'api-recent';
+const recent = () => {
+  try {
+    return JSON.parse(localStorage.getItem(RECENT)) || [];
+  } catch {
+    return [];
+  }
+};
+const remember = (label, href) => localStorage.setItem(RECENT, JSON.stringify([{ label, href }, ...recent().filter((r) => r.href !== href)].slice(0, 6)));
+const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
+
+/// The search palette (`/`, Ctrl-K): with nothing typed, where you were and
+/// where you can go; then names (fuzzy), what the docs say (whole words,
+/// any order), and names in the other VM.
+function Palette({ ix, theme, setTheme, onClose }) {
+  const [query, setQuery] = useState('');
+  const [sel, setSel] = useState(0);
+  const dialog = useRef(null);
+  const input = useRef(null);
+  useEffect(() => {
+    dialog.current.showModal();
+    input.current.focus();
+  }, []);
+
+  const q = query.trim();
+  const groups = useMemo(() => {
+    const go = (label, href, hint) => ({ label, hint, run: () => (location.hash = href) });
+    const actions = [
+      go('Overview', `#${ix.vm.name}`, 'page'),
+      go('Globals', ix.at('globals'), 'page'),
+      go('Types', ix.at('types'), 'page'),
+      ...VM_NAMES.filter((n) => n !== ix.vm.name).map((n) => go(`Switch to the ${n} VM`, `#${n}`, 'action')),
+      { label: `Use the ${theme === 'dark' ? 'light' : 'dark'} theme`, hint: 'action', run: () => setTheme(theme === 'dark' ? 'light' : 'dark') },
+    ];
+    if (!q) {
+      const seen = recent().map((r) => go(r.label, r.href, r.href.slice(1).split('/')[0]));
+      return [seen.length && { title: 'Recent', items: seen }, { title: 'Go to', items: actions }].filter(Boolean);
+    }
+    const entry = (e, label, extra) => ({ label, hint: [extra, KIND_LABEL[e.kind]].filter(Boolean).join(' '), run: () => { remember(e.label, e.href); location.hash = e.href; } });
+    const mark = (r) => r.highlight((m) => html`<b>${m}</b>`);
+    const named = fuzzysort.go(q, ix.entries, { key: 'label', limit: 30, threshold: 0.5 });
     const have = new Set(named.map((r) => r.obj));
-    const inDocs = query.length < 3 ? [] : ix.docs().search(query).map((r) => ({ obj: ix.entries[r.id], terms: r.terms })).filter((r) => !have.has(r.obj)).slice(0, 40);
-    return { named, inDocs };
-  }, [ix, query]);
-  useEffect(() => setCount(named.length + inDocs.length), [named, inDocs]);
-  const others = VM_NAMES.filter((n) => n !== ix.vm.name).map((n) => ({ n, total: fuzzysort.go(query, VMS.get(n).entries, { key: 'label', threshold: 0.5 }).length }));
-  return html`<div class="results" role="listbox">
-    ${named.length + inDocs.length === 0 && html`<div class="none">Nothing in the ${ix.vm.name} VM matches. Names are matched loosely; docs by whole words.</div>`}
-    ${named.map(
-      (r, i) => html`<a href=${r.obj.href} class=${i === sel ? 'sel' : ''} role="option" aria-selected=${i === sel} onClick=${onPick}>
-        ${r.highlight((m) => html`<b>${m}</b>`)}<span class="kind">${KIND_LABEL[r.obj.kind]}</span>
-      </a>`,
-    )}
-    ${inDocs.length > 0 && html`<div class="nav-group">In the docs</div>`}
-    ${inDocs.map((r, j) => {
-      const i = named.length + j;
-      return html`<a href=${r.obj.href} class=${i === sel ? 'sel' : ''} role="option" aria-selected=${i === sel} onClick=${onPick}>
-        ${r.obj.label}<span class="kind">${KIND_LABEL[r.obj.kind]}</span>
-        <span class="snip"><${Snippet} doc=${r.obj.doc} terms=${r.terms} /></span>
-      </a>`;
-    })}
-    ${others.filter((o) => o.total).map((o) => html`<div class="other">${o.total} names match in the ${o.n} VM. <a href=${`#${o.n}`} style="display:inline;padding:0">Search there</a></div>`)}
-  </div>`;
+    const inDocs = q.length < 3 ? [] : ix.docs().search(q).map((r) => ({ obj: ix.entries[r.id], terms: r.terms })).filter((r) => !have.has(r.obj)).slice(0, 30);
+    const out = [
+      { title: '', items: named.map((r) => entry(r.obj, mark(r))) },
+      { title: 'In the docs', items: inDocs.map((r) => ({ ...entry(r.obj, r.obj.label), snippet: html`<${Snippet} doc=${r.obj.doc} terms=${r.terms} />` })) },
+    ];
+    for (const n of VM_NAMES.filter((n) => n !== ix.vm.name)) {
+      const other = fuzzysort.go(q, VMS.get(n).entries, { key: 'label', limit: 12, threshold: 0.5 });
+      out.push({ title: `In the ${n} VM`, items: other.map((r) => entry(r.obj, mark(r), n)) });
+    }
+    const acts = fuzzysort.go(q, actions, { key: 'label', limit: 3, threshold: 0.5 });
+    out.push({ title: 'Go to', items: acts.map((r) => ({ ...r.obj, label: mark(r) })) });
+    return out.filter((g) => g.items.length);
+  }, [ix, q, theme]);
+  const flat = groups.flatMap((g) => g.items);
+  const pick = (item) => {
+    item.run();
+    onClose();
+  };
+  const onKey = (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const n = flat.length || 1;
+      setSel((s) => (s + (e.key === 'ArrowDown' ? 1 : n - 1)) % n);
+    } else if (e.key === 'Enter' && flat[sel]) {
+      e.preventDefault();
+      pick(flat[sel]);
+    }
+  };
+  useEffect(() => dialog.current.querySelector('.sel')?.scrollIntoView({ block: 'nearest' }), [sel, q]);
+
+  let i = 0;
+  return html`<dialog class="palette" ref=${dialog} aria-label="Search the API" onClose=${onClose} onClick=${(e) => e.target === dialog.current && onClose()}>
+    <input ref=${input} type="text" value=${query} placeholder=${`Search the ${ix.vm.name} VM: a name, or words from the docs`} spellcheck="false" autocomplete="off"
+      role="combobox" aria-expanded="true" aria-controls="palette-list"
+      onInput=${(e) => { setQuery(e.target.value); setSel(0); }} onKeyDown=${onKey} />
+    <div class="palette-list" id="palette-list" role="listbox">
+      ${flat.length === 0 && html`<p class="none">Nothing matches “${q}”. Names are matched loosely, docs by whole words.</p>`}
+      ${groups.map(
+        (g) => html`${g.title && html`<div class="group">${g.title}</div>`}
+          ${g.items.map((item) => {
+            const at = i++;
+            return html`<button class=${at === sel ? 'sel' : ''} role="option" aria-selected=${at === sel} onClick=${() => pick(item)} onMouseMove=${() => at !== sel && setSel(at)}>
+              <span class="what">${item.label}</span><span class="hint">${item.hint}</span>
+              ${item.snippet && html`<span class="snip">${item.snippet}</span>`}
+            </button>`;
+          })}`,
+      )}
+    </div>
+    <div class="keys"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>Enter</kbd> open</span><span><kbd>Esc</kbd> close</span></div>
+  </dialog>`;
 }
 
 // ------------------------------------------------------------------ app
@@ -643,12 +718,9 @@ function parseHash() {
 
 function App() {
   const [route, setRoute] = useState(parseHash);
-  const [query, setQuery] = useState('');
-  const [sel, setSel] = useState(0);
+  const [palette, setPalette] = useState(false);
   const [open, setOpen] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem('api-theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'));
-  const input = useRef(null);
-  const count = useRef(0);
   const ix = VMS.get(route.vm);
 
   useEffect(() => {
@@ -665,8 +737,7 @@ function App() {
       const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName);
       if ((e.key === '/' && !typing) || (e.key === 'k' && (e.metaKey || e.ctrlKey))) {
         e.preventDefault();
-        input.current.focus();
-        input.current.select();
+        setPalette(true);
       }
     };
     addEventListener('keydown', on);
@@ -684,29 +755,8 @@ function App() {
     document.title = `${what ? what + ' · ' : ''}Engine Lua API (${route.vm})`;
   }, [route.vm, route.scope, route.member]);
 
-  const done = () => {
-    setQuery('');
-    setOpen(false);
-    input.current.blur();
-  };
-  const onKey = (e) => {
-    if (e.key === 'Escape') done();
-    else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      const n = count.current || 1;
-      setSel((s) => (s + (e.key === 'ArrowDown' ? 1 : n - 1)) % n);
-    } else if (e.key === 'Enter') {
-      const a = document.querySelector('.results a.sel');
-      if (a) {
-        location.hash = a.getAttribute('href');
-        done();
-      }
-    }
-  };
-  useEffect(() => document.querySelector('.results a.sel')?.scrollIntoView({ block: 'nearest' }), [sel]);
-
   return html`<div class="app">
-    <aside class=${`side ${open ? 'open' : ''} ${query ? 'searching' : ''}`}>
+    <aside class=${`side ${open ? 'open' : ''}`}>
       <div class="side-top">
         <div class="brand">
           <a href=${`#${route.vm}`}>Engine Lua API</a>
@@ -715,20 +765,17 @@ function App() {
         <div class="vms" role="group" aria-label="Lua VM">
           ${VM_NAMES.map((n) => html`<button aria-pressed=${String(n === route.vm)} onClick=${() => (location.hash = `#${n}${route.scope && route.scope !== 'types' ? '/' + route.scope : ''}`)}>${n}</button>`)}
         </div>
-        <div class="search">
-          <input ref=${input} type="search" value=${query} placeholder="Search names and docs" aria-label="Search the API" spellcheck="false" autocomplete="off"
-            onInput=${(e) => { setQuery(e.target.value); setSel(0); }} onKeyDown=${onKey} />
-          ${!query && html`<kbd>/</kbd>`}
-        </div>
+        <button class="search" onClick=${() => setPalette(true)} aria-haspopup="dialog">
+          <span>Search names and docs</span><kbd>${MAC ? '⌘K' : 'Ctrl K'}</kbd>
+        </button>
         <button class="menu" onClick=${() => setOpen(!open)}>${open ? 'Hide the list' : 'Browse classes'}</button>
       </div>
       <div class="side-body">
-        ${query.trim()
-          ? html`<${Results} ix=${ix} query=${query.trim()} sel=${sel} setCount=${(n) => (count.current = n)} onPick=${done} />`
-          : html`<${Nav} ix=${ix} scope=${route.scope} />`}
+        <${Nav} ix=${ix} scope=${route.scope} />
       </div>
     </aside>
     <main><${Page} key=${route.vm + '/' + (route.scope || '') + (route.scope === 'types' ? '/' + route.member : '')} ix=${ix} scope=${route.scope} member=${route.member} /></main>
+    ${palette && html`<${Palette} ix=${ix} theme=${theme} setTheme=${setTheme} onClose=${() => setPalette(false)} />`}
   </div>`;
 }
 

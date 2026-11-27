@@ -221,7 +221,8 @@ build, and a zip on each `v*` release; see [packaging.md](packaging.md)). `cargo
   additions (`debug.getinfo`) are listed in a comment.
 - `<vm>.lua`: EmmyLua annotations (`---@class moho.unit_methods : moho.entity_methods`),
   the format of FAF's `/engine` files, for lua-language-server.
-- `index.html`: the API browser, one page for both VMs: search (`/`), the
+- `index.html`: the API browser, one page for both VMs: a search palette (`/` or
+  Ctrl-K: names, words from the docs, the other VM's names, recent pages), the
   classes as a tree, each function's signature with its types linked, docs,
   status (implemented / partial / stub), a link to the Rust line that
   registers it, what uses each type, and how much of each class works. The
