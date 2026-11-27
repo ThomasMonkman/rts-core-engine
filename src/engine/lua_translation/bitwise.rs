@@ -65,10 +65,21 @@ struct Collector {
 impl Visitor for Collector {
     fn visit_expression(&mut self, expr: &Expression) {
         if is_bitwise_root(expr)
-            && let Some((start, end)) = expr.range() {
-            self.found.push((start.bytes(), end.bytes(), expr.clone()));
+            && let Some((start, end)) = span(expr) {
+            self.found.push((start, end, expr.clone()));
         }
     }
+}
+
+/// The bytes an expression covers, from its first token to its last.
+/// (`Node::range` stops short of a closing `]`: `t[k]` ends at `k`.)
+fn span(expr: &Expression) -> Option<(usize, usize)> {
+    // Not the iterator's two ends: it yields a pair of brackets before
+    // what they hold.
+    expr.tokens().fold(None, |span, t| {
+        let (s, e) = (t.token().start_position().bytes(), t.token().end_position().bytes());
+        Some(span.map_or((s, e), |(a, b): (usize, usize)| (a.min(s), b.max(e))))
+    })
 }
 
 /// Whether an expression's root operation is a bitwise one we rewrite. Sees
@@ -123,8 +134,8 @@ fn render(src: &str, expr: &Expression, found: &[Found]) -> String {
         Expression::Parentheses { expression, .. } if is_bitwise_root(expression) => {
             render(src, expression, found)
         }
-        _ => match expr.range() {
-            Some((s, e)) => splice(src, s.bytes(), e.bytes(), found),
+        _ => match span(expr) {
+            Some((s, e)) => splice(src, s, e, found),
             None => expr.to_string(),
         },
     }
@@ -309,6 +320,14 @@ mod tests {
     fn nested_inside_plain_expression() {
         assert_eq!(rewrite("r = x & (y + (a | b))"), "r = bit32.band(x, (y + bit32.bor(a, b)))");
         assert_eq!(rewrite("r = f(a ^ 1, g(b | c))"), "r = f(bit32.bxor(a, 1), g(bit32.bor(b, c)))");
+    }
+
+    #[test]
+    fn operand_ending_in_an_index() {
+        assert_eq!(rewrite("x = b[1] ^ 3"), "x = bit32.bxor(b[1], 3)");
+        assert_eq!(rewrite("x = t[a[M.p]] + b[M.q] ^ 3"), "x = t[a[M.p]] + bit32.bxor(b[M.q], 3)");
+        assert_eq!(rewrite("x = (a | b[i]) + c[j]"), "x = bit32.bor(a, b[i]) + c[j]");
+        assert_eq!(rewrite("x = f(a)[1] & m[2] -- c"), "x = bit32.band(f(a)[1], m[2]) -- c");
     }
 
     #[test]
