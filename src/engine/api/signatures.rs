@@ -200,7 +200,6 @@ signatures! {
         FindFurthestUnit(squad: String, alliance: String, can_attack: bool, category: EntityCategory) -> Option<Obj<moho::Unit>>;
         FindHighestValueUnit(squad: String, alliance: String, can_attack: bool, category: EntityCategory) -> Option<Obj<moho::Unit>>;
         GetAIPlan() -> LuaValue;
-        GetFactionIndex() -> f64;
         GetFerryBeacons() -> LuaTable;
         GetPersonality() -> LuaValue;
         SwitchAIPlan(plan: LuaValue);

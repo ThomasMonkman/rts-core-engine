@@ -333,6 +333,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 None => Ok(None),
             }
         })?;
+    lua_method!(lua, moho::Platoon,
+        /// The platoon's army's faction, 1-based, as the brain's
+        /// `GetFactionIndex` (the stock game's AI asks the platoon).
+        GetFactionIndex = |lua, this: Obj<moho::Platoon>| {
+            let id = live_id(lua, &this)?;
+            let army = platoons(lua).get(id).map(|p| p.army);
+            Ok(army.and_then(|army| lua.app_data_ref::<crate::engine::sim::army::Armies>().and_then(|a| a.get(army).map(|a| a.faction))))
+        })?;
     /// Units back to the army pool, platoon gone, `OnDestroy` on it.
     fn disband(lua: &Lua, id: PlatoonId) -> LuaResult<()> {
         destroy(lua, id)
