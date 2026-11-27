@@ -808,20 +808,40 @@ fn get_folder_index(mount_point: &MountPoint) -> io::Result<FolderIndex> {
     })
 }
 
-/// A VFS key: forward slashes, lowercase, rooted.
+/// A VFS key: forward slashes, lowercase, rooted, with `.` and `..`
+/// segments resolved (a mod's blueprint naming another unit's mesh as
+/// `/units/a/../b/b_lod0.scm`; `..` at the root stays at the root).
 pub fn normalise(raw: &str) -> String {
     let s = raw.replace('\\', "/").replace("//", "/").to_lowercase();
-    if s.starts_with('/') {
-        s
-    } else {
-        format!("/{s}")
+    let s = if s.starts_with('/') { s } else { format!("/{s}") };
+    if !s.contains("/.") {
+        return s;
     }
+    let mut parts: Vec<&str> = Vec::new();
+    for part in s.split('/').skip(1) {
+        match part {
+            "." => {}
+            ".." => {
+                parts.pop();
+            }
+            p => parts.push(p),
+        }
+    }
+    format!("/{}", parts.join("/"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn normalise_resolves_dot_segments() {
+        assert_eq!(normalise("Units\\A/../B/b_lod0.scm"), "/units/b/b_lod0.scm");
+        assert_eq!(normalise("/units/./a/a.bp"), "/units/a/a.bp");
+        assert_eq!(normalise("/../units/a.bp"), "/units/a.bp");
+        assert_eq!(normalise("/units/.hidden/a.b"), "/units/.hidden/a.b");
+    }
 
     /// `DiskToLocal`: VFS paths pass through untouched (the blueprint
     /// loader's case, no file-system calls); disk paths under a folder mount,
