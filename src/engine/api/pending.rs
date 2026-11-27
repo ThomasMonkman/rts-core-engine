@@ -67,7 +67,7 @@ pub const UNUSED: &[(&str, &[&str], &str)] = &[
     (
         "unit_methods",
         &[
-            "AlterArmor", "CanPathToRect", "EnableManipulators", "GetCurrentMoveLocation",
+            "CanPathToRect", "EnableManipulators", "GetCurrentMoveLocation",
             "HasMeleeSpaceAroundTarget", "HasValidTeleportDest", "IsValidTarget", "KillManipulator", "KillManipulators",
             "MeleeWarpAdjacentToTarget", "PrintCommandQueue", "RecoilImpulse", "ScaleGetBuiltEmitter", "SetIsValidTarget",
         ],

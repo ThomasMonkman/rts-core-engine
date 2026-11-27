@@ -457,6 +457,9 @@ pub struct UnitData {
     pub jammer: Option<crate::engine::sim::vision::JammerSpec>,
     /// Blueprint `Defense.ArmorType`, lowercase (`api::armor`).
     pub armor_type: Option<std::sync::Arc<str>>,
+    /// Multipliers set by `Unit:AlterArmor`, by damage type: they come
+    /// before the armour type's (`api::armor`).
+    pub armor_altered: BTreeMap<String, f32>,
     /// Fuel left, 0..1, or -1 for units without fuel (`GetFuelRatio`).
     pub fuel_ratio: Fx,
     /// Seconds of flight a full tank lasts (`Physics.FuelUseTime`).
