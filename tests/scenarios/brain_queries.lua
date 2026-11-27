@@ -18,6 +18,16 @@ ForkThread(function()
     check(n(0) == 0, 'r=0 finds nothing: ' .. n(0))
     check(table.getn(brain:GetUnitsAroundPoint(categories.MOBILE, c, 0)) == 0, 'GetUnitsAroundPoint r=0 is empty')
 
+    -- A killed unit is out of the around-point queries at once; the army's
+    -- list keeps it until it is destroyed (real-game probe, 2026-11-26).
+    local k = CreateUnitHPR('uel0201', 'ARMY_1', 422, GetTerrainHeight(422, 600), 600, 0, 0, 0)
+    check(n(5) == 2, 'the new unit is found: ' .. n(5))
+    k:Kill()
+    local inList = false
+    for _, u in brain:GetListOfUnits(categories.MOBILE, false) do if u == k then inList = true end end
+    check(n(5) == 1 and table.getn(brain:GetUnitsAroundPoint(categories.MOBILE, c, 5, 'Ally')) == 1, 'a killed unit is not found around a point: ' .. n(5))
+    check(inList and not k:BeenDestroyed(), 'but is still in GetListOfUnits')
+
     -- GetPlatoonsList leaves out platoons with no units.
     local empty = brain:MakePlatoon('empty', 'none')
     local listed = function(x) for _, q in brain:GetPlatoonsList() do if q == x then return true end end return false end

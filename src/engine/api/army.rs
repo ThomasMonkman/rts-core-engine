@@ -528,6 +528,12 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
     /// while this brain detects them (seen or on radar / sonar / omni), and
     /// structures it has ever seen, which keep a blip once sight is lost
     /// (dev/probes probe_unit_intel observer-gone; the threat map's rule).
+    /// A killed unit is left out from the tick it dies, while
+    /// `GetListOfUnits`, `GetUnitsInRect` and `GetCurrentUnits` keep it until
+    /// it is destroyed (real-game probe, 2026-11-26: a radar and a tank
+    /// after `Kill`). M28AI relies on it: on a radar's death it looks for the
+    /// best radar left around each zone, and loops for ever if the dead one
+    /// is still found.
     /// Returns whether the visits were in id order.
     fn units_around(
         lua: &Lua,
@@ -563,6 +569,9 @@ fn register_brain_methods(lua: &Lua) -> LuaResult<()> {
             let p = e.position();
             let (dx, dz) = (p.x - cx, p.z - cz);
             if dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)) >= r2 {
+                return false;
+            }
+            if e.cold.killed {
                 return false;
             }
             let rel = e.army.map(stance);
