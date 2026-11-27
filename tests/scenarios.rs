@@ -1334,6 +1334,11 @@ fn guard_inside_structure() {
 }
 
 #[test]
+fn form_platoon_unfinished() {
+    scenario("form_platoon_unfinished", 300);
+}
+
+#[test]
 fn build_abandon_structure() {
     scenario("build_abandon_structure", 200);
 }
