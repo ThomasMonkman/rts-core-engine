@@ -999,7 +999,10 @@ pub fn repository_root(init_path: &Path) -> Option<PathBuf> {
 ///
 /// A map's or mod's `sounds` folder is mounted at `/sounds` too, as FAF's
 /// init file does, unless one of its wave banks has the name of one already
-/// there (`banks`: lower-case `.xwb` names, added to).
+/// there (`banks`: lower-case `.xwb` names, added to). A mod's
+/// `custom-strategic-icons` folder, or `custom-strategic-icons.scd` archive,
+/// is mounted at `/textures/ui/common/game/strategicicons/<mod>`, where
+/// FAF's blueprint loader points the units an icon mod changes.
 fn vault_maps(vault: &Path, banks: &mut BTreeSet<String>) -> std::io::Result<Vec<vfs::MountPoint>> {
     if !vault.is_dir() {
         return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("vault folder not found: {}", vault.display())));
@@ -1010,7 +1013,17 @@ fn vault_maps(vault: &Path, banks: &mut BTreeSet<String>) -> std::io::Result<Vec
         if dir.is_dir() {
             for folder in vault_folders(&dir, kind)? {
                 let sounds = folder.source.join("sounds");
+                let icons = ["custom-strategic-icons", "custom-strategic-icons.scd"].map(|name| folder.source.join(name));
+                let icons_at = folder.mountpoint.replacen("/mods/", "/textures/ui/common/game/strategicicons/", 1);
                 mounts.push(folder);
+                if kind == "mods" {
+                    if icons[0].is_dir() {
+                        mounts.push(vfs::MountPoint { source: icons[0].clone(), mountpoint: icons_at.clone() });
+                    }
+                    if icons[1].is_file() {
+                        mounts.push(vfs::MountPoint { source: icons[1].clone(), mountpoint: icons_at });
+                    }
+                }
                 if !sounds.is_dir() {
                     continue;
                 }
@@ -1070,6 +1083,25 @@ mod tests {
         let mounts = vault_maps(&vault, &mut banks).unwrap();
         assert_eq!(mounts.iter().map(|m| m.mountpoint.as_str()).collect::<Vec<_>>(), ["/mods/a_music", "/sounds", "/mods/b_clash", "/mods/c_same"]);
         assert_eq!(mounts[1].source, vault.join("mods/a_music/sounds"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_vault_mods_strategic_icons_are_mounted_under_its_name() {
+        let vault = std::env::temp_dir().join(format!("vault_icons_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&vault);
+        std::fs::create_dir_all(vault.join("mods/Big Icons/custom-strategic-icons")).unwrap();
+        std::fs::create_dir_all(vault.join("mods/packed")).unwrap();
+        std::fs::write(vault.join("mods/packed/custom-strategic-icons.scd"), "").unwrap();
+        // A map's folder of that name is nothing special.
+        std::fs::create_dir_all(vault.join("maps/canis/custom-strategic-icons")).unwrap();
+        let mounts = vault_maps(&vault, &mut BTreeSet::new()).unwrap();
+        assert_eq!(
+            mounts.iter().map(|m| m.mountpoint.as_str()).collect::<Vec<_>>(),
+            ["/maps/canis", "/mods/big icons", "/textures/ui/common/game/strategicicons/big icons", "/mods/packed", "/textures/ui/common/game/strategicicons/packed"]
+        );
+        assert_eq!(mounts[2].source, vault.join("mods/Big Icons/custom-strategic-icons"));
+        assert_eq!(mounts[4].source, vault.join("mods/packed/custom-strategic-icons.scd"));
         let _ = std::fs::remove_dir_all(&vault);
     }
 
