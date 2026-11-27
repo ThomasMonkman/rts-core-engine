@@ -264,6 +264,22 @@ for i = 1, count do
     armySetup[name] = opts
 end
 
+-- FAF's lobby adds each player's rating and clan tag to the options as it
+-- launches, by player name (`lobby.lua`, `TryLaunch`). Scripts expect the
+-- tables: M28AI writes its own rating into `Options.Ratings` as each brain
+-- starts. The ratings are 0 here: an AI's is its list entry's `rating`
+-- scaled by the map size and options (`ComputeAIRating`), which only the
+-- score board shows.
+if isFaf and not launch then
+    local ratings, clanTags = {}, {}
+    for i = 1, count do
+        local name = armySetup[starts[i]].PlayerName
+        ratings[name], clanTags[name] = 0, ''
+    end
+    scenario.Options.Ratings = scenario.Options.Ratings or ratings
+    scenario.Options.ClanTags = scenario.Options.ClanTags or clanTags
+end
+
 -- LOUD's lobby counts its players (people and AIs) into the options.
 if isLoud and scenario.Options.PlayerCount == nil then
     scenario.Options.PlayerCount = count
