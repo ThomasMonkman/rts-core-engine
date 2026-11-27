@@ -1324,6 +1324,11 @@ fn build_assist_finish() {
 }
 
 #[test]
+fn build_inside_structure() {
+    scenario("build_inside_structure", 300);
+}
+
+#[test]
 fn build_abandon_structure() {
     scenario("build_abandon_structure", 200);
 }

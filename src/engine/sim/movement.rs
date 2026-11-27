@@ -737,6 +737,10 @@ pub fn final_goal(commands: &Commands, world: &EntityWorld, unit: EntityId) -> O
     Some(ordered.or(data.navigator_goal).unwrap_or_else(|| e.position()))
 }
 
+/// A build site's skirt value for a builder that must walk right up to the
+/// site whatever its range (it stands inside a structure).
+pub const NO_REACH: Fx = Fx::MIN;
+
 /// `build_site`: where the structure a BuildMobile order builds stands (the
 /// order's point snapped to the grid) and its larger skirt side
 /// (`Env::build_sites`; else the order's point and a standing structure's
@@ -798,7 +802,7 @@ fn goal(cmd: Option<&crate::engine::sim::command::Command>, world: &EntityWorld,
                 }
             };
             let builder = world.get(unit).and_then(|e| e.unit.as_deref()).map_or(Fx::ZERO, |u| u.radius * Fx::from_num(2));
-            Some((site, build_range + builder + skirt, false))
+            Some((site, if skirt == NO_REACH { Fx::ZERO } else { build_range + builder + skirt }, false))
         }
         // Close to weapon range and hold; the order ends when the target dies
         // (`api::orders`). Units without weapons walk right up to it.

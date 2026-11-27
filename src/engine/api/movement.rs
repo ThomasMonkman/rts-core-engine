@@ -614,7 +614,8 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         // (snapped to the grid, as construction starts it) and its skirt
         // size, which their build range adds (`movement::goal`). Skirts read
         // once per blueprint.
-        let mut build_sites: movement::UnitMap<(FxVec3, Fx)> = movement::UnitMap::default();
+        // (Gathered by unit: the map itself takes units in ascending order.)
+        let mut sites: std::collections::BTreeMap<crate::engine::sim::entity::EntityId, (FxVec3, Fx)> = std::collections::BTreeMap::new();
         {
             let mut by_bp: std::collections::BTreeMap<&str, Fx> = std::collections::BTreeMap::new();
             for u in commands.units_doing(&[crate::engine::sim::command::CommandKind::BuildMobile]) {
@@ -628,9 +629,21 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                         s
                     }
                 };
-                build_sites.push_first(u, (crate::engine::api::construction::snap_site(lua, bp, target)?, skirt));
+                // A builder inside a structure (a factory's new unit on the
+                // pad) has no reach until it has walked out
+                // (`construction::ready_to_start`).
+                let inside = world.get(u).is_some_and(|e| {
+                    e.unit.as_deref().is_some_and(|x| x.layer != crate::engine::sim::layer::Layer::Air)
+                        && nav.as_deref().is_some_and(|n| {
+                            let (cx, cz) = n.cell_of(e.position());
+                            n.blocked_cell(cx, cz)
+                        })
+                });
+                let skirt = if inside { movement::NO_REACH } else { skirt };
+                sites.entry(u).or_insert((crate::engine::api::construction::snap_site(lua, bp, target)?, skirt));
             }
         }
+        let build_sites: movement::UnitMap<(FxVec3, Fx)> = sites.into();
         // Units in a fall don't drive or get stood on the ground: the fall
         // moves them (`crash_tick`).
         if let Some(falling) = lua.app_data_ref::<Falling>().filter(|f| !f.0.is_empty()) {

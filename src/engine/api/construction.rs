@@ -283,6 +283,16 @@ pub(crate) fn skirt_max(lua: &Lua, bp: &str) -> LuaResult<Fx> {
     Ok((x1 - x0).max(z1 - z0))
 }
 
+/// A surface builder at `p` stands on a cell a structure covers.
+fn inside_structure(lua: &Lua, builder: EntityId, p: FxVec3) -> bool {
+    let flying = entity::world(lua).get(builder).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.layer == crate::engine::sim::layer::Layer::Air);
+    !flying
+        && lua.app_data_ref::<crate::engine::sim::nav::NavGrid>().is_some_and(|n| {
+            let (x, z) = n.cell_of(p);
+            n.blocked_cell(x, z)
+        })
+}
+
 /// A build order the builder could start now: (order kind, command, blueprint,
 /// site), if its current order is a build and it's in range. A mobile build
 /// is in range as moho's `CUnitMobileBuildTask` (MohoEngine.dll 0x101e30ac..
@@ -322,8 +332,12 @@ fn ready_to_start(lua: &Lua, builder: EntityId) -> LuaResult<Option<(BuildOrder,
             // order has started the structure there.
             let r = r + skirt_max(lua, &bp)?;
             let (dx, dz) = (target.x - p.x, target.z - p.z);
-            let in_range = dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)) <= r.saturating_mul(r);
-            tracing::debug!("BUILDREACH id={builder} bp={bp} pos={p:?} site={target:?} reach={r}");
+            // A builder standing inside a structure (a factory's new unit
+            // still on the pad) walks out towards the site first, as one out
+            // of range does (FAF probe probe_padbuild2: `placed`, `attached`,
+            // `detached` walk, 7.2 from a site in reach at 8; `rolled`,
+            // outside the factory, builds where it stands).
+            let in_range = dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)) <= r.saturating_mul(r) && !inside_structure(lua, builder, p);
             Ok(in_range.then_some((BuildOrder::Mobile, cmd.id, bp, target)))
         }
         // Factories build at their build attach bone (else their origin);
