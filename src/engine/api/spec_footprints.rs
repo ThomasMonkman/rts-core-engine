@@ -64,6 +64,7 @@ impl crate::lua_api::LuaType for FootprintSpec {
                     ("MaxWaterDepth", LuaTy::Number.optional()),
                 ])
             },
+            src: crate::lua_api::Src { file: file!(), line: line!() },
         };
         LuaTy::Alias(&INFO)
     }

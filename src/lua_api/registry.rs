@@ -10,6 +10,24 @@ use mlua::prelude::*;
 
 use super::ty::LuaTy;
 
+/// Where something is declared in the engine's source (the API browser
+/// links to it). Filled at registration or compile time, never per call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Src {
+    /// As `file!()` gives it: relative to the workspace root.
+    pub file: &'static str,
+    pub line: u32,
+}
+
+impl Src {
+    /// The caller's location (of the outermost `#[track_caller]` function).
+    #[track_caller]
+    pub fn caller() -> Self {
+        let at = std::panic::Location::caller();
+        Self { file: at.file(), line: at.line() }
+    }
+}
+
 /// How far a registered function is implemented.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -43,6 +61,9 @@ pub struct FnEntry {
     pub rets: fn() -> Vec<LuaTy>,
     pub doc: &'static str,
     pub status: Status,
+    /// Where it is registered (a function written in Luau: where its
+    /// source is loaded).
+    pub src: Src,
 }
 
 /// A script callback the engine calls (`OnCreate`).
@@ -52,6 +73,7 @@ pub struct CallbackInfo {
     pub params: &'static [&'static str],
     pub args: fn() -> Vec<LuaTy>,
     pub doc: &'static str,
+    pub src: Src,
 }
 
 /// A `callbacks!` block: the callbacks the engine calls on a class's
@@ -72,6 +94,7 @@ pub struct Signature {
     pub args: fn() -> Vec<LuaTy>,
     pub rets: fn() -> Vec<LuaTy>,
     pub doc: &'static str,
+    pub src: Src,
     /// Further ways to call it (`GetUnitsInRect(rect)` / `(x0, z0, x1, z1)`).
     pub overloads: &'static [Signature],
 }

@@ -134,7 +134,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         ("SuspendCurrentThread", "Suspends the running thread until `ResumeThread` wakes it."),
         ("CurrentThread", "The running thread, or nil outside a coroutine (moho's behaviour; `coroutine.running()` returns the main thread there)."),
     ] {
-        crate::lua_api::registry::record(lua, FnEntry { scope: Scope::Global, name: name.into(), params: Some(&[]), args: <() as LuaArgs>::types, rets: <LuaMultiValue as LuaArgs>::types, doc, status: Status::Implemented });
+        crate::lua_api::registry::record(lua, FnEntry { scope: Scope::Global, name: name.into(), params: Some(&[]), args: <() as LuaArgs>::types, rets: <LuaMultiValue as LuaArgs>::types, doc, status: Status::Implemented, src: crate::lua_api::Src { file: file!(), line: line!() } });
     }
     lua_fn!(lua, global,
         /// Wakes a thread: one suspended by `SuspendCurrentThread`, or one

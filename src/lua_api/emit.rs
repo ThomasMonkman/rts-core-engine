@@ -99,10 +99,10 @@ fn registered_signature(f: &FnEntry) -> Sig {
 
 /// Named types (enums, structs) used anywhere in the registry, by name.
 #[derive(Default)]
-struct Named {
-    enums: BTreeMap<&'static str, &'static EnumInfo>,
-    structs: BTreeMap<&'static str, &'static StructInfo>,
-    aliases: BTreeMap<&'static str, &'static AliasInfo>,
+pub(super) struct Named {
+    pub(super) enums: BTreeMap<&'static str, &'static EnumInfo>,
+    pub(super) structs: BTreeMap<&'static str, &'static StructInfo>,
+    pub(super) aliases: BTreeMap<&'static str, &'static AliasInfo>,
 }
 
 impl Named {
@@ -134,7 +134,7 @@ impl Named {
         }
     }
 
-    fn collect(reg: &ApiRegistry) -> Self {
+    pub(super) fn collect(reg: &ApiRegistry) -> Self {
         let mut n = Self::default();
         for f in reg.functions() {
             let sig = signature(f);
@@ -196,7 +196,7 @@ fn doc_lines(out: &mut String, indent: &str, doc: &str, status: Option<String>) 
 }
 
 /// Methods by class, table functions by table, and globals.
-fn grouped(reg: &ApiRegistry) -> (BTreeMap<String, Vec<&FnEntry>>, BTreeMap<String, Vec<&FnEntry>>, Vec<&FnEntry>) {
+pub(super) fn grouped(reg: &ApiRegistry) -> (BTreeMap<String, Vec<&FnEntry>>, BTreeMap<String, Vec<&FnEntry>>, Vec<&FnEntry>) {
     let (mut methods, mut tables, mut globals) = (BTreeMap::<String, Vec<&FnEntry>>::new(), BTreeMap::<String, Vec<&FnEntry>>::new(), Vec::new());
     for f in reg.functions() {
         match &f.scope {
@@ -210,7 +210,7 @@ fn grouped(reg: &ApiRegistry) -> (BTreeMap<String, Vec<&FnEntry>>, BTreeMap<Stri
 
 /// Classes in registration order (bases first), then any class that only
 /// has methods (not registered as a class).
-fn class_order(reg: &ApiRegistry, methods: &BTreeMap<String, Vec<&FnEntry>>) -> Vec<(String, Vec<String>)> {
+pub(super) fn class_order(reg: &ApiRegistry, methods: &BTreeMap<String, Vec<&FnEntry>>) -> Vec<(String, Vec<String>)> {
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
     for c in &reg.classes {
         if !out.iter().any(|(n, _)| n == c.name) {
@@ -227,7 +227,7 @@ fn class_order(reg: &ApiRegistry, methods: &BTreeMap<String, Vec<&FnEntry>>) -> 
 
 // ---------------------------------------------------------------- Luau
 
-fn luau_class(c: &str) -> String {
+pub(super) fn luau_class(c: &str) -> String {
     luau_name(c).map(str::to_string).unwrap_or_else(|| c.to_string())
 }
 
@@ -405,7 +405,7 @@ fn luau_overloads(sig: &Sig, this: Option<&str>) -> String {
     std::iter::once(sig).chain(&sig.overloads).map(|s| format!("({})", one(s))).collect::<Vec<_>>().join(" & ")
 }
 
-fn callbacks_by_class(reg: &ApiRegistry) -> BTreeMap<&'static str, Vec<&super::registry::CallbackInfo>> {
+pub(super) fn callbacks_by_class(reg: &ApiRegistry) -> BTreeMap<&'static str, Vec<&super::registry::CallbackInfo>> {
     let mut out: BTreeMap<&'static str, BTreeMap<&str, &super::registry::CallbackInfo>> = BTreeMap::new();
     for b in reg.callbacks() {
         for c in b.callbacks {

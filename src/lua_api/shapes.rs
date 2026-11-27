@@ -62,7 +62,7 @@ macro_rules! shapes {
 
             impl LuaType for $name {
                 fn ty() -> LuaTy {
-                    static INFO: AliasInfo = AliasInfo { name: stringify!($name), doc: concat!($($doc, "\n"),*), ty: || $ty };
+                    static INFO: AliasInfo = AliasInfo { name: stringify!($name), doc: concat!($($doc, "\n"),*), ty: || $ty, src: super::registry::Src { file: file!(), line: line!() } };
                     LuaTy::Alias(&INFO)
                 }
                 $(fn param_ty() -> LuaTy {
@@ -235,7 +235,7 @@ impl<T: LuaType> LuaType for List<T> {
 #[macro_export]
 macro_rules! opaque_lua_type {
     ($name:literal, $doc:literal) => {{
-        static INFO: $crate::lua_api::AliasInfo = $crate::lua_api::AliasInfo { name: $name, doc: $doc, ty: || $crate::lua_api::LuaTy::Userdata };
+        static INFO: $crate::lua_api::AliasInfo = $crate::lua_api::AliasInfo { name: $name, doc: $doc, ty: || $crate::lua_api::LuaTy::Userdata, src: $crate::lua_api::Src { file: file!(), line: line!() } };
         $crate::lua_api::LuaTy::Alias(&INFO)
     }};
 }
