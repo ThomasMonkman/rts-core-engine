@@ -23,7 +23,7 @@ VFS file ──▶ hooks appended ──▶ translated ──▶ compiled ──
 
 A file that's missing raises `Unable to find file <path>`, as the real `doscript` does (so FAF's `import` of a missing module raises `Error importing`). One that doesn't compile is skipped with a warning, as moho's `SCR_LuaDoFileConcat` does: FAF's map scan relies on that.
 
-**The rule: never `lua.load` game source yourself.** Go through `doscript` (or `ScriptCache`), or the script misses the translation, the hooks, the mod hooks and the cache. Lua that isn't in the VFS translates itself before loading: the init file and the init VM's `dofile` (real files), `Game.prefs` (`ui/prefs.rs`), and the console's `ui_lua` and `--ui-lua` (`ui::run_source`). Engine-written Lua (the chunks in `src/`, `--script` files) is plain Luau and isn't translated.
+**The rule: never `lua.load` game source yourself.** Go through `doscript` (or `ScriptCache`), or the script misses the translation, the hooks, the mod hooks and the cache. Lua that isn't in the VFS translates itself before loading: the init file and the init VM's `dofile` (real files), `Game.prefs` (`ui/prefs.rs`), the console's `ui_lua` and `--ui-lua` (`ui::run_source`), and `--script` files (`engine/session.rs`). A `--script` file is therefore game Lua, like a probe's body shared with the real game: `#` starts a comment (use `table.getn`) and `^` is XOR (use `math.pow`); the test `repo_scripts_are_game_lua` holds the repo's scenes, audits, scenario tests and probe bodies to it. Engine-written Lua (the chunks in `src/`) is plain Luau and isn't translated.
 
 `.bp` files go through the same path but have no translation transform: FAF's blueprints use no SupCom-only syntax. A mod's blueprint that did would fail to compile.
 

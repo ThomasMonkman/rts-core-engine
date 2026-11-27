@@ -22,7 +22,7 @@ ForkThread(function()
         local w, h = GetMapSize()
         for z = 100, h - 100, 60 do
             for x = 100, w - 100, 8 do
-                if #sites < 5 and depth(x, z) > 8 and depth(x + 20, z) > 8 and depth(x + 40, z) > 8 then
+                if table.getn(sites) < 5 and depth(x, z) > 8 and depth(x + 20, z) > 8 and depth(x + 40, z) > 8 then
                     local clear = true
                     for _, s in sites do
                         if math.abs(s[2] - z) < 100 then clear = false end
@@ -31,8 +31,8 @@ ForkThread(function()
                 end
             end
         end
-        check(#sites >= 5, 'found five deep-water spots: ' .. #sites)
-        if #sites < 5 then return end
+        check(table.getn(sites) >= 5, 'found five deep-water spots: ' .. table.getn(sites))
+        if table.getn(sites) < 5 then return end
 
         -- The defender's anti-torpedo weapon index (nil: none).
         local function defence_of(bp)

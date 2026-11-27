@@ -79,7 +79,7 @@ local function find_land(w, h, avoid, near, rough)
             end
             if ok and hi - lo < (rough or 12) then
                 if not near then return x, z end
-                local d = (x + w / 2 - near[1]) ^ 2 + (z + h / 2 - near[2]) ^ 2
+                local d = math.pow(x + w / 2 - near[1], 2) + math.pow(z + h / 2 - near[2], 2)
                 if not best or d < best then best, bx, bz = d, x, z end
             end
         end

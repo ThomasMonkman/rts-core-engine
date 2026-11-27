@@ -512,7 +512,7 @@ fn formation_edges() {
         let mut engine = start(None, false);
         let lua = engine.sim_lua();
         lua.globals().set("FormationEdgesTarget", lua.create_sequence_from([x as f64, 0.0, z as f64]).unwrap()).unwrap();
-        lua.load(std::fs::read_to_string("tests/scenarios/formation_edges.lua").unwrap()).exec().expect("script");
+        lua.load(engine::lua_translation::translate(&std::fs::read_to_string("tests/scenarios/formation_edges.lua").unwrap())).exec().expect("script");
         // Each tank's slot while its order lasts (the last one is where it
         // should end up).
         let mut slots: std::collections::BTreeMap<u32, (f64, f64)> = Default::default();

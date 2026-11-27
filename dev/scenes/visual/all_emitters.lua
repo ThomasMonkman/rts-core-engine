@@ -12,10 +12,10 @@ for _, f in files do
     -- Beams and trails are named `_beam_` / `polytrail`; the rest are
     -- emitters (the oddly named files too).
     if not string.find(f, '_beam_') and not string.find(f, 'polytrail') then
-        emitters[#emitters + 1] = f
+        table.insert(emitters, f)
     end
 end
-LOG('EMITTER count ' .. #emitters)
+LOG('EMITTER count ' .. table.getn(emitters))
 
 local COLUMNS, SPACING = 20, 4
 local x0, z0 = 345, 530

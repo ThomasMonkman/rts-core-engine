@@ -130,7 +130,7 @@ local function run(t)
         local mx, mz = s.n > 0 and s.sx / s.n or 0, s.n > 0 and s.sz / s.n or 0
         local spread, far = 0, 0
         for _, f in s.list do
-            local d = math.sqrt((f.x - mx) ^ 2 + (f.z - mz) ^ 2)
+            local d = math.sqrt(math.pow(f.x - mx, 2) + math.pow(f.z - mz, 2))
             spread, far = spread + d, math.max(far, d)
         end
         note(string.format('%s shot %d: %d fragments landed, centred %.1f, %.1f from the target, %.1f mean / %.1f max from their centre, %d damaged the target (%d damage)',
