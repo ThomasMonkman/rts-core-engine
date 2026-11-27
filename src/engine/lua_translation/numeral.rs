@@ -9,6 +9,10 @@
 //! `1then` as one malformed number, so a space is inserted where 5.0's numeral
 //! ends and a letter or `_` follows.
 //!
+//! The same goes for `..` straight after a fraction or an exponent
+//! (`0.5..'x'`, in M28AI's log lines): 5.0 reads the number and then the
+//! concatenation, Luau one malformed number, so a space goes between them.
+//!
 //! Left alone: hex literals (`0x1F`, moho's extension, read to their end),
 //! digits inside a name (`a1then` is one name), and anything inside strings
 //! and comments (skipped via the shared [`super::lexscan`] scanners).
@@ -42,11 +46,18 @@ pub fn rewrite(source: &str) -> String {
                 }
             }
             c if c.is_ascii_digit() || (c == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_digit)) => {
+                let start = i;
                 i = numeral_end(b, i);
                 // `1end` reads as `1e` with no exponent digits: malformed in
                 // 5.0 too, so it's left for the compiler to reject.
                 let bare_exponent = matches!(b[i - 1], b'e' | b'E' | b'+' | b'-');
-                if !bare_exponent && b.get(i).is_some_and(|&c| c.is_ascii_alphabetic() || c == b'_') {
+                let name_follows = b.get(i).is_some_and(|&c| c.is_ascii_alphabetic() || c == b'_');
+                // `0.5..'x'`: 5.0 ends the numeral after the fraction (or the
+                // exponent) and reads `..` next. It rejects `1..` and `.5..`
+                // as ambiguous, so those are left for the compiler too.
+                let has_fraction_or_exponent = c != b'.' && !is_hex(b, start) && b[start..i].iter().any(|d| !d.is_ascii_digit());
+                let concat_follows = has_fraction_or_exponent && b.get(i) == Some(&b'.') && b.get(i + 1) == Some(&b'.');
+                if !bare_exponent && (name_follows || concat_follows) {
                     let o = out.get_or_insert_with(|| Vec::with_capacity(b.len() + 16));
                     o.extend_from_slice(&b[copied..i]);
                     o.push(b' ');
@@ -76,7 +87,7 @@ fn numeral_end(b: &[u8], start: usize) -> usize {
         }
         i
     };
-    if b[start] == b'0' && matches!(b.get(start + 1), Some(b'x' | b'X')) {
+    if is_hex(b, start) {
         let mut i = start + 2;
         while b.get(i).is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'_') {
             i += 1;
@@ -96,6 +107,10 @@ fn numeral_end(b: &[u8], start: usize) -> usize {
         i = digits(i);
     }
     i
+}
+
+fn is_hex(b: &[u8], start: usize) -> bool {
+    b[start] == b'0' && matches!(b.get(start + 1), Some(b'x' | b'X'))
 }
 
 #[cfg(test)]
@@ -119,6 +134,19 @@ mod tests {
         assert_eq!(rewrite("x = 1.then"), "x = 1. then");
         assert_eq!(rewrite("x = 1e5do"), "x = 1e5 do");
         assert_eq!(rewrite("x = 1E-3_y"), "x = 1E-3 _y");
+    }
+
+    #[test]
+    fn splits_fractions_and_exponents_from_a_following_concat() {
+        // From M28AI's M28Engineer.lua.
+        assert_eq!(rewrite("LOG(' radius='..size*0.5..'; Is unit')"), "LOG(' radius='..size*0.5 ..'; Is unit')");
+        assert_eq!(rewrite("x = 1e5..y"), "x = 1e5 ..y");
+        assert_eq!(rewrite("x = 1.e2..y"), "x = 1.e2 ..y");
+        assert_eq!(rewrite("x = 0.25...'a'"), "x = 0.25 ...'a'");
+        // 5.0: "ambiguous syntax (decimal point x string concatenation)".
+        for src in ["x = 1..y", "x = .5..y", "x = 0x1F..y", "x = t.a1..y"] {
+            assert_eq!(rewrite(src), src, "{src}");
+        }
     }
 
     #[test]
