@@ -168,8 +168,17 @@ fn with_effect(lua: &Lua, this: Obj<moho::IEffect>, f: impl FnOnce(&mut Effect))
 }
 
 /// `CreateLightParticle*(object, bone, army, size, lifetime, texture, ramp)`.
-fn spawn_light(lua: &Lua, intel: bool, args: (Obj<moho::Entity>, shapes::Bone, shapes::Army, f64, f64, String, String)) -> LuaResult<Obj<moho::IEffect>> {
+/// The real game takes anything for the two names without raising (a table,
+/// a boolean: dev/probes probe_rk; RK's Explosions passes a table of
+/// textures); a value that isn't a string or number is no name here.
+fn spawn_light(lua: &Lua, intel: bool, args: (Obj<moho::Entity>, shapes::Bone, shapes::Army, f64, f64, LuaValue, LuaValue)) -> LuaResult<Obj<moho::IEffect>> {
     let (object, bone, army, size, lifetime, texture, ramp) = args;
+    let name = |v: LuaValue| match v {
+        LuaValue::String(s) => s.to_string_lossy(),
+        LuaValue::Integer(_) | LuaValue::Number(_) => lua.coerce_string(v).ok().flatten().map(|s| s.to_string_lossy()).unwrap_or_default(),
+        _ => String::new(),
+    };
+    let (texture, ramp) = (name(texture), name(ramp));
     let obj = spawn_effect(lua, EffectKind::Light { intel }, &object, Some(&bone), false, &army, texture)?;
     let ramp_asset = lua.app_data_mut::<Presentation>().expect("Presentation").intern_asset(&ramp);
     with_effect(lua, obj, |e| {
@@ -256,8 +265,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
         /// TODO: grant the army vision for the light's lifetime once the intel
         /// system exists (sim-visible, so it must be fixed-point then).
-        CreateLightParticle = |lua, args: (Obj<moho::Entity>, shapes::Bone, shapes::Army, f64, f64, String, String)| spawn_light(lua, false, args))?;
-    lua_fn!(lua, global, CreateLightParticleIntel = |lua, args: (Obj<moho::Entity>, shapes::Bone, shapes::Army, f64, f64, String, String)| spawn_light(lua, true, args))?;
+        CreateLightParticle = |lua, args: (Obj<moho::Entity>, shapes::Bone, shapes::Army, f64, f64, LuaValue, LuaValue)| spawn_light(lua, false, args))?;
+    lua_fn!(lua, global, CreateLightParticleIntel = |lua, args: (Obj<moho::Entity>, shapes::Bone, shapes::Army, f64, f64, LuaValue, LuaValue)| spawn_light(lua, true, args))?;
     lua_fn!(lua, global, CreateEmitterAtBone = |lua, (object, bone, army, bp): (Obj<moho::Entity>, shapes::Bone, shapes::Army, String)| {
             spawn_effect(lua, EffectKind::Emitter, &object, Some(&bone), false, &army, bp)
         })?;
