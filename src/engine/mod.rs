@@ -19,7 +19,7 @@ use crate::debug_ui::DebugUiState;
 use crate::engine::lua::execute::exec_lua_string;
 use crate::engine::lua::script_cache::ScriptCache;
 use mlua::prelude::*;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use tracing::{info, warn};
@@ -88,7 +88,8 @@ impl Engine {
         let mut mount_points = init_script_output.mount_points.clone();
         crate::net::map_download::set_maps_dir(vault.unwrap_or(&init_script_output.vault).join("maps"));
         if let Some(vault) = vault {
-            mount_points.extend(vault_maps(vault).map_err(LuaError::external)?);
+            let mut banks = mount_points.iter().filter(|m| m.mountpoint.eq_ignore_ascii_case("/sounds")).flat_map(|m| wave_banks(&m.source)).collect();
+            mount_points.extend(vault_maps(vault, &mut banks).map_err(LuaError::external)?);
         }
         let mut hook_paths = init_script_output.hook_paths.clone();
         hook_paths.push(ENGINE_HOOK.to_string());
@@ -995,7 +996,11 @@ pub fn repository_root(init_path: &Path) -> Option<PathBuf> {
 /// folder in `<vault>/mods` (FAF's `MountModContent`: `/mods/<name>`), in
 /// name order. A vault without one of them has none of that kind (a
 /// mods-only vault works); a vault that isn't a folder is an error.
-fn vault_maps(vault: &Path) -> std::io::Result<Vec<vfs::MountPoint>> {
+///
+/// A map's or mod's `sounds` folder is mounted at `/sounds` too, as FAF's
+/// init file does, unless one of its wave banks has the name of one already
+/// there (`banks`: lower-case `.xwb` names, added to).
+fn vault_maps(vault: &Path, banks: &mut BTreeSet<String>) -> std::io::Result<Vec<vfs::MountPoint>> {
     if !vault.is_dir() {
         return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("vault folder not found: {}", vault.display())));
     }
@@ -1003,10 +1008,32 @@ fn vault_maps(vault: &Path) -> std::io::Result<Vec<vfs::MountPoint>> {
     for kind in ["maps", "mods"] {
         let dir = vault.join(kind);
         if dir.is_dir() {
-            mounts.extend(vault_folders(&dir, kind)?);
+            for folder in vault_folders(&dir, kind)? {
+                let sounds = folder.source.join("sounds");
+                mounts.push(folder);
+                if !sounds.is_dir() {
+                    continue;
+                }
+                let own = wave_banks(&sounds);
+                if let Some(taken) = own.iter().find(|b| banks.contains(*b)) {
+                    tracing::warn!(folder = %sounds.display(), bank = %taken, "vault: sound bank name already in use, sounds not mounted");
+                    continue;
+                }
+                banks.extend(own);
+                mounts.push(vfs::MountPoint { source: sounds, mountpoint: "/sounds".into() });
+            }
         }
     }
     Ok(mounts)
+}
+
+/// The wave banks (`.xwb`) in a sounds folder, as lower-case file names.
+fn wave_banks(sounds: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(sounds) else { return Vec::new() };
+    entries
+        .filter_map(|e| e.ok()?.file_name().to_str().map(str::to_lowercase))
+        .filter(|name| name.ends_with(".xwb"))
+        .collect()
 }
 
 fn vault_folders(dir: &Path, kind: &str) -> std::io::Result<Vec<vfs::MountPoint>> {
@@ -1031,21 +1058,37 @@ mod tests {
     /// FAF 3839 moved the development init file to `setup/bin/`: the
     /// repository is still the checkout's root.
     #[test]
+    fn a_vault_mods_sounds_are_mounted_unless_a_bank_name_is_taken() {
+        let vault = std::env::temp_dir().join(format!("vault_sounds_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&vault);
+        for (name, bank) in [("a_music", "Tunes.xwb"), ("b_clash", "INTERFACE.XWB"), ("c_same", "tunes.xwb")] {
+            std::fs::create_dir_all(vault.join("mods").join(name).join("sounds")).unwrap();
+            std::fs::write(vault.join("mods").join(name).join("sounds").join(bank), "").unwrap();
+        }
+        // The game's own bank, and the first mod's, keep their names.
+        let mut banks = BTreeSet::from(["interface.xwb".to_string()]);
+        let mounts = vault_maps(&vault, &mut banks).unwrap();
+        assert_eq!(mounts.iter().map(|m| m.mountpoint.as_str()).collect::<Vec<_>>(), ["/mods/a_music", "/sounds", "/mods/b_clash", "/mods/c_same"]);
+        assert_eq!(mounts[1].source, vault.join("mods/a_music/sounds"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
     fn a_vault_without_maps_or_mods_mounts_what_it_has() {
         let vault = std::env::temp_dir().join(format!("vault_parts_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&vault);
         std::fs::create_dir_all(vault.join("mods/RNGAI")).unwrap();
-        let mounts = vault_maps(&vault).unwrap();
+        let mounts = vault_maps(&vault, &mut BTreeSet::new()).unwrap();
         assert_eq!(mounts.iter().map(|m| m.mountpoint.as_str()).collect::<Vec<_>>(), ["/mods/rngai"]);
         std::fs::create_dir_all(vault.join("maps/canis")).unwrap();
-        let mounts = vault_maps(&vault).unwrap();
+        let mounts = vault_maps(&vault, &mut BTreeSet::new()).unwrap();
         assert_eq!(mounts.iter().map(|m| m.mountpoint.as_str()).collect::<Vec<_>>(), ["/maps/canis", "/mods/rngai"]);
         // Only maps.
         std::fs::remove_dir_all(vault.join("mods")).unwrap();
-        let mounts = vault_maps(&vault).unwrap();
+        let mounts = vault_maps(&vault, &mut BTreeSet::new()).unwrap();
         assert_eq!(mounts.iter().map(|m| m.mountpoint.as_str()).collect::<Vec<_>>(), ["/maps/canis"]);
         // A vault folder that isn't there is still an error (a typo).
-        assert!(vault_maps(&vault.join("nope")).is_err());
+        assert!(vault_maps(&vault.join("nope"), &mut BTreeSet::new()).is_err());
         let _ = std::fs::remove_dir_all(&vault);
     }
 
