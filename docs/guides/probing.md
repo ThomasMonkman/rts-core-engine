@@ -65,6 +65,8 @@ grep PROBE probe_fight.log
 
 Then diff the `PROBE` lines from the two logs.
 
+A `--script` file is translated exactly as game Lua is, so the one body means the same in both: `!=`, the implicit `arg`, `for k, v in t`, `#` as a comment and `^` as XOR all behave as in the real game. Use `table.getn` and `math.pow`.
+
 ### All-AI games and mods
 
 A probe map's optional `launch_args.txt` adds to the game's command line. With

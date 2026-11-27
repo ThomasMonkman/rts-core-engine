@@ -13,6 +13,6 @@ local i = 0
 for row = -4, 4 do
     for col = 0, 5 do
         i = i + 1
-        spawn(kinds[(i % #kinds) + 1], 2, cx + col * 6, cz + row * 6, -math.pi / 2)
+        spawn(kinds[(i % table.getn(kinds)) + 1], 2, cx + col * 6, cz + row * 6, -math.pi / 2)
     end
 end

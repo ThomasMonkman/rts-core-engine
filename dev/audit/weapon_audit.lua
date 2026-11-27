@@ -222,7 +222,7 @@ ForkThread(function()
         local name = (tag ~= ' ' and tag .. ' ' or '') .. d .. (un and ': ' .. un or '')
         return (string.gsub(name, '%s%s+', ' '))
     end
-    local function starts(s, pre) return string.sub(s, 1, #pre) == pre end
+    local function starts(s, pre) return string.sub(s, 1, string.len(pre)) == pre end
     -- The table's short token for an unsupported / map-nosupport reason
     -- (the full sentences stay on the case and in the log; the table prints
     -- the token and a legend line tallies them).
@@ -748,7 +748,7 @@ ForkThread(function()
     for _, c in selected do
         c.aimed = no_bearings(c) == nil
     end
-    if #selected == 0 then
+    if table.getn(selected) == 0 then
         fail('case selection matched nothing (WEAPON_AUDIT_CASE = ' .. selText .. '; case count is ' .. count .. ')')
         ScenarioResult.done = true
         return
@@ -776,13 +776,13 @@ ForkThread(function()
     for _, c in selected do
         if not c.unsupported then maxBudget = math.max(maxBudget, c.budget) end
     end
-    note('cases: ' .. #selected .. ' of ' .. count .. ' (unselected ' .. count - #selected .. '); ceiling hint: --ticks >= ' .. (maxBudget + 45) .. ' (max case budget ' .. maxBudget .. ' + spawn settle 20 + issue and margin 25)')
+    note('cases: ' .. table.getn(selected) .. ' of ' .. count .. ' (unselected ' .. count - table.getn(selected) .. '); ceiling hint: --ticks >= ' .. (maxBudget + 45) .. ' (max case budget ' .. maxBudget .. ' + spawn settle 20 + issue and margin 25)')
 
     -- The single selected case (WEAPON_AUDIT_CASE): a centred standalone
     -- layout, its engagement midpoint at the map's exact centre, so the
     -- coordinates to watch are the same fixed point every run. The strip
     -- probe still slides it if the terrain there disagrees.
-    local single = #selected == 1 and not selected[1].unsupported and selected[1] or nil
+    local single = table.getn(selected) == 1 and not selected[1].unsupported and selected[1] or nil
 
     -- 2. Layout. Fixed-height rows (the tallest case's) shared by every
     -- media pair (start medium > far-end medium, centred for a case
@@ -1171,7 +1171,7 @@ ForkThread(function()
     local function enhance(c, unit)
         local enhs = unit:GetBlueprint().Enhancements or {}
         local chain, e = {}, c.enh
-        while e and #chain < 8 do
+        while e and table.getn(chain) < 8 do
             table.insert(chain, 1, e)
             e = enhs[e] and enhs[e].Prerequisite
         end
@@ -1569,25 +1569,25 @@ ForkThread(function()
     local function aim_of(c)
         local parts = {}
         if c.aimed then
-            parts[#parts + 1] = 'b=' .. c.bearing
-            if c.turn then parts[#parts + 1] = string.format('turn=%.0f', c.turn) end
+            table.insert(parts, 'b=' .. c.bearing)
+            if c.turn then table.insert(parts, string.format('turn=%.0f', c.turn)) end
             if c.turn and arc_of(__blueprints[c.attacker].Weapon[c.weapon]) then
-                parts[#parts + 1] = 'arc=' .. (in_arc(__blueprints[c.attacker].Weapon[c.weapon], c.bearing - c.turn) and 'in' or 'out')
+                table.insert(parts, 'arc=' .. (in_arc(__blueprints[c.attacker].Weapon[c.weapon], c.bearing - c.turn) and 'in' or 'out'))
             end
             -- ticks from the order to the first shot, and for a structure
             -- (it can't turn its body) the fewest ticks its turret needs to
             -- swing from straight ahead to the bearing at TurretYawSpeed
             -- (degrees a second): a first shot before that fired without
             -- turning round
-            if c.shotTicks then parts[#parts + 1] = 'shot=' .. c.shotTicks end
+            if c.shotTicks then table.insert(parts, 'shot=' .. c.shotTicks) end
             local bp = __blueprints[c.attacker]
             local speed = bp.Weapon[c.weapon].TurretYawSpeed
             if bp.CategoriesHash and bp.CategoriesHash.STRUCTURE and speed and speed > 0 then
-                parts[#parts + 1] = 'slew=' .. math.floor(math.abs(c.bearing) / speed * 10)
+                table.insert(parts, 'slew=' .. math.floor(math.abs(c.bearing) / speed * 10))
             end
         end
         if c.aimN then
-            parts[#parts + 1] = string.format('n=%d lat=%.2f long=%.2f max=%.2f', c.aimN, c.aimLat / c.aimN, c.aimLong / c.aimN, c.aimMax)
+            table.insert(parts, string.format('n=%d lat=%.2f long=%.2f max=%.2f', c.aimN, c.aimLat / c.aimN, c.aimLong / c.aimN, c.aimMax))
         end
         if not parts[1] then return '' end
         return 'aim ' .. table.concat(parts, ' ')
@@ -1595,39 +1595,39 @@ ForkThread(function()
     -- Stage text: everything the trail knows, deterministic, one line.
     local function stage_of(c)
         local parts = {}
-        if c.unsupported then parts[#parts + 1] = c.unsupported end
-        if c.mapNo then parts[#parts + 1] = c.mapNo end
-        if c.adopted then parts[#parts + 1] = 'adopted ' .. c.adopted end
-        if c.enhanced then parts[#parts + 1] = 'enhanced ' .. c.enhanced end
-        if c.enhErr then parts[#parts + 1] = 'enhancement error ' .. c.enhErr end
-        if c.oc then parts[#parts + 1] = 'overcharge ' .. c.oc end
-        if c.silo then parts[#parts + 1] = c.silo .. ' launch at ' .. math.floor(c.dist) end
-        if c.clamped then parts[#parts + 1] = 'at ' .. math.floor(c.dist) .. ' (map clamp, window ' .. c.clamped .. ')' end
+        if c.unsupported then table.insert(parts, c.unsupported) end
+        if c.mapNo then table.insert(parts, c.mapNo) end
+        if c.adopted then table.insert(parts, 'adopted ' .. c.adopted) end
+        if c.enhanced then table.insert(parts, 'enhanced ' .. c.enhanced) end
+        if c.enhErr then table.insert(parts, 'enhancement error ' .. c.enhErr) end
+        if c.oc then table.insert(parts, 'overcharge ' .. c.oc) end
+        if c.silo then table.insert(parts, c.silo .. ' launch at ' .. math.floor(c.dist)) end
+        if c.clamped then table.insert(parts, 'at ' .. math.floor(c.dist) .. ' (map clamp, window ' .. c.clamped .. ')') end
         if c.icpt then
-            parts[#parts + 1] = 'intercept ' .. c.icpt .. ': ' .. (c.source or '-') .. ' ' .. (c.srcOrder or '-')
-                .. ' launch from ' .. math.floor(c.dist) .. ', missiles ' .. #c.missiles
+            table.insert(parts, 'intercept ' .. c.icpt .. ': ' .. (c.source or '-') .. ' ' .. (c.srcOrder or '-')
+                .. ' launch from ' .. math.floor(c.dist) .. ', missiles ' .. table.getn(c.missiles)
                 .. ', stopped ' .. c.stopped .. ' (the dmg column'
                 .. (c.stopBy and ((c.stopBy.hit and (': hit ' .. c.stopBy.hit) or '')
                     .. (c.stopBy.callback and (': callback ' .. c.stopBy.callback) or '')
                     .. (c.stopBy.redirect and (': redirect ' .. c.stopBy.redirect) or '')) or '')
                 .. '), attacker hit ' .. c.attHit
-                .. (c.othersOff and (', off ' .. c.othersOff) or '')
+                .. (c.othersOff and (', off ' .. c.othersOff) or ''))
         end
-        if c.capMissing then parts[#parts + 1] = 'no ' .. c.capMissing end
-        if c.dived then parts[#parts + 1] = 'dived to ' .. c.attLayer .. ' in ' .. c.dived .. ' ticks' end
-        if c.attDied then parts[#parts + 1] = 'attacker died' end
-        if c.spawnErr then parts[#parts + 1] = 'spawn error ' .. c.spawnErr end
-        if c.issueErr then parts[#parts + 1] = 'issue error ' .. c.issueErr end
-        if c.tDead then parts[#parts + 1] = 'target died' end
-        if c.w == nil then parts[#parts + 1] = 'no weapon object' end
-        parts[#parts + 1] = 'caps ' .. (c.caps or '-')
-        if c.label then parts[#parts + 1] = 'label ' .. c.label end
-        parts[#parts + 1] = 'held ' .. (c.heldCase and 'case' or (c.held and 'other' or 'never'))
-        parts[#parts + 1] = 'impacts ' .. c.impacted
-        if c.dmg == 0 and c.nearest then parts[#parts + 1] = string.format('nearest impact %.1f', c.nearest) end
-        if c.unitDmg > 0 then parts[#parts + 1] = 'uncredited unit dmg ' .. c.unitDmg end
+        if c.capMissing then table.insert(parts, 'no ' .. c.capMissing) end
+        if c.dived then table.insert(parts, 'dived to ' .. c.attLayer .. ' in ' .. c.dived .. ' ticks') end
+        if c.attDied then table.insert(parts, 'attacker died') end
+        if c.spawnErr then table.insert(parts, 'spawn error ' .. c.spawnErr) end
+        if c.issueErr then table.insert(parts, 'issue error ' .. c.issueErr) end
+        if c.tDead then table.insert(parts, 'target died') end
+        if c.w == nil then table.insert(parts, 'no weapon object') end
+        table.insert(parts, 'caps ' .. (c.caps or '-'))
+        if c.label then table.insert(parts, 'label ' .. c.label) end
+        table.insert(parts, 'held ' .. (c.heldCase and 'case' or (c.held and 'other' or 'never')))
+        table.insert(parts, 'impacts ' .. c.impacted)
+        if c.dmg == 0 and c.nearest then table.insert(parts, string.format('nearest impact %.1f', c.nearest)) end
+        if c.unitDmg > 0 then table.insert(parts, 'uncredited unit dmg ' .. c.unitDmg) end
         local aim = aim_of(c)
-        if aim ~= '' then parts[#parts + 1] = aim end
+        if aim ~= '' then table.insert(parts, aim) end
         return table.concat(parts, ', ')
     end
     local function audit(c, outcome)
@@ -1775,7 +1775,7 @@ ForkThread(function()
     -- every deadline and wait here is in game ticks since the loop began
     -- (a WaitTicks(4) is 3 of them)
     local loop0, nextTrace = GetGameTick(), 0
-    local lived, waited = #active, 0
+    local lived, waited = table.getn(active), 0
     while lived > 0 and waited < deadline do
         WaitTicks(4)
         waited = GetGameTick() - loop0

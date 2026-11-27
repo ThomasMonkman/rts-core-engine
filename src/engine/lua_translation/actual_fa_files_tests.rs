@@ -27,6 +27,45 @@ fn lua_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// `--script` files are translated as game Lua (`engine/session.rs`), so the
+/// repo's own scripts must be written in it: they compile once translated,
+/// and none uses Luau's `#` (a comment to the game) or `^` (XOR to the game:
+/// `math.pow`), which the translation would change without an error.
+#[test]
+fn repo_scripts_are_game_lua() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let lua = mlua::Lua::new();
+    let mut failures = Vec::new();
+    for (dir, own) in [("dev/scenes", true), ("dev/audit", true), ("tests/scenarios", true), ("dev/probes/maps", false)] {
+        let mut files = Vec::new();
+        lua_files(&root.join(dir), &mut files);
+        assert!(!files.is_empty(), "no scripts under {dir}");
+        for f in files {
+            // A probe's body; its map files load through the VFS, and some
+            // probes carry files that are bad syntax on purpose.
+            if !own && f.file_name().is_none_or(|n| n != "probe.lua") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&f).unwrap();
+            let translated = translate(&source);
+            if let Err(e) = lua.load(&translated).into_function() {
+                failures.push(format!("{}: {e}", f.display()));
+                continue;
+            }
+            if own {
+                assert_eq!(hash_comment::rewrite(&source), source, "{}: `#` is a comment in game Lua (table.getn)", f.display());
+                assert_eq!(
+                    translated.matches("bit32.bxor").count(),
+                    source.matches("bit32.bxor").count(),
+                    "{}: `^` is XOR in game Lua (math.pow)",
+                    f.display()
+                );
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 #[ignore = "requires ../fa checkout, run explicitly"]
 fn actual_fa_files_translate_preserves_parseability() {

@@ -18,7 +18,7 @@ ForkThread(function()
     local eng = CreateUnitHPR('uel0105', 'ARMY_1', 406, GetTerrainHeight(406, 600), 600, 0, 0, 0)
     local blocker = CreateUnitHPR('uel0105', 'ARMY_1', sx, GetTerrainHeight(sx, sz), sz, 0, 0, 0)
     local start = blocker:GetPosition()
-    local startd = (start[1] - sx) ^ 2 + (start[3] - sz) ^ 2
+    local startd = math.pow(start[1] - sx, 2) + math.pow(start[3] - sz, 2)
     note(string.format('the parked unit starts %.2f from the site', math.sqrt(startd)))
     local moved = false
     IssueBuildMobile({ eng }, Vector(sx, 0, sz), 'ueb1101', {})
@@ -26,7 +26,7 @@ ForkThread(function()
     for _ = 1, 300 do
         WaitTicks(1)
         local q = blocker:GetPosition()
-        if not moved and (q[1] - sx) ^ 2 + (q[3] - sz) ^ 2 > startd + 0.25 then moved = true end
+        if not moved and math.pow(q[1] - sx, 2) + math.pow(q[3] - sz, 2) > startd + 0.25 then moved = true end
         local s = eng.UnitBeingBuilt
         if s and not s.Dead and not built then
             built = s
@@ -38,7 +38,7 @@ ForkThread(function()
         if built and built:GetFractionComplete() >= 1 then break end
     end
     local q = blocker:GetPosition()
-    local d2 = (q[1] - sx) ^ 2 + (q[3] - sz) ^ 2
+    local d2 = math.pow(q[1] - sx, 2) + math.pow(q[3] - sz, 2)
     note(string.format('the parked unit ends %.2f from the site', math.sqrt(d2)))
     check(moved, 'the unit standing in the footprint was ordered out')
     check(built ~= nil and built:GetFractionComplete() >= 1, 'the structure was built')
@@ -49,7 +49,7 @@ ForkThread(function()
     local ox, oz = 420, 590
     local selfer = CreateUnitHPR('uel0105', 'ARMY_1', ox, GetTerrainHeight(ox, oz), oz, 0, 0, 0)
     local sstart = selfer:GetPosition()
-    local sstartd = (sstart[1] - ox) ^ 2 + (sstart[3] - oz) ^ 2
+    local sstartd = math.pow(sstart[1] - ox, 2) + math.pow(sstart[3] - oz, 2)
     note(string.format('the builder starts %.2f from its own site', math.sqrt(sstartd)))
     local smoved = false
     local sbuilt, overlap_at_start
@@ -57,7 +57,7 @@ ForkThread(function()
     for _ = 1, 400 do
         WaitTicks(1)
         local q = selfer:GetPosition()
-        if not smoved and (q[1] - ox) ^ 2 + (q[3] - oz) ^ 2 > sstartd + 0.25 then smoved = true end
+        if not smoved and math.pow(q[1] - ox, 2) + math.pow(q[3] - oz, 2) > sstartd + 0.25 then smoved = true end
         local s = selfer.UnitBeingBuilt
         if s and not s.Dead and not sbuilt then
             sbuilt = s
@@ -69,7 +69,7 @@ ForkThread(function()
         if sbuilt and sbuilt:GetFractionComplete() >= 1 then break end
     end
     local q = selfer:GetPosition()
-    local sd2 = (q[1] - ox) ^ 2 + (q[3] - oz) ^ 2
+    local sd2 = math.pow(q[1] - ox, 2) + math.pow(q[3] - oz, 2)
     note(string.format('the builder ends %.2f from its own site', math.sqrt(sd2)))
     check(smoved, 'the builder ordered over its own position walked out')
     check(sbuilt ~= nil and sbuilt:GetFractionComplete() >= 1, 'the structure over the builder was built')
@@ -90,8 +90,8 @@ ForkThread(function()
         if built3 then break end
     end
     local q = air:GetPosition()
-    note(string.format('the air unit stayed %.2f from where it parked', math.sqrt((q[1] - astart[1]) ^ 2 + (q[3] - astart[3]) ^ 2)))
+    note(string.format('the air unit stayed %.2f from where it parked', math.sqrt(math.pow(q[1] - astart[1], 2) + math.pow(q[3] - astart[3], 2))))
     check(built3 ~= nil, 'the structure under the hovering air unit started building')
-    check((q[1] - astart[1]) ^ 2 + (q[3] - astart[3]) ^ 2 < 1.0, 'the air unit was never ordered out of the site')
+    check(math.pow(q[1] - astart[1], 2) + math.pow(q[3] - astart[3], 2) < 1.0, 'the air unit was never ordered out of the site')
     ScenarioResult.done = true
 end)
