@@ -338,3 +338,78 @@ function GetScriptBit(units, bit)
 end
 function GetIsPaused(units) local u = first(units) return u and u.paused or false end
 function GetIsPausedOfUnit(unit) local u = unit and data[unit._id] return u and u.paused or false end
+
+-- The selected structures as a template, offsets from the first one
+-- (inferred: FAF re-centres on the first entry's footprint itself).
+function GenerateBuildTemplateFromSelection()
+    local units = EntityCategoryFilterDown(categories.STRUCTURE, GetSelectedUnits() or {})
+    if not units[1] then
+        ClearBuildTemplates()
+        return
+    end
+    local origin = units[1]:GetPosition()
+    local t = { 0, 0 }
+    local minX, maxX, minZ, maxZ = 0, 0, 0, 0
+    for i, u in units do
+        local p = u:GetPosition()
+        local x, z = p[1] - origin[1], p[3] - origin[3]
+        minX, maxX = math.min(minX, x), math.max(maxX, x)
+        minZ, maxZ = math.min(minZ, z), math.max(maxZ, z)
+        table.insert(t, { u:GetUnitId(), i, x, z })
+    end
+    t[1], t[2] = math.ceil(maxX - minX), math.ceil(maxZ - minZ)
+    SetActiveBuildTemplate(t)
+end
+
+-- A unit's rollover table, as moho builds it (FA's exe 0x847d40):
+-- the economy as whole numbers per second (the per-tick rate times
+-- 10, truncated), the rest as the unit's getters give them. Not
+-- copied: moho's 'unknown' blueprint and hidden health for units
+-- the player can't identify (the interface only has units it sees).
+local rolloverEcon = { 'energyConsumed', 'massConsumed', 'energyRequested', 'massRequested', 'energyProduced', 'massProduced' }
+local function rolloverInfo(unit)
+    local info = { blueprintId = unit:GetUnitId(), health = unit:GetHealth(), maxHealth = unit:GetMaxHealth() }
+    info.kills = unit:GetStat('KILLS', 0).Value
+    local econ = unit:GetEconData()
+    for _, k in rolloverEcon do
+        info[k] = math.floor(econ[k] or 0)
+    end
+    for k, v in unit:GetMissileInfo() do
+        info[k] = v
+    end
+    info.fuelRatio = unit:GetFuelRatio()
+    info.shieldRatio = unit:GetShieldRatio()
+    info.workProgress = unit:GetWorkProgress()
+    info.userUnit = unit
+    info.entityId = unit:GetEntityId()
+    local army = unit:GetArmy()
+    info.armyIndex = army - 1
+    local a = (rawget(_G, '__engine_armies') or {})[army]
+    info.teamColor = a and a.color
+    local name = unit:GetCustomName()
+    if name and name ~= '' then info.customName = name end
+    return info
+end
+-- The unit under the mouse (the engine sets `__engine_rollover` each
+-- frame, nil over the interface or empty ground), as moho's binding
+-- builds it (FA's exe 0x848470): the unit it works on as `focus`
+-- (`focusUpgrade` while upgrading), else the unit it guards as
+-- `guarded`, one level deep. Not copied: moho's brief `focus` for a
+-- unit it targets (blueprint and health) and `focusProp` for a prop
+-- it works on; the interface has neither.
+function GetRolloverInfo()
+    local id = rawget(_G, '__engine_rollover')
+    local unit = id and GetUnitById(id)
+    if not unit or unit:IsDead() then return nil end
+    local info = rolloverInfo(unit)
+    local focus = unit:GetFocus()
+    if focus then
+        local queue = unit:GetCommandQueue()
+        local upgrading = queue[1] and queue[1].type == 'Upgrade'
+        info[upgrading and 'focusUpgrade' or 'focus'] = rolloverInfo(focus)
+    else
+        local guarded = unit:GetGuardedEntity()
+        if guarded then info.guarded = rolloverInfo(guarded) end
+    end
+    return info
+end

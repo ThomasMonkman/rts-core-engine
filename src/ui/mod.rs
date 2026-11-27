@@ -10,6 +10,7 @@
 //! controls become a draw list the renderer batches into one draw call,
 //! as SupCom does (one texture atlas for the whole interface).
 
+pub mod armies;
 pub mod build_template;
 pub mod clipboard;
 pub mod controls;
@@ -17,6 +18,7 @@ pub mod cursor;
 pub mod decals;
 mod engine_stats;
 pub mod fonts;
+pub mod input;
 pub mod keymap;
 pub mod movie;
 pub mod net_lobby;
@@ -24,6 +26,7 @@ pub mod orders;
 pub mod overlays;
 pub mod prefs;
 pub mod replay;
+pub mod selection;
 pub mod session;
 pub mod shapes;
 pub mod signatures;
@@ -453,6 +456,10 @@ impl UserVm {
         decals::register(&lua)?;
         keymap::register(&lua)?;
         build_template::register(&lua)?;
+        selection::register(&lua)?;
+        armies::register(&lua)?;
+        input::register(&lua)?;
+        engine_stats::register(&lua)?;
         api::core::register(&lua)?;
         world_pick::register(&lua)?;
         world_draw::register(&lua)?;
@@ -1449,11 +1456,13 @@ impl UserVm {
     /// `CWldSession::DoBeat` 0x10457bda, after the beat's Sync).
     pub fn set_game_over(&self) -> LuaResult<()> {
         let g = self.lua.globals();
-        if g.raw_get::<Option<bool>>("__engine_game_over_noted")?.unwrap_or(false) {
-            return Ok(());
+        {
+            let mut s = session::state(&self.lua);
+            if std::mem::replace(&mut s.game_over_noted, true) {
+                return Ok(());
+            }
+            s.game_over = true;
         }
-        g.raw_set("__engine_game_over_noted", true)?;
-        g.raw_set("__engine_game_over", true)?;
         let import: LuaFunction = g.get("import")?;
         let uimain: LuaTable = import.call("/lua/ui/uimain.lua")?;
         if let Some(f) = uimain.get::<Option<LuaFunction>>("NoteGameOver")?
@@ -1465,12 +1474,7 @@ impl UserVm {
 
     /// The player left the session (`SessionEndGame`), taken once.
     pub fn take_session_left(&self) -> LuaResult<bool> {
-        let g = self.lua.globals();
-        let left = g.raw_get::<Option<bool>>("__engine_session_left")?.unwrap_or(false);
-        if left {
-            g.raw_set("__engine_session_left", LuaNil)?;
-        }
-        Ok(left)
+        Ok(std::mem::take(&mut session::state(&self.lua).session_left))
     }
 
     /// The interface asked for its preferences to be written
@@ -1543,12 +1547,7 @@ impl UserVm {
     /// The interface asked to return to the main menu (FAF's `ExitGame`:
     /// the score screen's Continue), taken once.
     pub fn take_menu_request(&self) -> LuaResult<bool> {
-        let g = self.lua.globals();
-        let asked = g.raw_get::<Option<bool>>("__engine_menu_request")?.unwrap_or(false);
-        if asked {
-            g.raw_set("__engine_menu_request", LuaNil)?;
-        }
-        Ok(asked)
+        Ok(std::mem::take(&mut session::state(&self.lua).menu_request))
     }
 
     /// The engine paused or resumed (whoever asked): FAF's `OnPause(by,

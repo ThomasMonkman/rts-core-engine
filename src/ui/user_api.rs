@@ -721,7 +721,7 @@ pub fn request_focus_army(lua: &Lua, index: i64) -> LuaResult<bool> {
         let army = armies.as_ref().map(|a| a.raw_get::<Option<LuaTable>>(own)).transpose()?.flatten();
         Ok(army.is_some_and(|a| !a.raw_get::<Option<bool>>("outOfGame").ok().flatten().unwrap_or(false)))
     };
-    let allowed = flag("__engine_replay")? || cheats()? || (new >= 1 && new == own) || flag("__engine_game_over")? || !own_in_game()?;
+    let allowed = flag("__engine_replay")? || cheats()? || (new >= 1 && new == own) || crate::ui::session::state(lua).game_over || !own_in_game()?;
     if !allowed {
         tracing::info!(target: "lua", index, "SetFocusArmy: refused (a player in a live game keeps their army's view)");
         return Ok(false);
@@ -748,14 +748,6 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// The selection's orders, toggles and buildable categories
         /// ([`unit_command_data`]).
         GetUnitCommandData = |lua, unit_set: Option<Vec<Obj<moho::UserUnit>>>| unit_command_data(lua, &unit_set.unwrap_or_default()))?;
-    lua_fn!(lua, global,
-        #[lua(internal)]
-        __engine_con_execute = |lua, line: String| {
-            if let Err(e) = crate::ui::console(lua, &line) {
-                tracing::warn!(target: "lua", line, "ConExecute failed: {e}");
-            }
-            Ok(())
-        })?;
     lua_fn!(lua, global,
         /// The user layer's clock: seconds of UI frames run (`UserVm::frame`),
         /// which is what animations and `WaitSeconds` count in.
@@ -897,7 +889,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
         /// The game ended (the sim's `EndGame`, `UserVm::set_game_over`) or this
         /// player left it (`SessionEndGame`).
-        SessionIsGameOver = |lua, ()| Ok(lua.globals().raw_get::<Option<bool>>("__engine_game_over")?.unwrap_or(false)))?;
+        SessionIsGameOver = |lua, ()| Ok(crate::ui::session::state(lua).game_over))?;
     lua_fn!(lua, global,
         /// This client has no army of its own (watching, or a replay).
         IsObserver = |lua, ()| Ok(lua.globals().raw_get::<Option<bool>>("__engine_observer")?.unwrap_or(false)))?;
@@ -926,6 +918,23 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
         /// The units handed in, unfiltered.
         GetValidAttackingUnits = |_, units: Loose<Vec<Obj<crate::engine::api::moho::UserUnit>>>| Ok(units))?;
+    lua_fn!(lua, global,
+        /// The current profile's options, where FAF's options dialog keeps
+        /// them (`Prefs.SetToCurrentProfile('options', ...)`), or just the
+        /// option `key`. No profile: an empty table (nil for one option),
+        /// and FAF falls back to each option's default from optionslogic.lua.
+        GetOptions = |lua, key: Option<String>| {
+            let preference: LuaFunction = lua.globals().get("GetPreference")?;
+            let Some(current) = lua.coerce_string(preference.call::<LuaValue>("profile.current")?)? else {
+                return Ok(if key.is_none() { LuaValue::Table(lua.create_table()?) } else { LuaNil });
+            };
+            let options = format!("profile.profiles.{}.options", current.to_string_lossy());
+            // One option: read just it (a preference comes out as a copy).
+            match key {
+                Some(key) => preference.call(format!("{options}.{key}")),
+                None => preference.call((options, lua.create_table()?)),
+            }
+        })?;
     lua.set_named_registry_value("user.focus_army", -1)?;
     lua_fn!(lua, global,
         /// The army the player sees as, 1-based (`--player`, else observer: -1).
@@ -934,387 +943,6 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// `index` is 0-based (-1: observer); `GetFocusArmy` is 1-based. A
         /// request, allowed only as moho allows it ([`request_focus_army`]).
         SetFocusArmy = |lua, a: i64| request_focus_army(lua, a).map(|_| ()))?;
-    crate::lua_api::script::exec(
-        lua,
-        r#"
-        -- The current profile's options, where FAF's options dialog keeps
-        -- them (`Prefs.SetToCurrentProfile('options', ...)`; none set: FAF
-        -- falls back to each option's default from optionslogic.lua).
-        function GetOptions(key)
-            local current = GetPreference('profile.current')
-            if not current then return key == nil and {} or nil end
-            local opts = 'profile.profiles.' .. current .. '.options'
-            -- One option: read just it (a preference comes out as a copy).
-            if key then return GetPreference(opts .. '.' .. key) end
-            return GetPreference(opts, {})
-        end
-        -- Units added to the selection from the interface (a transport's
-        -- carried units in the construction panel), by entity id. Kept;
-        -- orders don't go to them yet.
-        local extraSelect = {}
-        function AddToSessionExtraSelectList(unit) if unit then extraSelect[unit:GetEntityId()] = unit end end
-        function RemoveFromSessionExtraSelectList(unit) if unit then extraSelect[unit:GetEntityId()] = nil end end
-        function ClearSessionExtraSelectList() extraSelect = {} end
-        -- Console commands: the interface's own run here, the engine's go to
-        -- the renderer (`ui::console`).
-        function ConExecute(command) __engine_con_execute(command) end
-        function ConExecuteSave(command) __engine_con_execute(command) end
-        -- The command-graph waypoint under the mouse (the engine sets it each
-        -- frame), nil when none.
-        function GetHighlightCommand() return rawget(_G, '__engine_highlight_command') end
-        -- The selected structures as a template, offsets from the first one
-        -- (inferred: FAF re-centres on the first entry's footprint itself).
-        function GenerateBuildTemplateFromSelection()
-            local units = EntityCategoryFilterDown(categories.STRUCTURE, GetSelectedUnits() or {})
-            if not units[1] then
-                ClearBuildTemplates()
-                return
-            end
-            local origin = units[1]:GetPosition()
-            local t = { 0, 0 }
-            local minX, maxX, minZ, maxZ = 0, 0, 0, 0
-            for i, u in units do
-                local p = u:GetPosition()
-                local x, z = p[1] - origin[1], p[3] - origin[3]
-                minX, maxX = math.min(minX, x), math.max(maxX, x)
-                minZ, maxZ = math.min(minZ, z), math.max(maxZ, z)
-                table.insert(t, { u:GetUnitId(), i, x, z })
-            end
-            t[1], t[2] = math.ceil(maxX - minX), math.ceil(maxZ - minZ)
-            SetActiveBuildTemplate(t)
-        end
-        -- The focus army's idle engineers (not commanders) and factories (gates
-        -- too: FAF filters those out itself), nil when none (avatars.lua).
-        local function idle(category)
-            local units = {}
-            for _, id in __engine_idle_units(category) do
-                local u = GetUnitById(id)
-                if u then table.insert(units, u) end
-            end
-            if units[1] then return units end
-        end
-        function GetIdleEngineers() return idle('ENGINEER - COMMAND') end
-        function GetIdleFactories() return idle('FACTORY STRUCTURE') end
-        -- Selecting from the interface is synchronous, as in moho: the new
-        -- selection is what `GetSelectedUnits()` returns on the next line and
-        -- what selection orders given after it go to (FAF selects a factory,
-        -- issues a build and reselects in one frame: construction.lua,
-        -- hotbuild.lua). The engine adopts it as the player's selection at
-        -- the end of the frame (`UserVm::take_selection_request`), which then
-        -- runs `OnSelectionChanged`. Dead units are left out.
-        local function select_units(units)
-            local list, seen = {}, {}
-            for _, u in units or {} do
-                local id = type(u) == 'table' and rawget(u, '_id')
-                if id and not seen[id] and not u:IsDead() then
-                    seen[id] = true
-                    table.insert(list, u)
-                end
-            end
-            table.sort(list, function(a, b) return rawget(a, '_id') < rawget(b, '_id') end)
-            rawset(_G, '__engine_selection', list[1] and list or nil)
-            local request = {}
-            for i, u in ipairs(list) do request[i] = u end
-            rawset(_G, '__engine_select_request', request)
-        end
-        -- Selects the player's units in a category expression (moho's own
-        -- rules: `__engine_select_by_category`), at once like `SelectUnits`.
-        function UISelectionByCategory(expression, addToCurSel, inViewFrustum, nearestToMouse, mustBeIdle)
-            local ids = __engine_select_by_category(expression, addToCurSel and true or false, inViewFrustum and true or false, nearestToMouse and true or false, mustBeIdle and true or false)
-            if not ids then return end
-            local units = {}
-            for _, id in ids do
-                local u = GetUnitById(id)
-                if u then table.insert(units, u) end
-            end
-            select_units(units)
-        end
-        -- The player's selection, set by the engine from the renderer's
-        -- selection (`UserVm::set_selection`): a new table each call, nil
-        -- when nothing is selected, as moho's. FAF adds to the table it gets
-        -- (`AppendSetToSelection`) and tells calls apart by table identity
-        -- (selection sets' double tap).
-        function GetSelectedUnits()
-            local sel = rawget(_G, '__engine_selection')
-            if not sel or not sel[1] then return nil end
-            local copy = {}
-            for i, u in ipairs(sel) do copy[i] = u end
-            return copy
-        end
-        function SelectUnits(units) select_units(units) end
-        function AddSelectUnits(units)
-            local all = {}
-            for _, u in rawget(_G, '__engine_selection') or {} do table.insert(all, u) end
-            for _, u in units or {} do table.insert(all, u) end
-            select_units(all)
-        end
-        -- The session's scenario (the engine fills __engine_session when it
-        -- knows the map; until then a minimal one). `Share` is the lobby's
-        -- default: FAF's score panel looks it up and fails without it.
-        function SessionGetScenarioInfo()
-            return rawget(_G, '__engine_session') or { Options = { Share = 'ShareUntilDeath' }, size = {1024, 1024}, name = '', type = 'skirmish' }
-        end
-        function GetEconomyTotals()
-            return rawget(_G, '__engine_economy') or {
-                stored = {MASS = 0, ENERGY = 0}, maxStorage = {MASS = 0, ENERGY = 0}, income = {MASS = 0, ENERGY = 0},
-                lastUseRequested = {MASS = 0, ENERGY = 0}, lastUseActual = {MASS = 0, ENERGY = 0}, reclaimed = {MASS = 0, ENERGY = 0},
-            }
-        end
-        -- Alliances between army indices, from the sim's (`UserVm::set_alliances`).
-        local function alliance(a, b)
-            if a == b then return 'Ally' end
-            local row = (rawget(_G, '__engine_alliances') or {})[a]
-            return row and row[b] or 'Enemy'
-        end
-        function IsAlly(a, b) return alliance(a, b) == 'Ally' end
-        function IsEnemy(a, b) return alliance(a, b) == 'Enemy' end
-        function IsNeutral(a, b) return alliance(a, b) == 'Neutral' end
-        function GetArmiesTable()
-            local armies = rawget(_G, '__engine_armies') or {}
-            return { numArmies = table.getn(armies), focusArmy = GetFocusArmy(), armiesTable = armies }
-        end
-        function GetSessionClients()
-            local net = __net_session_clients()
-            if net then return net end
-            local out = {}
-            for i, a in rawget(_G, '__engine_armies') or {} do
-                if a.human then
-                    table.insert(out, { name = a.nickname, uid = tostring(i), connected = true, ['local'] = true, ejectedBy = {}, authorizedCommandSources = { table.getn(out) + 1 } })
-                end
-            end
-            -- Watching (no human army): moho still lists the local client,
-            -- an observer with no command source.
-            if table.getn(out) == 0 then
-                table.insert(out, { name = 'Observer', uid = '0', connected = true, ['local'] = true, ejectedBy = {}, authorizedCommandSources = {} })
-            end
-            return out
-        end
-        -- Command sources (1-based): each human army's player in army
-        -- order, then observers (the sim's numbering, `command_source.rs`).
-        function SessionGetCommandSourceNames()
-            local names = {}
-            for _, a in rawget(_G, '__engine_armies') or {} do
-                if a.human then table.insert(names, a.nickname) end
-            end
-            return names
-        end
-        function SessionGetLocalCommandSource()
-            local source, focus = 0, GetFocusArmy()
-            for i, a in rawget(_G, '__engine_armies') or {} do
-                if a.human then
-                    source = source + 1
-                    if i == focus then return source end
-                end
-            end
-            return source + 1
-        end
-        -- Engine-populated globals (/engine/Library.lua). `__EngineStats` is
-        -- moho's stats tree (`{Name, Type, Value, Children}` nodes), with
-        -- only the nodes FAF and mods read, kept up by the engine
-        -- (`ui::engine_stats`): `Frame` / `FPS` (AI-Uveso's interface hook,
-        -- FAF's debug FPS panel), `EntityCount` (FAF's performance
-        -- tracking samples `Unit`), `Camera` / `Cursor` (FAF's
-        -- `GetMouseTerrainElevation`: the water depth indicator, the
-        -- context-based build templates), `Heap` (FAF's session logger, AI-Uveso),
-        -- `Instance Counts` (AI-Uveso's hook; only the classes ours has).
-        -- The cursor's are 0 until the mouse is first over a world view.
-        local function stat(name, type) return { Name = name, Type = type, Value = 0 } end
-        rawset(_G, '__EngineStats', rawget(_G, '__EngineStats') or {
-            Name = 'Root', Children = {
-                { Name = 'Frame', Children = { stat('FPS', 'Float') } },
-                { Name = 'EntityCount', Children = { stat('Prop', 'Integer'), stat('Unit', 'Integer'), stat('Projectile', 'Integer'), stat('Shield', 'Integer'), stat('Other', 'Integer') } },
-                { Name = 'Instance Counts', Children = {
-                    stat('class Moho::Entity', 'Integer'), stat('class Moho::Prop', 'Integer'), stat('class Moho::Unit', 'Integer'),
-                    stat('class Moho::CPlatoon', 'Integer'), stat('class Moho::CDecalHandle', 'Integer'), stat('class Moho::CLuaTask', 'Integer'),
-                } },
-                { Name = 'Heap', Children = { { Name = 'Committed', Type = 'String', Value = '0.000M' }, { Name = 'Total', Type = 'String', Value = '0.000M' }, { Name = 'InUse', Type = 'String', Value = '0.000M' } } },
-                { Name = 'Camera', Children = { { Name = 'Cursor', Children = { { Name = 'Position', Type = 'String', Value = 'x=0.00,y=0.00,z=0.00' }, stat('Elevation', 'Float') } } } },
-            },
-        })
-        rawset(_G, 'LaunchDir', rawget(_G, 'LaunchDir') or '')
-        -- Input capture: controls that take all input (modal dialogs), last
-        -- added first.
-        local captures = {}
-        function AddInputCapture(control) table.insert(captures, control) end
-        function RemoveInputCapture(control)
-            for i = table.getn(captures), 1, -1 do
-                if captures[i] == control then table.remove(captures, i) end
-            end
-        end
-        function GetInputCapture() return captures[table.getn(captures)] end
-        function AnyInputCapture() return table.getn(captures) > 0 end
-        function GetMouseScreenPos() return { rawget(_G, '__engine_mouse_x') or 0, rawget(_G, '__engine_mouse_y') or 0 } end
-        -- A unit's rollover table, as moho builds it (FA's exe 0x847d40):
-        -- the economy as whole numbers per second (the per-tick rate times
-        -- 10, truncated), the rest as the unit's getters give them. Not
-        -- copied: moho's 'unknown' blueprint and hidden health for units
-        -- the player can't identify (the interface only has units it sees).
-        local rolloverEcon = { 'energyConsumed', 'massConsumed', 'energyRequested', 'massRequested', 'energyProduced', 'massProduced' }
-        local function rolloverInfo(unit)
-            local info = { blueprintId = unit:GetUnitId(), health = unit:GetHealth(), maxHealth = unit:GetMaxHealth() }
-            info.kills = unit:GetStat('KILLS', 0).Value
-            local econ = unit:GetEconData()
-            for _, k in rolloverEcon do
-                info[k] = math.floor(econ[k] or 0)
-            end
-            for k, v in unit:GetMissileInfo() do
-                info[k] = v
-            end
-            info.fuelRatio = unit:GetFuelRatio()
-            info.shieldRatio = unit:GetShieldRatio()
-            info.workProgress = unit:GetWorkProgress()
-            info.userUnit = unit
-            info.entityId = unit:GetEntityId()
-            local army = unit:GetArmy()
-            info.armyIndex = army - 1
-            local a = (rawget(_G, '__engine_armies') or {})[army]
-            info.teamColor = a and a.color
-            local name = unit:GetCustomName()
-            if name and name ~= '' then info.customName = name end
-            return info
-        end
-        -- The unit under the mouse (the engine sets `__engine_rollover` each
-        -- frame, nil over the interface or empty ground), as moho's binding
-        -- builds it (FA's exe 0x848470): the unit it works on as `focus`
-        -- (`focusUpgrade` while upgrading), else the unit it guards as
-        -- `guarded`, one level deep. Not copied: moho's brief `focus` for a
-        -- unit it targets (blueprint and health) and `focusProp` for a prop
-        -- it works on; the interface has neither.
-        function GetRolloverInfo()
-            local id = rawget(_G, '__engine_rollover')
-            local unit = id and GetUnitById(id)
-            if not unit or unit:IsDead() then return nil end
-            local info = rolloverInfo(unit)
-            local focus = unit:GetFocus()
-            if focus then
-                local queue = unit:GetCommandQueue()
-                local upgrading = queue[1] and queue[1].type == 'Upgrade'
-                info[upgrading and 'focusUpgrade' or 'focus'] = rolloverInfo(focus)
-            else
-                local guarded = unit:GetGuardedEntity()
-                if guarded then info.guarded = rolloverInfo(guarded) end
-            end
-            return info
-        end
-        -- Every game played in the window is recorded (a replay being
-        -- watched isn't).
-        function SessionIsBeingRecorded() return not SessionIsReplay() end
-        -- Moho's session works this out once, as it is made
-        -- (SupremeCommander.exe, beside its replay / recorded / multiplayer
-        -- flags): a replay may always be observed; a game takes its
-        -- `AllowObservers` option (a boolean, the lobby's), false without
-        -- one, as in a game started without a lobby (`probe_api_spot`
-        -- ui.session3).
-        function SessionIsObservingAllowed()
-            if SessionIsReplay() then return true end
-            local options = SessionGetScenarioInfo().Options
-            return options ~= nil and options.AllowObservers == true
-        end
-        -- In-game chat (`net::core`): `SessionSendChatMessage([clients,]
-        -- message)`; received messages go to FAF's gamemain.ReceiveChat.
-        -- FAF's disconnect dialog's Eject button (a vote; `net::lockstep`).
-        function EjectSessionClient(index) __net_eject(index) end
-        function SessionSendChatMessage(client, message)
-            if message == nil then client, message = nil, client end
-            if type(client) == 'number' then client = { client } end
-            __net_chat_send(client, message)
-        end
-        -- This player leaves the session (FAF's score screen, quitting):
-        -- the sim stops here and a networked game is told we left
-        -- (`UserVm::take_session_left`). A session's end is when moho hands
-        -- the interface its score data, which FAF's score screen waits for
-        -- (`hotstats.scoreData`); ours fills it in here at `SessionEndGame`,
-        -- whichever end took it, in the shape of FAF's sim score table.
-        function SessionEndGame()
-            rawset(_G, '__engine_game_over', true)
-            rawset(_G, '__engine_session_left', true)
-            local scoreData = import('/lua/ui/dialogs/hotstats.lua').scoreData
-            if scoreData.interval and scoreData.current and scoreData.history then return end
-            local current = {}
-            for index, info in GetArmiesTable().armiesTable do
-                if not info.civilian then
-                    current[index] = {
-                        name = info.nickname,
-                        general = { score = 0, kills = { count = 0, mass = 0, energy = 0 },
-                            built = { count = 0, mass = 0, energy = 0 },
-                            lost = { count = 0, mass = 0, energy = 0 },
-                            currentunits = 0, currentcap = 0 },
-                        units = { cdr = { kills = 0, built = 0, lost = 0 }, land = { kills = 0, built = 0, lost = 0 },
-                            naval = { kills = 0, built = 0, lost = 0 }, air = { kills = 0, built = 0, lost = 0 },
-                            experimental = { kills = 0, built = 0, lost = 0 }, structures = { kills = 0, built = 0, lost = 0 } },
-                        resources = {
-                            massin = { total = 0, rate = 0, reclaimed = 0, reclaimRate = 0 },
-                            massout = { total = 0, rate = 0, excess = 0 },
-                            energyin = { total = 0, rate = 0, reclaimed = 0, reclaimRate = 0 },
-                            energyout = { total = 0, rate = 0, excess = 0 },
-                            storage = { storedMass = 0, storedEnergy = 0, maxMass = 0, maxEnergy = 0 } },
-                    }
-                end
-            end
-            scoreData.interval = 30
-            scoreData.current = current
-            scoreData.history = {}
-        end
-        -- Moho returns to the main menu (the score screen's Continue): the
-        -- renderer tears the game's interface down and starts the front end
-        -- (`UserVm::take_menu_request`).
-        function ExitGame()
-            SessionEndGame()
-            rawset(_G, '__engine_menu_request', true)
-        end
-        -- The focus army's synced overflow flag (moho: false for an
-        -- observer; on until the first beat, as a new army's is).
-        function GetResourceSharing()
-            local focus = GetFocusArmy()
-            if focus < 1 then return false end
-            local flags = rawget(_G, '__engine_resource_sharing')
-            local on = flags and flags[focus]
-            if on == nil then return true end
-            return on
-        end
-        -- Unit toggles as the panels query them (defaults until they're
-        -- bridged to the sim: return fire, not paused, script bits off).
-        -- Unit toggles and lists over the units' details (selected units).
-        local function detail(u) return rawget(_G, '__engine_unit_data')[u._id] end
-        -- Any of the units in auto mode / auto-surfacing.
-        function GetIsAutoMode(units)
-            for _, u in units or {} do local d = detail(u) if d and d.autoMode then return true end end
-            return false
-        end
-        function GetIsAutoSurfaceMode(units)
-            for _, u in units or {} do local d = detail(u) if d and d.autoSurface then return true end end
-            return false
-        end
-        -- -1 all submerged, 1 none, 0 a mix (or no units).
-        function GetIsSubmerged(units)
-            local sub, surf = false, false
-            for _, u in units or {} do
-                local d = detail(u)
-                if d and d.submerged then sub = true else surf = true end
-            end
-            if sub and not surf then return -1 elseif surf and not sub then return 1 end
-            return 0
-        end
-        -- Units carried by / assisting any of `units`, each once.
-        local function gather(units, field)
-            local out, seen = {}, {}
-            for _, u in units or {} do
-                local d = detail(u)
-                for _, id in (d and d[field]) or {} do
-                    if not seen[id] then
-                        seen[id] = true
-                        local o = GetUnitById(id)
-                        if o then table.insert(out, o) end
-                    end
-                end
-            end
-            return out
-        end
-        function GetAttachedUnitsList(units) return gather(units, 'cargo') end
-        function GetAssistingUnitsList(units) return gather(units, 'assisters') end
-        "#,
-        "=[engine user strings]",
-    )?;
     // Engine objects that only need to exist as handles for now: the world
     // UI provider (gamemain drives the game interface through it) and the
     // cursor (its textures are kept by `ui::cursor`).
@@ -1339,15 +967,6 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     }
     bind_handle::<crate::engine::api::moho::WldUIProvider>(lua, "InternalCreateWldUIProvider")?;
     bind_handle::<crate::engine::api::moho::Cursor>(lua, "_c_CreateCursor")?;
-    crate::lua_api::script::exec(
-        lua,
-        r#"
-        local cursor = nil
-        function SetCursor(c) cursor = c end
-        function GetCursor() return cursor end
-        "#,
-        "=[engine cursor]",
-    )?;
     lua_fn!(lua, global,
         #[lua(internal)]
         __engine_wld_provider = |lua, ()| lua.named_registry_value::<Option<Obj<crate::engine::api::moho::WldUIProvider>>>("user.wld_provider"))?;
