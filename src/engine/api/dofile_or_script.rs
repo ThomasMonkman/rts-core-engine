@@ -100,6 +100,49 @@ fn traced_doscript(lua: &Lua) -> LuaResult<()> {
     .call::<()>((enter, leave))
 }
 
+/// The globals translated scripts call that the source never names:
+/// `for k, v in t` becomes `__forin(t)`, the bit operators `bit32.*`.
+const TRANSLATION_HELPERS: [&str; 2] = ["__forin", "bit32"];
+
+/// Lets a script run in `env` reach the [`TRANSLATION_HELPERS`]. An
+/// environment that falls back to the globals already does. A bare table
+/// (the one a prefs file is read into) gets a metatable whose `__index`
+/// holds just the helpers, so the table's own keys stay what the script
+/// set. One with a metatable of its own that doesn't lead to them (FAF's
+/// `NewSafeEnv` for a mod's `mod_icons.lua`: a list of allowed functions
+/// under the globals' metatable, which raises on a missing name) gets them
+/// as keys of its own.
+fn give_translation_helpers(lua: &Lua, env: &LuaTable) -> LuaResult<()> {
+    if !env.raw_get::<LuaValue>(TRANSLATION_HELPERS[0])?.is_nil() {
+        return Ok(());
+    }
+    if env.metatable().is_some() {
+        // A lookup that raises, or finds nothing, doesn't reach them.
+        if !matches!(env.get::<LuaValue>(TRANSLATION_HELPERS[0]), Ok(v) if !v.is_nil()) {
+            for name in TRANSLATION_HELPERS {
+                env.raw_set(name, lua.globals().raw_get::<LuaValue>(name)?)?;
+            }
+        }
+        return Ok(());
+    }
+    const KEY: &str = "doscript.translation_helpers";
+    let meta = match lua.named_registry_value::<Option<LuaTable>>(KEY)? {
+        Some(meta) => meta,
+        None => {
+            let helpers = lua.create_table()?;
+            for name in TRANSLATION_HELPERS {
+                helpers.raw_set(name, lua.globals().raw_get::<LuaValue>(name)?)?;
+            }
+            let meta = lua.create_table()?;
+            meta.raw_set("__index", helpers)?;
+            lua.set_named_registry_value(KEY, &meta)?;
+            meta
+        }
+    };
+    env.set_metatable(Some(meta));
+    Ok(())
+}
+
 /// Loads `path` (compiled bytecode from the [`ScriptCache`]) into a function,
 /// optionally bound to `env`. Returns `(nil, nil)` for one that doesn't
 /// compile (warned), `(nil, message, level)` for an error `doscript` raises:
@@ -139,6 +182,7 @@ fn load_file_from_vfs(
     debug!(path = path, "doscript: exec");
     let mut chunk = lua.load(&*bytecode).set_name(path);
     if let Some(env) = env {
+        give_translation_helpers(lua, &env)?;
         chunk = chunk.set_environment(env);
     }
     match chunk.into_function() {
@@ -239,6 +283,60 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(after, 1);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A script run in a bare environment can still loop over a table and
+    /// call `bit32` (what `for k, v in t` and the bit operators become), and
+    /// the environment's own keys are only what the script set.
+    #[test]
+    fn bare_environment_reaches_the_translation_helpers() {
+        let dir = std::env::temp_dir().join(format!("doscript_bare_env_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("lua")).unwrap();
+        std::fs::write(dir.join("lua/icons.lua"), "Sum = 0\nfor _, v in { 1, 2, 4 } do Sum = Sum + v end\nBits = bit32.band(6, 3)\nfunction Later(t) local n = 0 for _ in t do n = n + 1 end return n end\n").unwrap();
+        let vfs = Vfs::new(vec![MountPoint { source: dir.clone(), mountpoint: "/".into() }], vec![]).unwrap();
+        let lua = Lua::new();
+        lua.set_app_data(Arc::new(ScriptCache::new(Arc::new(RwLock::new(vfs)))));
+        register(&lua).unwrap();
+        lua.load("function __forin(t) return next, t end").exec().unwrap();
+
+        let out: String = lua
+            .load(
+                "local env = {} doscript('/lua/icons.lua', env)
+                 local keys = {} for k in pairs(env) do table.insert(keys, k) end table.sort(keys)
+                 return table.concat(keys, ',') .. ' ' .. env.Sum .. ' ' .. env.Bits .. ' ' .. env.Later({ 1, 2 })",
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(out, "Bits,Later,Sum 7 2 2");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// FAF's safe environment: a table under the globals' metatable, which
+    /// raises on a name that isn't there. A module environment that falls
+    /// back to the globals is left as it is.
+    #[test]
+    fn strict_environment_reaches_the_translation_helpers() {
+        let dir = std::env::temp_dir().join(format!("doscript_strict_env_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("lua")).unwrap();
+        std::fs::write(dir.join("lua/icons.lua"), "Sum = 0\nfor _, v in { 1, 2, 4 } do Sum = Sum + v end\n").unwrap();
+        let vfs = Vfs::new(vec![MountPoint { source: dir.clone(), mountpoint: "/".into() }], vec![]).unwrap();
+        let lua = Lua::new();
+        lua.set_app_data(Arc::new(ScriptCache::new(Arc::new(RwLock::new(vfs)))));
+        register(&lua).unwrap();
+        lua.load("function __forin(t) return next, t end").exec().unwrap();
+
+        let out: String = lua
+            .load(
+                "local strict = setmetatable({}, { __index = function(_, k) error('no global ' .. k) end })
+                 doscript('/lua/icons.lua', strict)
+                 local module = setmetatable({}, { __index = _G })
+                 doscript('/lua/icons.lua', module)
+                 return strict.Sum .. ' ' .. module.Sum .. ' ' .. tostring(rawget(module, '__forin'))",
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(out, "7 7 nil");
         std::fs::remove_dir_all(dir).ok();
     }
 
