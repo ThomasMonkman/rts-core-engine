@@ -100,7 +100,6 @@ signatures! {
         AddSelectUnits(selection: Vec<Obj<moho::UserUnit>>);
         AddToSessionExtraSelectList(unit: Obj<moho::UserUnit>);
         AnyInputCapture() -> bool;
-        ClearBuildTemplates();
         ClearCurrentFactoryForQueueDisplay();
         ClearSessionExtraSelectList();
         ConExecute(command: String);
@@ -117,7 +116,6 @@ signatures! {
         FlushEvents();
         GenerateBuildTemplateFromSelection();
         /// A `UIBuildTemplate`: `{ width, height, { blueprint, id, x, z }, ... }`, x / z offsets from the cursor.
-        GetActiveBuildTemplate() -> Vec<LuaValue>;
         GetArmiesTable() -> Shaped<ArmiesTable>;
         GetArmyAvatars() -> Vec<Obj<moho::UserUnit>>;
         GetArmyScore(army_index: f64) -> f64;
@@ -150,10 +148,7 @@ signatures! {
         GetUnitCommandDataOfUnit(unit: Obj<moho::UserUnit>) -> (Vec<String>, Vec<String>, EntityCategory);
         GpgNetSend(command: String, rest: mlua::Variadic<LuaValue>);
         /// Key name to action (a name, or a table with an `action`).
-        IN_AddKeyMapTable(key_map_table: BTreeMap<String, mlua::Either<String, LuaTable>>);
-        IN_ClearKeyMap();
         /// The table given to `IN_AddKeyMapTable`.
-        IN_RemoveKeyMapTable(key_map_table: BTreeMap<String, mlua::Either<String, LuaTable>>);
         IncreaseBuildCountInQueue(queue_index: f64, count: f64);
         InternalCreateDiscoveryService(service_class: LuaTable) -> Obj<moho::DiscoveryService>;
         /// nil when the lobby can't be created (the network port is taken).
@@ -190,21 +185,17 @@ signatures! {
         /// To the given session client index (1-based) or indices.
         SessionSendChatMessage(client: mlua::Either<f64, Vec<f64>>, message: mlua::Either<LuaTable, mlua::Either<f64, String>>);
         /// A `UIBuildTemplate`: `{ width, height, { blueprint, id, x, z }, ... }`.
-        SetActiveBuildTemplate(template: Vec<LuaValue>);
         /// The factory's queue, front first; nil when it's empty.
         SetCurrentFactoryForQueueDisplay(unit: Obj<moho::UserUnit>) -> Option<Vec<Shaped<QueueEntry>>>;
         SetCursor(cursor: Obj<moho::Cursor>);
         SetInvertMidMouseButton(flag: bool);
-        SetOverlayFilter(overlay: String, categories: EntityCategory, normal_color: Color, select_color: Color, rollover_color: Color, inner1: f64, inner2: f64, outer1: f64, outer2: f64);
         /// Range overlay names; an empty list turns them off.
-        SetOverlayFilters(list: Vec<String>);
         SetPreference(key: String, obj: LuaValue);
         SyncPlayableRect(region: Rect);
         UISelectAndZoomTo(userunit: Obj<moho::UserUnit>, seconds: Option<f64>);
         UISelectionByCategory(expression: String, add_to_cur_sel: bool, in_view_frustum: bool, nearest_to_mouse: bool, must_be_idle: bool);
         UIZoomTo(units: Vec<Obj<moho::UserUnit>>, seconds: Option<f64>);
         ValidateUnitsList(units: Vec<Obj<moho::UserUnit>>) -> Vec<Obj<moho::UserUnit>>;
-        _c_CreateDecal(decal: Obj<moho::UserDecal>, spec: Option<LuaTable>);
         _c_CreatePathDebugger(path_debugger: Obj<moho::PathDebugger>, spec: LuaTable);
     }
     moho::Bitmap {
