@@ -102,16 +102,15 @@ jobs:
           retention-days: 30
           compression-level: 0
 
-      # The API browser (the dump's `index.html`) for GitHub Pages: only when
-      # the repository variable API_DOCS_PAGES is `true` (Pages must be on,
-      # with "GitHub Actions" as its source), and only from `main`.
+      # The API browser (the dump's `index.html`) for GitHub Pages, from
+      # `main` only (Pages must be on, with "GitHub Actions" as its source).
       - uses: actions/upload-pages-artifact@v5
-        if: matrix.os == 'linux' && vars.API_DOCS_PAGES == 'true' && github.ref == 'refs/heads/main'
+        if: matrix.os == 'linux' && github.ref == 'refs/heads/main'
         with:
           path: api-site
 
   api-docs:
-    if: vars.API_DOCS_PAGES == 'true' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main'
     needs: package
     runs-on: ubuntu-24.04
     timeout-minutes: 10

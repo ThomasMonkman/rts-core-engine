@@ -178,9 +178,9 @@ The workflow is `.github/workflows/release.yml`.
 - The Linux leg also runs the built binary's `--dump-api` and uploads the Lua type files
   (`sim`/`user` `.d.luau` and EmmyLua `.lua`, see [lua-api-types.md](lua-api-types.md)) as another
   artifact, `rts-core-engine-lua-api` (`rts-core-engine-<version>-<commit>-lua-api.zip`).
-  The zip also holds the API browser (`index.html`, `api.json`). With the repository variable
-  `API_DOCS_PAGES` set to `true` (and Pages turned on with "GitHub Actions" as its source), a build
-  of `main` publishes the browser to GitHub Pages (the `api-docs` job); it is off otherwise.
+  The zip also holds the API browser (`index.html`, `api.json`), and a build of `main` publishes
+  it to GitHub Pages (the `api-docs` job). Pages must be turned on with "GitHub Actions" as its
+  source, and the `github-pages` environment must allow `main` to deploy.
 - **A `v*` tag** builds the same and then creates a GitHub release for that tag holding the Linux
   and Windows archives and the Lua API zip (add the macOS zip by hand, above), with notes generated from the merged PRs. To cut one, from an up-to-date `main`:
   `git tag v0.1.0 && git push origin v0.1.0`.
