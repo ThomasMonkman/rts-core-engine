@@ -1319,6 +1319,11 @@ fn build_abandon() {
 }
 
 #[test]
+fn build_assist_finish() {
+    scenario("build_assist_finish", 400);
+}
+
+#[test]
 fn build_abandon_structure() {
     scenario("build_abandon_structure", 200);
 }
