@@ -143,20 +143,19 @@ end
 methods.IsAutoMode = function(self) local u = d(self) return u and u.autoMode or false end
 methods.IsAutoSurfaceMode = function(self) local u = d(self) return u and u.autoSurface or false end
 methods.IsRepeatQueue = function(self) return self._repeat == true end
--- Unit settings sent to the sim like orders (`__engine_ui_orders`); the
+-- Unit settings sent to the sim like orders (`ui/orders.rs`); the
 -- repeat flag is remembered here for `IsRepeatQueue`.
 methods.ProcessInfo = function(self, command, value)
     local on = value == true or value == 'true'
-    local orders = rawget(_G, '__engine_ui_orders')
     if command == 'SetRepeatQueue' then
         self._repeat = on
-        table.insert(orders, { units = { self }, toggle = 'repeat', value = on and 1 or 0 })
+        __engine_unit_setting(self, 'repeat', on and 1 or 0)
     elseif command == 'SetPaused' then
         SetPaused({ self }, on)
     elseif command == 'SetFireState' then
         SetFireState({ self }, value)
     elseif command == 'PlayNoStagingPlatformsVO' or command == 'PlayBusyStagingPlatformsVO' then
-        table.insert(orders, { units = { self }, toggle = 'vo', value = command == 'PlayBusyStagingPlatformsVO' and 1 or 0 })
+        __engine_unit_setting(self, 'vo', command == 'PlayBusyStagingPlatformsVO' and 1 or 0)
     end
 end
 methods.IsStunned = function(self) local u = d(self) return u and u.stunned or false end
@@ -277,7 +276,7 @@ end
 local function changeBuildCount(index, delta)
     local unit = queueFactory and GetUnitById(tostring(queueFactory))
     if not unit or not index or delta == 0 then return end
-    table.insert(rawget(_G, '__engine_ui_orders'), { units = { unit }, toggle = 'count', index = index, value = delta })
+    __engine_unit_setting(unit, 'count', delta, index)
 end
 function IncreaseBuildCountInQueue(index, count) changeBuildCount(index, math.floor(count or 1)) end
 function DecreaseBuildCountInQueue(index, count) changeBuildCount(index, -math.floor(count or 1)) end

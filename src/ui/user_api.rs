@@ -1386,13 +1386,6 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             if sub and not surf then return -1 elseif surf and not sub then return 1 end
             return 0
         end
-        -- Settings for the sim, like orders (`__engine_ui_orders`).
-        function SetAutoMode(units, on)
-            table.insert(rawget(_G, '__engine_ui_orders'), { units = units, toggle = 'auto', value = on and 1 or 0 })
-        end
-        function SetAutoSurfaceMode(units, on)
-            table.insert(rawget(_G, '__engine_ui_orders'), { units = units, toggle = 'autosurface', value = on and 1 or 0 })
-        end
         -- Units carried by / assisting any of `units`, each once.
         local function gather(units, field)
             local out, seen = {}, {}
@@ -1410,35 +1403,6 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         end
         function GetAttachedUnitsList(units) return gather(units, 'cargo') end
         function GetAssistingUnitsList(units) return gather(units, 'assisters') end
-        -- Orders from the interface: queued for the engine, which turns them
-        -- into player commands for the selection (`UserVm::take_orders`).
-        local orders = {}
-        rawset(_G, '__engine_ui_orders', orders)
-        -- Orders to "the selection" go to the selection as it is when given
-        -- (see `select_units` above), not at the end of the frame.
-        local function selected() return GetSelectedUnits() or {} end
-        function GetUnitCommandFromCommandCap(cap) return 'UNITCOMMAND_' .. string.gsub(cap, '^RULEUCC_', '') end
-        function IssueCommand(command, a, b) table.insert(orders, { units = selected(), command = command, arg = a, clear = b }) end
-        function IssueUnitCommand(units, command, a, b) table.insert(orders, { units = units, command = command, arg = a, clear = b }) end
-        function IssueUnitCommandToUnit(unit, command, a, b) table.insert(orders, { units = { unit }, command = command, arg = a, clear = b }) end
-        function IssueBlueprintCommand(command, bp, count, clear) table.insert(orders, { units = selected(), command = command, bp = bp, count = count, clear = clear }) end
-        function IssueBlueprintCommandToUnits(units, command, bp, count, clear) table.insert(orders, { units = units, command = command, bp = bp, count = count, clear = clear }) end
-        function IssueBlueprintCommandToUnit(unit, command, bp, count, clear) table.insert(orders, { units = { unit }, command = command, bp = bp, count = count, clear = clear }) end
-        -- Unit settings (the order panel's toggles), sent like orders.
-        local fireStates = { ReturnFire = 0, HoldFire = 1, HoldGround = 2 }
-        function SetFireState(units, state) table.insert(orders, { units = units, toggle = 'fire', value = fireStates[state] or tonumber(state) or 0 }) end
-        -- `state` is the units' current fire state (FAF's cycle hotkey passes
-        -- `GetFireState`, -1 for a mix): they move on to the next of the
-        -- three, as the sim's `Unit:ToggleFireState` (probe_ui_units C).
-        function ToggleFireState(units, state)
-            local current = fireStates[state] or tonumber(state) or -1
-            table.insert(orders, { units = units, toggle = 'fire', value = math.mod(current + 1, 3) })
-        end
-        function SetPaused(units, paused) table.insert(orders, { units = units, toggle = 'pause', value = paused and 1 or 0 }) end
-        function SetPausedOfUnit(unit, paused) SetPaused({ unit }, paused) end
-        -- `state` is the bit's current state: it flips.
-        function ToggleScriptBit(units, bit, state) table.insert(orders, { units = units, toggle = 'bit', bit = bit, value = (not state) and 1 or 0 }) end
-        function IssueDockCommand(clear) table.insert(orders, { units = selected(), command = 'UNITCOMMAND_Dock', clear = clear }) end
         -- Key maps (key name -> action), the most recently added first.
         local keymaps = {}
         function IN_AddKeyMapTable(map) table.insert(keymaps, map) end
@@ -1500,7 +1464,6 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
         #[lua(internal)]
         __engine_wld_provider = |lua, ()| lua.named_registry_value::<Option<Obj<crate::engine::api::moho::WldUIProvider>>>("user.wld_provider"))?;
-    lua.set_app_data(PendingSimCallbacks::default());
     lua_fn!(lua, global,
         /// `SimCallback{Func, Args}`: converted now (FAF changes some Args tables
         /// after sending them) with the selection as it is now (when
@@ -1518,35 +1481,18 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             let with_selection = with_selection.unwrap_or(false);
             // The selection as the interface sees it now (`SelectUnits` is
             // synchronous).
-            let units: Vec<u32> = match lua.globals().raw_get::<Option<LuaTable>>("__engine_selection")? {
-                Some(t) if with_selection => t.sequence_values::<LuaTable>().filter_map(|u| u.ok()?.raw_get::<Option<u32>>("_id").ok().flatten()).collect(),
-                _ => Vec::new(),
-            };
+            let units = if with_selection { crate::ui::orders::selection(lua)? } else { Vec::new() };
             let callback = crate::engine::sim::input::SimCallback {
                 func: func.to_string_lossy(),
                 args: crate::engine::sim::lua_data::LuaData::from_lua(&callback.raw_get::<LuaValue>("Args")?),
                 with_selection,
             };
-            let index = {
-                let mut pending = lua.app_data_mut::<PendingSimCallbacks>().expect("PendingSimCallbacks");
-                pending.0.push((callback, units));
-                pending.0.len()
-            };
-            let orders: LuaTable = lua.globals().raw_get("__engine_ui_orders")?;
-            let entry = lua.create_table_with_capacity(0, 1)?;
-            entry.raw_set("callback", index)?;
-            orders.raw_push(entry)
+            crate::ui::orders::push(lua, crate::ui::UiOrder { units: Some(units), callback: Some(callback), ..Default::default() });
+            Ok(())
         })?;
     lua_fn!(lua, global, GetTextureDimensions = |lua, (path, _scale): (String, Option<f64>)| Ok(crate::ui::controls::texture_dimensions(lua, &path)))?;
     Ok(())
 }
-
-/// `SimCallback`s given since the orders were last taken, with the
-/// selection each carries (its entry in `__engine_ui_orders` holds the
-/// 1-based index here).
-#[derive(Default)]
-pub struct PendingSimCallbacks(pub Vec<(crate::engine::sim::input::SimCallback, Vec<u32>)>);
-
 
 /// Every method FAF documents for a user class (`/engine/User/*.lua`
 /// annotations, from the VFS) that isn't implemented gets a stub that warns
