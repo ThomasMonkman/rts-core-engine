@@ -76,6 +76,35 @@ mod tests {
         assert_eq!(r, "5 0 3 3 3 x 4 nil 1 a a 2 b nil x,a,b b 2");
     }
 
+    /// Lua 5.0 records a size on a table `insert` / `remove` has touched:
+    /// entries set to nil by hand don't shrink it (real-game probe
+    /// probe_tablesize; each group is `getn` then the keys present).
+    #[test]
+    fn insert_and_remove_record_the_size() {
+        let lua = mlua::Lua::new();
+        super::register(&lua).unwrap();
+        let r: String = lua
+            .load(
+                "local out = {}
+                 local function show(t) local ks = {} for k, v in pairs(t) do ks[#ks + 1] = k .. '=' .. v end table.sort(ks) out[#out + 1] = table.getn(t) .. ':' .. table.concat(ks, ',') end
+                 local function abc() local t = {} table.insert(t, 'a') table.insert(t, 'b') table.insert(t, 'c') return t end
+                 local t = abc() t[3] = nil show(t) table.insert(t, 'x') show(t)
+                 t = abc() t[1] = nil t[2] = nil t[3] = nil show(t) table.insert(t, 'x') show(t)
+                 t = { 'a', 'b', 'c' } table.insert(t, 'd') t[5] = 'e' t[6] = 'f' show(t) table.insert(t, 'x') show(t)
+                 t = { 'a', 'b', 'c', 'd' } table.remove(t) t[2] = nil t[3] = nil show(t) out[#out + 1] = tostring(table.remove(t)) show(t)
+                 t = {} for i = 1, 6 do table.insert(t, 'u' .. i) end t[2] = nil t[5] = nil
+                 local rev = 1
+                 for i = 1, table.getn(t) do if t[i] then if i ~= rev then t[rev] = t[i] t[i] = nil end rev = rev + 1 end end
+                 show(t) table.insert(t, 'new') show(t)
+                 return table.concat(out, ' ')",
+            )
+            .eval()
+            .unwrap();
+        // (The third and fourth groups are ours: a table emptied entirely
+        // is size 0 again, where the real game says `3:` and `4:4=x`.)
+        assert_eq!(r, "3:1=a,2=b 4:1=a,2=b,4=x 0: 1:1=x 4:1=a,2=b,3=c,4=d,5=e,6=f 5:1=a,2=b,3=c,4=d,5=x,6=f 3:1=a nil 2:1=a 6:1=u1,2=u3,3=u4,4=u6 7:1=u1,2=u3,3=u4,4=u6,7=new");
+    }
+
     /// `gsub` with a function: only a string result replaces the match.
     #[test]
     fn gsub_function_non_string_deletes() {

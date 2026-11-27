@@ -1,89 +1,85 @@
--- Lua 5.0 table sizes. `table.getn` reads a numeric `n` field first, then a
--- size given by `table.setn`, and only then the array length (probed:
--- `getn({n = 5})` = 5; `setn(t, 3)` on an empty table makes getn 3).
--- `table.insert` / `table.remove` on a table that has either size keep it
--- up to date, moving elements raw as Lua 5.0 does (`insert` on `{n = 0}`
--- bumps `n`; after `setn(t, 2)` on four items, `insert(t, x)` puts x at 3).
--- A table with neither uses Luau's length and library calls unchanged. Not
--- replicated: Lua 5.0 counts up to the first nil (`{1, 2, nil, 4}` is 2
--- there, Luau's border is 4), and its insert / remove record a size on
--- every table they touch; both would cost every call, and neither is
--- probed beyond the hole case. `getn` of a string gives its length (the
--- real one raises): the plain path is `#t`, an opcode, not a type check.
-local rawget, rawset, type, select = rawget, rawset, type, select
-local tinsert, tremove = table.insert, table.remove
+-- Lua 5.0 table sizes, as the real game has them (dev/probes
+-- probe_tablesize). `table.getn` reads a numeric `n` field first, then the
+-- size the library has recorded for the table, and only then the array
+-- length. `table.setn`, `table.insert` and `table.remove` record that size
+-- (in `n` when the table has one), so a table they have touched keeps its
+-- count when entries are set to nil by hand:
+--   t = {} insert a, b, c; t[3] = nil      -> getn 3, and the next insert is t[4]
+--   six inserts, two set to nil, compacted by hand -> getn stays 6
+-- AI code leans on it: it empties slots by hand, walks `1..getn`, and
+-- expects to reach everything it ever inserted (M28's zone unit lists; with
+-- Luau's length the entries past the first gap were never visited again).
+-- Elements move raw, as in Lua 5.0. Not replicated: for a table the library
+-- has never touched, Lua 5.0 counts up to the first nil (`{1, 2, nil, 4}`
+-- is 2 there; `{'a','b','c'}` with [1] set to nil is 0), where this uses
+-- Luau's length; and `getn` of a string gives its length (the real one
+-- raises). One departure on purpose: a table left with nothing in it at all
+-- counts as empty again (Lua 5.0 keeps its old size: three inserts, all set
+-- to nil, the next insert is t[4]). The engine's own code empties queues
+-- that script fills with `table.insert`, and nothing can be lost in an
+-- empty table.
+local rawget, rawset, type, select, next = rawget, rawset, type, select, next
 local sizes = setmetatable({}, { __mode = "k" })
--- Whether `setn` has ever run: until then no table has a setn size and the
--- weak table needn't be looked at (getn / insert are hot).
-local anysized = false
+-- Tables whose size `setn` gave: kept even when empty (probed: `setn(t, 3)`
+-- on an empty table makes getn 3).
+local set = setmetatable({}, { __mode = "k" })
 
--- The table's Lua 5.0 size (`n` field or setn size) and whether it is `n`,
--- or nil. `rawget` raises for a non-table, as Luau's functions would.
--- getn / insert / remove are hot, so they first test `t.n` (an opcode, not
--- a call) and `anysized`, and fall to Luau's function for a plain table.
-local function size(t)
-    local n = rawget(t, "n")
-    if n ~= nil and type(n) == "number" then
-        return n, true
+-- The size recorded for `t` (nil for none), dropped once `t` is empty.
+local function recorded(t)
+    local s = sizes[t]
+    if s and s > 0 and rawget(t, s) == nil and next(t) == nil and not set[t] then
+        sizes[t] = nil
+        return nil
     end
-    if anysized then
-        return sizes[t], false
-    end
-    return nil
-end
-
-local function setsize(t, n, field)
-    if field then
-        rawset(t, "n", n)
-    else
-        sizes[t] = n
-    end
+    return s
 end
 
 function table.getn(t)
-    if t.n ~= nil or anysized then
-        local n = size(t)
-        if n then
+    if t.n ~= nil then
+        local n = rawget(t, "n")
+        if type(n) == "number" then
             return n
         end
     end
-    return #t
+    return recorded(t) or #t
 end
 
 function table.setn(t, n)
-    if type(n) ~= "number" then
+    if type(n) ~= "number" or type(t) ~= "table" then
         return
     end
-    if type(t) ~= "table" then
-        return
+    if type(rawget(t, "n")) == "number" then
+        rawset(t, "n", n)
+    else
+        sizes[t] = n
+        set[t] = true
     end
-    local _, field = size(t)
-    anysized = anysized or not field
-    setsize(t, n, field)
 end
 
 function table.insert(t, ...)
-    local s, field
-    if t.n ~= nil or anysized then
-        s, field = size(t)
+    local field = false
+    local s
+    if t.n ~= nil then
+        s = rawget(t, "n")
+        field = type(s) == "number"
     end
-    if s == nil then
-        return tinsert(t, ...)
+    if not field then
+        s = recorded(t) or #t
     end
     local e = s + 1
-    local pos, v
     if select("#", ...) == 1 then
-        pos, v = e, ...
-    else
-        pos, v = ...
-        if type(pos) ~= "number" then
-            return tinsert(t, ...)
-        end
-        if pos > e then
-            e = pos
-        end
+        if field then rawset(t, "n", e) else sizes[t] = e end
+        rawset(t, e, (...))
+        return
     end
-    setsize(t, e, field)
+    local pos, v = ...
+    if type(pos) ~= "number" then
+        error("bad argument #2 to 'insert' (number expected, got " .. type(pos) .. ")", 2)
+    end
+    if pos > e then
+        e = pos
+    end
+    if field then rawset(t, "n", e) else sizes[t] = e end
     for i = e - 1, pos, -1 do
         rawset(t, i + 1, rawget(t, i))
     end
@@ -91,21 +87,20 @@ function table.insert(t, ...)
 end
 
 function table.remove(t, pos)
-    local s, field
-    if t.n ~= nil or anysized then
-        s, field = size(t)
+    local field = false
+    local s
+    if t.n ~= nil then
+        s = rawget(t, "n")
+        field = type(s) == "number"
     end
-    if s == nil then
-        if pos == nil then
-            return tremove(t)
-        end
-        return tremove(t, pos)
+    if not field then
+        s = recorded(t) or #t
     end
-    pos = pos or s
     if s <= 0 then
         return
     end
-    setsize(t, s - 1, field)
+    if field then rawset(t, "n", s - 1) else sizes[t] = s - 1 end
+    pos = pos or s
     local r = rawget(t, pos)
     for i = pos, s - 1 do
         rawset(t, i, rawget(t, i + 1))
