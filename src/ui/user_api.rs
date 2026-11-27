@@ -8,6 +8,7 @@ use mlua::prelude::*;
 
 use crate::lua_api::shapes::Shaped;
 use crate::lua_api::{Obj, Status, lua_fn};
+use crate::ui::session::UiState;
 use crate::ui::shapes::Loose;
 use std::collections::BTreeMap;
 
@@ -452,7 +453,7 @@ fn front_end_data() -> std::sync::MutexGuard<'static, BTreeMap<String, crate::en
 /// `replay_filename`, which FAF's restart reads (`tabs.lua`
 /// `RestartReplay`, `misckeyactions.lua` `RestartSessionOrReplay`).
 fn launch_replay_session(lua: &Lua, filename: &str) -> LuaResult<bool> {
-    if lua.globals().raw_get::<Option<String>>("__engine_ui_state")?.as_deref() != Some("frontend") {
+    if crate::ui::session::state(lua).ui_state != UiState::Frontend {
         tracing::warn!(target: "lua", filename, "LaunchReplaySession: only from the main menu for now");
         return Ok(false);
     }
@@ -872,13 +873,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         })?;
     lua_fn!(lua, global,
         /// A game is running (not the main menu).
-        SessionIsActive = |lua, ()| Ok(lua.globals().raw_get::<Option<String>>("__engine_ui_state")?.as_deref() == Some("game")))?;
+        SessionIsActive = |lua, ()| Ok(crate::ui::session::state(lua).ui_state == UiState::Game))?;
     lua_fn!(lua, global, SessionIsReplay = |lua, ()| Ok(lua.globals().raw_get::<Option<bool>>("__engine_replay")?.unwrap_or(false)))?;
     lua_fn!(lua, global, SessionIsMultiplayer = |_, ()| Ok(crate::net::core::current().is_some_and(|n| !n.session_clients().is_empty())))?;
     lua_fn!(lua, global,
         /// A game (not the main menu) that isn't networked: a skirmish or a
         /// replay starts again on this machine alone.
-        SessionCanRestart = |lua, ()| Ok(lua.globals().raw_get::<Option<String>>("__engine_ui_state")?.as_deref() == Some("game")
+        SessionCanRestart = |lua, ()| Ok(crate::ui::session::state(lua).ui_state == UiState::Game
             && !crate::net::core::current().is_some_and(|n| !n.session_clients().is_empty())))?;
     lua_fn!(lua, global,
         /// Starts the session again from its first tick (`SessionCanRestart`):
@@ -904,6 +905,27 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global, SetUIControlsAlpha = |_, _alpha: Loose<f64>| Ok(()))?;
     lua_fn!(lua, global, AddConsoleOutputReciever = |_, _receiver: Loose<LuaFunction>| Ok(()))?;
     lua_fn!(lua, global, RemoveConsoleOutputReciever = |_, _receiver: Loose<LuaFunction>| Ok(()))?;
+    lua_fn!(lua, global,
+        /// Moho runs the sim at 10 ticks a second, whatever the game speed.
+        GetSimTicksPerSecond = |_, ()| Ok(10.0f64))?;
+    lua_fn!(lua, global,
+        /// The Anti-Aliasing choices besides Off (FAF's presets pick the middle
+        /// one for High, the last for Ultra): 1 is SMAA (render/smaa.rs);
+        /// MSAA counts (2, 4, 8) join it once MSAA is drawn.
+        GetAntiAliasingOptions = |_, ()| Ok(vec![1.0f64]))?;
+    lua_fn!(lua, global,
+        /// Sound globals are ui/sound.rs; the tutorial's voice-overs aren't.
+        #[lua(stub)]
+        PlayTutorialVO = |_, _args: LuaMultiValue| Ok(()))?;
+    lua_fn!(lua, global,
+        #[lua(stub)]
+        FlushEvents = |_, _args: LuaMultiValue| Ok(()))?;
+    lua_fn!(lua, global,
+        /// Console commands matching `text`: none.
+        ConTextMatches = |_, _text: Loose<String>| Ok(Vec::<String>::new()))?;
+    lua_fn!(lua, global,
+        /// The units handed in, unfiltered.
+        GetValidAttackingUnits = |_, units: Loose<Vec<Obj<crate::engine::api::moho::UserUnit>>>| Ok(units))?;
     lua.set_named_registry_value("user.focus_army", -1)?;
     lua_fn!(lua, global,
         /// The army the player sees as, 1-based (`--player`, else observer: -1).
@@ -926,12 +948,6 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             if key then return GetPreference(opts .. '.' .. key) end
             return GetPreference(opts, {})
         end
-        -- Sound globals are ui/sound.rs; the tutorial's voice-overs aren't.
-        function PlayTutorialVO(...) end
-        -- The Anti-Aliasing choices besides Off (FAF's presets pick the middle
-        -- one for High, the last for Ultra): 1 is SMAA (render/smaa.rs);
-        -- MSAA counts (2, 4, 8) join it once MSAA is drawn.
-        function GetAntiAliasingOptions() return { 1 } end
         -- Range overlays (the military / intel rings): filters defined by
         -- name, then the active set chosen. Kept, not drawn yet.
         local overlayFilters, activeOverlays, overlayVersion = {}, {}, 0
@@ -984,23 +1000,6 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         -- the renderer (`ui::console`).
         function ConExecute(command) __engine_con_execute(command) end
         function ConExecuteSave(command) __engine_con_execute(command) end
-        function ConTextMatches(text) return {} end
-        function GetSimTicksPerSecond() return 10 end
-        -- Game speed as moho's step (-10..10, 0 normal; rate 10^(step/10)):
-        -- the engine keeps `__engine_game_speed` current and takes requests
-        -- (`UserVm::set_game_speed` / `take_speed_request`).
-        function GetGameSpeed() return rawget(_G, '__engine_game_speed') or 0 end
-        function SetGameSpeed(speed) rawset(_G, '__engine_speed_request', math.max(-10, math.min(10, math.floor(speed or 0)))) end
-        function GameTick() return rawget(_G, '__engine_ui_tick') or 0 end
-        function GameTime() return (rawget(_G, '__engine_ui_tick') or 0) / 10 end
-        function GetGameTime() return FormatTime((rawget(_G, '__engine_ui_tick') or 0) / 10) end
-        function GetGameTimeSeconds() return (rawget(_G, '__engine_ui_tick') or 0) / 10 end
-        function FormatTime(seconds)
-            local s = math.floor(seconds or 0)
-            return string.format('%02d:%02d:%02d', math.floor(s / 3600), math.floor(s / 60) % 60, s % 60)
-        end
-        -- The rate the sim actually runs at (1 = normal).
-        function GetSimRate() return rawget(_G, '__engine_sim_rate') or 0 end
         -- The player's selection, set by the engine from the renderer's
         -- selection (`UserVm::set_selection`): a new table each call, nil
         -- when nothing is selected, as moho's. FAF adds to the table it gets
@@ -1092,11 +1091,6 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         end
         function GetIdleEngineers() return idle('ENGINEER - COMMAND') end
         function GetIdleFactories() return idle('FACTORY STRUCTURE') end
-        -- A session's world is loaded and running: moho's world state is
-        -- "playing" (6 of 0..8; the binding in SupremeCommander.exe compares
-        -- it), which pausing, the game ending and `SessionEndGame` leave
-        -- alone. False at the main menu, where there is no world.
-        function WorldIsPlaying() return rawget(_G, '__engine_ui_state') == 'game' end
         -- Selecting from the interface is synchronous, as in moho: the new
         -- selection is what `GetSelectedUnits()` returns on the next line and
         -- what selection orders given after it go to (FAF selects a factory,
@@ -1240,7 +1234,6 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         end
         function GetInputCapture() return captures[table.getn(captures)] end
         function AnyInputCapture() return table.getn(captures) > 0 end
-        function FlushEvents() end
         function GetMouseScreenPos() return { rawget(_G, '__engine_mouse_x') or 0, rawget(_G, '__engine_mouse_y') or 0 } end
         -- A unit's rollover table, as moho builds it (FA's exe 0x847d40):
         -- the economy as whole numbers per second (the per-tick rate times
@@ -1294,24 +1287,6 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             end
             return info
         end
-        -- Moho's interface states: 'frontend' (the main menu) or 'game'.
-        rawset(_G, '__engine_ui_state', 'game')
-        function GetCurrentUIState() return rawget(_G, '__engine_ui_state') end
-        -- The renderer closes the window (`UserVm::exit_requested`).
-        function ExitApplication() rawset(_G, '__engine_exit_request', true) end
-        -- Session control: the engine keeps `__engine_paused` current; pause
-        -- requests are taken by the renderer (`UserVm::take_pause_request`).
-        -- A request not yet taken shows in `SessionIsPaused` at once, as the
-        -- real game's does in the same frame (dev/probes probe_ui_globals,
-        -- probe_re2_ui).
-        rawset(_G, '__engine_paused', false)
-        function SessionIsPaused()
-            local asked = rawget(_G, '__engine_pause_request')
-            if asked ~= nil then return asked end
-            return rawget(_G, '__engine_paused')
-        end
-        function SessionRequestPause() rawset(_G, '__engine_pause_request', true) end
-        function SessionResume() rawset(_G, '__engine_pause_request', false) end
         -- Every game played in the window is recorded (a replay being
         -- watched isn't).
         function SessionIsBeingRecorded() return not SessionIsReplay() end
@@ -1435,7 +1410,6 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         end
         function GetAttachedUnitsList(units) return gather(units, 'cargo') end
         function GetAssistingUnitsList(units) return gather(units, 'assisters') end
-        function GetValidAttackingUnits(units) return units end
         -- Orders from the interface: queued for the engine, which turns them
         -- into player commands for the selection (`UserVm::take_orders`).
         local orders = {}
@@ -1676,9 +1650,9 @@ mod special_file_tests {
         std::fs::write(&theirs, "12 0 0 1 2 0 - - - 5 - 0 - - -\n").unwrap();
         let (ours, theirs) = (ours.to_string_lossy().into_owned(), theirs.to_string_lossy().into_owned());
 
-        lua.globals().raw_set("__engine_ui_state", "game").unwrap();
+        crate::ui::session::state(&lua).ui_state = UiState::Game;
         assert!(!launch_replay_session(&lua, &ours).unwrap(), "not mid-game");
-        lua.globals().raw_set("__engine_ui_state", "frontend").unwrap();
+        crate::ui::session::state(&lua).ui_state = UiState::Frontend;
         assert!(!launch_replay_session(&lua, &theirs).unwrap(), "no header");
         assert!(!launch_replay_session(&lua, "/no/such/file.rtsreplay").unwrap());
         assert!(lua.globals().raw_get::<LuaValue>("__engine_launch_replay").unwrap().is_nil());

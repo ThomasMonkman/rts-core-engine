@@ -105,7 +105,6 @@ signatures! {
         ClearSessionExtraSelectList();
         ConExecute(command: String);
         ConExecuteSave(command: String);
-        ConTextMatches(text: String) -> Vec<String>;
         CopyCurrentReplay(profile: String, new_filename: String);
         CreateUnitAtMouse(blueprint_id: String, owner_army_index: f64, offset_mouse_world_pos_x: f64, offset_mouse_world_pos_z: f64, rotation: f64) -> Obj<moho::UserUnit>;
         DecreaseBuildCountInQueue(queue_index: f64, count: f64);
@@ -114,28 +113,19 @@ signatures! {
         EngineStartFrontEndUI();
         EngineStartSplashScreens();
         ExecLuaInSim(func: String, arg: LuaValue);
-        ExitApplication();
         ExitGame();
         FlushEvents();
-        FormatTime(seconds: f64) -> String;
-        GameTick() -> f64;
-        GameTime() -> f64;
         GenerateBuildTemplateFromSelection();
         /// A `UIBuildTemplate`: `{ width, height, { blueprint, id, x, z }, ... }`, x / z offsets from the cursor.
         GetActiveBuildTemplate() -> Vec<LuaValue>;
-        GetAntiAliasingOptions() -> Vec<f64>;
         GetArmiesTable() -> Shaped<ArmiesTable>;
         GetArmyAvatars() -> Vec<Obj<moho::UserUnit>>;
         GetArmyScore(army_index: f64) -> f64;
         GetAssistingUnitsList(units: Vec<Obj<moho::UserUnit>>) -> Vec<Obj<moho::UserUnit>>;
         GetAttachedUnitsList(units: Vec<Obj<moho::UserUnit>>) -> Vec<Obj<moho::UserUnit>>;
-        GetCurrentUIState() -> String;
         GetCursor() -> Option<Obj<moho::Cursor>>;
         GetEconomyTotals() -> Shaped<EconomyTotals>;
         GetFireState(units: Vec<Obj<moho::UserUnit>>) -> FireState;
-        GetGameSpeed() -> f64;
-        GetGameTime() -> String;
-        GetGameTimeSeconds() -> f64;
         GetHighlightCommand() -> Option<Shaped<HighlightCommand>>;
         GetIdleEngineers() -> Vec<Obj<moho::UserUnit>>;
         GetIdleFactories() -> Vec<Obj<moho::UserUnit>>;
@@ -156,12 +146,9 @@ signatures! {
         GetScriptBit(unit: Obj<moho::UserUnit>, bit: f64) -> bool;
         GetSelectedUnits() -> Vec<Obj<moho::UserUnit>>;
         GetSessionClients() -> List<Shaped<SessionClientData>>;
-        GetSimRate() -> f64;
-        GetSimTicksPerSecond() -> f64;
         GetUnitById(id: String) -> Option<Obj<moho::UserUnit>>;
         GetUnitCommandDataOfUnit(unit: Obj<moho::UserUnit>) -> (Vec<String>, Vec<String>, EntityCategory);
         GetUnitCommandFromCommandCap(rule: String) -> String;
-        GetValidAttackingUnits() -> Vec<Obj<moho::UserUnit>>;
         GpgNetSend(command: String, rest: mlua::Variadic<LuaValue>);
         /// Key name to action (a name, or a table with an `action`).
         IN_AddKeyMapTable(key_map_table: BTreeMap<String, mlua::Either<String, LuaTable>>);
@@ -205,9 +192,6 @@ signatures! {
         SessionGetScenarioInfo() -> LuaTable;
         SessionIsBeingRecorded() -> bool;
         SessionIsObservingAllowed() -> bool;
-        SessionIsPaused() -> bool;
-        SessionRequestPause();
-        SessionResume();
         /// To everyone.
         SessionSendChatMessage(message: mlua::Either<LuaTable, mlua::Either<f64, String>>);
         /// To the given session client index (1-based) or indices.
@@ -220,7 +204,6 @@ signatures! {
         SetCurrentFactoryForQueueDisplay(unit: Obj<moho::UserUnit>) -> Option<Vec<Shaped<QueueEntry>>>;
         SetCursor(cursor: Obj<moho::Cursor>);
         SetFireState(units: Vec<Obj<moho::UserUnit>>, fire_state: FireState);
-        SetGameSpeed(speed: f64);
         SetInvertMidMouseButton(flag: bool);
         SetOverlayFilter(overlay: String, categories: EntityCategory, normal_color: Color, select_color: Color, rollover_color: Color, inner1: f64, inner2: f64, outer1: f64, outer2: f64);
         /// Range overlay names; an empty list turns them off.
@@ -235,7 +218,6 @@ signatures! {
         UISelectionByCategory(expression: String, add_to_cur_sel: bool, in_view_frustum: bool, nearest_to_mouse: bool, must_be_idle: bool);
         UIZoomTo(units: Vec<Obj<moho::UserUnit>>, seconds: Option<f64>);
         ValidateUnitsList(units: Vec<Obj<moho::UserUnit>>) -> Vec<Obj<moho::UserUnit>>;
-        WorldIsPlaying() -> bool;
         _c_CreateDecal(decal: Obj<moho::UserDecal>, spec: Option<LuaTable>);
         _c_CreatePathDebugger(path_debugger: Obj<moho::PathDebugger>, spec: LuaTable);
     }

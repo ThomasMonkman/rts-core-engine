@@ -19,6 +19,7 @@ pub mod movie;
 pub mod net_lobby;
 pub mod prefs;
 pub mod replay;
+pub mod session;
 pub mod shapes;
 pub mod signatures;
 pub mod sound;
@@ -441,6 +442,7 @@ impl UserVm {
         api::spec_footprints::register_safe(&lua)?;
         api::categories::register(&lua)?;
         user_api::register(&lua)?;
+        session::register(&lua)?;
         api::core::register(&lua)?;
         world_pick::register(&lua)?;
         world_draw::register(&lua)?;
@@ -695,6 +697,7 @@ impl UserVm {
     /// (skin, layout, cursor), then `uimain.StartFrontEndUI()` (FAF's
     /// `menus/main.lua`).
     pub fn start_front_end(&self) -> LuaResult<()> {
+        session::state(&self.lua).ui_state = session::UiState::Frontend;
         self.lua.load(include_str!("front_end.lua")).set_name("=[engine front end]").exec()
     }
 
@@ -703,7 +706,7 @@ impl UserVm {
     /// (`gamemain.OnBeat`, which updates the economy bar and other panels).
     pub fn beat(&self, tick: u64, economy: &[crate::engine::snapshot::ArmyEconomy]) -> LuaResult<()> {
         let g = self.lua.globals();
-        g.raw_set("__engine_ui_tick", tick)?;
+        session::state(&self.lua).tick = tick;
         let focus: i64 = self.lua.named_registry_value("user.focus_army")?;
         let shown = if focus >= 1 { focus as u32 } else { 1 };
         // Each army's synced overflow flag, for `GetResourceSharing` (which
@@ -1464,7 +1467,7 @@ impl UserVm {
     /// The interface asked to quit (FAF's `ExitApplication`: the main
     /// menu's Exit).
     pub fn exit_requested(&self) -> LuaResult<bool> {
-        Ok(self.lua.globals().raw_get::<Option<bool>>("__engine_exit_request")?.unwrap_or(false))
+        Ok(session::state(&self.lua).exit_request)
     }
 
     /// A pause / resume the interface asked for (FAF's pause button:
@@ -1475,9 +1478,11 @@ impl UserVm {
     /// session client who changed it, 1-based).
     pub fn set_game_speed(&self, step: i32, rate: f32, by: u32) -> LuaResult<()> {
         let g = self.lua.globals();
-        let old: Option<i32> = g.raw_get("__engine_game_speed")?;
-        g.raw_set("__engine_game_speed", step)?;
-        g.raw_set("__engine_sim_rate", rate)?;
+        let old = {
+            let mut s = session::state(&self.lua);
+            s.sim_rate = rate;
+            s.game_speed.replace(step)
+        };
         // A change, or a game that starts away from normal speed (FAF's
         // clock starts at +0 and only hears changes).
         if old.map_or(step != 0, |o| o != step) {
@@ -1493,21 +1498,11 @@ impl UserVm {
 
     /// A game speed the interface asked for (`SetGameSpeed`), as a step.
     pub fn take_speed_request(&self) -> LuaResult<Option<i32>> {
-        let g = self.lua.globals();
-        let v: Option<i32> = g.raw_get("__engine_speed_request")?;
-        if v.is_some() {
-            g.raw_set("__engine_speed_request", LuaNil)?;
-        }
-        Ok(v)
+        Ok(session::state(&self.lua).speed_request.take())
     }
 
     pub fn take_pause_request(&self) -> LuaResult<Option<bool>> {
-        let g = self.lua.globals();
-        let v: Option<bool> = g.raw_get("__engine_pause_request")?;
-        if v.is_some() {
-            g.raw_set("__engine_pause_request", LuaNil)?;
-        }
-        Ok(v)
+        Ok(session::state(&self.lua).pause_request.take())
     }
 
     /// The sim ended the game (`EndGame`): `SessionIsGameOver` turns true
@@ -1622,10 +1617,9 @@ impl UserVm {
     /// `OnUserPause(pause)` (`/lua/ui/game/gamemain.lua`).
     pub fn set_paused(&self, paused: bool) -> LuaResult<()> {
         let g = self.lua.globals();
-        if g.raw_get::<Option<bool>>("__engine_paused")? == Some(paused) {
+        if std::mem::replace(&mut session::state(&self.lua).paused, paused) == paused {
             return Ok(());
         }
-        g.raw_set("__engine_paused", paused)?;
         let import: LuaFunction = g.get("import")?;
         let main: LuaTable = import.call("/lua/ui/game/gamemain.lua")?;
         if paused {
