@@ -30,7 +30,6 @@ pub const SIM: &[&str] = &[
     "LUnitMoveNear",
     "PlayLoop",
     "SelectedUnit",
-    "SetAlliedVictory",
     "SetArmyStatsSyncArmy",
     "SetTerrainType",
     "SetTerrainTypeRect",

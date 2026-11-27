@@ -236,6 +236,18 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_fn!(lua, global,
+        /// `SetAlliedVictory(army, state)`: sets the army's brain's
+        /// `RequestingAlliedVictory`, the field FAF's victory rules read
+        /// (FA exe 0x709920: `SetBoolean("RequestingAlliedVictory", state)`
+        /// on the brain's script object). The engine keeps no flag itself.
+        SetAlliedVictory = |lua, (army, state): (shapes::Army, bool)| {
+            let army = resolve_army(lua, &army)?;
+            if let Some(brain) = brain_obj(lua, army)? {
+                brain.raw_set("RequestingAlliedVictory", state)?;
+            }
+            Ok(())
+        })?;
+    lua_fn!(lua, global,
         /// The army this client views the game as (1-based; -1 = observer).
         GetFocusArmy = |lua, ()| Ok(lua.app_data_ref::<FocusArmy>().map_or(-1, |f| f.0)))?;
     lua_fn!(lua, global,
@@ -1200,5 +1212,21 @@ mod tests {
         let armies = lua.app_data_ref::<Armies>().unwrap();
         assert!(!armies.get(1).unwrap().show_score);
         assert_ne!(armies.display_version(), before);
+    }
+
+    #[test]
+    fn set_allied_victory() {
+        use crate::engine::sim::army::{Armies, Army};
+        let lua = mlua::Lua::new();
+        crate::engine::api::moho::register(&lua).unwrap();
+        super::register(&lua).unwrap();
+        lua.app_data_mut::<Armies>().unwrap().list.push(Army { index: 1, name: "UEF".into(), ..Default::default() });
+        let brain = lua.create_table().unwrap();
+        super::brains(&lua).unwrap().raw_set(1, &brain).unwrap();
+        lua.load("SetAlliedVictory(1, true)").exec().unwrap();
+        assert_eq!(brain.raw_get::<Option<bool>>("RequestingAlliedVictory").unwrap(), Some(true));
+        lua.load("SetAlliedVictory('UEF', false)").exec().unwrap();
+        assert_eq!(brain.raw_get::<Option<bool>>("RequestingAlliedVictory").unwrap(), Some(false));
+        assert!(lua.load("SetAlliedVictory(9, true)").exec().is_err());
     }
 }
