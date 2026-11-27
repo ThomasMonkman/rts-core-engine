@@ -50,7 +50,6 @@ signatures! {
         LOG(out: LuaValue, rest: mlua::Variadic<LuaValue>);
         SPEW(out: LuaValue, rest: mlua::Variadic<LuaValue>);
         SelectedUnit() -> Obj<moho::Unit>;
-        SetAlliedVictory(army: Army, state: bool);
         SetArmyStatsSyncArmy(army: Army);
         SetTerrainType(x: f64, z: f64, type_: LuaTable);
         SetTerrainTypeRect(rect: Rect, type_: LuaTable);
