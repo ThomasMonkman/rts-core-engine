@@ -200,7 +200,6 @@ signatures! {
         FindFurthestUnit(squad: String, alliance: String, can_attack: bool, category: EntityCategory) -> Option<Obj<moho::Unit>>;
         FindHighestValueUnit(squad: String, alliance: String, can_attack: bool, category: EntityCategory) -> Option<Obj<moho::Unit>>;
         GetAIPlan() -> LuaValue;
-        GetFactionIndex() -> f64;
         GetFerryBeacons() -> LuaTable;
         GetPersonality() -> LuaValue;
         SwitchAIPlan(plan: LuaValue);
@@ -227,7 +226,6 @@ signatures! {
     // (FA's exe only) SupremeCommander.exe 0x6d27f0, 0x6d5560, 0x6d4f20.
     // FA's exe patches change none of them.
     moho::Unit {
-        AlterArmor(damage_type: String, multiplier: f64);
         /// Both corners read by the exe's vector reader (0x4d6ba0).
         CanPathToRect(a: Vector, b: Vector) -> bool;
         EnableManipulators(bone: Bone, enable: bool);

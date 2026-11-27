@@ -179,8 +179,14 @@ fn select_for_template(
             _ => Fx::ZERO,
         }
     };
+    // A unit still under construction is in its pool but can't be picked
+    // (dev/probes probe_poolbuild: listed by the pool's `GetPlatoonUnits`,
+    // `CanFormPlatoon` false until it is finished, mobile or structure).
+    // Stock AI forms a scout platoon the moment the pool can fill one.
+    let being_built = crate::engine::sim::unit_state::UnitStates::index("BeingBuilt").expect("unit state");
     let mut candidates: Vec<(Fx, EntityId)> = members
         .into_iter()
+        .filter(|&id| !world.get(id).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.states.contains(being_built)))
         .map(|id| (dist2(id), id))
         .filter(|&(d, _)| match (location, r2) {
             (Some(_), Some(r2)) => d <= r2,
@@ -332,6 +338,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 Some(army) => crate::engine::api::army::brain_obj(lua, army),
                 None => Ok(None),
             }
+        })?;
+    lua_method!(lua, moho::Platoon,
+        /// The platoon's army's faction, 1-based, as the brain's
+        /// `GetFactionIndex` (the stock game's AI asks the platoon).
+        GetFactionIndex = |lua, this: Obj<moho::Platoon>| {
+            let id = live_id(lua, &this)?;
+            let army = platoons(lua).get(id).map(|p| p.army);
+            Ok(army.and_then(|army| lua.app_data_ref::<crate::engine::sim::army::Armies>().and_then(|a| a.get(army).map(|a| a.faction))))
         })?;
     /// Units back to the army pool, platoon gone, `OnDestroy` on it.
     fn disband(lua: &Lua, id: PlatoonId) -> LuaResult<()> {

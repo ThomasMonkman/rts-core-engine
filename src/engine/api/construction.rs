@@ -283,6 +283,16 @@ pub(crate) fn skirt_max(lua: &Lua, bp: &str) -> LuaResult<Fx> {
     Ok((x1 - x0).max(z1 - z0))
 }
 
+/// A surface builder at `p` stands on a cell a structure covers.
+fn inside_structure(lua: &Lua, builder: EntityId, p: FxVec3) -> bool {
+    let flying = entity::world(lua).get(builder).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.layer == crate::engine::sim::layer::Layer::Air);
+    !flying
+        && lua.app_data_ref::<crate::engine::sim::nav::NavGrid>().is_some_and(|n| {
+            let (x, z) = n.cell_of(p);
+            n.blocked_cell(x, z)
+        })
+}
+
 /// A build order the builder could start now: (order kind, command, blueprint,
 /// site), if its current order is a build and it's in range. A mobile build
 /// is in range as moho's `CUnitMobileBuildTask` (MohoEngine.dll 0x101e30ac..
@@ -322,8 +332,12 @@ fn ready_to_start(lua: &Lua, builder: EntityId) -> LuaResult<Option<(BuildOrder,
             // order has started the structure there.
             let r = r + skirt_max(lua, &bp)?;
             let (dx, dz) = (target.x - p.x, target.z - p.z);
-            let in_range = dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)) <= r.saturating_mul(r);
-            tracing::debug!("BUILDREACH id={builder} bp={bp} pos={p:?} site={target:?} reach={r}");
+            // A builder standing inside a structure (a factory's new unit
+            // still on the pad) walks out towards the site first, as one out
+            // of range does (FAF probe probe_padbuild2: `placed`, `attached`,
+            // `detached` walk, 7.2 from a site in reach at 8; `rolled`,
+            // outside the factory, builds where it stands).
+            let in_range = dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)) <= r.saturating_mul(r) && !inside_structure(lua, builder, p);
             Ok(in_range.then_some((BuildOrder::Mobile, cmd.id, bp, target)))
         }
         // Factories build at their build attach bone (else their origin);
@@ -867,15 +881,12 @@ fn finish_shared(lua: &Lua, command: CommandId, target: EntityId) -> LuaResult<(
 }
 
 /// A structure its builder's job saw at fraction 1 finishes:
-/// `OnStopBeingBuilt` (with adjacency), then the builder stops — its
+/// `OnStopBeingBuilt` (with adjacency; not again if a helper finished it,
+/// [`complete_without_builder`]), then the builder stops — its
 /// `OnStopBuild`, where FAF's `UpgradingState.OnStopBuild` swaps a finished
 /// upgrade — and the order is done.
 fn complete(lua: &Lua, builder: EntityId, job: &Job, builder_obj: &LuaTable, target_obj: &LuaTable) -> LuaResult<()> {
-    crate::engine::api::unit_stats::unit_finished(lua, job.target)?;
-    set_state(lua, job.target, "BeingBuilt", false);
-    let layer = entity::world(lua).get(job.target).and_then(|e| e.unit.as_deref().map(|u| u.layer)).unwrap_or_default();
-    UnitCallbacks::on_stop_being_built(lua, target_obj, "unit", Some(Obj::new(builder_obj.clone())), layer)?;
-    crate::engine::api::adjacency::on_finished(lua, job.target)?;
+    finish_target(lua, job.target, target_obj, builder_obj)?;
     stop(lua, builder, true)?;
     finish_order(lua, builder, job);
     if job.order == BuildOrder::Mobile {
@@ -1060,12 +1071,12 @@ fn destroy_unfinished(lua: &Lua, target: EntityId) -> LuaResult<()> {
     Ok(())
 }
 
-/// A mobile build cancelled: `OnStopBuild`, then `OnFailedToBuild` when the
-/// structure is unfinished (dev/probes probe_unit_build G2, G8).
+/// A mobile build cancelled: `OnStopBuild`, then `OnFailedToBuild`
+/// (dev/probes probe_unit_build G2, G8), also when a helper has finished the
+/// structure and the builder, paused, still held its order (probe_padbuild
+/// `hold-clear`, `hold-callback`: both callbacks inside the clear).
 fn cancel_mobile(lua: &Lua, builder: EntityId, builder_alive: bool) -> LuaResult<()> {
-    let Some(job) = stop(lua, builder, builder_alive)? else { return Ok(()) };
-    let unfinished = entity::world(lua).get(job.target).is_some_and(|e| e.fraction_complete < Fx::ONE);
-    if builder_alive && unfinished
+    if stop(lua, builder, builder_alive)?.is_some() && builder_alive
         && let Some(b) = object(lua, builder)? {
         UnitCallbacks::on_failed_to_build(lua, &b, "unit")?;
     }
@@ -2023,6 +2034,12 @@ fn assists(lua: &Lua) -> LuaResult<()> {
                 _ => false,
             }
         });
+        // A builder standing inside a structure (a factory's new engineer
+        // on the pad) doesn't start work from there: it walks out first
+        // (`api::movement`; dev/probes probe_padassist).
+        let current = lua.app_data_ref::<Assists>().and_then(|a| a.0.get(&assister).copied());
+        let at = entity::world(lua).get(assister).map(|a| a.position());
+        let in_range = in_range && (current.is_some() || !at.is_some_and(|p| inside_structure(lua, assister, p)));
         // `GuardBusy` while a guard has work: from the order on when it
         // helps a builder (it walks to the site busy), once in range of a
         // factory it helps (the real engineer guarding a factory reads it
@@ -2035,7 +2052,6 @@ fn assists(lua: &Lua) -> LuaResult<()> {
                 && lua.app_data_ref::<Commands>().is_some_and(|c| c.current(target).is_some_and(|t| matches!(t.kind, CommandKind::BuildMobile)));
             set_state(lua, assister, "GuardBusy", to_build || (work.is_some() && (in_range || !factory_target)));
         }
-        let current = lua.app_data_ref::<Assists>().and_then(|a| a.0.get(&assister).copied());
         let Some(work) = work.filter(|_| in_range) else {
             if current.is_some() {
                 stop_assist(lua, assister)?;
@@ -2183,8 +2199,7 @@ fn assists(lua: &Lua) -> LuaResult<()> {
         let lane = assist_progress(lua, work);
         set_work_progress(lua, assister, lane);
         if finished_build {
-            // No builder of its own (abandoned / assisted-only): finish it here;
-            // with a builder, the builder's job completes it next tick.
+            // The structure finishes now, whoever holds its build job.
             complete_without_builder(lua, work, &w_obj, &a_obj)?;
         }
         if finished_build || healed {
@@ -2220,19 +2235,36 @@ fn set_work_progress(lua: &Lua, unit: EntityId, progress: Fx) {
 }
 
 /// A unit whose construction just reached 1 through someone other than its
-/// builder (assist, sacrifice): if no builder job holds it, finish it here
-/// (`OnStopBeingBuilt(by, layer)`, adjacency); a builder's job completes it
-/// next tick otherwise.
+/// builder (assist, sacrifice) finishes at once: `OnStopBeingBuilt(builder,
+/// layer)` and adjacency, before the helper's `OnStopBuild`. The builder
+/// passed is the one whose job holds it (the lowest id of several), paused
+/// or not, else `by`. That builder's job then only has its own stop left
+/// ([`complete`]); if its order is cleared first, inside the helper's
+/// `OnStopBuild` say, nothing more is owed to the structure (FAF probe
+/// probe_padbuild `hold-*`: `structure.OnStopBeingBuilt builder=e1` in the
+/// tick the fraction reaches 1 with e1 paused, then `e2.OnStopBuild`).
 pub(crate) fn complete_without_builder(lua: &Lua, work: EntityId, work_obj: &LuaTable, by: &LuaTable) -> LuaResult<()> {
-    let has_builder = lua.app_data_ref::<Builds>().is_some_and(|b| b.0.values().any(|j| j.target == work));
-    if has_builder {
+    let holder = lua.app_data_ref::<Builds>().and_then(|b| b.0.iter().find(|(_, j)| j.target == work).map(|(&b, _)| b));
+    let holder_obj = match holder {
+        Some(h) => object(lua, h)?,
+        None => None,
+    };
+    finish_target(lua, work, work_obj, holder_obj.as_ref().unwrap_or(by))
+}
+
+/// The structure's side of finishing, once: stats, `BeingBuilt` off,
+/// `OnStopBeingBuilt(builder, layer)`, adjacency. Nothing if it has already
+/// finished (an assister got there first).
+fn finish_target(lua: &Lua, target: EntityId, target_obj: &LuaTable, builder_obj: &LuaTable) -> LuaResult<()> {
+    let being_built = state("BeingBuilt");
+    if !entity::world(lua).get(target).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.states.contains(being_built)) {
         return Ok(());
     }
-    crate::engine::api::unit_stats::unit_finished(lua, work)?;
-    set_state(lua, work, "BeingBuilt", false);
-    let layer = entity::world(lua).get(work).and_then(|e| e.unit.as_deref().map(|u| u.layer)).unwrap_or_default();
-    UnitCallbacks::on_stop_being_built(lua, work_obj, "unit", Some(Obj::new(by.clone())), layer)?;
-    crate::engine::api::adjacency::on_finished(lua, work)
+    crate::engine::api::unit_stats::unit_finished(lua, target)?;
+    set_state(lua, target, "BeingBuilt", false);
+    let layer = entity::world(lua).get(target).and_then(|e| e.unit.as_deref().map(|u| u.layer)).unwrap_or_default();
+    UnitCallbacks::on_stop_being_built(lua, target_obj, "unit", Some(Obj::new(builder_obj.clone())), layer)?;
+    crate::engine::api::adjacency::on_finished(lua, target)
 }
 
 pub fn register(lua: &Lua) -> LuaResult<()> {

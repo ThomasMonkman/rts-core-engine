@@ -510,11 +510,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
 
     // moho.manipulator_methods (base of every manipulator)
     lua_method!(lua, moho::Manipulator,
-        /// Evaluation order against the unit's other manipulators.
+        /// Evaluation order against the unit's other manipulators. Returns
+        /// the manipulator, as the other setters do (mods chain it:
+        /// `CreateRotator(...):SetPrecedence(1):SetTargetSpeed(40)`).
         SetPrecedence = |lua, (this, p): (Obj<moho::Manipulator>, i32)| {
         let id = id_of(&this)?;
         manips(lua).set_precedence(id, p);
-        Ok(())
+        Ok(this)
     })?;
     lua_method!(lua, moho::Manipulator,
         /// Removes the manipulator.

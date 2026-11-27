@@ -59,15 +59,15 @@ pub const UNUSED: &[(&str, &[&str], &str)] = &[
         "platoon_methods",
         &[
             "CanConsiderFormingPlatoon", "Destroy", "DisbandOnIdle", "FerryToLocation", "FindClosestUnitToBase", "FindFurthestUnit",
-            "FindHighestValueUnit", "GetAIPlan", "GetFactionIndex", "GetFerryBeacons", "GetPersonality", "GetPlatoonLifetimeStats",
+            "FindHighestValueUnit", "GetAIPlan", "GetFerryBeacons", "GetPersonality", "GetPlatoonLifetimeStats",
             "SwitchAIPlan", "UseTeleporter",
         ],
-        "scripts disband through the brain and ask the brain for its faction and personality",
+        "scripts disband through the brain and ask the brain for its personality",
     ),
     (
         "unit_methods",
         &[
-            "AlterArmor", "CanPathToRect", "EnableManipulators", "GetCurrentMoveLocation",
+            "CanPathToRect", "EnableManipulators", "GetCurrentMoveLocation",
             "HasMeleeSpaceAroundTarget", "HasValidTeleportDest", "IsValidTarget", "KillManipulator", "KillManipulators",
             "MeleeWarpAdjacentToTarget", "PrintCommandQueue", "RecoilImpulse", "ScaleGetBuiltEmitter", "SetIsValidTarget",
         ],

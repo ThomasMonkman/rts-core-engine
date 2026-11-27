@@ -27,6 +27,7 @@ mod actual_fa_files_tests;
 /// | implicit `arg`     | ✓ (5.0)| ✗                | ✗ (`local arg = table.pack(...)`) |
 /// | nested `[[ [[ ]] ]]` | ✓ (5.0)| ✗              | ✗ (levelled `[=[ ]=]`)        |
 /// | `1then` (numeral + name) | ✓ (5.0)| ✗          | ✗ (split to `1 then`)         |
+/// | `0.5..'x'` (fraction + concat) | ✓ (5.0)| ✗    | ✗ (split to `0.5 ..'x'`)      |
 ///
 /// The bitwise pass parses with `full_moon` configured for Lua 5.3 **and** Luau
 /// at once, so `continue` and bitwise operators coexist without any masking.

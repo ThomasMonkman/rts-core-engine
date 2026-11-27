@@ -614,7 +614,8 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         // (snapped to the grid, as construction starts it) and its skirt
         // size, which their build range adds (`movement::goal`). Skirts read
         // once per blueprint.
-        let mut build_sites: movement::UnitMap<(FxVec3, Fx)> = movement::UnitMap::default();
+        // (Gathered by unit: the map itself takes units in ascending order.)
+        let mut sites: std::collections::BTreeMap<crate::engine::sim::entity::EntityId, (FxVec3, Fx)> = std::collections::BTreeMap::new();
         {
             let mut by_bp: std::collections::BTreeMap<&str, Fx> = std::collections::BTreeMap::new();
             for u in commands.units_doing(&[crate::engine::sim::command::CommandKind::BuildMobile]) {
@@ -628,9 +629,62 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                         s
                     }
                 };
-                build_sites.push_first(u, (crate::engine::api::construction::snap_site(lua, bp, target)?, skirt));
+                // A builder inside a structure (a factory's new unit on the
+                // pad) has no reach until it has walked out
+                // (`construction::ready_to_start`).
+                let inside = world.get(u).is_some_and(|e| {
+                    e.unit.as_deref().is_some_and(|x| x.layer != crate::engine::sim::layer::Layer::Air)
+                        && nav.as_deref().is_some_and(|n| {
+                            let (cx, cz) = n.cell_of(e.position());
+                            n.blocked_cell(cx, cz)
+                        })
+                });
+                let skirt = if inside { movement::NO_REACH } else { skirt };
+                sites.entry(u).or_insert((crate::engine::api::construction::snap_site(lua, bp, target)?, skirt));
+            }
+            // A builder told to guard or repair while it stands inside a
+            // structure (a factory's new engineer, still on the pad) walks
+            // out before anything else, whatever its target's range: the
+            // real one guarding its own factory ends 5.6 in front of the
+            // factory's centre and the factory is free 16 ticks on
+            // (dev/probes probe_padassist `guardfac`; ours stayed and the
+            // factory stayed busy). Out: from the structure's centre through
+            // the unit, 3 past the footprint (the distance is inferred from
+            // that one case).
+            if let Some(n) = nav.as_deref() {
+                use crate::engine::sim::command::CommandKind as K;
+                for u in commands.units_doing(&[K::Guard, K::Repair]) {
+                    let Some(e) = world.get(u) else { continue };
+                    let p = e.position();
+                    if !e.unit.as_deref().is_some_and(|x| x.build_rate > Fx::ZERO && x.layer != crate::engine::sim::layer::Layer::Air) {
+                        continue;
+                    }
+                    let (cx, cz) = n.cell_of(p);
+                    if !n.blocked_cell(cx, cz) {
+                        continue;
+                    }
+                    // (Units are found by their centres: far enough out for
+                    // the largest footprint.)
+                    let far = Fx::from_num(16);
+                    let Some((x0, z0, x1, z1)) = world
+                        .units_in_rect(p.x - far, p.z - far, p.x + far, p.z + far)
+                        .into_iter()
+                        .filter_map(|id| world.get(id)?.unit.as_deref()?.nav_block)
+                        .find(|r| p.x >= r.0 && p.x <= r.2 && p.z >= r.1 && p.z <= r.3)
+                    else {
+                        continue;
+                    };
+                    let centre = FxVec3 { x: (x0 + x1) / 2, y: p.y, z: (z0 + z1) / 2 };
+                    // (Dead centre: out the front.)
+                    let front = FxVec3 { x: Fx::ZERO, y: Fx::ZERO, z: Fx::ONE };
+                    let off = FxVec3 { x: p.x - centre.x, y: Fx::ZERO, z: p.z - centre.z };
+                    let dir = if off.x.abs().max(off.z.abs()) < Fx::from_num(0.05) { front } else { off.normalized().unwrap_or(front) };
+                    let out = (x1 - x0).max(z1 - z0) / 2 + Fx::from_num(3);
+                    sites.entry(u).or_insert((FxVec3 { x: centre.x + dir.x * out, y: p.y, z: centre.z + dir.z * out }, movement::NO_REACH));
+                }
             }
         }
+        let build_sites: movement::UnitMap<(FxVec3, Fx)> = sites.into();
         // Units in a fall don't drive or get stood on the ground: the fall
         // moves them (`crash_tick`).
         if let Some(falling) = lua.app_data_ref::<Falling>().filter(|f| !f.0.is_empty()) {

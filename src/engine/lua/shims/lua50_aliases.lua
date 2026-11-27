@@ -1,4 +1,8 @@
 -- Lua 5.0 standard library names FAF still uses, mapped onto Luau equivalents.
+-- The game's Lua version string (FAF's `engine/Library.lua` documents it);
+-- mods read it to tell the game from other hosts of their files (BrewLAN's
+-- blueprint hook takes its documentation-export path when it differs).
+_VERSION = "Lua 5.0.1"
 math.mod = math.mod or math.fmod
 math.pow = math.pow or function(a, b) return a ^ b end
 string.gfind = string.gfind or string.gmatch
