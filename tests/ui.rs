@@ -3461,13 +3461,44 @@ fn apply_function_goes_one_level_down() {
     assert_eq!(got, "g;child;");
 }
 
-/// A game being played is recorded and observing reads false, as in the
-/// real game's single-player session (`probe_api_spot` ui.session3).
+/// A game being played is recorded, and observing reads false without an
+/// `AllowObservers` option, as in the real game's single-player session
+/// (`probe_api_spot` ui.session3).
 #[test]
 fn a_played_session_is_recorded() {
     let Some(vm) = vm() else { return };
     let got: (bool, bool) = vm.lua().load("return SessionIsBeingRecorded(), SessionIsObservingAllowed()").eval().unwrap();
     assert_eq!(got, (true, false));
+}
+
+/// Observing is allowed by the game's `AllowObservers` option, and always
+/// in a replay (moho's session, read from SupremeCommander.exe).
+#[test]
+fn observing_follows_the_game_option() {
+    use rts_core_engine::engine::sync::SyncValue as V;
+    let Some(vm) = vm() else { return };
+    let s = |x: &str| V::Str(x.into());
+    let scenario = |allow: bool| V::Table(vec![(s("Options"), V::Table(vec![(s("Share"), s("ShareUntilDeath")), (s("AllowObservers"), V::Bool(allow))]))]);
+    let allowed = || vm.lua().load("return SessionIsObservingAllowed()").eval::<bool>().unwrap();
+    vm.set_scenario(&scenario(true)).unwrap();
+    assert!(allowed());
+    vm.set_scenario(&scenario(false)).unwrap();
+    assert!(!allowed());
+    vm.set_session_flags(true, true).unwrap();
+    assert!(allowed(), "a replay");
+}
+
+/// The world is playing in a game and not at the main menu (moho's world
+/// state, read from SupremeCommander.exe's `WorldIsPlaying`).
+#[test]
+fn the_world_plays_only_in_a_game() {
+    let Some(vm) = vm() else { return };
+    let playing = || vm.lua().load("return WorldIsPlaying()").eval::<bool>().unwrap();
+    assert!(playing());
+    vm.lua().load("SessionRequestPause()").exec().unwrap();
+    assert!(playing(), "paused is still playing");
+    vm.start_front_end().expect("main menu");
+    assert!(!playing(), "no world at the main menu");
 }
 
 /// An edit's limit is 1024 characters by default and `SetMaxChars` cuts

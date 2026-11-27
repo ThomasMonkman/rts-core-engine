@@ -1092,8 +1092,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         end
         function GetIdleEngineers() return idle('ENGINEER - COMMAND') end
         function GetIdleFactories() return idle('FACTORY STRUCTURE') end
-        -- The game world is running (the interface exists only then).
-        function WorldIsPlaying() return true end
+        -- A session's world is loaded and running: moho's world state is
+        -- "playing" (6 of 0..8; the binding in SupremeCommander.exe compares
+        -- it), which pausing, the game ending and `SessionEndGame` leave
+        -- alone. False at the main menu, where there is no world.
+        function WorldIsPlaying() return rawget(_G, '__engine_ui_state') == 'game' end
         -- Selecting from the interface is synchronous, as in moho: the new
         -- selection is what `GetSelectedUnits()` returns on the next line and
         -- what selection orders given after it go to (FAF selects a factory,
@@ -1310,10 +1313,19 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         function SessionRequestPause() rawset(_G, '__engine_pause_request', true) end
         function SessionResume() rawset(_G, '__engine_pause_request', false) end
         -- Every game played in the window is recorded (a replay being
-        -- watched isn't); observing reads false, as in the real game's
-        -- single-player session (`probe_api_spot` ui.session3).
+        -- watched isn't).
         function SessionIsBeingRecorded() return not SessionIsReplay() end
-        function SessionIsObservingAllowed() return false end
+        -- Moho's session works this out once, as it is made
+        -- (SupremeCommander.exe, beside its replay / recorded / multiplayer
+        -- flags): a replay may always be observed; a game takes its
+        -- `AllowObservers` option (a boolean, the lobby's), false without
+        -- one, as in a game started without a lobby (`probe_api_spot`
+        -- ui.session3).
+        function SessionIsObservingAllowed()
+            if SessionIsReplay() then return true end
+            local options = SessionGetScenarioInfo().Options
+            return options ~= nil and options.AllowObservers == true
+        end
         -- In-game chat (`net::core`): `SessionSendChatMessage([clients,]
         -- message)`; received messages go to FAF's gamemain.ReceiveChat.
         -- FAF's disconnect dialog's Eject button (a vote; `net::lockstep`).
