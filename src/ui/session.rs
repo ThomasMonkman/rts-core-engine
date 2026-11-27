@@ -41,6 +41,15 @@ pub struct Session {
     pub ui_state: UiState,
     /// `ExitApplication` was called.
     pub exit_request: bool,
+    /// The game ended (the sim's `EndGame`) or this player left it
+    /// (`SessionEndGame`).
+    pub game_over: bool,
+    /// FAF has been told the sim ended the game (`uimain.NoteGameOver`).
+    pub game_over_noted: bool,
+    /// This player left the session (`SessionEndGame`), not yet taken.
+    pub session_left: bool,
+    /// `ExitGame` asked for the main menu, not yet taken.
+    pub menu_request: bool,
 }
 
 /// The VM's session state (made on first use, so a bare VM in a test has one).
@@ -55,6 +64,39 @@ pub fn state(lua: &Lua) -> mlua::AppDataRefMut<'_, Session> {
 fn format_time(seconds: f64) -> String {
     let s = seconds.floor() as i64;
     format!("{:02}:{:02}:{:02}", s.div_euclid(3600), s.div_euclid(60).rem_euclid(60), s.rem_euclid(60))
+}
+
+/// Watching a recording (`UserVm::set_session_flags`).
+fn replay(lua: &Lua) -> LuaResult<bool> {
+    Ok(lua.globals().raw_get::<Option<bool>>("__engine_replay")?.unwrap_or(false))
+}
+
+/// The session's scenario: the engine's (`UserVm::set_scenario`) once it
+/// knows the map; until then a minimal one. `Share` is the lobby's
+/// default: FAF's score panel looks it up and fails without it.
+fn scenario_info(lua: &Lua) -> LuaResult<LuaTable> {
+    if let Some(t) = lua.globals().raw_get::<Option<LuaTable>>("__engine_session")? {
+        return Ok(t);
+    }
+    let t = lua.create_table()?;
+    t.raw_set("Options", lua.create_table_from([("Share", "ShareUntilDeath")])?)?;
+    t.raw_set("size", lua.create_sequence_from([1024, 1024])?)?;
+    t.raw_set("name", "")?;
+    t.raw_set("type", "skirmish")?;
+    Ok(t)
+}
+
+/// This player leaves the session: the sim stops here and a networked
+/// game is told we left (`UserVm::take_session_left`). A session's end is
+/// when moho hands the interface its score data, which FAF's score screen
+/// waits for; ours fills it in here, whichever end took it.
+fn end_game(lua: &Lua) -> LuaResult<()> {
+    {
+        let mut s = state(lua);
+        s.game_over = true;
+        s.session_left = true;
+    }
+    crate::ui::armies::fill_score_data(lua)
 }
 
 /// Seconds of game time: moho's sim runs 10 ticks a second.
@@ -124,6 +166,57 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         ExitApplication = |lua, ()| {
             state(lua).exit_request = true;
             Ok(())
+        })?;
+    lua_fn!(lua, global, SessionGetScenarioInfo = |lua, ()| scenario_info(lua))?;
+    lua_fn!(lua, global,
+        /// Every game played in the window is recorded (a replay being
+        /// watched isn't).
+        SessionIsBeingRecorded = |lua, ()| Ok(!replay(lua)?))?;
+    lua_fn!(lua, global,
+        /// Moho's session works this out once, as it is made
+        /// (SupremeCommander.exe, beside its replay / recorded / multiplayer
+        /// flags): a replay may always be observed; a game takes its
+        /// `AllowObservers` option (a boolean, the lobby's), false without
+        /// one, as in a game started without a lobby (`probe_api_spot`
+        /// ui.session3).
+        SessionIsObservingAllowed = |lua, ()| {
+            if replay(lua)? {
+                return Ok(true);
+            }
+            Ok(match scenario_info(lua)?.get::<LuaValue>("Options")? {
+                LuaValue::Table(options) => options.get::<LuaValue>("AllowObservers")? == LuaValue::Boolean(true),
+                _ => false,
+            })
+        })?;
+    lua_fn!(lua, global,
+        /// This player leaves the session (FAF's score screen, quitting).
+        SessionEndGame = |lua, ()| end_game(lua))?;
+    lua_fn!(lua, global,
+        /// Moho returns to the main menu (the score screen's Continue): the
+        /// renderer tears the game's interface down and starts the front end
+        /// (`UserVm::take_menu_request`).
+        ExitGame = |lua, ()| {
+            end_game(lua)?;
+            state(lua).menu_request = true;
+            Ok(())
+        })?;
+    lua_fn!(lua, global,
+        /// FAF's disconnect dialog's Eject button (a vote; `net::lockstep`).
+        EjectSessionClient = |lua, client_index: LuaValue| lua.globals().get::<LuaFunction>("__net_eject")?.call::<()>(client_index))?;
+    lua_fn!(lua, global,
+        /// In-game chat (`net::core`): `SessionSendChatMessage([clients,]
+        /// message)`, `clients` one client index or a list of them (none:
+        /// everyone); received messages go to FAF's gamemain.ReceiveChat.
+        SessionSendChatMessage = |lua, args: LuaMultiValue| {
+            let mut args = args.into_iter();
+            let (mut client, mut message) = (args.next().unwrap_or(LuaNil), args.next().unwrap_or(LuaNil));
+            if message.is_nil() {
+                (client, message) = (LuaNil, client);
+            }
+            if let LuaValue::Integer(_) | LuaValue::Number(_) = client {
+                client = LuaValue::Table(lua.create_sequence_from([client])?);
+            }
+            lua.globals().get::<LuaFunction>("__net_chat_send")?.call::<()>((client, message))
         })?;
     Ok(())
 }

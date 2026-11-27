@@ -13,6 +13,11 @@ use crate::lua_api::{LuaTy, LuaType};
 
 pub use crate::lua_api::shapes::Loose;
 
+/// Lua's truth: anything but nil and false.
+pub fn truthy(value: &LuaValue) -> bool {
+    !matches!(value, LuaValue::Nil | LuaValue::Boolean(false))
+}
+
 /// A table keyed by anything, with values of `T` (`{ [any]: T }`); converts
 /// as `LuaTable`.
 #[derive(Clone, Debug)]
