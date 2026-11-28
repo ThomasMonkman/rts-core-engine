@@ -716,7 +716,8 @@ fn pace(cmd: Option<&crate::engine::sim::command::Command>, unit: EntityId, tick
 }
 
 /// Where `unit` is steering now (`navigator:GetCurrentTargetPos`): its
-/// path's next waypoint, else its order's goal, else its script goal.
+/// path's next waypoint, else its order's goal, else its script goal. `None`
+/// when it isn't going anywhere (the binding then gives its cell).
 pub fn current_target(commands: &Commands, world: &EntityWorld, unit: EntityId) -> Option<FxVec3> {
     let data = world.get(unit)?.unit.as_deref()?;
     if let Some(p) = data.path.as_deref() {

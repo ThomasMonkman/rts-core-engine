@@ -9,14 +9,22 @@ ForkThread(function()
     local tank = CreateUnitHPR('uel0201', 'ARMY_1', 400, GetTerrainHeight(400, 600), 600, 0, 0, 0)
     WaitTicks(2)
     local nav = tank:GetNavigator()
-    check(nav:GetCurrentTargetPos() == nil, 'an idle unit has no target')
+    -- Not going anywhere, the target is the centre of the unit's cell at the
+    -- ground's height (moho always gives a point; real game, probe_navtarget).
+    local function idle(what)
+        local t, at = nav:GetCurrentTargetPos(), tank:GetPosition()
+        local x, z = math.floor(at[1]) + 0.5, math.floor(at[3]) + 0.5
+        check(t ~= nil and math.abs(t[1] - x) < 0.01 and math.abs(t[3] - z) < 0.01 and math.abs(t[2] - GetTerrainHeight(x, z)) < 0.01,
+            what .. ': ' .. repr(t) .. ' at ' .. repr(at))
+    end
+    idle('an idle unit\'s target is its cell')
     nav:SetGoal({ 420, 0, 600 })
     local target = nav:GetCurrentTargetPos()
     check(target ~= nil and math.abs(target[1] - 420) < 1 and math.abs(target[3] - 600) < 1, 'the target is the goal')
     WaitTicks(150)
     local p = tank:GetPosition()
     check(VDist2(p[1], p[3], 420, 600) < 1.5, string.format('it went to the goal: %.1f, %.1f', p[1], p[3]))
-    check(nav:GetCurrentTargetPos() == nil, 'arrived: no target')
+    idle('arrived: the target is its cell')
     -- An order takes over from a goal, and the goal doesn't come back after.
     nav:SetGoal({ 440, 0, 600 })
     IssueMove({ tank }, { 420, GetTerrainHeight(420, 620), 620 })
@@ -27,7 +35,7 @@ ForkThread(function()
     nav:SetGoal({ 400, 0, 620 })
     WaitTicks(3)
     nav:AbortMove()
-    check(nav:GetCurrentTargetPos() == nil, 'AbortMove clears the goal')
+    idle('AbortMove clears the goal')
     -- FAF's load-into-transport gathers tech 2 units with SetGoal while a
     -- tech 3 unit boards first (load-in-transport.lua:352).
     local transport = CreateUnitHPR('uea0104', 'ARMY_1', 430, GetTerrainHeight(430, 640) + 10, 640, 0, 0, 0)
