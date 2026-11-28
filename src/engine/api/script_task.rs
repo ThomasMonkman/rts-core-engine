@@ -337,18 +337,34 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         crate::engine::api::entity::vector(lua, goal.unwrap_or_default())
     })?;
     lua_method!(lua, moho::Navigator,
-        /// Where the unit is steering now, or nil when it isn't going anywhere.
+        /// Where the unit is steering now. Moho always gives a vector (FA
+        /// exe 0x5a6010): a land unit that isn't going anywhere has the
+        /// centre of the cell its path ended on, at the ground's height
+        /// (real game, `probe_navtarget`: within a cell of where it stands).
+        /// Ours: the centre of the cell it stands on; an aircraft, where it
+        /// is (moho keeps its last target). The Nomads commander turns its
+        /// head to this point.
         GetCurrentTargetPos = |lua, this: Obj<moho::Navigator>| {
         let id = entity_id(&this)?;
-        let target = {
+        let (target, idle) = {
             let commands = lua.app_data_ref::<Commands>();
             let w = world(lua);
-            commands.and_then(|c| crate::engine::sim::movement::current_target(&c, &w, id))
+            let target = commands.and_then(|c| crate::engine::sim::movement::current_target(&c, &w, id));
+            let idle = w.get(id).map(|e| (e.position(), e.unit.as_deref().is_some_and(|u| u.layer == crate::engine::sim::layer::Layer::Air)));
+            (target, idle)
         };
-        match target {
-            Some(p) => crate::engine::api::entity::vector(lua, p).map(Some),
-            None => Ok(None),
-        }
+        let point = match (target, idle) {
+            (Some(p), _) => p,
+            (None, Some((at, false))) => {
+                let half = crate::engine::sim::math::Fx::ONE / 2;
+                let (x, z) = (at.x.floor() + half, at.z.floor() + half);
+                let y = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>().map_or(at.y, |t| t.height_at(x, z));
+                crate::engine::sim::math::FxVec3 { x, y, z }
+            }
+            (None, Some((at, true))) => at,
+            (None, None) => Default::default(),
+        };
+        crate::engine::api::entity::vector(lua, point)
     })?;
     Ok(())
 }
