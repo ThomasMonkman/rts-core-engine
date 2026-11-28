@@ -92,6 +92,14 @@ pub struct Cli {
     #[arg(long = "ai", value_name = "[N=]KEY", conflicts_with = "no_ai")]
     pub ai: Vec<String>,
 
+    /// The faction the armies play, by its key in the game's
+    /// `/lua/factions.lua` (repeatable): `KEY` for every army, `N=KEY` for
+    /// army N. E.g. `--faction uef --faction 2=cybran`. A faction a mod
+    /// adds (Nomads: `nomads`) counts too. `--faction list` stops with the
+    /// keys there are. Default: one of each of the first four in turn.
+    #[arg(long = "faction", value_name = "[N=]KEY")]
+    pub faction: Vec<String>,
+
     /// Runs a mod (its uid, from its `mod_info.lua`; repeatable), as if
     /// the lobby had it on: a sim mod in the sim, a UI-only one in the
     /// interface. E.g. Resource Rich: 74A9EAB2-E851-11DB-A1F1-F2C755D89593.
@@ -506,7 +514,7 @@ fn parse_overlay(s: &str) -> Result<Overlay, String> {
 /// Options that only mean something in a game session: giving any of them
 /// skips the main menu, as `--session` does.
 const SESSION_OPTIONS: &[&str] = &[
-    "ticks", "map", "armies", "teams", "auto_teams", "fog", "victory", "prebuilt", "no_ai", "ai", "seed", "script", "camera", "overlay", "select", "player", "record", "replay",
+    "ticks", "map", "armies", "teams", "auto_teams", "fog", "victory", "prebuilt", "no_ai", "ai", "faction", "seed", "script", "camera", "overlay", "select", "player", "record", "replay",
     "profile_stages", "net_host", "net_join", "net_bot", "mods",
 ];
 
@@ -540,6 +548,9 @@ impl Cli {
         if let Err(e) = AiChoice::parse(&cli.ai) {
             return Err(Self::command().error(clap::error::ErrorKind::ValueValidation, e));
         }
+        if let Err(e) = AiChoice::parse_flag("--faction", "faction", &cli.faction) {
+            return Err(Self::command().error(clap::error::ErrorKind::ValueValidation, e));
+        }
         cli.headless |= cli.headless_with_ui;
         cli.session |= cli.headless || SESSION_OPTIONS.iter().any(|id| matches.value_source(id) == Some(ValueSource::CommandLine));
         Ok(cli)
@@ -564,6 +575,7 @@ impl Cli {
             victory: self.victory.clone(),
             mods: self.mods.clone(),
             ai_choice: AiChoice::parse(&self.ai).expect("checked when parsed"),
+            factions: AiChoice::parse_flag("--faction", "faction", &self.faction).expect("checked when parsed"),
             ..SessionConfig::default()
         }
     }
@@ -627,6 +639,17 @@ mod tests {
         let r = c.debug_request();
         assert!(r.paths && !r.weapon_ranges);
         assert_eq!((r.nav_layer, r.threat_army, r.selected), (Some(2), Some(2), Some(5)));
+    }
+
+    #[test]
+    fn faction_takes_a_default_and_per_army_keys() {
+        let c = Cli::try_parse_args(["rts", "--faction", "nomads", "--faction", "2=uef"]).unwrap();
+        assert!(c.session, "--faction is a session option");
+        let f = c.session().factions;
+        assert_eq!((f.default.as_deref(), f.armies), (Some("nomads"), vec![(2, "uef".to_string())]));
+        assert!(Cli::try_parse_args(["rts"]).unwrap().session().factions.is_empty(), "one of each in turn");
+        let err = Cli::try_parse_args(["rts", "--faction", "a", "--faction", "b"]).unwrap_err().to_string();
+        assert!(err.contains("--faction b"), "{err}");
     }
 
     #[test]

@@ -57,6 +57,10 @@ pub struct SessionConfig {
     /// The AI the armies get (`--ai`), instead of the game code's default.
     /// Unused with a lobby launch (its slots name their own AI).
     pub ai_choice: AiChoice,
+    /// The faction the armies play (`--faction`), by the key in the game's
+    /// `/lua/factions.lua` (so a mod's faction too), instead of one of each
+    /// in turn. Unused with a lobby launch (its slots name their faction).
+    pub factions: AiChoice,
 }
 
 /// Which AI (a lobby AI key, e.g. `adaptive`, `RNGStandard`) the armies
@@ -73,22 +77,27 @@ pub struct AiChoice {
 impl AiChoice {
     /// The `--ai` values: `KEY` for every army, `N=KEY` for army N.
     pub fn parse(values: &[String]) -> Result<Self, String> {
+        Self::parse_flag("--ai", "AI", values)
+    }
+
+    /// The same form for another flag (`--faction`): `what` names a key.
+    pub fn parse_flag(flag: &str, what: &str, values: &[String]) -> Result<Self, String> {
         let mut choice = AiChoice::default();
         for v in values {
             match v.split_once('=') {
                 Some((army, key)) => {
-                    let army: u32 = army.trim().parse().ok().filter(|&a| a > 0).ok_or_else(|| format!("--ai {v}: expected ARMY=KEY with an army number from 1"))?;
+                    let army: u32 = army.trim().parse().ok().filter(|&a| a > 0).ok_or_else(|| format!("{flag} {v}: expected ARMY=KEY with an army number from 1"))?;
                     let key = key.trim();
                     if key.is_empty() {
-                        return Err(format!("--ai {v}: no AI key"));
+                        return Err(format!("{flag} {v}: no {what} key"));
                     }
                     if choice.armies.iter().any(|(a, _)| *a == army) {
-                        return Err(format!("--ai: army {army} given twice"));
+                        return Err(format!("{flag}: army {army} given twice"));
                     }
                     choice.armies.push((army, key.to_string()));
                 }
-                None if v.trim().is_empty() => return Err("--ai: no AI key".into()),
-                None if choice.default.is_some() => return Err(format!("--ai {v}: a default AI is already given (use ARMY=KEY for one army)")),
+                None if v.trim().is_empty() => return Err(format!("{flag}: no {what} key")),
+                None if choice.default.is_some() => return Err(format!("{flag} {v}: a default {what} is already given (use ARMY=KEY for one army)")),
                 None => choice.default = Some(v.trim().to_string()),
             }
         }
@@ -168,6 +177,7 @@ impl Default for SessionConfig {
             victory: None,
             mods: Vec::new(),
             ai_choice: AiChoice::default(),
+            factions: AiChoice::default(),
         }
     }
 }
@@ -208,7 +218,7 @@ pub fn setup(lua: &Lua, cfg: &SessionConfig) -> LuaResult<()> {
         let lobby_army: Option<u32> = lua
             .load(include_str!("lua/session_launch.lua"))
             .set_name("=[engine session_launch]")
-            .call((scenario.as_str(), cfg.ai_armies, cfg.ai, cfg.human_army.unwrap_or(0), cfg.teams, cfg.prebuilt, launch, game_code(lua).name(), cfg.ai_choice.to_lua(lua)?))?;
+            .call((scenario.as_str(), cfg.ai_armies, cfg.ai, cfg.human_army.unwrap_or(0), cfg.teams, cfg.prebuilt, launch, game_code(lua).name(), cfg.ai_choice.to_lua(lua)?, cfg.factions.to_lua(lua)?))?;
         cfg.human_army.or(lobby_army)
     };
     if let Some(fog) = &cfg.fog_of_war {

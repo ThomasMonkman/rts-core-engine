@@ -358,6 +358,7 @@ fn encode_session(c: &SessionConfig) -> LuaData {
         (s("victory"), opt_s(&c.victory)),
         (s("mods"), string_list(&c.mods)),
         (s("ai_choice"), string_list(&c.ai_choice.values())),
+        (s("factions"), string_list(&c.factions.values())),
     ])
 }
 
@@ -407,6 +408,7 @@ fn decode_session(t: &LuaData) -> Result<SessionConfig, String> {
         victory: text("victory"),
         mods: decode_list(get("mods")),
         ai_choice: AiChoice::parse(&decode_list(get("ai_choice"))).map_err(|e| format!("session ai_choice: {e}"))?,
+        factions: AiChoice::parse_flag("--faction", "faction", &decode_list(get("factions"))).map_err(|e| format!("session factions: {e}"))?,
     })
 }
 
@@ -458,6 +460,7 @@ mod tests {
             victory: None,
             mods: vec!["74A9EAB2-E851-11DB-A1F1-F2C755D89593".into()],
             ai_choice: AiChoice { default: Some("RNGStandard".into()), armies: vec![(2, "adaptive".into())] },
+            factions: AiChoice { default: Some("nomads".into()), armies: vec![(3, "uef".into())] },
         };
         let text = header("0.1.0+abcd1234, FAF 3839, Lua 0123abcd", &session) + "12 0 0 1 2 0 - - - 5 - 0 - - -\n";
         let h = read_header(&text).unwrap();

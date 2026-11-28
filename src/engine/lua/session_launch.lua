@@ -9,8 +9,9 @@
 -- players replace the ones made up here. Returns the army the local player
 -- has in the lobby's game (nil without a lobby, or as an observer). Last, the
 -- game code (`GameCode::name`: 'faf', 'loud' or 'other'). Last, the AI chosen
--- with `--ai` (`{default = key, [army] = key}`, or nil: the default below).
-local scenarioPath, aiArmies, withAI, humanArmy, teamCount, prebuilt, launch, gameCode, aiChoice = ...
+-- with `--ai` (`{default = key, [army] = key}`, or nil: the default below),
+-- and the factions chosen with `--faction` (the same shape, or nil).
+local scenarioPath, aiArmies, withAI, humanArmy, teamCount, prebuilt, launch, gameCode, aiChoice, factionChoice = ...
 local isFaf, isLoud = gameCode == 'faf', gameCode == 'loud'
 teamCount = teamCount or 0
 
@@ -168,6 +169,45 @@ if aiChoice then
     end
 end
 
+-- The `--faction` keys, as indices into the game's faction list
+-- (`/lua/factions.lua`, with a mod's hooks: `PlayerOptions.Faction` is an
+-- index into it). Letter case aside; `--faction list` or an unknown key
+-- stops with the keys there are.
+local chosenFaction = {}
+if factionChoice then
+    local ok, mod = pcall(import, '/lua/factions.lua')
+    local list = ok and rawget(mod, 'Factions')
+    if type(list) ~= 'table' then
+        error("--faction: can't read the game's factions (/lua/factions.lua): " .. tostring(mod), 0)
+    end
+    local byKey, lines = {}, {}
+    for i, faction in ipairs(list) do
+        if type(faction.Key) == 'string' then
+            byKey[string.lower(faction.Key)] = i
+            table.insert(lines, '  ' .. faction.Key)
+        end
+    end
+    local keys = table.concat(lines, '\n')
+    local function check(key, what)
+        if key == 'list' then
+            error('Faction keys (the game\'s, with its mods\'):\n' .. keys, 0)
+        end
+        local i = byKey[string.lower(key)]
+        if not i then
+            error('--faction ' .. what .. ': no faction with the key ' .. key .. '. The keys:\n' .. keys, 0)
+        end
+        return i
+    end
+    if factionChoice.default then
+        chosenFaction.default = check(factionChoice.default, factionChoice.default)
+    end
+    for army, key in pairs(factionChoice) do
+        if type(army) == 'number' then
+            chosenFaction[army] = check(key, army .. '=' .. key)
+        end
+    end
+end
+
 local armySetup = {}
 local index = 0
 local starts = teams[1].armies
@@ -202,6 +242,14 @@ end
 local count = (aiArmies > 0 and aiArmies < table.getn(starts)) and aiArmies or table.getn(starts)
 if aiChoice and launch then
     WARN('--ai is ignored: the lobby\'s launch names each slot\'s AI')
+end
+if factionChoice and launch then
+    WARN('--faction is ignored: the lobby\'s launch names each slot\'s faction')
+end
+for army in pairs(chosenFaction) do
+    if type(army) == 'number' and not launch and army > count then
+        error('--faction ' .. army .. '=...: there are only ' .. count .. ' armies', 0)
+    end
 end
 for army in pairs(chosenAI) do
     if type(army) == 'number' and not launch then
@@ -243,6 +291,7 @@ for i = 1, count do
     -- getting one of each in turn
     local k = teamed and math.floor((i - 1) / teamCount) or (i - 1)
     opts.Faction = math.mod(k, 4) + 1
+    opts.Faction = chosenFaction[i] or chosenFaction.default or opts.Faction
     -- the matchmaker's colours: warm against cold by start spot (FAF's
     -- `MapToWarmCold` covers 16 spots; the rest in palette order)
     local color = warmCold(i) or i
