@@ -57,7 +57,7 @@ impl OverchargeTasks {
                 CommandTarget::Ground(p) => WeaponTarget::Ground(p),
                 CommandTarget::None => return None,
             };
-            Some((u, OrderedTarget { target, silo: None, overcharge: Some(t.weapon) }))
+            Some((u, OrderedTarget { target, silo: None, overcharge: Some(t.weapon), in_range: true }))
         })
     }
 

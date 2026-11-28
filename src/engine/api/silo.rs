@@ -1,9 +1,12 @@
 //! Missile silos (moho): nuke and tactical launchers build their missiles.
 //!
 //! A silo weapon (`CountedProjectile`) builds one missile at a time while
-//! its unit's current order is the matching silo build order
-//! (`IssueSiloBuildNuke` / `IssueSiloBuildTactical`, counted) or its unit is
-//! in auto mode, and it holds fewer than `MaxProjectileStorage`. A missile
+//! its unit has a silo build request of the matching kind left
+//! (`IssueSiloBuildNuke` / `IssueSiloBuildTactical`, one missile each) or
+//! is in auto mode, and it holds fewer than `MaxProjectileStorage`. The
+//! requests are kept here, out of the command queue: the real game's
+//! `GetCommandQueue` stays empty after a silo build order (dev/probes
+//! probe_re2_orders SILO). A missile
 //! costs its projectile blueprint's `Economy` (`BuildCostEnergy`,
 //! `BuildCostMass`) over `BuildTime / BuildRate` seconds, charged as an
 //! economy event; meanwhile the unit is in the `SiloBuildingAmmo` state.
@@ -36,11 +39,12 @@ struct Job {
     banked: (Fx, Fx),
 }
 
-/// Missiles in progress by (unit, silo kind), and the ammo each launch order
+/// Missiles in progress by (unit, silo kind), the ammo each launch order
 /// started with (it's done once a missile leaves: FAF's weapon script takes
-/// the ammo when it creates the missile).
+/// the ammo when it creates the missile), and the missiles silo build
+/// orders asked for that aren't built yet.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
-pub struct SiloJobs(BTreeMap<(EntityId, u8), Job>, BTreeMap<(EntityId, u8), u32>);
+pub struct SiloJobs(BTreeMap<(EntityId, u8), Job>, BTreeMap<(EntityId, u8), u32>, BTreeMap<(EntityId, u8), u32>);
 
 fn kind_key(kind: SiloKind) -> u8 {
     match kind {
@@ -56,10 +60,22 @@ fn launch_order(kind: SiloKind) -> CommandKind {
     }
 }
 
-fn build_order(kind: SiloKind) -> CommandKind {
-    match kind {
-        SiloKind::Nuke => CommandKind::BuildSiloNuke,
-        SiloKind::Tactical => CommandKind::BuildSiloTactical,
+/// A silo build order: `count` (at least one) more missiles of `kind`'s
+/// silo for each of `units` that has one. Nothing goes into their command
+/// queues.
+pub fn request(lua: &Lua, units: &[EntityId], kind: CommandKind, count: u32) {
+    let key = match kind {
+        CommandKind::BuildSiloNuke => 0,
+        CommandKind::BuildSiloTactical => 1,
+        _ => return,
+    };
+    let silos = lua.app_data_ref::<Weapons>().map(|w| w.silos()).unwrap_or_default();
+    let mut jobs = lua.app_data_mut::<SiloJobs>().expect("SiloJobs");
+    for &unit in units {
+        if silos.iter().any(|s| s.0 == unit && kind_key(s.2) == key) {
+            let n = jobs.2.entry((unit, key)).or_default();
+            *n = n.saturating_add(count.max(1));
+        }
     }
 }
 
@@ -86,7 +102,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua.set_app_data(SiloJobs::default());
     lua_method!(lua, moho::Unit,
         /// Stops missile production: the missile in progress is dropped (its
-        /// progress lost, `OnSiloBuildEnd`), a current silo build order ends and
+        /// progress lost, `OnSiloBuildEnd`), its silo build requests end and
         /// auto mode goes off. FAF saves and restores auto mode around it when it
         /// restarts a missile (`StructureUnit.OnReceiveAdjacencyBuffTo`), so moho
         /// clears it (inferred).
@@ -95,12 +111,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         if let Some(u) = entity::world(lua).get_mut(unit).and_then(|e| e.unit.as_deref_mut()) {
             u.auto_mode = false;
         }
-        {
-            let mut c = lua.app_data_mut::<Commands>().expect("Commands");
-            if c.current(unit).is_some_and(|cmd| matches!(cmd.kind, CommandKind::BuildSiloNuke | CommandKind::BuildSiloTactical)) {
-                c.pop_front(unit);
-            }
-        }
+        lua.app_data_mut::<SiloJobs>().expect("SiloJobs").2.retain(|k, _| k.0 != unit);
         let jobs: Vec<((EntityId, u8), Job)> = {
             let j = lua.app_data_ref::<SiloJobs>().expect("SiloJobs");
             j.0.range((unit, 0)..=(unit, u8::MAX)).map(|(k, v)| (*k, *v)).collect()
@@ -176,6 +187,11 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         Some(w) => w.silos(),
         None => return Ok(()),
     };
+    // (Requests of units gone with them.)
+    {
+        let w = entity::world(lua);
+        lua.app_data_mut::<SiloJobs>().expect("SiloJobs").2.retain(|k, n| *n > 0 && w.get(k.0).is_some_and(|e| !e.destroyed));
+    }
     for (unit, index, kind, max, projectile) in silos {
         let key = (unit, kind_key(kind));
         let (alive, ammo, auto, paused, build_rate) = match entity::world(lua).get(unit).filter(|e| !e.destroyed && e.fraction_complete >= Fx::ONE) {
@@ -211,8 +227,8 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             }
             _ => {}
         }
-        let ordered = current.filter(|(k, _)| *k == build_order(kind));
-        let wants = alive && (ordered.is_some() || auto) && ammo < max && !paused;
+        let ordered = lua.app_data_ref::<SiloJobs>().is_some_and(|j| j.2.get(&key).is_some_and(|&n| n > 0));
+        let wants = alive && (ordered || auto) && ammo < max && !paused;
         let job = lua.app_data_ref::<SiloJobs>().and_then(|j| j.0.get(&key).copied());
         match job {
             // Stopped (order gone, auto off, full, paused, dead): drop it.
@@ -225,13 +241,9 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                         UnitCallbacks::on_silo_build_end(lua, &u, "unit", Obj::new(w))?;
                     }
                 }
-                // A full silo has nothing left to build for the order.
-                if alive && ammo >= max
-                    && let Some((_, id)) = ordered {
-                    let mut c = lua.app_data_mut::<Commands>().expect("Commands");
-                    if c.current(unit).is_some_and(|cmd| cmd.id == id) {
-                        c.pop_front(unit);
-                    }
+                // A full silo has nothing left to build for the requests.
+                if alive && ammo >= max {
+                    lua.app_data_mut::<SiloJobs>().expect("SiloJobs").2.remove(&key);
                 }
             }
             Some(job) => {
@@ -262,12 +274,9 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                         && let Some(u) = &unit_obj {
                         UnitCallbacks::on_nuke_armed(lua, u, "unit")?;
                     }
-                    // A counted order counts down; the last one pops.
-                    if let Some((_, id)) = ordered {
-                        let mut c = lua.app_data_mut::<Commands>().expect("Commands");
-                        if c.count_down(id) == 0 && c.current(unit).is_some_and(|cmd| cmd.id == id) {
-                            c.pop_front(unit);
-                        }
+                    // One request fewer.
+                    if let Some(n) = lua.app_data_mut::<SiloJobs>().expect("SiloJobs").2.get_mut(&key) {
+                        *n = n.saturating_sub(1);
                     }
                 }
             }

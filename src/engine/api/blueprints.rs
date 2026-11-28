@@ -86,6 +86,8 @@ enum Default {
     Bool(bool),
     /// A reflected range (`RRange`): `{ Min = 0, Max = 0 }`.
     Range,
+    /// An empty table (a reflected vector).
+    Table,
 }
 
 /// Unit blueprint fields moho fills in when a blueprint leaves them out
@@ -107,8 +109,8 @@ enum Default {
 ///   structure for an upgrade. (`UpgradesTo` stays nil: FAF's AI tests it
 ///   with `if not upgradeId`.)
 /// - `MaxSpeed`, `MaxAcceleration` 0 and
-///   `MaxBuildDistance` 5: what the sim already assumes when they're absent (`TurnRate` isn't filled: the sim
-///   assumes 90, and 0 would change movement).
+///   `MaxBuildDistance` 5: what the sim already assumes when they're absent
+///   (`TurnRate` 0 is in [`REFLECTED_DEFAULTS`]).
 /// - `Transport`: every field of moho's `RUnitBlueprintTransport` with its
 ///   constructor default (`MohoEngine.dll` 0x1010e1d0; `InitBlueprint`
 ///   0x100fb300 merges the reflected struct back into the Lua table, so
@@ -124,16 +126,9 @@ enum Default {
 ///   `Physics` fields with their constructor values in FA's exe (the
 ///   `RUnitBlueprint` constructor 0x524f80: `Defense` at +0x420, `Intel`
 ///   +0x330; `General` 0x525910; `Physics` 0x525b90), floats as 32-bit.
-///   Left out, because ours reads them with another default or moho
-///   derives them after the constructor (`ComputeDerivedQuantities`), so
-///   filling them would change the sim before that's checked: `Health`
-///   (1; ours takes `MaxHealth`), `Physics.TurnRate` (0; ours 90),
-///   `RotateOnSpotThreshold` (0.5; ours 0.1), `TurnRadius` (5; ours none),
-///   `MaxBrake` (0; ours the acceleration), `LayerChangeOffsetHeight` (-0.1;
-///   ours 0), `BackUpDistance` (-1), `AttackElevation` (derived),
-///   `SkirtSizeX/Z` (derived), and `General.UpgradesTo` / `SeedUnit` /
-///   `QuickSelectPriority` (empty strings and 0, which FAF's scripts and our
-///   interface test for presence).
+///   Left out here: `Health` (1; ours takes `MaxHealth`), `MaxBrake`,
+///   `BackUpDistance`, `AttackElevation` and `SkirtSizeX/Z` (derived). The
+///   rest the real game's dumps show are in [`REFLECTED_DEFAULTS`].
 /// See docs/research/verifying-against-the-binary.md.
 const UNIT_DEFAULTS: [(&str, &str, Default); 62] = [
     ("Defense", "MaxHealth", Default::Num(1.0)),
@@ -200,58 +195,244 @@ const UNIT_DEFAULTS: [(&str, &str, Default); 62] = [
     ("Transport", "RepairRate", Default::Num(0.0)),
 ];
 
-/// Fields the unit tooltip formats whose default we don't know: 0 (a C++
-/// struct's zero value) in the user layer only, so the interface works
-/// without the guess changing the sim (aircraft without `Air.TurnSpeed`
-/// turn at their `TurnRate` there).
-const UI_DEFAULTS: [(&str, &str, Default); 1] = [("Air", "TurnSpeed", Default::Num(0.0))];
+/// The rest of the fields moho's reflected unit blueprint carries with its
+/// constructor value, so every registered unit blueprint has them (the real
+/// game's `__blueprints` dumps, dev/probes `probe_api_spot` `BP.*` and
+/// `probe_unit_api` `bp`: uel0201, ueb0101, uea0102, ues0103, uel0105).
+/// Values as the real game prints them, each the same for every unit that
+/// leaves the field out. Paths are dotted (`""`-less top-level fields have
+/// none). `Default::Table` is a fresh empty table per blueprint. Left out on
+/// purpose (see docs/research/probe-sweep-2026-11 for the review list):
+/// fields moho derives per unit (`InertiaTensor*`, `BlueprintOrdinal`,
+/// `Air.StartTurnDistance`, `Physics.AttackElevation`, `BackUpDistance`,
+/// `CatchUpAcc`), `Footprint` / `AltFootprint` zeros (our placement reads an
+/// absent slope or depth limit as none), `Physics.MaxBrake` (ours brakes at
+/// the acceleration without it), `AI.StagingPlatformScanRadius` 300 (our
+/// overlay would ring every unit), the mesh blueprint's and projectile
+/// blueprints' fields.
+const REFLECTED_DEFAULTS: &[(&str, Default)] = &[
+    ("AI.AttackAngle", Default::Num(0.0)),
+    ("AI.AutoSurfaceToAttack", Default::Bool(true)),
+    ("AI.BeaconName", Default::Str("")),
+    ("AI.GuardFormationName", Default::Str("GuardFormation")),
+    ("AI.GuardReturnRadius", Default::Num(50.0)),
+    ("AI.InitialAutoMode", Default::Bool(false)),
+    ("AI.NeedUnpack", Default::Bool(false)),
+    ("AI.RefuelingMultiplier", Default::Num(1.0)),
+    ("AI.RefuelingRepairAmount", Default::Num(20.0)),
+    ("AI.RepairConsumeEnergy", Default::Num(2.0)),
+    ("AI.RepairConsumeMass", Default::Num(0.5)),
+    ("AI.ShowAssistRangeOnSelect", Default::Bool(false)),
+    ("AI.TargetBones", Default::Table),
+    ("Air.AutoLandTime", Default::Num(0.0)),
+    ("Air.BankFactor", Default::Num(0.5)),
+    ("Air.BankForward", Default::Bool(false)),
+    ("Air.BreakOffDistance", Default::Num(0.0)),
+    ("Air.BreakOffIfNearNewTarget", Default::Bool(false)),
+    ("Air.BreakOffTrigger", Default::Num(0.0)),
+    ("Air.CanFly", Default::Bool(false)),
+    ("Air.CirclingDirChange", Default::Bool(true)),
+    ("Air.CirclingElevationChangeRatio", Default::Num(0.25)),
+    ("Air.CirclingFlightChangeFrequency", Default::Num(2.0)),
+    ("Air.CirclingRadiusChangeMaxRatio", Default::Num(0.9)),
+    ("Air.CirclingRadiusChangeMinRatio", Default::Num(0.6)),
+    ("Air.CirclingRadiusVsAirMult", Default::Num(1.0)),
+    ("Air.CirclingTurnMult", Default::Num(3.0)),
+    ("Air.CombatTurnSpeed", Default::Num(1.0)),
+    ("Air.EngageDistance", Default::Num(0.0)),
+    ("Air.FlyInWater", Default::Bool(false)),
+    ("Air.HoverOverAttack", Default::Bool(false)),
+    ("Air.KLift", Default::Num(1.0)),
+    ("Air.KLiftDamping", Default::Num(1.0)),
+    ("Air.KMove", Default::Num(1.0)),
+    ("Air.KMoveDamping", Default::Num(1.0)),
+    ("Air.KRoll", Default::Num(3.0)),
+    ("Air.KRollDamping", Default::Num(3.0)),
+    ("Air.KTurn", Default::Num(3.0)),
+    ("Air.KTurnDamping", Default::Num(3.0)),
+    ("Air.LiftFactor", Default::Num(5.0)),
+    ("Air.MaxAirspeed", Default::Num(0.0)),
+    ("Air.MinAirspeed", Default::Num(0.0)),
+    ("Air.PredictAheadForBombDrop", Default::Num(0.0)),
+    ("Air.RandomBreakOffDistanceMult", Default::Num(1.5)),
+    ("Air.RandomMaxChangeCombatStateTime", Default::Num(6.0)),
+    ("Air.RandomMinChangeCombatStateTime", Default::Num(3.0)),
+    ("Air.SustainedTurnThreshold", Default::Num(10.0)),
+    ("Air.TightTurnMultiplier", Default::Num(1.0)),
+    ("Air.TransportHoverHeight", Default::Num(0.0)),
+    ("Air.TurnSpeed", Default::Num(1.0)),
+    ("Air.Winged", Default::Bool(false)),
+    ("CollisionShape", Default::Str("Box")),
+    ("DesiredShooterCap", Default::Num(3.0)),
+    ("Display.DisplayName", Default::Str("")),
+    ("Display.HideLifebars", Default::Bool(false)),
+    ("Display.PlaceholderMeshName", Default::Str("")),
+    ("Display.SpawnRandomRotation", Default::Bool(false)),
+    ("Economy.BuildableCategory", Default::Table),
+    ("Economy.InitialRallyX", Default::Num(0.0)),
+    ("Economy.InitialRallyZ", Default::Num(5.0)),
+    ("Economy.NaturalProducer", Default::Bool(false)),
+    ("Economy.NeedToFaceTargetToBuild", Default::Bool(false)),
+    ("Economy.RebuildBonusIds", Default::Table),
+    ("Economy.SacrificeEnergyMult", Default::Num(0.0)),
+    ("Economy.SacrificeMassMult", Default::Num(0.0)),
+    ("Economy.StorageEnergy", Default::Num(0.0)),
+    ("Economy.StorageMass", Default::Num(0.0)),
+    ("General.QuickSelectPriority", Default::Num(0.0)),
+    ("General.SeedUnit", Default::Str("")),
+    ("General.UpgradesTo", Default::Str("")),
+    ("LifeBarRender", Default::Bool(true)),
+    ("Physics.LayerChangeOffsetHeight", Default::Num(-0.1)),
+    ("Physics.OccupyRects", Default::Table),
+    ("Physics.RaisedPlatforms", Default::Table),
+    ("Physics.RotateOnSpotThreshold", Default::Num(0.5)),
+    ("Physics.TurnRadius", Default::Num(5.0)),
+    ("Physics.TurnRate", Default::Num(0.0)),
+    ("ScriptClass", Default::Str("")),
+    ("ScriptModule", Default::Str("")),
+    ("SelectionCenterOffsetX", Default::Num(0.0)),
+    ("SelectionCenterOffsetY", Default::Num(0.0)),
+    ("SelectionCenterOffsetZ", Default::Num(0.0)),
+    ("SelectionMeshScaleX", Default::Num(1.0)),
+    ("SelectionMeshScaleY", Default::Num(1.0)),
+    ("SelectionMeshScaleZ", Default::Num(1.0)),
+    ("SelectionMeshUseTopAmount", Default::Num(0.0)),
+    ("SelectionSizeY", Default::Num(1.0)),
+    ("SelectionYOffset", Default::Num(0.5)),
+    ("UseOOBTestZoom", Default::Num(0.0)),
+    ("Weapon", Default::Table),
+];
 
-/// The same for each `Weapon` entry: the radii the armament detail formats
-/// (on by default) that some blueprints leave out (dal0310, dea0202).
-const UI_WEAPON_DEFAULTS: [(&str, f64); 3] = [("MinRadius", 0.0), ("MaxRadius", 0.0), ("DamageRadius", 0.0)];
+/// The same for each `Weapon` entry (`RUnitBlueprintWeapon`'s constructor
+/// values, from the same dumps). Left out: `MuzzleVelocity` 0 and `Turreted`
+/// false (ours tells "given" from absent there) and `MaxHeightDiff` inf
+/// (ours would test every target against it): for review.
+const WEAPON_DEFAULTS: &[(&str, Default)] = &[
+    ("AboveWaterFireOnly", Default::Bool(false)),
+    ("AboveWaterTargetsOnly", Default::Bool(false)),
+    ("AimsStraightOnDisable", Default::Bool(false)),
+    ("AlwaysRecheckTarget", Default::Bool(true)),
+    ("AttackGroundTries", Default::Num(3.0)),
+    ("AutoInitiateAttackCommand", Default::Bool(false)),
+    ("BallisticArc", Default::Str("RULEUBA_None")),
+    ("BelowWaterFireOnly", Default::Bool(false)),
+    ("BelowWaterTargetsOnly", Default::Bool(false)),
+    ("BombDropThreshold", Default::Num(1.5)),
+    ("CannotAttackGround", Default::Bool(false)),
+    ("CountedProjectile", Default::Bool(false)),
+    ("DummyWeapon", Default::Bool(false)),
+    ("EffectiveRadius", Default::Num(-1.0)),
+    ("HeadingArcCenter", Default::Num(0.0)),
+    ("HeadingArcRange", Default::Num(180.0)),
+    ("IgnoreIfDisabled", Default::Bool(false)),
+    ("IgnoresAlly", Default::Bool(true)),
+    ("LeadTarget", Default::Bool(true)),
+    ("ManualFire", Default::Bool(false)),
+    ("MaxProjectileStorage", Default::Num(0.0)),
+    ("MaxRadius", Default::Num(0.0)),
+    ("MaximumBeamLength", Default::Num(0.0)),
+    ("MinRadius", Default::Num(0.0)),
+    ("MuzzleVelocityRandom", Default::Num(0.0)),
+    ("MuzzleVelocityReduceDistance", Default::Num(0.0)),
+    ("NeedPrep", Default::Bool(false)),
+    ("NeedToComputeBombDrop", Default::Bool(false)),
+    ("NukeWeapon", Default::Bool(false)),
+    ("OverChargeWeapon", Default::Bool(false)),
+    ("PrefersPrimaryWeaponTarget", Default::Bool(false)),
+    ("ProjectileId", Default::Str("")),
+    ("ProjectileLifetime", Default::Num(0.0)),
+    ("ProjectileLifetimeUsesMultiplier", Default::Num(0.0)),
+    ("RangeCategory", Default::Str("UWRC_Undefined")),
+    ("ReTargetOnMiss", Default::Bool(false)),
+    ("RequiresEnergy", Default::Num(0.0)),
+    ("RequiresMass", Default::Num(0.0)),
+    ("SlavedToBody", Default::Bool(false)),
+    ("SlavedToBodyArcRange", Default::Num(1.0)),
+    ("StopOnPrimaryWeaponBusy", Default::Bool(false)),
+    ("TargetCheckInterval", Default::Num(3.0)),
+    ("TargetRestrictDisallow", Default::Str("")),
+    ("TargetRestrictOnlyAllow", Default::Str("")),
+    ("TargetType", Default::Str("RULEWTT_Unit")),
+    ("TrackingRadius", Default::Num(1.0)),
+    ("UIMaxRangeVisualId", Default::Str("")),
+    ("UIMinRangeVisualId", Default::Str("")),
+    ("UseFiringSolutionInsteadOfAimBone", Default::Bool(false)),
+    ("YawOnlyOnTarget", Default::Bool(false)),
+];
 
-/// Fills [`UNIT_DEFAULTS`] (and in the user layer, `user_layer`, also
-/// [`UI_DEFAULTS`] and [`UI_WEAPON_DEFAULTS`]) into every registered unit
-/// blueprint. Call once
-/// blueprints are loaded.
+/// In the user layer only: `Weapon.DamageRadius`, which the armament detail
+/// formats and some blueprints leave out (dal0310, dea0202); its engine
+/// default isn't known.
+const UI_WEAPON_DEFAULTS: [(&str, f64); 1] = [("DamageRadius", 0.0)];
+
+/// Sets `field` of `t` to `value` unless it's already set.
+fn fill(lua: &Lua, t: &LuaTable, field: &str, value: Default, id: &str) -> LuaResult<()> {
+    if !t.raw_get::<LuaValue>(field)?.is_nil() {
+        return Ok(());
+    }
+    match value {
+        Default::Num(n) => t.raw_set(field, n),
+        Default::Str(v) => t.raw_set(field, v),
+        Default::Id => t.raw_set(field, id),
+        Default::Bool(b) => t.raw_set(field, b),
+        Default::Table => t.raw_set(field, lua.create_table()?),
+        Default::Range => {
+            let r = lua.create_table_with_capacity(0, 2)?;
+            r.raw_set("Min", 0.0)?;
+            r.raw_set("Max", 0.0)?;
+            t.raw_set(field, r)
+        }
+    }
+}
+
+/// `bp[section]`, made an empty table when absent; `None` when it's set to
+/// something else.
+fn section_of(lua: &Lua, bp: &LuaTable, section: &str) -> LuaResult<Option<LuaTable>> {
+    Ok(match bp.raw_get::<LuaValue>(section)? {
+        LuaValue::Table(t) => Some(t),
+        LuaValue::Nil => {
+            let t = lua.create_table()?;
+            bp.raw_set(section, t.clone())?;
+            Some(t)
+        }
+        _ => None,
+    })
+}
+
+/// Fills [`UNIT_DEFAULTS`], [`REFLECTED_DEFAULTS`] and each weapon's
+/// [`WEAPON_DEFAULTS`] (and in the user layer, `user_layer`, also
+/// [`UI_WEAPON_DEFAULTS`]) into every registered unit blueprint, never over
+/// a value the blueprint sets. Call once blueprints are loaded.
 pub fn apply_defaults(lua: &Lua, user_layer: bool) -> LuaResult<()> {
     let tables: Vec<(String, LuaTable)> = {
         let reg = lua.app_data_ref::<BlueprintRegistry>().ok_or_else(|| LuaError::runtime("BlueprintRegistry not in app_data"))?;
         reg.iter(BlueprintKind::Unit).map(|(id, bp)| (id.to_owned(), bp.table.clone())).collect()
     };
-    let ui: &[(&str, &str, Default)] = if user_layer { &UI_DEFAULTS } else { &[] };
     for (id, bp) in tables {
-        for &(section, field, value) in UNIT_DEFAULTS.iter().chain(ui) {
-            let t = match bp.raw_get::<LuaValue>(section)? {
-                LuaValue::Table(t) => t,
-                LuaValue::Nil => {
-                    let t = lua.create_table()?;
-                    bp.raw_set(section, t.clone())?;
-                    t
-                }
-                _ => continue,
-            };
-            if t.raw_get::<LuaValue>(field)?.is_nil() {
-                match value {
-                    Default::Num(n) => t.raw_set(field, n)?,
-                    Default::Str(v) => t.raw_set(field, v)?,
-                    Default::Id => t.raw_set(field, id.as_str())?,
-                    Default::Bool(b) => t.raw_set(field, b)?,
-                    Default::Range => {
-                        let r = lua.create_table_with_capacity(0, 2)?;
-                        r.raw_set("Min", 0.0)?;
-                        r.raw_set("Max", 0.0)?;
-                        t.raw_set(field, r)?
-                    }
-                }
+        for &(section, field, value) in UNIT_DEFAULTS.iter() {
+            if let Some(t) = section_of(lua, &bp, section)? {
+                fill(lua, &t, field, value, &id)?;
             }
         }
-        if let (true, LuaValue::Table(weapons)) = (user_layer, bp.raw_get::<LuaValue>("Weapon")?) {
+        for &(path, value) in REFLECTED_DEFAULTS {
+            match path.split_once('.') {
+                Some((section, field)) => {
+                    if let Some(t) = section_of(lua, &bp, section)? {
+                        fill(lua, &t, field, value, &id)?;
+                    }
+                }
+                None => fill(lua, &bp, path, value, &id)?,
+            }
+        }
+        if let LuaValue::Table(weapons) = bp.raw_get::<LuaValue>("Weapon")? {
             for weapon in weapons.sequence_values::<LuaTable>() {
                 let weapon = weapon?;
-                for &(field, value) in &UI_WEAPON_DEFAULTS {
-                    if weapon.raw_get::<LuaValue>(field)?.is_nil() {
-                        weapon.raw_set(field, value)?;
+                for &(field, value) in WEAPON_DEFAULTS {
+                    fill(lua, &weapon, field, value, &id)?;
+                }
+                if user_layer {
+                    for &(field, value) in &UI_WEAPON_DEFAULTS {
+                        fill(lua, &weapon, field, Default::Num(value), &id)?;
                     }
                 }
             }
@@ -773,12 +954,14 @@ mod tests {
         lua.set_app_data(Arc::new(RwLock::new(Vfs::new(vec![MountPoint { source: dir.clone(), mountpoint: "/".into() }], vec![]).unwrap())));
         lua.set_app_data(construction::Footprints::default());
         lua.set_app_data(construction::DecayRates::default());
+        lua.set_app_data(construction::RegenAssistMults::default());
         lua.set_app_data(build::SkirtCache::default());
+        lua.set_app_data(build::PlacementCache::default());
         lua.set_app_data(build::BuildableCache::default());
         lua.set_app_data(crate::engine::sim::projectile::Projectiles::default());
         lua.load(
             "__blueprints = {}
-            RegisterUnitBlueprint({ BlueprintId = 'b', Categories = { 'LAND' }, Footprint = { SizeX = 2, SizeZ = 2 }, Economy = { BuildCostMass = 10, BuildableCategory = { 'LAND' } } })
+            RegisterUnitBlueprint({ BlueprintId = 'b', Categories = { 'LAND' }, Footprint = { SizeX = 2, SizeZ = 2 }, Economy = { BuildCostMass = 10, BuildableCategory = { 'LAND' } }, Defense = { Shield = { RegenAssistMult = 60 } } })
             RegisterUnitBlueprint({ BlueprintId = 'n', Categories = { 'NAVAL' } })
             RegisterProjectileBlueprint({ BlueprintId = '/p.bp', Physics = { PositionX = 1 } })",
         )
@@ -786,7 +969,7 @@ mod tests {
         .unwrap();
         categories::build(&lua).unwrap();
 
-        // (footprint half x, decay cost (0.1 / rate), skirt width, builds `n`, effect lifetime, projectile offset x)
+        // (footprint half x, decay cost (0.1 / rate), skirt width, builds `n`, effect lifetime, projectile offset x, placement half x, shield assist divisor)
         let read = |lua: &Lua| {
             let n = categories::domain(lua).unwrap().index_of("n").unwrap();
             let bp = lua.load("return __blueprints['/p.bp']").eval::<LuaTable>().unwrap();
@@ -798,14 +981,16 @@ mod tests {
                 build::buildable(lua, "b").unwrap().contains(n),
                 effect::blueprint_lifetime(lua, EffectKind::Emitter, "/effects/e.bp"),
                 projectile::template_of(lua, "/p.bp", &bp).unwrap().position.x.to_num::<f64>(),
+                build::Placement::of(lua, "b").unwrap().half().0.to_num::<f64>(),
+                construction::regen_assist_mult(lua, "b").unwrap().to_num::<f64>(),
             )
         };
         let before = read(&lua);
-        assert_eq!(before, (1.0, 10.0, 2.0, false, Some(10.0), 1.0));
+        assert_eq!(before, (1.0, 10.0, 2.0, false, Some(10.0), 1.0, 1.0, 60.0));
 
         reloading(&lua, || {
             lua.load(
-                "RegisterUnitBlueprint({ BlueprintId = 'b', Categories = { 'LAND' }, Footprint = { SizeX = 4, SizeZ = 4 }, Economy = { BuildCostMass = 20, BuildableCategory = { 'NAVAL' } } })
+                "RegisterUnitBlueprint({ BlueprintId = 'b', Categories = { 'LAND' }, Footprint = { SizeX = 4, SizeZ = 4 }, Economy = { BuildCostMass = 20, BuildableCategory = { 'NAVAL' } }, Defense = { Shield = { RegenAssistMult = 30 } } })
                 RegisterProjectileBlueprint({ BlueprintId = '/p.bp', Physics = { PositionX = 2 } })",
             )
             .exec()
@@ -815,8 +1000,8 @@ mod tests {
         categories::build(&lua).unwrap();
         forget_derived(&lua);
 
-        assert_eq!(read(&lua), (2.0, 20.0, 4.0, true, Some(20.0), 2.0), "every cache reads the new values");
-        assert_eq!(inventory::iter::<DerivedCache>.into_iter().count(), 6, "a new DerivedCache: check it here too");
+        assert_eq!(read(&lua), (2.0, 20.0, 4.0, true, Some(20.0), 2.0, 2.0, 30.0), "every cache reads the new values");
+        assert_eq!(inventory::iter::<DerivedCache>.into_iter().count(), 8, "a new DerivedCache: check it here too");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

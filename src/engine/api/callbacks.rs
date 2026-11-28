@@ -155,6 +155,8 @@ callbacks! {
         OnExitWater();
         /// `kind`: `"Terrain"`, `"Water"`, `"Unit"`, `"Shield"`, `"Prop"`, ...
         OnImpact(kind: &str, target: Loose<Option<Obj<moho::Entity>>>);
+        /// A tracking projectile's target entity is gone.
+        OnLostTarget();
         OnDestroy();
     }
 

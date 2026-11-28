@@ -576,3 +576,81 @@ fn cheat_menu_over_the_minimap_takes_its_clicks() {
     frames(&vm, 2);
     assert!(vm.hit_minimap(x, y).unwrap(), "closed: the minimap's again");
 }
+
+/// `LockInput` is counted: two locks need two unlocks (`probe_ui_controls`
+/// cam: `LockInput nested = true false`).
+#[test]
+fn world_view_input_locks_are_counted() {
+    let Some(vm) = hud() else { return };
+    let got: (bool, bool, bool) = vm
+        .lua()
+        .load(
+            r#"
+            local view = import('/lua/ui/game/worldview.lua').viewLeft
+            view:LockInput() view:LockInput() view:UnlockInput()
+            local nested = view:IsInputLocked()
+            view:UnlockInput()
+            local open = view:IsInputLocked()
+            view:UnlockInput()
+            return nested, open, view:IsInputLocked()
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(got, (true, false, false));
+}
+
+/// Key maps (`IN_AddKeyMapTable`): the newest map is looked in first, a
+/// map changed after it was added is read as it now is, and a map is
+/// removed by the table that added it.
+#[test]
+fn key_maps_are_kept_by_table() {
+    let Some(vm) = hud() else { return };
+    let hits = || vm.lua().load("return rawget(_G, 'TestKeyHits') or ''").eval::<String>().unwrap();
+    vm.lua()
+        .load(
+            r#"
+            local function hit(s) return "UI_Lua rawset(_G, 'TestKeyHits', (rawget(_G, 'TestKeyHits') or '') .. '" .. s .. "')" end
+            TestOld = { ['Ctrl-Alt-F9'] = hit('a') }
+            TestNew = { ['Ctrl-Alt-F9'] = { action = hit('b') } }
+            TestHit = hit
+            IN_AddKeyMapTable(TestOld)
+            IN_AddKeyMapTable(TestNew)
+            "#,
+        )
+        .exec()
+        .unwrap();
+    assert!(vm.key("F9", true, true, false).unwrap());
+    assert_eq!(hits(), "b", "the newest map wins");
+    vm.lua().load("TestNew['Ctrl-Alt-F9'] = TestHit('c')").exec().unwrap();
+    assert!(vm.key("F9", true, true, false).unwrap());
+    assert_eq!(hits(), "bc", "a map changed after it was added");
+    vm.lua().load("IN_RemoveKeyMapTable(TestNew)").exec().unwrap();
+    assert!(vm.key("F9", true, true, false).unwrap());
+    assert_eq!(hits(), "bca", "the older map shows through");
+    vm.lua().load("IN_ClearKeyMap()").exec().unwrap();
+    assert!(!vm.key("F9", true, true, false).unwrap(), "nothing bound");
+}
+
+/// The active build template comes back as a copy of what was set: FAF
+/// rotates the table it gets and sets it again.
+#[test]
+fn build_template_is_copied_both_ways() {
+    let Some(vm) = hud() else { return };
+    let got: (bool, f64, f64, String, f64, f64, f64, bool, f64) = vm
+        .lua()
+        .load(
+            r#"
+            local given = { 4, 2, { 'ueb1101', 7, 1.5, -2 }, { 'UEB1102', 8, 3, 0 } }
+            SetActiveBuildTemplate(given)
+            given[3][3] = 99
+            local a, b = GetActiveBuildTemplate(), GetActiveBuildTemplate()
+            a[4][3] = 50
+            ClearBuildTemplates()
+            return a ~= b and a ~= given, a[1], a[2], a[3][1], a[3][2], a[3][3], a[3][4], next(GetActiveBuildTemplate()) == nil, b[4][3]
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(got, (true, 4.0, 2.0, "ueb1101".to_string(), 7.0, 1.5, -2.0, true, 3.0));
+}

@@ -71,14 +71,17 @@ lobby, and LAN / Direct Connect play over the network
 `--armies`, `--script`, `--player`, `--replay`, ...) and `--headless` imply `--session`. The window
 opens at 1024×768, SupCom's minimum resolution.
 
-Without `--player` you watch the AIs, but you can still select and order any army's units.
+Without `--player` you watch the AIs, but you can still select and order any army's units. As in
+the real game, clicking an army's line in the score board shows the game as that army (its fog of
+war, economy and commanders; its units can be selected but take no orders), and the Observer line
+goes back to every army. A player in a live game keeps their own army's view (cheats aside).
 
 ### Controls
 
 | Input | Action |
 |---|---|
-| WASD / arrow keys, middle-drag | pan |
-| mouse wheel | zoom toward the cursor; straight down when zoomed out, tilting to 40 degrees close in (moho's camera curve) |
+| WASD / arrow keys (Ctrl: 4x faster), middle-drag | pan |
+| mouse wheel | an eased zoom, in toward the cursor and out about the middle of the view; straight down when zoomed out, tilting to 40 degrees close in (moho's camera curve) |
 | left-click / left-drag | select a unit / box-select (shift adds; click empty ground to clear) |
 | double-click | every unit of that type (and army) on screen |
 | right-click | order by what's under the cursor: attack an enemy, reclaim a prop (engineers), repair a damaged / guard an own unit, else move |
@@ -90,7 +93,7 @@ Without `--player` you watch the AIs, but you can still select and order any arm
 | `F` | cycle formation |
 | ctrl/cmd + 0-9, 0-9 (twice: centre camera), shift + 0-9 | set / recall / add to a control group |
 | Esc | cancel an armed order, else clear the selection |
-| `+` / `-` | game speed up / down (0.25x … 16x, max) |
+| `+` / `-` | game speed up / down (0.25x … 16x, max; the keys step one at a time with no upper limit, max is step +77; FAF's clock shows the step asked for and the actual speed as measured) |
 | Pause (FAF's key map), or the bottom bar's pause | pause / resume |
 
 With FAF's interface up, its own key map and panels work as in the real game
@@ -155,6 +158,19 @@ Every 1000 ticks, and at the end of a `--ticks` run, the log gets:
 - a `progress` line: ms/tick, entity count, the sim checksum;
 - a `stage ms` line: each sim stage's ms/tick, slowest first, plus the slowest tick's own breakdown
   and the path searches. The Lua garbage collection (every 100 ticks) is its own stage, `LuaGc`.
+
+`--headless-snapshots` builds every tick's render snapshot (and the user layer's `Sync` copy), as a
+window would, and drops it, so the `Snapshot` and `Sync` stages can be timed without a window.
+
+`--headless-with-ui` (implies `--headless`; no window, GPU or audio) also runs FAF's interface Lua on
+those snapshots (`src/render/headless_ui.rs`). Its orders and `SimCallback`s go to the sim as a
+window's do. An all-AI game sends some: the nuke launch ping (`SpawnSpecialPing`) is one. Interface
+errors are logged as they are with a window, and each callback sent is logged
+(`grep "interface SimCallback"`). The sim waits for the interface after every tick, and the
+interface runs one beat and one 0.1 s frame per tick, so two runs of a game give the same
+checksums. A windowed run is paced by frames, so its commands can land on other ticks and its
+checksums can differ. Not run: cameras, picks, the draw list, sounds. `--ui-lua` and `--record`
+work.
 
 **Stall watchdog.** If no tick completes for `--stall-timeout` seconds (default 30; `0` turns it
 off), the engine logs `ERROR ... sim stalled` with the tick and the stage. If Lua is spinning, it
@@ -234,6 +250,7 @@ and a map from a vault needs the same `--vault`. File format and internals:
 | `--record <file>` / `--no-record` | record to this file / don't record | windowed: `replays/` |
 | `--replay <file>` | play a recording (headless too; `--ticks` still applies) | off |
 | `--stall-timeout <secs>` | seconds without a tick before the watchdog reports a stall; 0 = off | 30 |
+| `--tracy-level <1-3>` | how much a `--features tracy` build sends to Tracy: [levels](#profiling-with-tracy) | 1 |
 | `--lua-debug [port]` | serve the Lua debugger (Debug Adapter Protocol) on `127.0.0.1:port` for VS Code: [debugging-lua.md](debugging-lua.md) | off; 4711 |
 | `--lua-debug-wait` | with `--lua-debug` (implied): run no Lua until the debugger has attached | off |
 | `--enable-disk-watch` | reload game files edited on disk while the game runs: scripts, blueprints, models, textures (the game's `/EnableDiskWatch`, for modding): [lua-bridge.md](../architecture/lua-bridge.md#reloading-changed-files) | off |
@@ -288,22 +305,52 @@ It shows:
 - a frame mark per rendered frame, and a "sim tick" mark per tick ("head 2 frame" for the second head);
 - spans for every sim stage (`Economy`, `Movement`, `LuaThreads`, ...) inside `sim tick`, and for the
   render frame (`receive snapshots`, `prepare scene`, `ui`, `submit`, `present`);
-- every log event as a message;
+- every log event that passes the log filter as a message: TRACE for our own targets, WARN for
+  every other crate. Unfiltered, a window's wgpu and naga TRACE logs (millions of messages) took more
+  than the link to the profiler can carry: the threads that log the most (sim, render) fell
+  further and further behind, so their zones seemed to stop a few seconds into a capture;
 - on GPUs with timestamp queries, a "wgpu" track timing the `scene pass` and `ui pass`;
 - model loading (`load model`, `upload models`) and a "memory MB" plot of resident memory.
 
 Without the feature the hooks compile to nothing.
 
-To profile the Lua, build with `lua-profile` (it turns on `tracy` too). Every Lua thread resume
-becomes a zone inside `LuaThreads`, named by the function the thread was forked with
-(`/lua/ai/gridrecon.lua:204`). Tracy's Statistics view then ranks scripts by time. It's a separate
-feature because it adds a lookup to every thread resume.
+`--tracy-level N` sets how much goes to Tracy, so one build serves all levels:
+
+| Level | Adds |
+|-------|------|
+| 1 (default) | The spans and plots above. |
+| 2 | A zone per engine function Lua calls, named as Lua knows it (`Unit:GetPosition`), and per script callback, by method (`OnDamage`). |
+| 3 | A zone per Lua thread resume inside `LuaThreads`, named by where the thread's function was defined (`/lua/ai/gridrecon.lua:204`), and the `prof_plot!` counters. |
+
+Statistics then ranks engine functions and scripts by time. Below level 2 Lua calls the bare
+functions, so a level costs nothing until it's on. On the RNGAI 4v4 benchmark, 6000 ticks cost
+4-7% more tick time at any level and capture to about 10 / 60 / 65 MB at levels 1 / 2 / 3. Late
+game calls far more: 32000 ticks at level 3 cost 6% (9% late on), saved 690 MB and took
+`tracy-capture` 4.7 GB of memory.
 
 ```sh
-cargo build --release --features lua-profile
-tracy-capture -o lua.tracy -f &             # save a trace from a headless run
-./target/release/rts-core-engine --headless --ticks 3000
+cargo build --release --features tracy
+./target/release/rts-core-engine --headless --ticks 3000 --tracy-level 3 &
+sleep 5; tracy-capture -o lua.tracy -f      # save a trace from a headless run
 ```
+
+Start the game first, then the recorder: a `tracy-capture` already waiting when the game starts
+fails with "disconnected during the initial connection handshake". The client keeps everything from
+the start of the process until a recorder connects, so nothing is lost; but with no recorder at
+all it keeps growing (about 1.5 GB per 6000 ticks at level 2), so don't leave a level 2 or 3 game
+running without one. `TRACY_PORT=<n>` on the game and `tracy-capture -p <n>` keep a capture away
+from another profiled process on the default port.
+
+Totals for a window of ticks, or the change between two builds' traces of the same game:
+
+```sh
+dev/bench/tracy_window.py 29000 32000 a.tracy [b.tracy] > window.csv
+```
+
+It counts the zones that start in the window (tick n is the n-th `sim tick` zone) from
+`tracy-csvexport -u`: calls and total time per zone name, children included (no self time).
+On the 32000-tick level-3 trace it takes a minute and 7 GB. In the GUI,
+Statistics' "Limit range" does the same for a selected range.
 
 ### Stress maps (manual)
 

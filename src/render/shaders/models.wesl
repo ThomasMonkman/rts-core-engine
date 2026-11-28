@@ -706,9 +706,11 @@ fn mesh_glow(i: MeshOut, shading: u32, fidelity: u32) -> f32 {
 
 // ---- Shield bubbles (mesh.fx `ShieldUEF` / `ShieldCybran` / `ShieldAeon` /
 // `ShieldSeraphim`) ---------------------------------------------------------
-// FAF scrolls four texture coordinate sets over time: (uv0 * s0, uv1 * s1,
-// uv0 * s2, uv1 * s3), each shifted by time * its rate
-// (`FourUVTexShiftScaleVS` / `ShieldNormalVS`). `team.a` is the shield's
+// FAF scrolls four texture coordinate sets over time: (uv0 * s0, uv0 * s1,
+// uv0 * s2, uv0 * s3), each shifted by time * its rate (`ShieldNormalVS`:
+// `texcoord0.zw = texcoord0 * texScale1` keeps the float4's xy, the first
+// UV; FAF's `Sphere01` has the constant (0, 1) as its second UV, which made
+// the whole dome one scrolling texel). `team.a` is the shield's
 // health fraction (`PARAM_FRACTIONHEALTH`, the `material.y` its colour
 // shifts with).
 
@@ -739,9 +741,9 @@ fn shield_uv(i: MeshOut, scale: vec4<f32>, shift0: vec4<f32>, shift1: vec4<f32>)
     let t = fa_time();
     var u: ShieldUv;
     u.a = i.uv * scale.x + t * shift0.xy;
-    u.b = i.uv1 * scale.y + t * shift0.zw;
+    u.b = i.uv * scale.y + t * shift0.zw;
     u.c = i.uv * scale.z + t * shift1.xy;
-    u.d = i.uv1 * scale.w + t * shift1.zw;
+    u.d = i.uv * scale.w + t * shift1.zw;
     return u;
 }
 
@@ -1370,6 +1372,9 @@ fn phase_shield(i: MeshOut, age: f32, s1: f32, d1: vec2<f32>, s2: f32, d2: vec2<
             if (alpha <= 0.137) { discard; }
             c = vec4<f32>(a.rgb, alpha);
         }
+        // `CommandFeedback3` (ping markers): `CommandFeedbackPS0(false)`
+        // with no alpha test.
+        case 47u: { c = albedo_at(i.uv); }
         // `StunnedUnit`.
         default: { c = vec4<f32>(0.0, 0.0, 0.0, 0.66); }
     }
@@ -1405,6 +1410,7 @@ fn phase_shield(i: MeshOut, age: f32, s1: f32, d1: vec2<f32>, s2: f32, d2: vec2<
     let distance_scale = max(mix(1.0, 15.0, (depth - 10.5) * 0.001), 0.0);
     let scale_to = select(0.7, 1.1, u32(shading.x + 0.5) == 43u);
     let t = clamp(shading.w / max(params.z, 1e-3), 0.0, 1.0);
-    let scaled = pos * distance_scale * mix(1.0, scale_to, t);
+    // `CommandFeedback3` is `VertexNormalVS`: the mesh as it is.
+    let scaled = select(pos * distance_scale * mix(1.0, scale_to, t), pos, u32(shading.x + 0.5) == 47u);
     return mesh_vertex(scaled, normal, uv, bone, m0, m1, m2, m3, team, params, bones, tangent, binormal, uv1, shading);
 }

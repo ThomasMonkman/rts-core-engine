@@ -125,8 +125,9 @@ pub type Icon = (u32, [f32; 3], u32, u32, IconKind, f32);
 
 /// How an icon draws: at the unit, in its army's colour (`Full`); an
 /// unidentified radar / sonar contact (`Blip`: a generic shape, grey); or
-/// a scouted structure now out of sight (`Remembered`: its own icon
-/// greyed; the mesh keeps its last-seen look, darkened by the fog).
+/// a scouted structure now out of sight (`Remembered`: its own icon in its
+/// army's colour, as the real game draws it after radar loss; the mesh
+/// keeps its last-seen look, darkened by the fog).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IconKind {
     Full,
@@ -718,6 +719,13 @@ impl Stage {
                     p.what = What::Blip;
                     return p;
                 }
+                // A unit seen before, on radar now: its own icon in army
+                // colour at any zoom, no mesh (a structure shows as
+                // remembered, its icon in colour).
+                if e.sighting == crate::engine::snapshot::Sighting::Identified && e.kind != ViewKind::Structure {
+                    p.what = What::Icon;
+                    return p;
+                }
                 let unit = matches!(e.kind, ViewKind::Unit | ViewKind::Structure);
                 // An upgrade being built inside its structure (no box) shows
                 // no icon of its own: the structure's stands for both.
@@ -812,8 +820,8 @@ impl Stage {
                 What::Skip => {}
                 // A blip: its generic shape, grey, at any zoom. The icon
                 // standing alone (past the mesh's last LOD cutoff, or a
-                // remembered scouted structure): its own icon, greyed for
-                // the remembered structure, full colour otherwise.
+                // remembered scouted structure): its own icon in its army's
+                // colour.
                 What::Blip => {
                     for icons in &mut self.icons {
                         icons.push((e.id, e.position, e.army, e.blueprint, IconKind::Blip, 1.0));
@@ -856,7 +864,7 @@ impl Stage {
             }
             for (icons, &alpha) in self.icons.iter_mut().zip(&p.icons) {
                 if alpha != NO_ICON {
-                    // A remembered structure's icon stays greyed.
+                    // A remembered structure keeps its icon (army colour).
                     let kind = if e.sighting == crate::engine::snapshot::Sighting::Remembered { IconKind::Remembered } else { IconKind::Full };
                     icons.push((e.id, e.position, e.army, e.blueprint, kind, alpha));
                 }
@@ -1934,7 +1942,11 @@ impl Scene {
                         continue;
                     }
                     let i = list.len() as u32;
-                    list.push(*inst);
+                    let mut inst = *inst;
+                    // A Seraphim unit being built casts the shadow of what
+                    // is drawn of it (`bones.z`: see `vs_shadow`).
+                    inst.bones[2] = (m.build == Some(crate::engine::api::mesh::BuildShader::Seraphim)) as u32;
+                    list.push(inst);
                     match draws.last_mut() {
                         Some((last, r)) if last == mesh && r.end == i => r.end = i + 1,
                         _ => draws.push((*mesh, i..i + 1)),

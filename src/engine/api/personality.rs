@@ -1,10 +1,11 @@
 //! `CAiBrain:GetPersonality` and `moho.aipersonality_methods`.
 //!
 //! Moho's personality tables live in the binary; FAF ships none, and
-//! scenario saves set `personality = ''`. Until real data turns up, every
-//! brain gets the same neutral personality: emphases/tendencies 0.5 (no
-//! preference), sizes 1 (no scaling), `AdjustDelay` returns the delay
-//! unchanged. All values are inferred placeholders, not moho's.
+//! scenario saves set `personality = ''`. Every brain gets the personality
+//! the real game reports for a brain with none set (dev/probes
+//! probe_ai_brain): name `AverageJoe`, chat `None`, difficulty 0.5, army
+//! size 75, platoon size 1, every tendency 0.5, no favourites.
+//! `AdjustDelay` is the real game's formula (probed).
 
 use crate::lua_api::shapes;
 use std::collections::BTreeMap;
@@ -77,47 +78,61 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             moho::AIPersonality::CLASS,
             name,
             None,
-            "Placeholder tendency: 0.5 (no preference) for every brain.",
+            "0.5 for every brain (the real game's default personality).",
             Status::Implemented,
             |_, _this: Obj<moho::AIPersonality>| Ok(0.5),
         )?;
     }
-    for name in ["GetArmySize", "GetPlatoonSize"] {
-        crate::lua_api::add_class_fn(
-            lua,
-            moho::AIPersonality::CLASS,
-            name,
-            None,
-            "Placeholder size multiplier: 1 (no scaling) for every brain.",
-            Status::Implemented,
-            |_, _this: Obj<moho::AIPersonality>| Ok(1.0),
-        )?;
-    }
     lua_method!(lua, moho::AIPersonality,
-        /// Placeholder: 2 for every brain.
-        GetDifficulty = |_, _this: Obj<moho::AIPersonality>| Ok(2.0))?;
+        /// 75 for every brain (the real game's default personality).
+        GetArmySize = |_, _this: Obj<moho::AIPersonality>| Ok(75.0))?;
     lua_method!(lua, moho::AIPersonality,
-        /// Returns `delay` unchanged (placeholder).
-        AdjustDelay = |_, (_this, delay, _factor): (Obj<moho::AIPersonality>, f64, Option<f64>)| Ok(delay))?;
+        /// 1 for every brain (the real game's default personality).
+        GetPlatoonSize = |_, _this: Obj<moho::AIPersonality>| Ok(1.0))?;
+    lua_method!(lua, moho::AIPersonality,
+        /// 0.5 for every brain (the real game's default personality).
+        GetDifficulty = |_, _this: Obj<moho::AIPersonality>| Ok(0.5))?;
+    lua_method!(lua, moho::AIPersonality,
+        /// `delay x (1 + trunc(factor) x 0.5)`: dev/probes probe_ai_brain / probe_ai_misc, (10, 1) =
+        /// 15, (10, 1.5) = 15, (10, 3) = 25, (10, -1) = 5, (100, 0.9) = 100, (-10, 2) = -20.
+        /// (IEEE multiply and add are exact-rounded, so the same everywhere.)
+        AdjustDelay = |_, (_this, delay, factor): (Obj<moho::AIPersonality>, f64, Option<f64>)| Ok(adjust_delay(delay, factor.unwrap_or(0.0))))?;
     for name in ["GetFavouriteStructures", "GetFavouriteUnits"] {
         crate::lua_api::add_class_fn(
             lua,
             moho::AIPersonality::CLASS,
             name,
             None,
-            "Placeholder: an empty table.",
+            "An empty table (the real game's default personality).",
             Status::Implemented,
             |lua, _this: Obj<moho::AIPersonality>| lua.create_table().map(shapes::List::<String>::new),
         )?;
     }
     lua_method!(lua, moho::AIPersonality,
-        /// Placeholder: the empty string.
-        GetChatPersonality = |_, _this: Obj<moho::AIPersonality>| Ok(String::new()))?;
+        /// `"None"` for every brain (the real game's default personality).
+        GetChatPersonality = |_, _this: Obj<moho::AIPersonality>| Ok("None"))?;
     lua_method!(lua, moho::AIPersonality,
-        /// The name set by `SetArmyAIPersonality` for this brain's army, or the empty string.
+        /// The name set by `SetArmyAIPersonality` for this brain's army, else `AverageJoe` (the
+        /// real game's default).
         GetPersonalityName = |lua, this: Obj<moho::AIPersonality>| {
             let PersonalityHandle(army) = script_object::handle(&this)?;
-            Ok(lua.app_data_ref::<PersonalityNames>().and_then(|n| n.0.get(&army).cloned()).unwrap_or_default())
+            Ok(lua.app_data_ref::<PersonalityNames>().and_then(|n| n.0.get(&army).cloned()).unwrap_or_else(|| "AverageJoe".to_owned()))
         })?;
     Ok(())
+}
+
+/// `AIPersonality:AdjustDelay(delay, factor)`.
+fn adjust_delay(delay: f64, factor: f64) -> f64 {
+    delay * (1.0 + factor.trunc() * 0.5)
+}
+
+#[cfg(test)]
+mod tests {
+    /// dev/probes probe_ai_brain / probe_ai_misc.
+    #[test]
+    fn adjust_delay_matches_the_real_game() {
+        for (a, b, want) in [(10.0, 1.0, 15.0), (10.0, 1.5, 15.0), (10.0, 2.0, 20.0), (10.0, 3.0, 25.0), (10.0, -1.0, 5.0), (100.0, 0.9, 100.0), (-10.0, 2.0, -20.0)] {
+            assert_eq!(super::adjust_delay(a, b), want, "({a}, {b})");
+        }
+    }
 }

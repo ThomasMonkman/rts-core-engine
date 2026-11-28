@@ -27,8 +27,12 @@
 //!    order counts down first).
 //! A paused builder's job still tracks its assist's progress and completes
 //! it; progress callbacks fire only on change.
-//! A builder whose order was cleared stops (`OnStopBuild`) and leaves the
-//! half-built unit standing, to decay while nobody works on it (`decay`). Jobs are kept by builder id, so callbacks run
+//! A builder whose order was cleared stops (`OnStopBuild`, then
+//! `OnFailedToBuild`; a factory the other way round, and a cancelled
+//! upgrade `OnFailedToBuild` then `OnStopBuild`, dev/probes
+//! probe_unit_build G2-G4; a mobile build inside `IssueClearCommands`,
+//! and with `OnFailedToBuild` alone when its builder is killed or
+//! destroyed, probe_q_build: `orders_cleared`, `builder_died`) and leaves the half-built unit standing, to decay while nobody works on it (`decay`). Jobs are kept by builder id, so callbacks run
 //! in a fixed order.
 //! A builder (or assister) whose structure is destroyed unfinished gets
 //! `OnFailedToBuild` then `OnStopBuild(target, order)`, as moho's build stop
@@ -38,9 +42,13 @@
 //! The progress step is moho's (the build-task work step, MohoEngine.dll
 //! 0x101e1ace..0x101e1af9: `BuildRate / BuildTime x GetResourceConsumed x
 //! 0.1`). Repairing an aircraft also refuels it, at half speed for both while
-//! it's damaged (`assists`). Not done: assisting a shield generator
-//! regenerating its bubble (0x101e1b33..0x101e1c76: `RegenRate x BuildRate /
-//! Defense.Shield.RegenAssistMult`, needs the owner's shield link).
+//! it's damaged (`assists`). Repairing or guarding a `SHIELD` unit
+//! regenerates its focus entity (FAF focuses a shield unit on its shield) by
+//! `RegenRate x 0.1 x BuildRate / Defense.Shield.RegenAssistMult` a tick,
+//! the divisor doubled and the repair halved while the unit is damaged
+//! (0x101e1b33..0x101e1c76); at full health the work lasts until the shield
+//! is full, or ends at once when the script's `ShieldIsOn()` says it's off
+//! (FAF probe `probe_shield_assist`).
 //!
 //! Inferred, not verified against the binary: progress callbacks every tick,
 //! no site snapping.
@@ -210,8 +218,8 @@ pub(crate) fn snap_site(lua: &Lua, bp: &str, site: FxVec3) -> LuaResult<FxVec3> 
 fn cap_used(lua: &Lua, army: u32, cache: &mut BTreeMap<u32, Fx>) -> Fx {
     *cache.entry(army).or_insert_with(|| {
         entity::world(lua)
-            .iter()
-            .filter(|e| !e.destroyed && e.army == Some(army))
+            .units_of(army)
+            .filter(|e| !e.destroyed)
             .filter_map(|e| e.unit.as_deref().map(|u| u.cap_cost))
             .fold(Fx::ZERO, |a, b| a.saturating_add(b))
     })
@@ -275,6 +283,16 @@ pub(crate) fn skirt_max(lua: &Lua, bp: &str) -> LuaResult<Fx> {
     Ok((x1 - x0).max(z1 - z0))
 }
 
+/// A surface builder at `p` stands on a cell a structure covers.
+fn inside_structure(lua: &Lua, builder: EntityId, p: FxVec3) -> bool {
+    let flying = entity::world(lua).get(builder).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.layer == crate::engine::sim::layer::Layer::Air);
+    !flying
+        && lua.app_data_ref::<crate::engine::sim::nav::NavGrid>().is_some_and(|n| {
+            let (x, z) = n.cell_of(p);
+            n.blocked_cell(x, z)
+        })
+}
+
 /// A build order the builder could start now: (order kind, command, blueprint,
 /// site), if its current order is a build and it's in range. A mobile build
 /// is in range as moho's `CUnitMobileBuildTask` (MohoEngine.dll 0x101e30ac..
@@ -285,6 +303,15 @@ fn ready_to_start(lua: &Lua, builder: EntityId) -> LuaResult<Option<(BuildOrder,
     let commands = lua.app_data_ref::<Commands>();
     let Some(cmd) = commands.as_ref().and_then(|c| c.current(builder)) else { return Ok(None) };
     let Some(bp) = cmd.blueprint.clone() else { return Ok(None) };
+    // A blueprint that doesn't exist (orders are checked at issue,
+    // `api::command::issue`; this is the backstop): the order is dropped.
+    if matches!(cmd.kind, CommandKind::BuildMobile | CommandKind::BuildFactory | CommandKind::Upgrade)
+        && !crate::engine::api::command::unit_blueprint_known(lua, &bp) {
+        drop(commands);
+        tracing::warn!(target: "lua", builder, blueprint = %bp, "build order for an unknown unit blueprint; dropped");
+        lua.app_data_mut::<Commands>().expect("Commands").pop_front(builder);
+        return Ok(None);
+    }
     let (site, reach) = {
         let w = entity::world(lua);
         // Moho's dispatch hold: a factory rolling a unit off
@@ -305,8 +332,12 @@ fn ready_to_start(lua: &Lua, builder: EntityId) -> LuaResult<Option<(BuildOrder,
             // order has started the structure there.
             let r = r + skirt_max(lua, &bp)?;
             let (dx, dz) = (target.x - p.x, target.z - p.z);
-            let in_range = dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)) <= r.saturating_mul(r);
-            tracing::debug!("BUILDREACH id={builder} bp={bp} pos={p:?} site={target:?} reach={r}");
+            // A builder standing inside a structure (a factory's new unit
+            // still on the pad) walks out towards the site first, as one out
+            // of range does (FAF probe probe_padbuild2: `placed`, `attached`,
+            // `detached` walk, 7.2 from a site in reach at 8; `rolled`,
+            // outside the factory, builds where it stands).
+            let in_range = dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)) <= r.saturating_mul(r) && !inside_structure(lua, builder, p);
             Ok(in_range.then_some((BuildOrder::Mobile, cmd.id, bp, target)))
         }
         // Factories build at their build attach bone (else their origin);
@@ -692,6 +723,15 @@ fn start(lua: &Lua, builder: EntityId, order: BuildOrder, command: CommandId, gu
         if let Some(target) = shared.filter(|&t| entity::world(lua).get(t).is_some_and(|e| !e.destroyed && e.fraction_complete < Fx::ONE)) {
             return join(lua, builder, &builder_obj, order, command, target);
         }
+        // The same unit left unfinished on the site (an order cleared and
+        // given again, as FAF's AIs do): the builder takes it up again
+        // rather than starting a second one over it (real game, dev/probes
+        // `probe_t4_vanish` CBRE / THRE: `OnStartBuild` again with the same
+        // unit, which then went on being built).
+        if crate::engine::api::build::can_build(lua, builder, &bp)?
+            && let Some(target) = unfinished_at(lua, builder, &bp, site) {
+            return join(lua, builder, &builder_obj, order, command, target);
+        }
     }
     let site = match order {
         BuildOrder::Mobile | BuildOrder::Upgrade => site,
@@ -725,9 +765,14 @@ fn start(lua: &Lua, builder: EntityId, order: BuildOrder, command: CommandId, gu
         Some(t) if order == BuildOrder::Mobile => FxVec3 { y: if floats { t.surface_at(site.x, site.z) } else { t.height_at(site.x, site.z) }, ..site },
         _ => site,
     };
-    // An upgrade keeps the old structure's facing.
+    // An upgrade keeps the old structure's heading, not its lean: FAF's
+    // `StructureUnit.OnCreate` tilts every `FlattenSkirt` structure to the
+    // ground's gradient on top of the orientation it is made with, so the
+    // old one's tilt carried over leaned each upgrade once more (a Cybran
+    // shield on a slope 20 degrees at T2, 41 at T3). (Inferred: FAF has no
+    // guard for upgrades, so moho must make them level.)
     let facing = match order {
-        BuildOrder::Upgrade => entity::world(lua).get(builder).map(|e| e.orientation).unwrap_or(FxQuat::IDENTITY),
+        BuildOrder::Upgrade => entity::world(lua).get(builder).map(|e| FxQuat::from_heading(e.orientation.heading()).0).unwrap_or(FxQuat::IDENTITY),
         _ => FxQuat::IDENTITY,
     };
     // Building on a wreck of the same unit: moho asks the builder for a
@@ -781,8 +826,29 @@ fn start(lua: &Lua, builder: EntityId, order: BuildOrder, command: CommandId, gu
     Ok(())
 }
 
+/// An unfinished unit of `bp` in `builder`'s army standing on `site` (its
+/// position within half a unit of it, flat), lowest id first.
+fn unfinished_at(lua: &Lua, builder: EntityId, bp: &str, site: FxVec3) -> Option<EntityId> {
+    let unfinished = lua.app_data_ref::<Unfinished>()?;
+    let w = entity::world(lua);
+    let army = w.get(builder).and_then(|e| e.army)?;
+    let near = Fx::from_num(1) / Fx::from_num(4);
+    unfinished.0.iter().copied().find(|&id| {
+        w.get(id).is_some_and(|e| {
+            let p = e.position();
+            let (dx, dz) = (p.x - site.x, p.z - site.z);
+            !e.destroyed
+                && e.fraction_complete < Fx::ONE
+                && e.army == Some(army)
+                && e.cold.blueprint_id.eq_ignore_ascii_case(bp)
+                && dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)) <= near
+        })
+    })
+}
+
 /// `builder` works on `target`, a structure its shared order already
-/// started: the same job as the builder that started it.
+/// started (or one left unfinished on its order's site): the same job as
+/// the builder that started it.
 fn join(lua: &Lua, builder: EntityId, builder_obj: &LuaTable, order: BuildOrder, command: CommandId, target: EntityId) -> LuaResult<()> {
     let Some(target_obj) = object(lua, target)? else { return Ok(()) };
     if let Some(u) = entity::world(lua).get_mut(builder).and_then(|e| e.unit.as_deref_mut()) {
@@ -815,15 +881,12 @@ fn finish_shared(lua: &Lua, command: CommandId, target: EntityId) -> LuaResult<(
 }
 
 /// A structure its builder's job saw at fraction 1 finishes:
-/// `OnStopBeingBuilt` (with adjacency), then the builder stops — its
+/// `OnStopBeingBuilt` (with adjacency; not again if a helper finished it,
+/// [`complete_without_builder`]), then the builder stops — its
 /// `OnStopBuild`, where FAF's `UpgradingState.OnStopBuild` swaps a finished
 /// upgrade — and the order is done.
 fn complete(lua: &Lua, builder: EntityId, job: &Job, builder_obj: &LuaTable, target_obj: &LuaTable) -> LuaResult<()> {
-    crate::engine::api::unit_stats::unit_finished(lua, job.target)?;
-    set_state(lua, job.target, "BeingBuilt", false);
-    let layer = entity::world(lua).get(job.target).and_then(|e| e.unit.as_deref().map(|u| u.layer)).unwrap_or_default();
-    UnitCallbacks::on_stop_being_built(lua, target_obj, "unit", Some(Obj::new(builder_obj.clone())), layer)?;
-    crate::engine::api::adjacency::on_finished(lua, job.target)?;
+    finish_target(lua, job.target, target_obj, builder_obj)?;
     stop(lua, builder, true)?;
     finish_order(lua, builder, job);
     if job.order == BuildOrder::Mobile {
@@ -924,6 +987,150 @@ pub fn targets_destroyed(lua: &Lua) -> LuaResult<()> {
     }
     for assister in assisters {
         stop_assist(lua, assister)?;
+    }
+    Ok(())
+}
+
+/// A builder's orders were cleared from script (`IssueClearCommands`): the
+/// build it was on ends inside the call. A mobile build: `OnStopBuild` then
+/// `OnFailedToBuild` (FAF probe probe_q_build `clear`, `newbuild`: both come
+/// before the call returns, the structure hears nothing and is left to
+/// decay). A factory build or an upgrade: [`cancel_structure`] (FAF probe
+/// probe_q_build2 `fclear`, `uclear`: all of it before the call returns).
+pub fn orders_cleared(lua: &Lua, builder: EntityId) -> LuaResult<()> {
+    let job = lua.app_data_ref::<Builds>().and_then(|b| b.0.get(&builder).cloned());
+    let Some(job) = job else { return Ok(()) };
+    let live = {
+        let w = entity::world(lua);
+        w.get(builder).is_some_and(|e| !e.destroyed && !e.cold.killed) && w.get(job.target).is_some_and(|e| !e.destroyed)
+    };
+    // A lost target is `targets_destroyed`'s; a dead builder's build has
+    // ended already.
+    if !live {
+        return Ok(());
+    }
+    match job.order {
+        BuildOrder::Mobile => cancel_mobile(lua, builder, true),
+        BuildOrder::Factory | BuildOrder::Upgrade if !job_order_current(lua, builder, &job) => cancel_structure(lua, builder, &job, true),
+        _ => Ok(()),
+    }
+}
+
+/// A factory build or an upgrade ending before it is done: its order went
+/// away (cleared or replaced) with the builder alive, or the builder was
+/// destroyed (a killed one ends in [`builder_died`]). With the builder
+/// alive, moho's failed build stop: the builder's `OnFailedToBuild` (FAF's
+/// `UpgradingState` one returns the structure to idle), the new unit's
+/// `OnFailedToBeBuilt`, the builder's `OnStopBuild(new, order)` (where FAF
+/// turns the upgrade's consumption off, and `FactoryUnit` destroys its
+/// unfinished unit); then an upgrade's new structure is destroyed: left
+/// standing it would stay invulnerable (FAF's `OnStartBuild` turns its
+/// collision and damage off until it completes). A destroyed builder hears
+/// nothing and neither does the new unit; an upgrade's new structure is
+/// destroyed all the same (FAF probe probe_q_build2: `fclear`, `uclear` in
+/// that order, instance hooks seeing the states' callbacks; `udestroy` no
+/// `OnFailedToBeBuilt`, the new structure's `OnDestroy` the tick after the
+/// old one's). An assist can finish the unit while the builder still holds
+/// it (paused): a stop at fraction 1 completes an upgrade instead (the
+/// builder's `OnStopBuild`, where FAF's script swaps the upgrade); failing
+/// it would take down a fully built structure.
+fn cancel_structure(lua: &Lua, builder: EntityId, job: &Job, builder_alive: bool) -> LuaResult<()> {
+    let finished = entity::world(lua).get(job.target).is_some_and(|e| e.fraction_complete >= Fx::ONE);
+    if finished {
+        if job.order == BuildOrder::Upgrade && builder_alive
+            && let (Some(b), Some(t)) = (object(lua, builder)?, object(lua, job.target)?) {
+            return complete(lua, builder, job, &b, &t);
+        }
+        stop(lua, builder, job.order == BuildOrder::Factory && builder_alive)?;
+        return Ok(());
+    }
+    let target_obj = object(lua, job.target)?;
+    if builder_alive {
+        if let Some(b) = object(lua, builder)? {
+            UnitCallbacks::on_failed_to_build(lua, &b, "unit")?;
+        }
+        if let Some(t) = &target_obj {
+            UnitCallbacks::on_failed_to_be_built(lua, t, "unit")?;
+        }
+    }
+    stop(lua, builder, builder_alive)?;
+    if job.order == BuildOrder::Upgrade {
+        destroy_unfinished(lua, job.target)?;
+    }
+    Ok(())
+}
+
+/// An upgrade's new structure, unfinished and not yet destroyed, destroyed
+/// through its script.
+fn destroy_unfinished(lua: &Lua, target: EntityId) -> LuaResult<()> {
+    let live = entity::world(lua).get(target).is_some_and(|e| !e.destroyed && e.fraction_complete < Fx::ONE);
+    if live
+        && let Some(t) = object(lua, target)? {
+        EntityCallbacks::destroy(lua, &t, "unit")?;
+    }
+    Ok(())
+}
+
+/// A mobile build cancelled: `OnStopBuild`, then `OnFailedToBuild`
+/// (dev/probes probe_unit_build G2, G8), also when a helper has finished the
+/// structure and the builder, paused, still held its order (probe_padbuild
+/// `hold-clear`, `hold-callback`: both callbacks inside the clear).
+fn cancel_mobile(lua: &Lua, builder: EntityId, builder_alive: bool) -> LuaResult<()> {
+    if stop(lua, builder, builder_alive)?.is_some() && builder_alive
+        && let Some(b) = object(lua, builder)? {
+        UnitCallbacks::on_failed_to_build(lua, &b, "unit")?;
+    }
+    Ok(())
+}
+
+/// A builder was killed (`Kill`, before its `OnKilled`) or destroyed (the
+/// end of the beat, after its `OnDestroy`): a mobile build it was on ends
+/// there with `OnFailedToBuild` and no `OnStopBuild`, and it does no more
+/// work on it (FAF probe probe_q_build `kill`: `OnFailedToBuild`, `OnKilled`
+/// inside the call, nothing more at its `OnDestroy` two ticks on; `destroy`:
+/// `OnDestroy`, `OnFailedToBuild` in the tick of the call; the structure
+/// stays at the fraction it had).
+///
+/// A killed factory or upgrading structure stops at once too, but hears
+/// nothing (no `OnFailedToBuild`, no `OnStopBuild`) and neither does the
+/// unit it was building; a factory's unit stays at its fraction (FAF's
+/// `FactoryUnit.OnKilled` kills it), an upgrade's new structure is destroyed
+/// in the tick of the kill (FAF probe probe_q_build2 `fkill`, `ukill`). A
+/// destroyed one (not killed) is left to [`cancel_structure`] in [`tick`]:
+/// the real game destroys an upgrade's new structure the tick after
+/// (`udestroy`).
+pub fn builder_died(lua: &Lua, builder: EntityId) -> LuaResult<()> {
+    let job = {
+        let Some(mut builds) = lua.app_data_mut::<Builds>() else { return Ok(()) };
+        let Some(order) = builds.0.get(&builder).map(|j| j.order) else { return Ok(()) };
+        if order != BuildOrder::Mobile {
+            let killed = entity::world(lua).get(builder).is_some_and(|e| e.cold.killed);
+            if !killed {
+                return Ok(());
+            }
+            let job = builds.0.remove(&builder).expect("job");
+            drop(builds);
+            if let Some(u) = entity::world(lua).get_mut(builder).and_then(|e| e.unit.as_deref_mut()) {
+                u.focus = None;
+                u.work_progress = Fx::ZERO;
+            }
+            set_state(lua, builder, job.order.state(), false);
+            if job.order == BuildOrder::Upgrade {
+                destroy_unfinished(lua, job.target)?;
+            }
+            return Ok(());
+        }
+        builds.0.remove(&builder).expect("job")
+    };
+    if let Some(u) = entity::world(lua).get_mut(builder).and_then(|e| e.unit.as_deref_mut()) {
+        u.focus = None;
+        u.work_progress = Fx::ZERO;
+    }
+    set_state(lua, builder, job.order.state(), false);
+    let finished = entity::world(lua).get(job.target).is_some_and(|e| !e.destroyed && e.fraction_complete >= Fx::ONE);
+    if !finished
+        && let Some(b) = object(lua, builder)? {
+        UnitCallbacks::on_failed_to_build(lua, &b, "unit")?;
     }
     Ok(())
 }
@@ -1031,6 +1238,11 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
     for builder in candidates {
         let job = lua.app_data_ref::<Builds>().and_then(|b| b.0.get(&builder).cloned());
         let Some(job) = job else {
+            // A killed builder starts nothing more (its build ended with
+            // the kill, `builder_died`).
+            if entity::world(lua).get(builder).is_none_or(|e| e.cold.killed) {
+                continue;
+            }
             if let Some((order, command, bp, site)) = ready_to_start(lua, builder)? {
                 // Props in the way (tree groups, rocks): reclaim them first;
                 // units standing in the footprint: order them out (the
@@ -1048,52 +1260,20 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         let builder_alive = entity::world(lua).get(builder).is_some_and(|e| !e.destroyed);
         let order_current = job_order_current(lua, builder, &job);
         let target_alive = entity::world(lua).get(job.target).is_some_and(|e| !e.destroyed);
-        // An upgrade that stops unfinished (order cancelled, or the old
-        // structure destroyed) takes its half-built structure with it, as in
-        // FA: left standing it would stay invulnerable (FAF's OnStartBuild
-        // turns its collision and damage off until it completes). The old
-        // structure, if alive, is told it failed so FAF leaves the
-        // upgrading state. An assist can finish it while the builder still
-        // holds it (paused): a stop at fraction 1 completes it instead —
-        // the builder's `OnStopBuild`, where FAF's script swaps the
-        // upgrade — failing it would take down a fully built structure.
-        if job.order == BuildOrder::Upgrade && target_alive && (!builder_alive || !order_current) {
-            let finished = entity::world(lua).get(job.target).is_some_and(|e| e.fraction_complete >= Fx::ONE);
-            if finished && builder_alive
-                && let (Some(b), Some(t)) = (object(lua, builder)?, object(lua, job.target)?) {
-                complete(lua, builder, &job, &b, &t)?;
-                continue;
-            }
-            stop(lua, builder, false)?;
-            if builder_alive
-                && let Some(b) = object(lua, builder)? {
-                UnitCallbacks::on_failed_to_build(lua, &b, "unit")?;
-            }
-            if !finished
-                && let Some(t) = object(lua, job.target)? {
-                UnitCallbacks::on_failed_to_be_built(lua, &t, "unit")?;
-                EntityCallbacks::destroy(lua, &t, "unit")?;
-            }
-            continue;
-        }
-        // A factory build that stops unfinished (cancelled, or the factory
-        // died) fails: FAF's `OnFailedToBeBuilt` destroys the unit a tick
-        // later. Mobile builds leave theirs standing.
-        if job.order == BuildOrder::Factory && target_alive && (!builder_alive || !order_current) {
-            stop(lua, builder, builder_alive)?;
-            let unfinished = entity::world(lua).get(job.target).is_some_and(|e| e.fraction_complete < Fx::ONE);
-            if unfinished
-                && let Some(t) = object(lua, job.target)? {
-                UnitCallbacks::on_failed_to_be_built(lua, &t, "unit")?;
-            }
+        // A factory build or an upgrade whose order went away, or whose
+        // builder was destroyed: [`cancel_structure`].
+        if matches!(job.order, BuildOrder::Factory | BuildOrder::Upgrade) && target_alive && (!builder_alive || !order_current) {
+            cancel_structure(lua, builder, &job, builder_alive)?;
             continue;
         }
         if !target_alive {
             target_lost(lua, builder, &job)?;
             continue;
         }
+        // A mobile build cancelled unfinished: `OnStopBuild`, then
+        // `OnFailedToBuild` (dev/probes probe_unit_build G2, G8).
         if !builder_alive || !order_current {
-            stop(lua, builder, builder_alive)?;
+            cancel_mobile(lua, builder, builder_alive)?;
             continue;
         }
         let (Some(builder_obj), Some(target_obj)) = (object(lua, builder)?, object(lua, job.target)?) else { continue };
@@ -1111,7 +1291,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             let mut w = entity::world(lua);
             let Some(t) = w.get_mut(job.target) else { continue };
             let old = t.fraction_complete;
-            let new = (old + delta).min(Fx::ONE);
+            let new = finish_rounding(old + delta, delta);
             t.fraction_complete = new;
             t.health = (t.health + t.max_health * (new - old)).min(t.max_health);
             new
@@ -1131,6 +1311,15 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
     factory_guards(lua, &guarding, &mut caps)?;
     assists(lua)?;
     decay(lua)
+}
+
+/// A build's fraction after a step of `delta` to `sum`, at most 1. A sum
+/// short of 1 by no more than the step's rounding (a 1/1024th of it) is 1:
+/// `dt / time` rounds down, so a radar upgrade's 78 steps of 1/78 fell a
+/// hair short and it paid a 79th tick (182.31 mass for a 180 upgrade; the
+/// real game's costs exactly 180: dev/probes probe_re2_upg).
+fn finish_rounding(sum: Fx, delta: Fx) -> Fx {
+    if delta > Fx::ZERO && Fx::ONE - sum <= delta / 1024 { Fx::ONE } else { sum.min(Fx::ONE) }
 }
 
 /// A factory whose current order is a Guard (`IssueFactoryAssist` issues
@@ -1323,7 +1512,7 @@ fn auto_assist(lua: &Lua) {
         let w = entity::world(lua);
         let mut orders: Vec<(EntityId, EntityId)> = Vec::new();
         let mut homes: Vec<(EntityId, FxVec3)> = Vec::new();
-        for e in w.iter() {
+        for e in w.units() {
             let Some(u) = e.unit.as_deref() else { continue };
             if e.destroyed || e.cold.killed || !u.auto_mode || u.paused || u.command_caps & repair == 0 || e.fraction_complete < Fx::ONE || e.attachment.is_some() || !commands.is_idle(e.id) {
                 continue;
@@ -1424,13 +1613,21 @@ pub fn mark_unfinished(lua: &Lua, id: EntityId) {
 }
 
 /// Moho's natural decay: an unfinished unit nobody is building (no builder's
-/// job, no assister on it) loses build progress, and health with it, by
-/// [`decay_rate`] a tick; at none left it gets `OnDecayed` (FAF destroys
-/// it). Health stays at least 1, as a fresh construction's.
+/// job, no assister on it) loses [`decay_rate`] of build progress a tick
+/// (down to none) and that share of its max health; at no health left it
+/// gets `OnDecayed` (FAF destroys it). It is health that runs out, not
+/// progress: a construction abandoned before any progress (fraction 0,
+/// health 1) stands until its 1 health has decayed (real game, dev/probes
+/// `probe_t4_vanish`: an Ahwassa, 52000 health and 1920000 energy, lost
+/// 0.0027 a tick and heard `OnDecayed` 371 ticks after it was started and
+/// cleared; a T1 power generator, 0.08 a tick, after 14).
 ///
-/// Inferred, not verified against the binary: decay starts at once (no
-/// grace period), a paused builder's job still holds it off, and health
-/// drops in step with progress.
+/// A killed one (a dead factory's unit, waiting for its death thread)
+/// keeps its fraction (FAF probe probe_q_build2 `fkill`).
+///
+/// Inferred, not verified against the binary: decay starts at once (the
+/// real game's starts a tick or so later), and a paused builder's job still
+/// holds it off.
 fn decay(lua: &Lua) -> LuaResult<()> {
     if lua.app_data_ref::<Unfinished>().is_none_or(|u| u.0.is_empty()) {
         return Ok(());
@@ -1444,18 +1641,16 @@ fn decay(lua: &Lua) -> LuaResult<()> {
         let w = entity::world(lua);
         let mut unfinished = lua.app_data_mut::<Unfinished>().expect("Unfinished");
         unfinished.0.retain(|&id| w.get(id).is_some_and(|e| !e.destroyed && e.fraction_complete < Fx::ONE));
-        unfinished.0.iter().filter(|id| !worked.contains(id)).filter_map(|&id| w.get(id).map(|e| (id, e.cold.blueprint_id.clone()))).collect()
+        unfinished.0.iter().filter(|id| !worked.contains(id)).filter_map(|&id| w.get(id).filter(|e| !e.cold.killed).map(|e| (id, e.cold.blueprint_id.clone()))).collect()
     };
     for (id, bp) in idle {
         let rate = decay_rate(lua, &bp)?;
         let gone = {
             let mut w = entity::world(lua);
             let Some(e) = w.get_mut(id) else { continue };
-            let old = e.fraction_complete;
-            let new = (old - rate).max(Fx::ZERO);
-            e.fraction_complete = new;
-            e.health = (e.health - e.max_health * (old - new)).max(Fx::ONE.min(e.max_health));
-            new == Fx::ZERO
+            e.fraction_complete = (e.fraction_complete - rate).max(Fx::ZERO);
+            e.health = (e.health - e.max_health * rate).max(Fx::ZERO);
+            e.health == Fx::ZERO
         };
         if gone
             && let Some(obj) = object(lua, id)? {
@@ -1591,9 +1786,85 @@ fn work_target(lua: &Lua, kind: CommandKind, target: EntityId) -> Option<EntityI
         drop(w);
         // (Guard) a missile silo building a missile: the assister helps
         // build it (moho's repair task with `isSilo`).
-        is_enhancing(lua, target) || (kind == CommandKind::Guard && crate::engine::api::silo::is_building(lua, target))
+        is_enhancing(lua, target) || (kind == CommandKind::Guard && crate::engine::api::silo::is_building(lua, target)) || shield_needs_assist(lua, target)
     })
     .then_some(target)
+}
+
+/// A finished `SHIELD` unit's focus entity when it is below its max health:
+/// the shield assisting the unit regenerates (FAF focuses a shield unit on
+/// its shield, `Unit.CreateShield`). MohoEngine.dll 0x101e1b53..0x101e1bd2:
+/// category `SHIELD`, `GetFocusEntity`, focus health +0x90 < max +0x94.
+fn shield_to_regen(lua: &Lua, target: EntityId) -> Option<EntityId> {
+    let w = entity::world(lua);
+    let t = w.get(target).filter(|e| !e.destroyed && e.fraction_complete >= Fx::ONE)?;
+    let shield = t.unit.as_deref()?.focus?;
+    w.get(shield).filter(|s| !s.destroyed && s.health < s.max_health)?;
+    drop(w);
+    has_category(lua, target, "SHIELD").ok()?.then_some(shield)
+}
+
+/// Full health, a shield to regenerate and the script's `ShieldIsOn()`:
+/// work for a repair (off, moho's work step ends it: 0x101e1bb2..0x101e1bb9
+/// -> 0x101e17fd; it asks only while the unit is undamaged).
+fn shield_needs_assist(lua: &Lua, target: EntityId) -> bool {
+    if shield_to_regen(lua, target).is_none() {
+        return false;
+    }
+    let Ok(Some(obj)) = object(lua, target) else { return false };
+    match obj.get::<LuaValue>("ShieldIsOn").and_then(|f| match f {
+        LuaValue::Function(f) => f.call::<LuaValue>(obj.clone()),
+        _ => Ok(LuaValue::Nil),
+    }) {
+        Ok(on) => !matches!(on, LuaValue::Nil | LuaValue::Boolean(false)),
+        Err(e) => {
+            tracing::warn!(target: "lua", "ShieldIsOn: {e}");
+            false
+        }
+    }
+}
+
+/// `Defense.Shield.RegenAssistMult` per unit blueprint (0 without one), read
+/// once.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RegenAssistMults(BTreeMap<String, Fx>);
+crate::engine::api::blueprints::derived_cache!(RegenAssistMults);
+
+pub(crate) fn regen_assist_mult(lua: &Lua, bp_id: &str) -> LuaResult<Fx> {
+    if let Some(m) = lua.app_data_ref::<RegenAssistMults>().and_then(|d| d.0.get(bp_id).copied()) {
+        return Ok(m);
+    }
+    let bp = entity::blueprint_table(lua, crate::engine::api::blueprints::BlueprintKind::Unit, bp_id)?;
+    let mult = bp
+        .get::<Option<LuaTable>>("Defense")?
+        .and_then(|d| d.get::<Option<LuaTable>>("Shield").ok().flatten())
+        .and_then(|s| s.get::<Option<f64>>("RegenAssistMult").ok().flatten())
+        .map_or(Fx::ZERO, crate::engine::sim::math::from_lua);
+    lua.app_data_mut::<RegenAssistMults>().expect("RegenAssistMults").0.insert(bp_id.to_owned(), mult);
+    Ok(mult)
+}
+
+/// What one tick of `assister`'s work on finished `work` gives its shield:
+/// the shield, `RegenRate` (the shield's Lua field) x 0.1 x the assister's
+/// `BuildRate`, and the divisor `RegenAssistMult` (MohoEngine.dll
+/// 0x101e1bd8..0x101e1c76). None without a shield to regenerate or a
+/// multiplier (0).
+fn shield_regen(lua: &Lua, assister: EntityId, work: EntityId) -> LuaResult<Option<(EntityId, Fx, Fx)>> {
+    let Some(shield) = shield_to_regen(lua, work) else { return Ok(None) };
+    let (bp, build_rate) = {
+        let w = entity::world(lua);
+        let bp = w.get(work).map(|e| e.cold.blueprint_id.clone()).unwrap_or_default();
+        (bp, w.get(assister).and_then(|e| e.unit.as_deref()).map_or(Fx::ZERO, |u| u.build_rate))
+    };
+    let mult = regen_assist_mult(lua, &bp)?;
+    if mult == Fx::ZERO {
+        return Ok(None);
+    }
+    let rate = match object(lua, shield)? {
+        Some(s) => s.get::<Option<f64>>("RegenRate")?.map_or(Fx::ZERO, crate::engine::sim::math::from_lua),
+        None => Fx::ZERO,
+    };
+    Ok(Some((shield, rate * build_rate / Fx::from_num(10), mult)))
 }
 
 /// Stops an assister's current work (`OnStopBuild(target, 'Repair')`).
@@ -1659,9 +1930,14 @@ fn assists(lua: &Lua) -> LuaResult<()> {
     }
     // Guard tasks: those whose order is gone end; a new one decides whether
     // it ends with its target going idle.
-    {
+    let ended: Vec<EntityId> = {
         let mut guards = lua.app_data_mut::<GuardTasks>().expect("GuardTasks");
+        let ended = guards.0.iter().filter(|(a, (c, _))| !orders.iter().any(|o| o.0 == **a && o.3 == *c)).map(|(a, _)| *a).collect();
         guards.0.retain(|a, (c, _)| orders.iter().any(|o| o.0 == *a && o.3 == *c));
+        ended
+    };
+    for a in ended {
+        set_state(lua, a, "GuardBusy", false);
     }
     for &(assister, kind, target, command) in &orders {
         let known = lua.app_data_ref::<GuardTasks>().is_some_and(|t| t.0.get(&assister).is_some_and(|&(c, _)| c == command));
@@ -1683,7 +1959,10 @@ fn assists(lua: &Lua) -> LuaResult<()> {
     for (assister, kind, target, command) in orders {
         // A factory under a Guard never works on its target (no repair, no
         // assist beam): it builds ([`factory_guards`]).
+        // (It reads `GuardBusy` throughout, idle target or not: dev/probes
+        // probe_re2_orders FA.)
         if kind == CommandKind::Guard && factories.binary_search(&assister).is_ok() {
+            set_state(lua, assister, "GuardBusy", true);
             continue;
         }
         // A new repair task: on a unit that is enhancing, it inherits the
@@ -1723,7 +2002,11 @@ fn assists(lua: &Lua) -> LuaResult<()> {
             }
             continue;
         }
-        let work = work_target(lua, kind, target);
+        // A unit that can't build (a tank) guards without working: the real
+        // tank guarding a building engineer never helps (dev/probes
+        // probe_re2_orders ST).
+        let builder = entity::world(lua).get(assister).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.build_rate > Fx::ZERO);
+        let work = work_target(lua, kind, target).filter(|_| builder);
         // An engineer's guard with nothing to work on ends when an order is
         // queued behind it (or its guarded unit, once built, went idle).
         if kind == CommandKind::Guard && work.is_none() && guard_ends(lua, assister, target, command)? {
@@ -1751,7 +2034,24 @@ fn assists(lua: &Lua) -> LuaResult<()> {
                 _ => false,
             }
         });
+        // A builder standing inside a structure (a factory's new engineer
+        // on the pad) doesn't start work from there: it walks out first
+        // (`api::movement`; dev/probes probe_padassist).
         let current = lua.app_data_ref::<Assists>().and_then(|a| a.0.get(&assister).copied());
+        let at = entity::world(lua).get(assister).map(|a| a.position());
+        let in_range = in_range && (current.is_some() || !at.is_some_and(|p| inside_structure(lua, assister, p)));
+        // `GuardBusy` while a guard has work: from the order on when it
+        // helps a builder (it walks to the site busy), once in range of a
+        // factory it helps (the real engineer guarding a factory reads it
+        // from its arrival, and not between two units: dev/probes
+        // probe_re2_orders FA ref-guard, ST engguard-engbuild).
+        if kind == CommandKind::Guard {
+            let factory_target = has_category(lua, target, "FACTORY")?;
+            let to_build = builder
+                && !factory_target
+                && lua.app_data_ref::<Commands>().is_some_and(|c| c.current(target).is_some_and(|t| matches!(t.kind, CommandKind::BuildMobile)));
+            set_state(lua, assister, "GuardBusy", to_build || (work.is_some() && (in_range || !factory_target)));
+        }
         let Some(work) = work.filter(|_| in_range) else {
             if current.is_some() {
                 stop_assist(lua, assister)?;
@@ -1788,10 +2088,24 @@ fn assists(lua: &Lua) -> LuaResult<()> {
             }
             lua.app_data_mut::<Assists>().expect("Assists").0.insert(assister, work);
             let finished = entity::world(lua).get(work).is_some_and(|e| e.fraction_complete >= Fx::ONE);
+            // A guard's help with a construction: `Building` only when it's
+            // a builder's structure, `Repairing` only (FAF's `OnStartRepair`
+            // sets it) when it's a factory's unit (the real engineers read
+            // `Guarding+Building+GuardBusy` and `Guarding+Repairing+GuardBusy`:
+            // dev/probes probe_re2_orders ST, FA). Moho's start for the
+            // former isn't FAF's 'Repair' start; ours still calls it so and
+            // drops the state it sets.
+            let factory_unit = kind == CommandKind::Guard && !finished && work != target && has_category(lua, target, "FACTORY")?;
+            let builders_structure = kind == CommandKind::Guard && !finished && !factory_unit;
             crate::engine::api::unit::set_focus(lua, assister, Some(work))?;
-            set_state(lua, assister, if finished { "Repairing" } else { "Building" }, true);
+            if !factory_unit {
+                set_state(lua, assister, if finished { "Repairing" } else { "Building" }, true);
+            }
             prepare_arm(lua, &a_obj)?;
             UnitCallbacks::on_start_build(lua, &a_obj, "unit", Obj::new(w_obj.clone()), "Repair")?;
+            if builders_structure {
+                set_state(lua, assister, "Repairing", false);
+            }
         }
         if entity::world(lua).get(assister).and_then(|e| e.unit.as_deref().map(|u| u.paused)).unwrap_or(false) {
             // Paused, it still shows the work's fraction complete (FAF's
@@ -1823,6 +2137,7 @@ fn assists(lua: &Lua) -> LuaResult<()> {
         let time = build_time(lua, &a_obj, work)?;
         let served = entity::world(lua).get(assister).and_then(|e| e.unit.as_deref().map(|u| u.resource_consumed)).unwrap_or(Fx::ONE);
         let delta = dt / time * served;
+        let shield = if served > Fx::ZERO { shield_regen(lua, assister, work)? } else { None };
         let (finished_build, healed) = {
             let mut w = entity::world(lua);
             let Some(t) = w.get_mut(work) else { continue };
@@ -1833,14 +2148,29 @@ fn assists(lua: &Lua) -> LuaResult<()> {
                 t.health = (t.health + t.max_health * (new - old)).min(t.max_health);
                 (new >= Fx::ONE, false)
             } else {
+                let mut delta = delta;
+                let damaged = t.health < t.max_health;
+                // Assisting a shield unit regenerates its shield by
+                // `RegenRate x 0.1 x BuildRate / RegenAssistMult`; while the
+                // unit is damaged, the divisor doubles and the repair halves
+                // (MohoEngine.dll 0x101e1b33..0x101e1c76; FAF probe
+                // `probe_shield_assist`: a T1 engineer gives a T2 generator's
+                // shield 1 a tick, three 3, 0.5 while it's damaged). Only
+                // while served.
+                let shield = shield.map(|(s, gain, mult)| {
+                    if damaged {
+                        delta /= 2;
+                        (s, gain / (mult * 2))
+                    } else {
+                        (s, gain / mult)
+                    }
+                });
                 // Repairing something with fuel refuels it, at
                 // `Physics.FuelRechargeRate / FuelUseTime` a second of the
                 // tank; while it's damaged both that and the repair go at
                 // half speed (MohoEngine.dll 0x101e1c82..0x101e1d1b, unit bp
                 // +0x304 / +0x308 = Physics +0x8c / +0x90; fuel ratio unit
                 // +0x284, `GetFuelRatio` 0x10168c60). Only while served.
-                let mut delta = delta;
-                let damaged = t.health < t.max_health;
                 if let Some(u) = t.unit.as_deref_mut()
                     && served > Fx::ZERO
                     && u.fuel_use_time > Fx::ZERO
@@ -1853,16 +2183,23 @@ fn assists(lua: &Lua) -> LuaResult<()> {
                     u.fuel_ratio = (u.fuel_ratio + refuel).min(Fx::ONE);
                 }
                 t.health = (t.health + t.max_health * delta).min(t.max_health);
-                (false, t.health >= t.max_health)
+                let full = t.health >= t.max_health;
+                if let Some((s, gain)) = shield
+                    && let Some(s) = w.get_mut(s) {
+                    s.health = (s.health + gain).min(s.max_health);
+                }
+                (false, full)
             }
         };
+        // At full health, the work on a shield unit lasts until its shield
+        // is full too (0x101e1e1c..0x101e1ec9).
+        let healed = healed && shield_to_regen(lua, work).is_none();
         // Its own work lane shows the work's absolute progress, as the
         // builders' do: construction, else health.
         let lane = assist_progress(lua, work);
         set_work_progress(lua, assister, lane);
         if finished_build {
-            // No builder of its own (abandoned / assisted-only): finish it here;
-            // with a builder, the builder's job completes it next tick.
+            // The structure finishes now, whoever holds its build job.
             complete_without_builder(lua, work, &w_obj, &a_obj)?;
         }
         if finished_build || healed {
@@ -1898,19 +2235,36 @@ fn set_work_progress(lua: &Lua, unit: EntityId, progress: Fx) {
 }
 
 /// A unit whose construction just reached 1 through someone other than its
-/// builder (assist, sacrifice): if no builder job holds it, finish it here
-/// (`OnStopBeingBuilt(by, layer)`, adjacency); a builder's job completes it
-/// next tick otherwise.
+/// builder (assist, sacrifice) finishes at once: `OnStopBeingBuilt(builder,
+/// layer)` and adjacency, before the helper's `OnStopBuild`. The builder
+/// passed is the one whose job holds it (the lowest id of several), paused
+/// or not, else `by`. That builder's job then only has its own stop left
+/// ([`complete`]); if its order is cleared first, inside the helper's
+/// `OnStopBuild` say, nothing more is owed to the structure (FAF probe
+/// probe_padbuild `hold-*`: `structure.OnStopBeingBuilt builder=e1` in the
+/// tick the fraction reaches 1 with e1 paused, then `e2.OnStopBuild`).
 pub(crate) fn complete_without_builder(lua: &Lua, work: EntityId, work_obj: &LuaTable, by: &LuaTable) -> LuaResult<()> {
-    let has_builder = lua.app_data_ref::<Builds>().is_some_and(|b| b.0.values().any(|j| j.target == work));
-    if has_builder {
+    let holder = lua.app_data_ref::<Builds>().and_then(|b| b.0.iter().find(|(_, j)| j.target == work).map(|(&b, _)| b));
+    let holder_obj = match holder {
+        Some(h) => object(lua, h)?,
+        None => None,
+    };
+    finish_target(lua, work, work_obj, holder_obj.as_ref().unwrap_or(by))
+}
+
+/// The structure's side of finishing, once: stats, `BeingBuilt` off,
+/// `OnStopBeingBuilt(builder, layer)`, adjacency. Nothing if it has already
+/// finished (an assister got there first).
+fn finish_target(lua: &Lua, target: EntityId, target_obj: &LuaTable, builder_obj: &LuaTable) -> LuaResult<()> {
+    let being_built = state("BeingBuilt");
+    if !entity::world(lua).get(target).and_then(|e| e.unit.as_deref()).is_some_and(|u| u.states.contains(being_built)) {
         return Ok(());
     }
-    crate::engine::api::unit_stats::unit_finished(lua, work)?;
-    set_state(lua, work, "BeingBuilt", false);
-    let layer = entity::world(lua).get(work).and_then(|e| e.unit.as_deref().map(|u| u.layer)).unwrap_or_default();
-    UnitCallbacks::on_stop_being_built(lua, work_obj, "unit", Some(Obj::new(by.clone())), layer)?;
-    crate::engine::api::adjacency::on_finished(lua, work)
+    crate::engine::api::unit_stats::unit_finished(lua, target)?;
+    set_state(lua, target, "BeingBuilt", false);
+    let layer = entity::world(lua).get(target).and_then(|e| e.unit.as_deref().map(|u| u.layer)).unwrap_or_default();
+    UnitCallbacks::on_stop_being_built(lua, target_obj, "unit", Some(Obj::new(builder_obj.clone())), layer)?;
+    crate::engine::api::adjacency::on_finished(lua, target)
 }
 
 pub fn register(lua: &Lua) -> LuaResult<()> {
@@ -1946,6 +2300,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua.set_app_data(FaceToBuild::default());
     lua.set_app_data(DecayRates::default());
     lua.set_app_data(Footprints::default());
+    lua.set_app_data(RegenAssistMults::default());
     lua.set_app_data(Unfinished::default());
     fn with_unit<R: Default>(lua: &Lua, this: &LuaTable, f: impl FnOnce(&mut crate::engine::sim::entity::UnitData) -> R) -> LuaResult<R> {
         let id = entity::entity_id(this)?;
@@ -1991,4 +2346,22 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             })
         })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_build_of_78_steps_finishes_on_the_78th() {
+        let delta = Fx::ONE / Fx::from_num(10) / Fx::from_num(7.8);
+        let mut f = Fx::ZERO;
+        let mut steps = 0;
+        while f < Fx::ONE {
+            f = finish_rounding(f + delta, delta);
+            steps += 1;
+        }
+        assert_eq!(steps, 78);
+        assert_eq!(finish_rounding(Fx::from_num(0.5), delta), Fx::from_num(0.5));
+    }
 }

@@ -61,6 +61,10 @@ pub struct Bitmap {
     pub solid: Option<[f32; 4]>,
     /// Sub-rectangle of the texture `(u0, v0, u1, v1)`.
     pub uv: [f32; 4],
+    /// The part of the texture inside its border (`SetNewTexture`'s
+    /// `border`, 1 pixel by default), which is what is drawn: `uv` is within
+    /// it. `None`: the whole texture.
+    pub inner: Option<[f32; 4]>,
     pub tiled: bool,
     /// `SetColorMask` (FAF patch): multiplies the texture.
     pub mask: Option<[f32; 4]>,
@@ -131,11 +135,14 @@ pub struct Edit {
     pub caret_shown: bool,
     /// `SetCaretCycle(seconds, minAlpha, maxAlpha)`: the caret's blink.
     pub caret_cycle: Option<(f32, f32, f32)>,
+    /// Inside this edit's `OnTextChanged`: text set meanwhile doesn't call
+    /// it again (moho's byte at +0x190 of the edit).
+    pub notifying: bool,
 }
 
 impl Default for Edit {
     fn default() -> Self {
-        Self { text: Text::default(), background: [0.0, 0.0, 0.0, 0.0], show_background: false, max_chars: 255, enabled: true, caret: 0, caret_color: [1.0; 4], caret_shown: true, caret_cycle: None }
+        Self { text: Text::default(), background: [0.0, 0.0, 0.0, 0.0], show_background: false, max_chars: 1024, enabled: true, caret: 0, caret_color: [1.0; 4], caret_shown: true, caret_cycle: None, notifying: false }
     }
 }
 
@@ -148,8 +155,10 @@ pub struct WorldView {
     pub mini: bool,
     /// The camera it shows (`GetCamera(name)`).
     pub camera: Option<String>,
-    /// `LockInput` (cinematics): the world doesn't get the mouse over it.
-    pub input_locked: bool,
+    /// `LockInput` (cinematics): the world doesn't get the mouse over it
+    /// while any lock is held. Counted, as moho's: two locks need two
+    /// unlocks (`probe_ui_controls` cam).
+    pub input_locks: u32,
     pub cartographic: bool,
     pub resources: bool,
     /// `SetCustomRender`: the engine calls its `OnRenderWorld` each frame
@@ -246,9 +255,11 @@ pub struct Controls {
     /// The last button press on a control (button, control, time, x, y),
     /// for double clicks.
     last_press: Option<(u8, ControlId, f64, f32, f32)>,
-    /// Controls holding the keyboard focus, oldest first, and whether each
-    /// blocks the key map.
-    focus: Vec<(ControlId, bool)>,
+    /// The control holding the keyboard focus, and whether it blocks the key
+    /// map. One holder, no stack: when it abandons the focus nobody has it
+    /// (`probe_ui_controls` focus: `GetCurrentFocusControl` is nil after the
+    /// second taker abandons, not the first taker).
+    focus: Option<(ControlId, bool)>,
     /// A scrollbar whose thumb is held, and where on the thumb (pixels
     /// along its axis).
     scroll_drag: Option<(ControlId, f64)>,
@@ -276,6 +287,11 @@ pub enum DrawItem {
     /// Movie control `movie`'s current frame stretched over `rect`
     /// (YCbCr planes; the renderer converts them).
     Movie { rect: [f32; 4], movie: ControlId, frame: super::movie::FrameRef, color: [f32; 4] },
+    /// A strategic icon (moho's `primbatcher.fx` `TStrategicIcon`): the
+    /// texture point sampled, its grey texels (within 0.5 of mid-grey)
+    /// replaced by `color`'s RGB, the rest (outline, glyph, tech pip) kept;
+    /// `color`'s alpha fades it. `uv` as a quad's.
+    Icon { rect: [f32; 4], texture: String, uv: [f32; 4], color: [f32; 4] },
 }
 
 /// `"ffRRGGBB"` (ARGB), `"RRGGBB"`, or a moho colour name
@@ -533,7 +549,15 @@ fn create(lua: &Lua, obj: &LuaTable, parent: Option<&LuaTable>, kind: Kind) -> L
         let id = c.next;
         c.next += 1;
         let key = lua.create_registry_value(obj.clone())?;
-        c.map.insert(id, Control { parent, children: Vec::new(), kind, hidden: false, alpha: 1.0, hit_test: true, name: String::new(), needs_frame: false, render_pass: 0, layout: None, obj: key });
+        // Moho's defaults (`probe_ui_controls` ctl, `probe_api_spot`): a
+        // group is named `group`, a bitmap `Bitmap` (others not measured),
+        // and every control draws in `UIRP_PostGlow` (8).
+        let name = match &kind {
+            Kind::Group => "group",
+            Kind::Bitmap(_) => "Bitmap",
+            _ => "",
+        };
+        c.map.insert(id, Control { parent, children: Vec::new(), kind, hidden: false, alpha: 1.0, hit_test: true, name: name.to_owned(), needs_frame: false, render_pass: UIRP_POST_GLOW, layout: None, obj: key });
         if let Some(p) = parent.and_then(|p| c.map.get_mut(&p)) {
             p.children.push(id);
         }
@@ -681,8 +705,11 @@ fn root_of(c: &Controls, mut id: ControlId) -> ControlId {
 pub const SCMAP_PREVIEW: &str = "#scmap:";
 
 /// Width and height of a `.dds` / `.png` texture from its header (0, 0 if it won't read).
+/// `GetTextureDimensions`: the size less the 1-pixel border, as a bitmap
+/// with that texture is (`probe_api_spot`: 4 x 32 gives `2 30`).
 pub fn texture_dimensions(lua: &Lua, path: &str) -> (u32, u32) {
-    texture_size(lua, path)
+    let (w, h) = texture_size(lua, path);
+    (w.saturating_sub(2), h.saturating_sub(2))
 }
 
 fn texture_size(lua: &Lua, path: &str) -> (u32, u32) {
@@ -924,7 +951,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_method!(lua, moho::Control,
-        /// Hit testing: recursive by default when enabling (annotations).
+        /// Hit testing: not recursive unless asked.
         DisableHitTest = |lua, (this, recursive): (Obj<moho::Control>, Option<bool>)| {
             let id = id_of(&this)?;
             let mut c = controls(lua);
@@ -937,10 +964,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_method!(lua, moho::Control,
+        /// Not recursive unless asked (`probe_ui_controls` ctl: after
+        /// `DisableHitTest(true)`, `EnableHitTest()` leaves the children
+        /// disabled).
         EnableHitTest = |lua, (this, recursive): (Obj<moho::Control>, Option<bool>)| {
             let id = id_of(&this)?;
             let mut c = controls(lua);
-            let ids = if recursive.unwrap_or(true) { subtree(&c, id) } else { vec![id] };
+            let ids = if recursive.unwrap_or(false) { subtree(&c, id) } else { vec![id] };
             for i in ids {
                 if let Some(ctl) = c.map.get_mut(&i) {
                     ctl.hit_test = true;
@@ -951,26 +981,39 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::Control,
         /// True when the control doesn't take mouse events.
         IsHitTestDisabled = |lua, this: Obj<moho::Control>| with(lua, &this, |c| !c.hit_test))?;
+    /// `Hide` / `Show` / `SetHidden`, as moho does (`probe_ui_controls` ctl):
+    /// the control's flag is set and its `OnHide(hidden)` runs, always, even
+    /// when the flag doesn't change; then every descendant gets the same flag
+    /// and `OnHide`, depth first, except one whose `OnHide` returns true:
+    /// it and its subtree keep their own flags. So showing a parent shows
+    /// every descendant that doesn't veto, and `IsHidden` is true down a
+    /// hidden subtree. The control's own `OnHide` returning true keeps the
+    /// change from its children (FAF's economy bar shows its rate texts from
+    /// `warningBG.OnHide`, after siblings that return true).
     fn set_hidden(lua: &Lua, this: &LuaTable, hidden: bool) -> LuaResult<()> {
-        let changed = with(lua, this, |c| std::mem::replace(&mut c.hidden, hidden) != hidden)?;
-        if changed {
-            notify_hide(lua, id_of(this)?, hidden)?;
-        }
-        Ok(())
-    }
-    /// `OnHide(hidden)` down the tree, depth first; a control's returning
-    /// true keeps it from that control's own children only (FAF's
-    /// economy bar shows its rate texts from `warningBG.OnHide`, after
-    /// siblings that return true).
-    fn notify_hide(lua: &Lua, id: ControlId, hidden: bool) -> LuaResult<()> {
-        if let Some(obj) = object(lua, id)?
-            && let Some(f) = obj.get::<Option<LuaFunction>>("OnHide")?
-            && f.call::<Option<bool>>((obj.clone(), hidden)).unwrap_or(None) == Some(true) {
+        let id = id_of(this)?;
+        with(lua, this, |c| c.hidden = hidden)?;
+        if on_hide(lua, id, hidden)? {
             return Ok(());
         }
+        hide_children(lua, id, hidden)
+    }
+    /// The control's `OnHide(hidden)`: true when it vetoes.
+    fn on_hide(lua: &Lua, id: ControlId, hidden: bool) -> LuaResult<bool> {
+        let Some(obj) = object(lua, id)? else { return Ok(false) };
+        let Some(f) = obj.get::<Option<LuaFunction>>("OnHide")? else { return Ok(false) };
+        Ok(f.call::<Option<bool>>((obj.clone(), hidden)).unwrap_or(None) == Some(true))
+    }
+    fn hide_children(lua: &Lua, id: ControlId, hidden: bool) -> LuaResult<()> {
         let children = controls(lua).map.get(&id).map(|c| c.children.clone()).unwrap_or_default();
         for child in children {
-            notify_hide(lua, child, hidden)?;
+            if on_hide(lua, child, hidden)? {
+                continue;
+            }
+            if let Some(c) = controls(lua).map.get_mut(&child) {
+                c.hidden = hidden;
+            }
+            hide_children(lua, child, hidden)?;
         }
         Ok(())
     }
@@ -1021,14 +1064,17 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         AcquireKeyboardFocus = |lua, (this, blocks): (Obj<moho::Control>, Option<bool>)| acquire_focus(lua, id_of(&this)?, blocks.unwrap_or(false)))?;
     lua_method!(lua, moho::Control,
         /// Gives up the keyboard focus.
-        AbandonKeyboardFocus = |lua, this: Obj<moho::Control>| {
-            let id = id_of(&this)?;
-            controls(lua).focus.retain(|f| f.0 != id);
-            Ok(())
-        })?;
+        AbandonKeyboardFocus = |lua, this: Obj<moho::Control>| abandon_focus(lua, id_of(&this)?))?;
     lua_method!(lua, moho::Control,
-        #[lua(stub)]
-        GetCurrentFocusControl = |_, _args: LuaMultiValue| Ok(LuaNil))?;
+        /// The control holding the keyboard focus (`AcquireKeyboardFocus`,
+        /// `Edit:AcquireFocus`), whichever control it's called on.
+        GetCurrentFocusControl = |lua, _this: Obj<moho::Control>| {
+            let id = focused(lua).map(|f| f.0);
+            match id {
+                Some(id) => object(lua, id),
+                None => Ok(None),
+            }
+        })?;
     lua_method!(lua, moho::Control,
         #[lua(stub)]
         Dump = |_, _args: LuaMultiValue| Ok(()))?;
@@ -1043,9 +1089,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             frame(lua, head)
         })?;
     lua_method!(lua, moho::Control,
-        /// Calls `f(control)` on the control and each descendant, parents first.
+        /// Calls `f(control)` on the control, then on each of its children
+        /// (not deeper, as moho's: `probe_ui_controls` ctl).
         ApplyFunction = |lua, (this, f): (Obj<moho::Control>, LuaFunction)| {
-            let ids = subtree(&controls(lua), id_of(&this)?);
+            let id = id_of(&this)?;
+            let ids: Vec<ControlId> = {
+                let c = controls(lua);
+                std::iter::once(id).chain(c.map.get(&id).map(|ctl| ctl.children.clone()).unwrap_or_default()).collect()
+            };
             for id in ids {
                 if let Some(obj) = object(lua, id)? {
                     f.call::<()>(obj)?;
@@ -1093,11 +1144,11 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         HasHighlightCommand = |lua, _this: Obj<moho::UIWorldView>| Ok(lua.globals().raw_get::<LuaValue>("__engine_highlight_command")? != LuaNil))?;
     lua_method!(lua, moho::UIWorldView,
         /// The camera argument is ignored: a view locks its own camera.
-        LockInput = |lua, (this, _camera): (Obj<moho::UIWorldView>, Loose<Option<Obj<moho::CameraImpl>>>)| with_view(lua, &this, |v| v.input_locked = true).map(|_| ()))?;
+        LockInput = |lua, (this, _camera): (Obj<moho::UIWorldView>, Loose<Option<Obj<moho::CameraImpl>>>)| with_view(lua, &this, |v| v.input_locks = v.input_locks.saturating_add(1)).map(|_| ()))?;
     lua_method!(lua, moho::UIWorldView,
-        UnlockInput = |lua, (this, _camera): (Obj<moho::UIWorldView>, Loose<Option<Obj<moho::CameraImpl>>>)| with_view(lua, &this, |v| v.input_locked = false).map(|_| ()))?;
+        UnlockInput = |lua, (this, _camera): (Obj<moho::UIWorldView>, Loose<Option<Obj<moho::CameraImpl>>>)| with_view(lua, &this, |v| v.input_locks = v.input_locks.saturating_sub(1)).map(|_| ()))?;
     lua_method!(lua, moho::UIWorldView,
-        IsInputLocked = |lua, (this, _camera): (Obj<moho::UIWorldView>, Loose<Option<Obj<moho::CameraImpl>>>)| Ok(with_view(lua, &this, |v| v.input_locked)?.unwrap_or(false)))?;
+        IsInputLocked = |lua, (this, _camera): (Obj<moho::UIWorldView>, Loose<Option<Obj<moho::CameraImpl>>>)| Ok(with_view(lua, &this, |v| v.input_locks > 0)?.unwrap_or(false)))?;
     lua_method!(lua, moho::UIWorldView,
         /// Every camera object drives the renderer's one camera, and the minimap
         /// always shows the whole map: only a main view resets.
@@ -1328,17 +1379,27 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     }
     lua_method!(lua, moho::Bitmap,
         /// Sets the texture (a path, or a list of paths for an animation) and updates `BitmapWidth` / `BitmapHeight`.
-        SetNewTexture = |lua, (this, file, _border): (Obj<moho::Bitmap>, Loose<Either<String, Vec<String>>>, Option<f64>)| {
+        /// As moho (`probe_ui_controls` bmp): the texture's outer `border`
+        /// pixels (FAF's `SetTexture` passes 1) aren't part of the bitmap, so
+        /// a 64 x 64 icon is 62 x 62 and draws its inner 62 x 62 pixels.
+        SetNewTexture = |lua, (this, file, border): (Obj<moho::Bitmap>, Loose<Either<String, Vec<String>>>, Option<f64>)| {
         let textures: Vec<String> = match &*file {
             LuaValue::String(s) => vec![s.to_str()?.to_string()],
             LuaValue::Table(t) => t.clone().sequence_values::<String>().collect::<LuaResult<_>>()?,
             _ => Vec::new(),
         };
-        let (w, h) = textures.first().map_or((0, 0), |t| texture_size(lua, t));
+        let border = border.unwrap_or(1.0).max(0.0) as u32;
+        let (tw, th) = textures.first().map_or((0, 0), |t| texture_size(lua, t));
+        let (w, h) = (tw.saturating_sub(2 * border), th.saturating_sub(2 * border));
+        let inner = (border > 0 && w > 0 && h > 0).then(|| {
+            let (bu, bv) = (border as f32 / tw as f32, border as f32 / th as f32);
+            [bu, bv, 1.0 - bu, 1.0 - bv]
+        });
         with_bitmap(lua, &this, |b| {
             b.textures = textures;
             b.frame = 0;
             b.solid = None;
+            b.inner = inner;
         })?;
         set_var(&this, "BitmapWidth", w)?;
         set_var(&this, "BitmapHeight", h)
@@ -1379,6 +1440,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             with_bitmap(lua, &this, |b| {
                 b.textures = src.textures;
                 b.solid = src.solid;
+                b.inner = src.inner;
             })?;
         }
         Ok(())
@@ -1526,22 +1588,16 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         })
     }
     lua_method!(lua, moho::Edit,
-        /// Sets the text, cut to `MaxChars`; the caret moves to the end.
-        SetText = |lua, (this, text): (Obj<moho::Edit>, Option<String>)| {
-            with_edit(lua, &this, |e| {
-                let t: String = text.unwrap_or_default().chars().take(e.max_chars.max(0) as usize).collect();
-                e.caret = t.chars().count() as i64;
-                e.text.text = t;
-            })
-            .map(|_| ())
-        })?;
+        /// Sets the text, cut to `MaxChars`; the caret moves to the end, and
+        /// `OnTextChanged(new, old)` runs if the text changed
+        /// (`probe_ui_controls` edit: `SetText('abcdef')` logs `>abcdef;`).
+        SetText = |lua, (this, text): (Obj<moho::Edit>, Option<String>)| set_edit_text(lua, id_of(&this)?, &text.unwrap_or_default()))?;
     lua_method!(lua, moho::Edit,
         GetText = |lua, this: Obj<moho::Edit>| with_edit(lua, &this, |e| e.text.text.clone()).map(Option::unwrap_or_default))?;
     lua_method!(lua, moho::Edit,
-        ClearText = |lua, this: Obj<moho::Edit>| with_edit(lua, &this, |e| {
-            e.text.text.clear();
-            e.caret = 0;
-        }).map(|_| ()))?;
+        /// Empties the text, with `OnTextChanged` as `SetText` (`ClearText`
+        /// on "123" logs `123>;`).
+        ClearText = |lua, this: Obj<moho::Edit>| set_edit_text(lua, id_of(&this)?, ""))?;
         lua_method!(lua, moho::Edit,
             SetNewFont = |lua, (this, family, size): (Obj<moho::Edit>, Option<String>, Option<f32>)| {
             with_edit(lua, &this, |e| {
@@ -1576,7 +1632,20 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::Edit,
         IsBackgroundVisible = |lua, this: Obj<moho::Edit>| with_edit(lua, &this, |e| e.show_background).map(|v| v.unwrap_or(false)))?;
     lua_method!(lua, moho::Edit,
-        SetMaxChars = |lua, (this, n): (Obj<moho::Edit>, i64)| with_edit(lua, &this, |e| e.max_chars = n).map(|_| ()))?;
+        /// Sets the limit (moho's default 1024) and cuts the text to it
+        /// (`probe_ui_controls` edit: `abcdef` becomes `abc`); whether moho
+        /// calls `OnTextChanged` for the cut wasn't measured, so it doesn't.
+        SetMaxChars = |lua, (this, n): (Obj<moho::Edit>, i64)| {
+            with_edit(lua, &this, |e| {
+                e.max_chars = n;
+                let keep = n.max(0) as usize;
+                if e.text.text.chars().count() > keep {
+                    e.text.text = e.text.text.chars().take(keep).collect();
+                    e.caret = e.caret.min(keep as i64);
+                }
+            })
+            .map(|_| ())
+        })?;
     lua_method!(lua, moho::Edit,
         GetMaxChars = |lua, this: Obj<moho::Edit>| with_edit(lua, &this, |e| e.max_chars).map(|v| v.unwrap_or(0)))?;
     lua_method!(lua, moho::Edit,
@@ -1595,11 +1664,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// An edit with the focus takes every key (typing doesn't run hotkeys).
         AcquireFocus = |lua, this: Obj<moho::Edit>| acquire_focus(lua, id_of(&this)?, true))?;
     lua_method!(lua, moho::Edit,
-        AbandonFocus = |lua, this: Obj<moho::Edit>| {
-            let id = id_of(&this)?;
-            controls(lua).focus.retain(|f| f.0 != id);
-            Ok(())
-        })?;
+        AbandonFocus = |lua, this: Obj<moho::Edit>| abandon_focus(lua, id_of(&this)?))?;
     lua_method!(lua, moho::Edit,
         SetNewCaretColor = |lua, (this, c): (Obj<moho::Edit>, Option<String>)| with_edit(lua, &this, |e| e.caret_color = c.as_deref().and_then(parse_color).unwrap_or([1.0; 4])).map(|_| ()))?;
     lua_method!(lua, moho::Edit,
@@ -1757,7 +1822,11 @@ pub fn draw_list(lua: &Lua, head: usize) -> LuaResult<Vec<DrawItem>> {
                     let base = b.solid.unwrap_or(b.mask.unwrap_or([1.0; 4]));
                     let color = [base[0], base[1], base[2], base[3] * alpha];
                     let texture = if b.solid.is_some() { None } else { b.textures.get(b.frame.min(b.textures.len() - 1)).cloned() };
-                    DrawItem::Quad { rect: [l, t, l + w, t + h], texture, uv: b.uv, color, tiled: b.tiled }
+                    let uv = match b.inner.filter(|_| !b.tiled) {
+                        Some(r) => [r[0] + b.uv[0] * (r[2] - r[0]), r[1] + b.uv[1] * (r[3] - r[1]), r[0] + b.uv[2] * (r[2] - r[0]), r[1] + b.uv[3] * (r[3] - r[1])],
+                        None => b.uv,
+                    };
+                    DrawItem::Quad { rect: [l, t, l + w, t + h], texture, uv, color, tiled: b.tiled }
                 }),
                 Kind::Text(tx) => Some({
                     let color = [tx.color[0], tx.color[1], tx.color[2], tx.color[3] * alpha];
@@ -1926,6 +1995,7 @@ pub fn draw_list(lua: &Lua, head: usize) -> LuaResult<Vec<DrawItem>> {
 /// `UIRP_UnderWorld` (FAF's `UIUtil`): a control drawn in the world views'
 /// pass rather than over them.
 const UIRP_UNDER_WORLD: i32 = 1;
+const UIRP_POST_GLOW: i32 = 8;
 
 /// Moho's under-world pass: world views and the controls marked
 /// `UIRP_UnderWorld` draw together by depth, the rest of the interface over
@@ -1960,7 +2030,7 @@ fn under_world(items: Vec<(bool, DrawItem)>) -> Vec<DrawItem> {
 /// covers it.
 fn cut(item: DrawItem, hole: [f32; 4]) -> Vec<DrawItem> {
     let rect = match &item {
-        DrawItem::Quad { rect, .. } | DrawItem::Text { rect, .. } | DrawItem::Movie { rect, .. } => *rect,
+        DrawItem::Quad { rect, .. } | DrawItem::Text { rect, .. } | DrawItem::Movie { rect, .. } | DrawItem::Icon { rect, .. } => *rect,
         _ => return vec![item],
     };
     let [l, t, r, b] = rect;
@@ -2192,7 +2262,7 @@ fn press_focus(lua: &Lua, target: ControlId, x: f32) -> LuaResult<()> {
     };
     let previous = focused_edit(lua).filter(|&p| p != target);
     if let Some(p) = previous {
-        controls(lua).focus.retain(|f| f.0 != p);
+        abandon_focus(lua, p)?;
         hook(lua, p, "OnLoseKeyboardFocus", ())?;
     }
     if let Some(e) = edit {
@@ -2217,20 +2287,39 @@ enum Hit {
     Locked,
 }
 
-/// The topmost visible, hit-testable control under (x, y).
+/// The newest live input capture (`AddInputCapture`: FAF's and LOUD's
+/// modal dialogs, `UIUtil.MakeInputModal`).
+fn input_capture(lua: &Lua) -> LuaResult<Option<ControlId>> {
+    let capture = lua.globals().get::<LuaFunction>("GetInputCapture")?.call::<Option<LuaTable>>(())?;
+    Ok(capture.and_then(|c| id_of(&c).ok()).filter(|id| controls(lua).map.contains_key(id)))
+}
+
+/// The topmost visible, hit-testable control under (x, y). With an input
+/// capture, only the capture and what's under it are searched, and the
+/// capture itself takes the event when none of them is under the mouse,
+/// as moho's mouse dispatch does (MohoEngine.dll 0x1036db00:
+/// `GetTopmostControl` from the capture stack's top, else the root frame;
+/// nothing found goes to the capture, else the frame). So a modal dialog
+/// takes its clicks even when a deeper control covers it: LOUD's and FAF's
+/// profile name dialog (depth `GetFrame(0).Depth() + 10`) under the main
+/// menu's full-screen `topLevelGroup` (depth 100).
 fn hit(lua: &Lua, x: f32, y: f32) -> LuaResult<Option<Hit>> {
-    let roots: Vec<ControlId> = {
-        let c = controls(lua);
-        c.frames.get(&c.mouse_head).copied().into_iter().collect()
+    let capture = input_capture(lua)?;
+    let roots: Vec<ControlId> = match capture {
+        Some(id) => vec![id],
+        None => {
+            let c = controls(lua);
+            c.frames.get(&c.mouse_head).copied().into_iter().collect()
+        }
     };
-    // The visible, hit-testable controls (with their tree order), under
-    // one borrow; then all their layouts in one call.
+    // The visible, hit-testable controls in tree order (depth first, each
+    // control before its children, children in the order they were made),
+    // under one borrow; then all their layouts in one call.
     forget_dirty_layouts(lua)?;
-    let mut candidates: Vec<(ControlId, usize, Hit)> = Vec::new();
+    let mut candidates: Vec<(ControlId, Hit)> = Vec::new();
     let mut stale: Vec<ControlId> = Vec::new();
     {
         let c = controls(lua);
-        let mut order = 0usize;
         let mut stack: Vec<ControlId> = roots.into_iter().rev().collect();
         while let Some(id) = stack.pop() {
             let Some(ctl) = c.map.get(&id) else { continue };
@@ -2238,16 +2327,15 @@ fn hit(lua: &Lua, x: f32, y: f32) -> LuaResult<Option<Hit>> {
                 continue;
             }
             stack.extend(ctl.children.iter().rev());
-            order += 1;
             if !ctl.hit_test {
                 continue;
             }
             let what = match &ctl.kind {
-                Kind::WorldView(v) if v.input_locked => Hit::Locked,
+                Kind::WorldView(v) if v.input_locks > 0 => Hit::Locked,
                 Kind::WorldView(_) => Hit::World(id),
                 _ => Hit::Control(id),
             };
-            candidates.push((id, order, what));
+            candidates.push((id, what));
             if ctl.layout.is_none() {
                 stale.push(id);
             }
@@ -2255,15 +2343,17 @@ fn hit(lua: &Lua, x: f32, y: f32) -> LuaResult<Option<Hit>> {
     }
     read_layouts(lua, &stale)?;
     let c = controls(lua);
-    let mut best: Option<(f32, usize, Hit)> = None;
-    for (id, order, what) in candidates {
+    // The greatest depth; of equal ones, the first in tree order, as moho's
+    // walk keeps (original game's MohoEngine.dll `GetTopmostControl`,
+    // 0x103515d0: a control replaces the best only with a greater depth).
+    let mut best: Option<(f32, Hit)> = None;
+    for (id, what) in candidates {
         let Some((l, t, w, h, depth)) = c.map.get(&id).and_then(|ctl| ctl.layout) else { continue };
-        if x >= l && y >= t && x < l + w && y < t + h
-            && best.is_none_or(|b| (depth, order) >= (b.0, b.1)) {
-            best = Some((depth, order, what));
+        if x >= l && y >= t && x < l + w && y < t + h && best.is_none_or(|b| depth > b.0) {
+            best = Some((depth, what));
         }
     }
-    Ok(best.map(|b| b.2))
+    Ok(best.map(|b| b.1).or(capture.map(Hit::Control)))
 }
 
 fn event_table(lua: &Lua, kind: &str, x: f32, y: f32, mods: Modifiers, wheel: f32, key: i64) -> LuaResult<LuaTable> {
@@ -2303,7 +2393,7 @@ fn bubble(lua: &Lua, mut id: Option<ControlId>, event: &LuaTable) -> LuaResult<b
 pub fn hovered_world_view(lua: &Lua) -> LuaResult<Option<LuaTable>> {
     let Some(id) = lua.named_registry_value::<Option<u32>>("user.hover")? else { return Ok(None) };
     match controls(lua).map.get(&id).map(|c| &c.kind) {
-        Some(Kind::WorldView(v)) if !v.input_locked => {}
+        Some(Kind::WorldView(v)) if v.input_locks == 0 => {}
         _ => return Ok(None),
     }
     object(lua, id)
@@ -2512,19 +2602,12 @@ pub fn key_down(lua: &Lua, name: &str, mods: Modifiers, repeat: bool) -> LuaResu
     }
     // An input capture (FAF's modal dialogs: `MakeInputModal`) takes every
     // key: its Esc / Enter answer the dialog, and nothing else hears them.
-    let capture = lua.globals().get::<LuaFunction>("GetInputCapture")?.call::<Option<LuaTable>>(())?;
-    if let Some(id) = capture.and_then(|c| id_of(&c).ok()).filter(|id| controls(lua).map.contains_key(id)) {
+    if let Some(id) = input_capture(lua)? {
         let e = key_event(lua, name, mods)?;
         bubble(lua, Some(id), &e)?;
         return Ok(Some(true));
     }
-    let focus = {
-        let mut c = controls(lua);
-        let live: Vec<(ControlId, bool)> = c.focus.iter().copied().filter(|f| c.map.contains_key(&f.0)).collect();
-        c.focus = live;
-        c.focus.last().copied()
-    };
-    let Some((id, blocks)) = focus else { return Ok(None) };
+    let Some((id, blocks)) = focused(lua) else { return Ok(None) };
     let e = key_event(lua, name, mods)?;
     bubble(lua, Some(id), &e)?;
     Ok(Some(blocks))
@@ -2542,13 +2625,8 @@ fn key_event(lua: &Lua, name: &str, mods: Modifiers) -> LuaResult<LuaTable> {
 /// `blocks` keeps them from the key map. The previous holder hears
 /// `OnKeyboardFocusChange`.
 fn acquire_focus(lua: &Lua, id: ControlId, blocks: bool) -> LuaResult<()> {
-    let previous = {
-        let mut c = controls(lua);
-        let previous = c.focus.last().map(|f| f.0).filter(|&p| p != id && c.map.contains_key(&p));
-        c.focus.retain(|f| f.0 != id);
-        c.focus.push((id, blocks));
-        previous
-    };
+    let previous = focused(lua).map(|f| f.0).filter(|&p| p != id);
+    controls(lua).focus = Some((id, blocks));
     if let Some(p) = previous {
         hook(lua, p, "OnKeyboardFocusChange", ())?;
     }
@@ -2578,9 +2656,26 @@ pub fn typing(lua: &Lua) -> bool {
 
 /// The edit holding the keyboard focus, if the focus is an edit.
 fn focused_edit(lua: &Lua) -> Option<ControlId> {
-    let c = controls(lua);
-    let (id, _) = c.focus.iter().rev().find(|f| c.map.contains_key(&f.0))?;
-    matches!(c.map.get(id)?.kind, Kind::Edit(_)).then_some(*id)
+    let (id, _) = focused(lua)?;
+    matches!(controls(lua).map.get(&id)?.kind, Kind::Edit(_)).then_some(id)
+}
+
+/// The focus holder, if it still exists (a destroyed holder drops it).
+fn focused(lua: &Lua) -> Option<(ControlId, bool)> {
+    let mut c = controls(lua);
+    if c.focus.is_some_and(|f| !c.map.contains_key(&f.0)) {
+        c.focus = None;
+    }
+    c.focus
+}
+
+/// `id` gives up the keyboard focus, if it holds it.
+fn abandon_focus(lua: &Lua, id: ControlId) -> LuaResult<()> {
+    let mut c = controls(lua);
+    if c.focus.is_some_and(|f| f.0 == id) {
+        c.focus = None;
+    }
+    Ok(())
 }
 
 /// The Windows virtual key for a key named FAF's way (its
@@ -2618,9 +2713,49 @@ fn edit_text(lua: &Lua, id: ControlId, f: impl FnOnce(&mut Vec<char>, &mut usize
         (e.text.text != old).then(|| (e.text.text.clone(), old))
     };
     if let Some((new, old)) = change {
-        hook(lua, id, "OnTextChanged", (new, old))?;
+        text_changed(lua, id, new, old)?;
     }
     Ok(())
+}
+
+/// Sets edit `id`'s text from Lua (`SetText`, `ClearText`): cut to its
+/// `MaxChars`, the caret at the end, then `OnTextChanged(new, old)` even
+/// when the text is the same, as moho's `CMauiEdit::SetText` (retail exe
+/// 0x7969f8) and `ClearText` (0x796a9a) do: FAF's key bindings dialog
+/// fills its list from the `SetText('')` it ends with. Unlike typing it
+/// works on a disabled edit.
+fn set_edit_text(lua: &Lua, id: ControlId, text: &str) -> LuaResult<()> {
+    let (new, old) = {
+        let mut c = controls(lua);
+        let Some(Control { kind: Kind::Edit(e), .. }) = c.map.get_mut(&id) else { return Ok(()) };
+        let t: String = text.chars().take(e.max_chars.max(0) as usize).collect();
+        e.caret = t.chars().count() as i64;
+        let old = std::mem::replace(&mut e.text.text, t);
+        (e.text.text.clone(), old)
+    };
+    text_changed(lua, id, new, old)
+}
+
+/// `OnTextChanged(new, old)` on edit `id`, unless the edit is already in
+/// it: text its handler sets doesn't call it again (moho's flag at +0x190;
+/// FAF's numbers-only edits set their own text from it).
+fn text_changed(lua: &Lua, id: ControlId, new: String, old: String) -> LuaResult<()> {
+    let set_flag = |on: bool| -> bool {
+        let mut c = controls(lua);
+        match c.map.get_mut(&id) {
+            Some(Control { kind: Kind::Edit(e), .. }) if e.notifying != on => {
+                e.notifying = on;
+                true
+            }
+            _ => false,
+        }
+    };
+    if !set_flag(true) {
+        return Ok(());
+    }
+    let result = hook(lua, id, "OnTextChanged", (new, old));
+    set_flag(false);
+    result.map(|_| ())
 }
 
 /// A key pressed while edit `id` has the focus: editing keys edit,

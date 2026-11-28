@@ -27,6 +27,8 @@ pub fn skip_requested() -> bool {
 /// with `RTS_SKIP_DATA_TESTS` set, prints that `what` is skipped and
 /// returns `false`.
 pub fn require<P: AsRef<std::path::Path>>(what: &str, paths: &[P]) -> bool {
+    // A sim stage error ends a test's run rather than being passed over.
+    crate::engine::sim::tick::set_strict_stage_errors(true);
     let missing: Vec<&std::path::Path> = paths.iter().map(AsRef::as_ref).filter(|p| !p.exists()).collect();
     if missing.is_empty() {
         return true;

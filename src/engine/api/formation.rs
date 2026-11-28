@@ -52,7 +52,7 @@ pub fn plan(lua: &Lua, units: &[EntityId], name: Option<&str>, target: FxVec3, d
         for id in ids {
             let Some(e) = w.get(id).filter(|e| !e.destroyed) else { continue };
             let Some(u) = e.unit.as_deref() else { continue };
-            let m = Member { id, position: e.position(), category: e.category_index, max_speed: u.motion_params.max_speed.saturating_mul(u.motion.speed) };
+            let m = Member { id, position: e.position(), category: e.category_index, max_speed: u.motion_params.max_speed.saturating_mul(u.motion_params.kind.speed_mult(u.motion.speed)) };
             // FAF's `Footprint.SizeMax` (blueprints-units.lua): what its
             // `CalculateSizes` compensates for. FAF computes it before the
             // engine fills in default footprints, so blueprints without a

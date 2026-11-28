@@ -4,6 +4,11 @@ rawset(_G, "ScenarioResult", { done = false, failures = {}, notes = {} })
 local function check(ok, msg) if not ok then table.insert(ScenarioResult.failures, msg) end end
 ForkThread(function()
     WaitTicks(2)
+    -- Off the map is the Default type, not the edge cell's (FAF's
+    -- `DefaultTerrainType = GetTerrainType(-1, -1)`).
+    local mx, mz = GetMapSize()
+    check(GetTerrainType(-1, -1).Name == 'Default', 'GetTerrainType(-1, -1) is Default')
+    check(GetTerrainType(mx, mz).Name == 'Default', 'GetTerrainType at the far edge is Default')
     -- A dry spot 40 east of which the type differs, with the same type along
     -- the first 10.
     local ax, az, bx

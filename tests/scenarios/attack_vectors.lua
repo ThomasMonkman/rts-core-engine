@@ -36,11 +36,21 @@ ForkThread(function()
     local tank = CreateUnitHPR('uel0201', 'ARMY_1', 376, GetTerrainHeight(376, 560), 560, 0, 0, 0)
     local platoon = me:MakePlatoon('', '')
     me:AssignUnitsToPlatoon(platoon, { tank }, 'Attack', 'None')
-    local best = me:PickBestAttackVector(platoon, 'Attack', 'Enemy', 'Closest', categories.STRUCTURE)
-    check(best ~= nil, 'a vector is picked')
-    if best then
-        note(string.format('picked %d,%d + %d,%d', best.px, best.pz, best.vx, best.vz))
-        check(best.px == 368 and best.pz == 560, 'the first vector to the closest structure')
+    -- A platoon made this tick (or the one before) gets nothing yet, as in
+    -- the real game (dev/probes probe_re3_ai AV L1).
+    check(me:PickBestAttackVector(platoon, 'Attack', 'Enemy', 'Closest', categories.STRUCTURE) == nil, 'a new platoon gets nil')
+    WaitTicks(1)
+    check(me:PickBestAttackVector(platoon, 'Attack', 'Enemy', 'Closest', categories.STRUCTURE) == nil, 'a platoon made the tick before gets nil')
+    WaitTicks(2)
+    -- Closest, Furthest and LeastDefended all give the first vector
+    -- (dev/probes probe_re3_ai2, probe_re3_ai3).
+    for _, cmp in { 'Closest', 'Furthest', 'LeastDefended' } do
+        local best = me:PickBestAttackVector(platoon, 'Attack', 'Enemy', cmp, categories.STRUCTURE)
+        check(best ~= nil, cmp .. ': a vector is picked')
+        if best then
+            note(string.format('%s picked %d,%d + %d,%d', cmp, best.px, best.pz, best.vx, best.vz))
+            check(best.px == 368 and best.pz == 560, cmp .. ': the first vector')
+        end
     end
     local ok7 = pcall(me.PickBestAttackVector, me, platoon, 'Attack', 'Enemy', 'Closest', categories.STRUCTURE, '/lua/x.lua')
     check(not ok7, '7 arguments is an error')

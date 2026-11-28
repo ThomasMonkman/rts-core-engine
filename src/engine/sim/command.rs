@@ -82,9 +82,9 @@ impl CommandKind {
         Self::ALL.get((v as usize).checked_sub(1)?).copied()
     }
 
-    /// A transport load/unload order: while one is active the transport
-    /// flies at its `TransportHoverHeight` (it lowers for the tractor /
-    /// drop and climbs back once the order ends).
+    /// A transport load/unload order: on one the transport lowers to its
+    /// `TransportHoverHeight` over the order's point (for the tractor /
+    /// drop) and climbs back once the order ends.
     pub fn is_transport_load_unload(self) -> bool {
         matches!(self, Self::TransportLoadUnits | Self::TransportReverseLoadUnits | Self::TransportUnloadUnits | Self::TransportUnloadSpecificUnits)
     }
@@ -132,6 +132,19 @@ pub struct Command {
     /// at +0xe4): [`Commands::repeat_to_back`].
     #[serde(default)]
     pub repeat_count: u32,
+    /// A patrol the player gave (`api::player_input`): left alone in the
+    /// queue, it's followed by a leg back to where the unit started, so
+    /// one point patrols between there and here. Moho's interface adds that
+    /// leg; a script's lone `IssuePatrol` point just ends on arrival
+    /// (dev/probes probe_unit_orders O3). Copied to units joining a
+    /// factory's patrol rally.
+    #[serde(default)]
+    pub patrol_home: bool,
+    /// A load order an air transport joined (`api::transport`'s pick-up):
+    /// where its units gather for the transport to come to them. `None`:
+    /// they go to the transport.
+    #[serde(default)]
+    pub gather: Option<FxVec3>,
 }
 
 /// A unit's place in a formation order: its goal is the target plus
@@ -197,9 +210,22 @@ pub struct Commands {
     /// by unit ([`Commands::cycle_ground_attacks`]).
     #[serde(default)]
     ground_fired: BTreeMap<EntityId, (CommandId, u64)>,
+    /// The live `BuildMobile` commands' ids (the keys of `map` whose kind
+    /// is `BuildMobile`): [`Commands::pending_builds`] visits these, not
+    /// every command. Kept in step where `map` gains or loses a command.
+    #[serde(default)]
+    builds: std::collections::BTreeSet<CommandId>,
 }
 
 impl Commands {
+    /// Adds command `c` (id `id`) to the map and the build index.
+    fn insert_command(&mut self, id: CommandId, c: Command) {
+        if c.kind == CommandKind::BuildMobile {
+            self.builds.insert(id);
+        }
+        self.map.insert(id, c);
+    }
+
     /// Re-indexes `unit` by its current command's kind, and notes a new
     /// current command as not yet dispatched.
     fn sync(&mut self, unit: EntityId) {
@@ -274,6 +300,12 @@ impl Commands {
         }
     }
 
+    /// How many commands have been issued this game (ids are handed out in
+    /// order from 0): a deterministic measure of how busy the AI is.
+    pub fn issued(&self) -> CommandId {
+        self.next_id
+    }
+
     /// Creates a command and adds it to the queue of each unit in `units`
     /// (deduplicated; ids sorted in the command), at the back unless it's
     /// a patrol point joining a patrol loop ([`Self::add_to_queue`]).
@@ -288,7 +320,7 @@ impl Commands {
         }
         // A command nobody received is done at once.
         if !members.is_empty() {
-            self.map.insert(id, Command { id, kind, target, blueprint, count, issued: members.len() as u32, units: members.clone(), formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count });
+            self.insert_command(id, Command { id, kind, target, blueprint, count, issued: members.len() as u32, units: members.clone(), formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count, patrol_home: false, gather: None });
         }
         for u in members {
             self.sync(u);
@@ -343,6 +375,16 @@ impl Commands {
     /// Focus units whose commands are done: their owner destroys them.
     pub fn take_dropped_focus(&mut self) -> Vec<EntityId> {
         std::mem::take(&mut self.dropped_focus)
+    }
+
+    /// Live `BuildMobile` commands (queued on some unit, current or not),
+    /// in id order.
+    pub fn pending_builds(&self) -> impl Iterator<Item = &Command> {
+        debug_assert!(
+            self.builds.iter().copied().eq(self.map.values().filter(|c| c.kind == CommandKind::BuildMobile).map(|c| c.id)),
+            "build command index out of step"
+        );
+        self.builds.iter().filter_map(|id| self.map.get(id))
     }
 
     /// Done once no unit has it queued (or it never existed).
@@ -432,9 +474,11 @@ impl Commands {
     fn release(&mut self, unit: EntityId, id: CommandId) {
         if let Some(c) = self.map.get_mut(&id) {
             c.units.retain(|&u| u != unit);
-            if c.units.is_empty()
-                && let Some(f) = self.map.remove(&id).and_then(|c| c.focus) {
-                self.dropped_focus.push(f);
+            if c.units.is_empty() {
+                self.builds.remove(&id);
+                if let Some(f) = self.map.remove(&id).and_then(|c| c.focus) {
+                    self.dropped_focus.push(f);
+                }
             }
         }
     }
@@ -457,7 +501,7 @@ impl Commands {
         let id = self.next_id;
         self.next_id += 1;
         self.queues.entry(unit).or_default().push_front(id);
-        self.map.insert(id, Command { id, kind, target, blueprint, count, issued: 1, units: vec![unit], formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count });
+        self.insert_command(id, Command { id, kind, target, blueprint, count, issued: 1, units: vec![unit], formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: count, patrol_home: false, gather: None });
         self.sync(unit);
         id
     }
@@ -535,7 +579,7 @@ impl Commands {
         copy.id = new;
         copy.units = vec![unit];
         copy.issued = 1;
-        self.map.insert(new, copy);
+        self.insert_command(new, copy);
         if let Some(slot) = self.queues.get_mut(&unit).and_then(|q| q.iter_mut().find(|q| **q == id)) {
             *slot = new;
         }
@@ -658,7 +702,7 @@ impl Commands {
             }
             self.factory_queues.entry(f).or_default().push(id);
         }
-        self.map.insert(id, Command { id, kind, target, blueprint: None, count: 0, issued: 1, units: members, formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: 0 });
+        self.insert_command(id, Command { id, kind, target, blueprint: None, count: 0, issued: 1, units: members, formation: Vec::new(), travel: Vec::new(), off_factory: false, category: None, focus: None, repeat_count: 0, patrol_home: false, gather: None });
         id
     }
 
@@ -718,6 +762,19 @@ impl Commands {
             self.add_to_queue(unit, id, kind);
         }
         self.sync(unit);
+    }
+
+    /// `unit` joins command `id` as one more of its units, at the back of
+    /// its queue (an air transport joining the load order onto it,
+    /// `api::transport`). False: no such command, or it has it already.
+    pub fn join(&mut self, id: CommandId, unit: EntityId) -> bool {
+        let Some(c) = self.map.get_mut(&id) else { return false };
+        let Err(i) = c.units.binary_search(&unit) else { return false };
+        c.units.insert(i, unit);
+        let kind = c.kind;
+        self.add_to_queue(unit, id, kind);
+        self.sync(unit);
+        true
     }
 
     /// Units with a non-empty queue, ascending.

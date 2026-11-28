@@ -135,6 +135,15 @@ impl EntityView {
     }
 }
 
+/// A jammer's fake radar contact as the view army sees it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FakeBlip {
+    pub position: [f32; 3],
+    /// The jammer's blueprint index (as [`EntityView::blueprint`]): fakes
+    /// show the jammer's own contact shape.
+    pub blueprint: u32,
+}
+
 /// How the viewing army knows an entity it is shown (fog of war; see
 /// [`DebugRequest::view_army`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -149,6 +158,10 @@ pub enum Sighting {
     /// A structure seen before and out of sight now: its last-seen state
     /// (it may be gone).
     Remembered,
+    /// A unit seen before, out of sight now but on radar / sonar: its full
+    /// strategic icon in its army's colour (no mesh for a mobile unit; a
+    /// structure is its remembered state). FAF probe `probe_intel_icons`.
+    Identified,
 }
 
 /// The fog of war texture's changes (see [`Snapshot::fog`]).
@@ -389,14 +402,35 @@ impl SimControl {
         self.agreed().unwrap_or_else(|| self.speed())
     }
 
-    /// The speed the game actually runs at (percent), as the real-time
-    /// loop last paced or measured it; else the shown one.
+    /// The speed the game actually runs at (percent), as the sim loop last
+    /// paced or measured it; else the shown one (`MAX` only then: a
+    /// measured speed is a number).
     pub fn effective(&self) -> u32 {
-        Some(self.effective.load(std::sync::atomic::Ordering::Relaxed)).filter(|&p| p != 0).unwrap_or_else(|| self.shown())
+        self.measured().unwrap_or_else(|| self.shown())
     }
 
+    /// The speed the sim loop last paced or measured (percent), `None`
+    /// before it knows.
+    pub fn measured(&self) -> Option<u32> {
+        Some(self.effective.load(std::sync::atomic::Ordering::Relaxed)).filter(|&p| p != 0)
+    }
+
+    /// The sim loop's actual speed ([`RateMeter::actual`]): a number, never
+    /// `MAX` ("max" is a speed asked for, not one run at).
     pub fn set_effective(&self, percent: u32) {
-        self.effective.store(percent.max(1), std::sync::atomic::Ordering::Relaxed);
+        debug_assert_ne!(percent, Self::MAX, "an actual speed is measured, not max");
+        self.effective.store(percent.clamp(1, Self::MAX - 1), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The game speed as the interface sees it, in moho steps: the one
+    /// asked for (`GetGameSpeed`, FAF's clock's first number) and the one
+    /// the game runs at (`GetSimRate`, the second). "Max" is asked for as
+    /// [`Self::MAX_STEP`] (the keys step up to it one at a time); the
+    /// actual one is what the sim loop measured (below 0 when slower than real time), and until
+    /// it has measured anything, the one asked for.
+    pub fn interface_steps(&self) -> (i32, i32) {
+        let asked = Self::step_of(self.shown());
+        (asked, self.measured().map_or(asked.min(Self::MOHO_MAX_STEP), Self::step_of))
     }
 
     /// The session client (1-based) who changed the speed last.
@@ -474,6 +508,9 @@ impl SimControl {
     /// go): 10^(77/10) times normal no longer fits a percent.
     pub const MAX_STEP: i32 = 77;
 
+    /// Moho's fastest step (10x): how the interface sees "max".
+    pub const MOHO_MAX_STEP: i32 = 10;
+
     /// Moho's game speed step (0 normal) nearest `percent`: the rate is
     /// 10^(step/10) (`RATE_GameSpeedToRate`, MohoEngine.dll 0x1014a3d0), so
     /// +10 is 10x, +20 100x. Moho stops at -10..=10; we don't: "max" is
@@ -497,6 +534,120 @@ impl SimControl {
     pub fn label(percent: u32) -> String {
         if percent == Self::MAX { "max".into() } else { format!("{}x", percent as f32 / 100.0) }
     }
+}
+
+/// The speed the sim really runs at, measured over at least
+/// [`Self::WINDOW`] of ticks (wall-clock time: it paces and reports, never
+/// reaches sim state).
+#[derive(Debug)]
+pub struct RateMeter {
+    since: std::time::Instant,
+    ticks: u32,
+    achieved: Option<u32>,
+}
+
+impl RateMeter {
+    pub const WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+    pub fn new(now: std::time::Instant) -> Self {
+        Self { since: now, ticks: 0, achieved: None }
+    }
+
+    /// A pause or hold: the time stopped doesn't count (the last
+    /// measurement stays).
+    pub fn restart(&mut self, now: std::time::Instant) {
+        (self.since, self.ticks) = (now, 0);
+    }
+
+    /// A tick ended at `now`.
+    pub fn tick(&mut self, now: std::time::Instant) {
+        self.ticks += 1;
+        let secs = now.saturating_duration_since(self.since).as_secs_f64();
+        if secs >= Self::WINDOW.as_secs_f64() {
+            // 10 ticks a second is 100%.
+            self.achieved = Some(((self.ticks as f64 * 10.0 / secs).round() as u32).clamp(1, SimControl::MAX - 1));
+            self.restart(now);
+        }
+    }
+
+    /// The last measured speed (percent).
+    pub fn achieved(&self) -> Option<u32> {
+        self.achieved
+    }
+
+    /// The actual speed (percent) while pacing at `speed`: the pace,
+    /// unless the sim measurably falls short of it (5% slack for timer
+    /// jitter), and as measured when running flat out ("max": `None`
+    /// until measured, never `MAX`).
+    pub fn actual(&self, speed: u32) -> Option<u32> {
+        match self.achieved {
+            Some(a) if speed == SimControl::MAX || (a as f64) < speed as f64 * 0.95 => Some(a),
+            _ if speed == SimControl::MAX => None,
+            _ => Some(speed),
+        }
+    }
+}
+
+/// The real-time loop's schedule: every tick has a slot on an absolute
+/// timeline, one period after the last one's. A tick that ends late (a slow
+/// tick, a sleep that overshot, a coarse OS timer) is owed: the next ones
+/// start without waiting until the schedule is met again, so the speed asked
+/// for is held on average. The debt is capped at [`Self::MAX_DEBT`], so a
+/// long stall (a hitch, a debugger) is forgiven rather than caught up in a
+/// burst. Wall-clock time only: it never reaches sim state.
+#[derive(Debug)]
+pub struct Pacer {
+    /// When the next tick's slot starts.
+    next: std::time::Instant,
+}
+
+impl Pacer {
+    /// The most the schedule carries when behind: a quarter of a second
+    /// (25 ticks at 10x, 2.5 at normal speed).
+    pub const MAX_DEBT: std::time::Duration = std::time::Duration::from_millis(250);
+
+    pub fn new(now: std::time::Instant) -> Self {
+        Self { next: now }
+    }
+
+    /// Paused, held or flat out: the schedule starts again from `now` (no
+    /// debt).
+    pub fn restart(&mut self, now: std::time::Instant) {
+        self.next = now;
+    }
+
+    /// A tick ended at `now`; the next one's slot is `period` after this
+    /// one's. Returns when to start it, or `None` to start it now (behind:
+    /// the debt, less `excused`, carries up to [`Self::MAX_DEBT`]).
+    /// `excused` is time the tick spent not on its own work (a networked
+    /// game's wait for players' turns): it isn't owed, as the lockstep paces
+    /// against the other players itself.
+    pub fn after_tick(&mut self, now: std::time::Instant, period: std::time::Duration, excused: std::time::Duration) -> Option<std::time::Instant> {
+        self.next += period;
+        let late = now.saturating_duration_since(self.next);
+        if late.is_zero() {
+            return Some(self.next);
+        }
+        let owed = late.saturating_sub(excused).min(Self::MAX_DEBT);
+        self.next = now.checked_sub(owed).unwrap_or(now);
+        None
+    }
+
+    /// Waits until `deadline`: sleeps most of the way, then yields for the
+    /// last [`Self::SPIN`], so the OS timer's overshoot (about a millisecond
+    /// on Windows' high-resolution timer) doesn't land on every tick.
+    pub fn wait_until(deadline: std::time::Instant) {
+        loop {
+            let Some(left) = deadline.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero()) else { return };
+            match left.checked_sub(Self::SPIN) {
+                Some(sleep) if !sleep.is_zero() => std::thread::sleep(sleep),
+                _ => std::thread::yield_now(),
+            }
+        }
+    }
+
+    /// The tail of a wait spent yielding rather than asleep.
+    const SPIN: std::time::Duration = std::time::Duration::from_micros(if cfg!(windows) { 1000 } else { 200 });
 }
 
 /// What the renderer wants beyond the basics (written by the renderer,
@@ -612,9 +763,10 @@ pub struct UnitDetail {
     pub paused: bool,
     /// Overcharge auto-fire paused (`SetOverchargePaused`).
     pub overcharge_paused: bool,
-    /// Silo missiles (`UserUnit:GetMissileInfo`): nuke building (the
-    /// missile in progress as a fraction, FA-Binary-Patches#14), nuke max
-    /// storage, nukes stored, then the same for tactical missiles.
+    /// Silo missiles (`UserUnit:GetMissileInfo`): nukes being built (a
+    /// count: 1 while one is in progress, as moho's integer field; the
+    /// progress is `GetWorkProgress`), nuke max storage, nukes stored, then
+    /// the same for tactical missiles.
     pub missiles: [f32; 6],
     /// The unit that made it (a pod's carrier, an external factory's
     /// unit): `UserUnit:GetCreator`.
@@ -688,8 +840,9 @@ pub struct Snapshot {
     pub tick: u64,
     /// The sim's own tick (`GetGameTick`), the clock effects are timed in.
     pub sim_tick: u64,
-    /// Wall time the sim spent on this tick, ms (display only: measured
-    /// outside sim state, never fed back into it).
+    /// Wall time the sim spent on this tick, ms, up to sending this
+    /// snapshot (display only: measured outside sim state, never fed back
+    /// into it).
     pub tick_ms: f32,
     pub entities: Vec<EntityView>,
     /// Present when the terrain changed since the last snapshot (and in the
@@ -712,6 +865,10 @@ pub struct Snapshot {
     /// 1 = highest), bit 7 set for `LOWSELECTPRIO` units (priority 6 while
     /// being built: FAF's exe patch), same index.
     pub blueprint_selection_priority: Option<Arc<Vec<u8>>>,
+    /// Each blueprint's `UNSELECTABLE` category, same index: such units
+    /// (FAF's Cybran build bots) aren't picked by the mouse, for a click,
+    /// a drag or the rollover.
+    pub blueprint_unselectable: Option<Arc<Vec<bool>>>,
     /// Each blueprint's `StrategicIconName` (empty: none), same index.
     pub blueprint_icons: Option<Arc<Vec<String>>>,
     /// Each blueprint's `Display.IconFadeInZoom`: the camera zoom from
@@ -846,8 +1003,9 @@ pub struct Snapshot {
     /// The fog of war texture's changes since the last delivered snapshot
     /// (`None`: unchanged).
     pub fog: Option<FogUpdate>,
-    /// Fake radar contacts (enemy jammers) the view army sees now.
-    pub fake_blips: Vec<[f32; 3]>,
+    /// Fake radar contacts (enemy jammers) the view army believes in now:
+    /// on its radar, not known fakes.
+    pub fake_blips: Vec<FakeBlip>,
     /// While fog of war is on: the view army's side's vision sources, in
     /// entity order. The renderer draws the clear ground as their circles,
     /// blended between snapshots as the units are (moho's vision pass), while
@@ -856,6 +1014,47 @@ pub struct Snapshot {
     /// The game is over (`EndGame` in an earlier tick): the sim no longer
     /// advances. The user layer's `SessionIsGameOver`, `NoteGameOver`.
     pub game_over: bool,
+    /// The sim's counts for the interface's `__EngineStats`.
+    pub engine_counts: EngineCounts,
+}
+
+/// The sim's counts for the interface's `__EngineStats` (moho's engine
+/// statistics tree), this tick: live entities by kind, the whole sim, not
+/// the view army's share. Display only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EngineCounts {
+    pub units: u32,
+    pub projectiles: u32,
+    pub props: u32,
+    /// Shield bubbles.
+    pub shields: u32,
+    /// Blueprint-less script entities (collision beams, flares, ...):
+    /// moho's `Other`.
+    pub other: u32,
+    /// AI platoons (`CPlatoon`).
+    pub platoons: u32,
+    /// Live decal handles (`CreateDecal`'s `CDecalHandle`s).
+    pub decals: u32,
+    /// The sim's live Lua threads (`ForkThread`: moho's `CLuaTask`).
+    pub lua_threads: u32,
+}
+
+impl EngineCounts {
+    /// Every live entity in `world`.
+    pub fn of(world: &EntityWorld) -> Self {
+        let mut c = EngineCounts::default();
+        for e in world.iter().filter(|e| !e.destroyed) {
+            let n = match e.kind {
+                EntityKind::Unit => &mut c.units,
+                EntityKind::Projectile => &mut c.projectiles,
+                EntityKind::Prop => &mut c.props,
+                EntityKind::Shield => &mut c.shields,
+                EntityKind::Script => &mut c.other,
+            };
+            *n += 1;
+        }
+        c
+    }
 }
 
 /// An army as the interface describes it (sent with the first snapshot).
@@ -921,7 +1120,8 @@ pub struct SnapshotSink {
     sent_projectile_icons: usize,
     sent_vfs: bool,
     /// Clip paths seen so far (render-side numbering, not sim state).
-    clip_ids: std::collections::BTreeMap<String, u32>,
+    /// (Lookup only: the numbering is `clips`' order.)
+    clip_ids: std::collections::HashMap<String, u32>,
     clips: Vec<String>,
     sent_clips: usize,
     sent_effect_assets: usize,
@@ -936,6 +1136,10 @@ pub struct SnapshotSink {
     fog: fog::FogSink,
     /// A snapshot saying the game is over was delivered.
     sent_game_over: bool,
+    /// Lockstep with the consumer (`--headless-with-ui`): every snapshot is
+    /// delivered (none dropped), and after each tick the sim waits for the
+    /// consumer to say it has handled it ([`await_consumer`]).
+    consumer: Option<Receiver<u64>>,
 }
 
 /// A connected sink/receiver pair (capacity: a few snapshots) and the
@@ -962,13 +1166,45 @@ pub fn channel() -> (SnapshotSink, Receiver<Snapshot>, SharedDebugRequest) {
 
 impl SnapshotSink {
     fn new(tx: SyncSender<Snapshot>, in_flight: Arc<std::sync::atomic::AtomicUsize>, request: SharedDebugRequest) -> Self {
-        SnapshotSink { in_flight, tx, tick: 0, terrain_version: None, sent_blueprints: false, sent_alliances: None, sent_focus_army: None, sent_army_display: None, sent_decals: None, sent_custom_names: None, sent_props: false, pending_props: Vec::new(), sent_meshes: 0, sent_projectile_icons: 0, sent_vfs: false, clip_ids: Default::default(), clips: Vec::new(), sent_clips: 0, sent_effect_assets: 0, pose_ops: Vec::new(), hidden: Vec::new(), request, grid_key: None, grid: None, fog: Default::default(), sent_game_over: false }
+        SnapshotSink { in_flight, tx, tick: 0, terrain_version: None, sent_blueprints: false, sent_alliances: None, sent_focus_army: None, sent_army_display: None, sent_decals: None, sent_custom_names: None, sent_props: false, pending_props: Vec::new(), sent_meshes: 0, sent_projectile_icons: 0, sent_vfs: false, clip_ids: Default::default(), clips: Vec::new(), sent_clips: 0, sent_effect_assets: 0, pose_ops: Vec::new(), hidden: Vec::new(), request, grid_key: None, grid: None, fog: Default::default(), sent_game_over: false, consumer: None }
     }
 
     /// The same channel to the renderer for another session, with nothing
     /// sent yet (the next engine's assets, terrain and meshes all go again).
     pub fn renew(self) -> Self {
-        Self::new(self.tx, self.in_flight, self.request)
+        Self { consumer: self.consumer, ..Self::new(self.tx, self.in_flight, self.request) }
+    }
+
+    /// Runs the sim in lockstep with the consumer: it sends the tick of
+    /// each snapshot it has handled (and anything it does in reply, such as
+    /// player commands, before that) on the returned sender, and the sim
+    /// waits for it after each tick. A consumer that goes away ends the
+    /// lockstep.
+    pub fn lockstep(&mut self) -> std::sync::mpsc::Sender<u64> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.consumer = Some(rx);
+        tx
+    }
+}
+
+/// Between ticks, in lockstep with the consumer ([`SnapshotSink::lockstep`]):
+/// waits until it has handled the latest tick's snapshot, so what it sends
+/// back in reply lands on the next tick whatever the wall clock does.
+/// `waiting` runs every second of the wait (the stall watchdog's beat).
+pub fn await_consumer(lua: &mlua::Lua, waiting: impl Fn()) {
+    let Some(mut sink) = lua.app_data_mut::<SnapshotSink>() else { return };
+    let tick = sink.tick;
+    let Some(rx) = &sink.consumer else { return };
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+            Ok(handled) if handled >= tick => return,
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => waiting(),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                sink.consumer = None;
+                return;
+            }
+        }
     }
 }
 
@@ -1064,13 +1300,13 @@ pub fn build_where(
     out.clear();
     let keep = |e: &&crate::engine::sim::entity::Entity| !e.destroyed && drawn(e) && !stored(e) && pick(e);
     let all = world.as_slice();
-    if all.len() < VIEWS_PARALLEL_MIN {
+    if !parallel(all.len(), VIEWS_PARALLEL_MIN) {
         out.extend(all.iter().filter(keep).map(|e| view_of(e, structure)));
         return;
     }
     // Chunks in parallel, appended in id order.
     let chunks: Vec<Vec<EntityView>> = all
-        .par_chunks(2048)
+        .par_chunks(VIEWS_CHUNK)
         .map(|chunk| {
             let _s = crate::prof_span!("snapshot entities (worker)");
             chunk.iter().filter(keep).map(|e| view_of(e, structure)).collect()
@@ -1082,8 +1318,20 @@ pub fn build_where(
     }
 }
 
-/// Entities from which [`build_where`] splits across threads.
-const VIEWS_PARALLEL_MIN: usize = 16384;
+/// Entities from which [`build_where`] splits across threads, and how
+/// many each job takes. (A view is ~100 ns: a late game's ~6k entities were
+/// 0.6 ms serially, well past rayon's wake-up.)
+const VIEWS_PARALLEL_MIN: usize = 4096;
+const VIEWS_CHUNK: usize = 1024;
+
+/// Testing: every builder takes its serial path (`RTS_SNAPSHOT_CHECK`
+/// compares the parallel output against it).
+static FORCE_SERIAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `len` items are worth splitting across threads (from `min`).
+fn parallel(len: usize, min: usize) -> bool {
+    len >= min && !FORCE_SERIAL.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Entities that have hidden a bone (`HideBone`), so snapshots visit only
 /// those rather than every entity's cold half. Render bookkeeping: stale
@@ -1160,12 +1408,12 @@ pub fn manipulator_poses<'m>(
     // id-ordered list by owner gave, without the sort).
     // (owner, id) pairs, then each fetched in the parallel pass below: a
     // serial lookup per manipulator was most of this step.
+    let list_span = crate::prof_span!("snapshot manip list");
     let ids: Vec<crate::engine::sim::manipulator::ManipulatorId> = manips.owner_order().collect();
-    let list: Vec<&'m crate::engine::sim::manipulator::Manipulator> = if ids.len() >= POSES_PARALLEL_MIN {
-        ids.par_chunks(2048).flat_map_iter(|c| c.iter().filter_map(|&id| manips.get(id)).filter(|m| crate::engine::sim::manipulator::Manipulators::poses(m)).collect::<Vec<_>>()).collect()
-    } else {
-        ids.iter().filter_map(|&id| manips.get(id)).filter(|m| crate::engine::sim::manipulator::Manipulators::poses(m)).collect()
-    };
+    drop(list_span);
+    crate::prof_plot!("snapshot manipulators", ids.len());
+    // Each id fetched in the pass that builds its ops (below).
+    let posing = |id: &crate::engine::sim::manipulator::ManipulatorId| manips.get(*id).filter(|m| crate::engine::sim::manipulator::Manipulators::poses(m));
     // An op with its clip still a path (interned serially below).
     enum Pending<'a> {
         Ready(PoseOp),
@@ -1197,16 +1445,19 @@ pub fn manipulator_poses<'m>(
     };
     // (Thousands of units each with a few pods / rotators / clips: one
     // thread per chunk, merged in order.)
-    let pending: Vec<Vec<(u32, u32, Pending<'m>)>> = if list.len() >= POSES_PARALLEL_MIN {
-        list.par_chunks(512)
+    let ops_span = crate::prof_span!("snapshot manip ops");
+    let pending: Vec<Vec<(u32, u32, Pending<'m>)>> = if parallel(ids.len(), POSES_PARALLEL_MIN) {
+        ids.par_chunks(256)
             .map(|chunk| {
                 let _s = crate::prof_span!("snapshot poses (worker)");
-                chunk.iter().flat_map(&ops_for).collect()
+                chunk.iter().filter_map(posing).flat_map(|m| ops_for(&m)).collect()
             })
             .collect()
     } else {
-        vec![list.iter().flat_map(&ops_for).collect()]
+        vec![ids.iter().filter_map(posing).flat_map(|m| ops_for(&m)).collect()]
     };
+    drop(ops_span);
+    let _merge = crate::prof_span!("snapshot manip merge");
     out.reserve(pending.iter().map(Vec::len).sum());
     // Slaves of the owner being merged: (index in `out` it goes at, slave
     // id, dest, src). Resolved when the owner's run ends, from its other
@@ -1258,7 +1509,7 @@ pub fn manipulator_poses<'m>(
 const PLACEMENT_QUERIES_MAX: usize = 128;
 
 /// Manipulators from which [`manipulator_poses`] splits across threads.
-const POSES_PARALLEL_MIN: usize = 4096;
+const POSES_PARALLEL_MIN: usize = 1024;
 
 /// Gives each view its slice of `poses`: its manipulator ops (`ops`, sorted
 /// by owner) then its hidden bones (`hidden`, sorted by entity).
@@ -1310,10 +1561,24 @@ pub(crate) fn last_anchor(world: &EntityWorld, entity: u32, bone: Option<u32>) -
 /// and curves gathered serially in id order, so the output doesn't depend
 /// on the thread count. 63 armies of 1000 aircraft carry ~200k emitters:
 /// serially this was 18 ms a tick.
+#[cfg(test)]
 fn effect_views(
     lua: &mlua::Lua,
     world: &EntityWorld,
     p: &crate::engine::sim::presentation::Presentation,
+    out: &mut Vec<EffectView>,
+    curves: &mut Vec<EffectCurve>,
+) {
+    let beams = lua.app_data_ref::<crate::engine::api::beam::Beams>();
+    effect_views_with(world, p, beams.as_deref(), out, curves);
+}
+
+/// [`effect_views`] with the beams in hand (no Lua: runs beside the
+/// entity views on another thread).
+fn effect_views_with(
+    world: &EntityWorld,
+    p: &crate::engine::sim::presentation::Presentation,
+    beams: Option<&crate::engine::api::beam::Beams>,
     out: &mut Vec<EffectView>,
     curves: &mut Vec<EffectCurve>,
 ) {
@@ -1323,8 +1588,6 @@ fn effect_views(
     use rayon::prelude::*;
     out.clear();
     curves.clear();
-    let beams = lua.app_data_ref::<crate::engine::api::beam::Beams>();
-    let beams = beams.as_deref();
     let f3 = |v: FxVec3| [v.x.to_num::<f32>(), v.y.to_num::<f32>(), v.z.to_num::<f32>()];
     let view_at = |id: u32, e: &crate::engine::sim::presentation::Effect, pos: FxVec3, rot: FxQuat, ended: bool| -> (EffectView, Vec<EffectCurve>) {
         let r = [rot.x.to_num::<f32>(), rot.y.to_num::<f32>(), rot.z.to_num::<f32>(), rot.w.to_num::<f32>()];
@@ -1415,9 +1678,12 @@ fn effect_views(
         }
         (views, own_curves)
     };
+    let collect_span = crate::prof_span!("snapshot effects collect");
     let all: Vec<(&u32, &crate::engine::sim::presentation::Effect)> = p.effects().iter().map(|(k, e)| (k, &**e)).collect();
-    let parts: Vec<(Vec<EffectView>, Vec<EffectCurve>)> = if all.len() >= EFFECTS_PARALLEL_MIN {
-        all.par_chunks(1024)
+    drop(collect_span);
+    let build_span = crate::prof_span!("snapshot effects build");
+    let parts: Vec<(Vec<EffectView>, Vec<EffectCurve>)> = if parallel(all.len(), EFFECTS_PARALLEL_MIN) {
+        all.par_chunks(512)
             .map(|c| {
                 let _s = crate::prof_span!("snapshot effects (worker)");
                 chunk(c)
@@ -1426,6 +1692,8 @@ fn effect_views(
     } else {
         vec![chunk(&all)]
     };
+    drop(build_span);
+    let _merge = crate::prof_span!("snapshot effects merge");
     out.reserve(parts.iter().map(|(v, _)| v.len()).sum());
     for (views, own_curves) in parts {
         let base = curves.len() as u32;
@@ -1466,7 +1734,7 @@ fn effect_views(
 
 /// Effects from which [`effect_views`] splits the work across threads
 /// (rayon's wake-up is ~100 µs; a view is ~90 ns).
-const EFFECTS_PARALLEL_MIN: usize = 4096;
+const EFFECTS_PARALLEL_MIN: usize = 1024;
 
 /// `General.CommandCaps` of each blueprint as [`caps`] bits (read once,
 /// with the first snapshot).
@@ -1540,6 +1808,21 @@ fn blueprint_selection_priority(lua: &mlua::Lua, ids: &[String]) -> Vec<u8> {
                 .and_then(|c| c.raw_get::<Option<bool>>("LOWSELECTPRIO").ok().flatten())
                 .unwrap_or(false);
             priority | if low { 0x80 } else { 0 }
+        })
+        .collect()
+}
+
+/// Each blueprint's `UNSELECTABLE` category (see [`Snapshot::blueprint_unselectable`]).
+fn blueprint_unselectable(lua: &mlua::Lua, ids: &[String]) -> Vec<bool> {
+    use mlua::prelude::*;
+    let bps: Option<LuaTable> = lua.globals().raw_get("__blueprints").ok().flatten();
+    ids.iter()
+        .map(|id| {
+            bps.as_ref()
+                .and_then(|b| b.raw_get::<Option<LuaTable>>(id.as_str()).ok().flatten())
+                .and_then(|bp| bp.raw_get::<Option<LuaTable>>("CategoriesHash").ok().flatten())
+                .and_then(|c| c.raw_get::<Option<bool>>("UNSELECTABLE").ok().flatten())
+                .unwrap_or(false)
         })
         .collect()
 }
@@ -2290,8 +2573,19 @@ fn debug_data(lua: &mlua::Lua, req: &DebugRequest, sink: &mut SnapshotSink) -> D
                         (cmd.kind as u8, at)
                     })
                     .collect();
+                let building_silo = u.states.contains(crate::engine::sim::unit_state::UnitStates::index("SiloBuildingAmmo").expect("unit state"));
                 let served = f(u.resource_consumed);
-                let (cm, ce) = if u.consumption_active { (f(u.consumption_mass), f(u.consumption_energy)) } else { (0.0, 0.0) };
+                let (mut cm, mut ce) = if u.consumption_active { (f(u.consumption_mass), f(u.consumption_energy)) } else { (0.0, 0.0) };
+                // A missile in progress (its fractional economy event) shows
+                // as the unit's drain, as moho's silo build sets the unit's
+                // maintenance cost (`probe_ui_units` A: a tactical launcher
+                // reads 120 energy, 8.33 mass a second).
+                if building_silo && let Some(ev) = lua.app_data_ref::<crate::engine::sim::economy::EconomyEvents>() {
+                    for e in ev.map.values().filter(|e| e.unit == id && !e.whole_steps && !e.held && !e.done()) {
+                        cm += f(e.mass) * 10.0;
+                        ce += f(e.energy) * 10.0;
+                    }
+                }
                 let (pm, pe) = if u.production_active { (f(u.production_mass), f(u.production_energy)) } else { (0.0, 0.0) };
                 Some(UnitDetail {
                     id,
@@ -2308,11 +2602,10 @@ fn debug_data(lua: &mlua::Lua, req: &DebugRequest, sink: &mut SnapshotSink) -> D
                         use crate::engine::sim::weapon::SiloKind;
                         let weapons = lua.app_data_ref::<crate::engine::sim::weapon::Weapons>();
                         let max = |kind: SiloKind| weapons.as_ref().map_or(0, |w| w.of(id).iter().filter(|s| s.silo == Some(kind)).map(|s| s.max_storage).max().unwrap_or(0)) as f32;
-                        let building = u.states.contains(crate::engine::sim::unit_state::UnitStates::index("SiloBuildingAmmo").expect("unit state"));
                         let (nuke_max, tac_max) = (max(SiloKind::Nuke), max(SiloKind::Tactical));
-                        let progress = if building { f(u.work_progress) } else { 0.0 };
-                        let nuke_building = if nuke_max > 0.0 && (u.nuke_ammo as f32) < nuke_max { progress } else { 0.0 };
-                        let tac_building = if nuke_max == 0.0 && tac_max > 0.0 { progress } else { 0.0 };
+                        let building = if building_silo { 1.0 } else { 0.0 };
+                        let nuke_building = if nuke_max > 0.0 && (u.nuke_ammo as f32) < nuke_max { building } else { 0.0 };
+                        let tac_building = if nuke_max == 0.0 && tac_max > 0.0 { building } else { 0.0 };
                         [nuke_building, nuke_max, u.nuke_ammo as f32, tac_building, tac_max, u.tactical_ammo as f32]
                     },
                     creator: u.creator,
@@ -2383,7 +2676,7 @@ fn debug_data(lua: &mlua::Lua, req: &DebugRequest, sink: &mut SnapshotSink) -> D
             Some((_, army, version)) => {
                 let armies = lua.app_data_ref::<crate::engine::sim::army::Armies>();
                 lua.app_data_mut::<crate::engine::sim::threat::ThreatMap>().and_then(|mut m| {
-                    crate::engine::api::threat::refresh(lua, &mut m, army);
+                    crate::engine::api::threat::refresh(lua, &mut m);
                     let armies = armies?;
                     let enemy = |a: u32| armies.alliance(army, a) == crate::engine::sim::army::Alliance::Enemy;
                     let (cols, rows, cell, values) = m.grid_values(crate::engine::sim::threat::ThreatType::Overall, army, &enemy);
@@ -2397,13 +2690,192 @@ fn debug_data(lua: &mlua::Lua, req: &DebugRequest, sink: &mut SnapshotSink) -> D
     out
 }
 
-/// End of tick: offer a snapshot if a renderer is attached. `tick_time` is
-/// how long the tick took (for the renderer's status bar).
-pub fn publish(lua: &mlua::Lua, tick_time: std::time::Duration) {
+/// What [`world_views`] builds: the pose ops by owner and hidden bones
+/// (scratch kept by the sink), the entity views and their pose slices.
+struct WorldViews {
+    ops: Vec<(u32, Pose)>,
+    hidden: Vec<(u32, u32)>,
+    entities: Vec<EntityView>,
+    poses: Vec<Pose>,
+}
+
+/// Numbers clip paths for the renderer: the sink's ids and paths. Exact
+/// path first (no allocation), then lowercased.
+fn intern_clip(clip_ids: &mut std::collections::HashMap<String, u32>, clips: &mut Vec<String>, path: &str) -> u32 {
+    if let Some(&i) = clip_ids.get(path) {
+        return i;
+    }
+    let lower = path.to_lowercase();
+    let i = match clip_ids.get(&lower) {
+        Some(&i) => i,
+        None => {
+            let i = clips.len() as u32;
+            clips.push(lower.clone());
+            clip_ids.insert(lower, i);
+            i
+        }
+    };
+    clip_ids.insert(path.to_owned(), i);
+    i
+}
+
+/// A snapshot's entity side: hidden and placed bones, manipulator pose
+/// ops (`clips` numbers clip paths), the views (props only when posed; the
+/// rest come in `props` when they change) and their poses. Reads no Lua,
+/// so it runs beside [`effect_views_with`]; within it the hidden bones,
+/// the manipulator ops and the views are built side by side too (the
+/// views of all props, then those not posed dropped: what picking only
+/// the posed ones gives, without waiting for the ops).
+fn world_views(
+    world: &EntityWorld,
+    owners: Option<&mut HiddenBoneOwners>,
+    manips: Option<&crate::engine::sim::manipulator::Manipulators>,
+    weapons: Option<&crate::engine::sim::weapon::Weapons>,
+    clips: (&mut std::collections::HashMap<String, u32>, &mut Vec<String>),
+    structure: Option<&crate::engine::sim::category::CategorySet>,
+    out: &mut WorldViews,
+) {
+    let WorldViews { ops, hidden, entities, poses } = out;
+    let mut placed = Vec::new();
+    let (clip_ids, clips) = clips;
+    rayon::join(
+        || {
+            rayon::join(
+                || match owners {
+                    Some(owners) => {
+                        let _s = crate::prof_span!("snapshot hidden bones");
+                        hidden_bones(world, owners, hidden, &mut placed);
+                        crate::prof_plot!("snapshot hidden owners", owners.0.len());
+                    }
+                    None => hidden.clear(),
+                },
+                || match manips {
+                    Some(m) => {
+                        let _s = crate::prof_span!("snapshot poses");
+                        manipulator_poses(m, weapons, world, |path| intern_clip(clip_ids, clips, path), ops);
+                    }
+                    None => ops.clear(),
+                },
+            )
+        },
+        || {
+            let _s = crate::prof_span!("snapshot entities");
+            build_where(world, structure, entities, |_| true);
+        },
+    );
+    crate::prof_plot!("snapshot hidden bones", hidden.len());
+    crate::prof_plot!("snapshot placed ops", placed.len());
+    let _s = crate::prof_span!("snapshot attach poses");
+    if !placed.is_empty() {
+        // After each owner's manipulator ops: both lists are by owner, so
+        // one merge (what a stable sort of the two gave).
+        let manip = std::mem::take(ops);
+        ops.reserve(manip.len() + placed.len());
+        let mut placed = placed.into_iter().peekable();
+        for op in manip {
+            while let Some(p) = placed.next_if(|p| p.0 < op.0) {
+                ops.push(p);
+            }
+            ops.push(op);
+        }
+        ops.extend(placed);
+    }
+    crate::prof_plot!("snapshot pose ops", ops.len());
+    // Props only when posed (their ops must attach to a view here).
+    let posed = |id: u32| ops.binary_search_by_key(&id, |(o, _)| *o).is_ok() || hidden.binary_search_by_key(&id, |(o, _)| *o).is_ok();
+    entities.retain(|v| v.kind != ViewKind::Prop || posed(v.id));
+    crate::prof_plot!("snapshot world slots", world.as_slice().len());
+    crate::prof_plot!("snapshot entity views", entities.len());
+    attach_poses(entities, ops, hidden, poses);
+    crate::prof_plot!("snapshot poses", poses.len());
+}
+
+/// [`world_views`] as it was built before it ran in parallel: one step
+/// after another, the props picked as the views are built
+/// (`RTS_SNAPSHOT_CHECK`'s reference).
+fn world_views_serial(
+    world: &EntityWorld,
+    owners: Option<&mut HiddenBoneOwners>,
+    manips: Option<&crate::engine::sim::manipulator::Manipulators>,
+    weapons: Option<&crate::engine::sim::weapon::Weapons>,
+    clips: (&mut std::collections::HashMap<String, u32>, &mut Vec<String>),
+    structure: Option<&crate::engine::sim::category::CategorySet>,
+    out: &mut WorldViews,
+) {
+    let WorldViews { ops, hidden, entities, poses } = out;
+    let mut placed = Vec::new();
+    match owners {
+        Some(owners) => hidden_bones(world, owners, hidden, &mut placed),
+        None => hidden.clear(),
+    }
+    let (clip_ids, clips) = clips;
+    match manips {
+        Some(m) => manipulator_poses(m, weapons, world, |path| intern_clip(clip_ids, clips, path), ops),
+        None => ops.clear(),
+    }
+    if !placed.is_empty() {
+        ops.extend(placed);
+        ops.sort_by_key(|(owner, _)| *owner);
+    }
+    let posed = |id: u32| ops.binary_search_by_key(&id, |(o, _)| *o).is_ok() || hidden.binary_search_by_key(&id, |(o, _)| *o).is_ok();
+    build_where(world, structure, entities, |e| e.kind != EntityKind::Prop || posed(e.id));
+    attach_poses(entities, ops, hidden, poses);
+}
+
+/// `RTS_SNAPSHOT_CHECK=1`: every snapshot's entity side and effects are
+/// built again serially and must match field for field (testing the
+/// parallel builders against the plain path).
+fn check_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RTS_SNAPSHOT_CHECK").is_ok_and(|v| v != "0"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_against_serial(
+    world: &EntityWorld,
+    owners: Option<&mut HiddenBoneOwners>,
+    manips: Option<&crate::engine::sim::manipulator::Manipulators>,
+    weapons: Option<&crate::engine::sim::weapon::Weapons>,
+    clips: (&mut std::collections::HashMap<String, u32>, &mut Vec<String>),
+    structure: Option<&crate::engine::sim::category::CategorySet>,
+    presentation: Option<&crate::engine::sim::presentation::Presentation>,
+    beams: Option<&crate::engine::api::beam::Beams>,
+    built: &WorldViews,
+    effects: &[EffectView],
+    curves: &[EffectCurve],
+) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CHECKED: AtomicU64 = AtomicU64::new(0);
+    FORCE_SERIAL.store(true, Ordering::Relaxed);
+    let mut serial = WorldViews { ops: Vec::new(), hidden: Vec::new(), entities: Vec::new(), poses: Vec::new() };
+    world_views_serial(world, owners, manips, weapons, clips, structure, &mut serial);
+    let (mut serial_effects, mut serial_curves) = (Vec::new(), Vec::new());
+    if let Some(p) = presentation {
+        effect_views_with(world, p, beams, &mut serial_effects, &mut serial_curves);
+    }
+    FORCE_SERIAL.store(false, Ordering::Relaxed);
+    let same = |what: &str, a: String, b: String| assert!(a == b, "snapshot check: {what} differ from the serial build");
+    same("pose ops", format!("{:?}", built.ops), format!("{:?}", serial.ops));
+    same("hidden bones", format!("{:?}", built.hidden), format!("{:?}", serial.hidden));
+    same("entity views", format!("{:?}", built.entities), format!("{:?}", serial.entities));
+    same("poses", format!("{:?}", built.poses), format!("{:?}", serial.poses));
+    same("effects", format!("{:?}", effects), format!("{:?}", serial_effects));
+    same("effect curves", format!("{:?}", curves), format!("{:?}", serial_curves));
+    let n = CHECKED.fetch_add(1, Ordering::Relaxed) + 1;
+    if n % 1000 == 0 {
+        tracing::info!(snapshots = n, entities = built.entities.len(), effects = effects.len(), "snapshot check: parallel build matches the serial one");
+    }
+}
+
+/// End of tick: offer a snapshot if a renderer is attached. `started` is
+/// when the tick began: the snapshot's `tick_ms` (the renderer's status bar)
+/// is taken as the last thing before it is sent, so it covers the whole
+/// tick, this build included.
+pub fn publish(lua: &mlua::Lua, started: std::time::Instant) {
     // Renderer-only work: it must not move the gcid counter (a run with a
     // window and one without are the same game; `docs/architecture/replays.md`).
     let _frozen = has_sink(lua).then(|| crate::engine::lua::heap_snapshot::FrozenGcids::new(lua));
-    offer(lua, tick_time, true);
+    offer(lua, Some(started), true);
 }
 
 /// Offers the current tick's snapshot again (no tick advance): while the sim
@@ -2411,7 +2883,7 @@ pub fn publish(lua: &mlua::Lua, tick_time: std::time::Duration) {
 /// still reaches the renderer.
 pub fn republish(lua: &mlua::Lua) {
     let _frozen = has_sink(lua).then(|| crate::engine::lua::heap_snapshot::FrozenGcids::new(lua));
-    offer(lua, std::time::Duration::ZERO, false);
+    offer(lua, None, false);
 }
 
 /// The game is over and the renderer (if any) has been told: nothing more
@@ -2425,7 +2897,7 @@ pub fn game_over_delivered(lua: &mlua::Lua) -> bool {
     lua.app_data_ref::<SnapshotSink>().is_none_or(|s| s.sent_game_over)
 }
 
-fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
+fn offer(lua: &mlua::Lua, started: Option<std::time::Instant>, advance: bool) {
     let Some(mut sink) = lua.app_data_mut::<SnapshotSink>() else {
         // No renderer to hear them.
         if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
@@ -2443,7 +2915,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
     // The renderer is behind (game speed above its frame rate): this
     // snapshot couldn't be sent, so don't build it. One-off data and Sync
     // tables go with the next one; sounds too, the latest few.
-    if sink.in_flight.load(std::sync::atomic::Ordering::Acquire) >= CHANNEL_SLOTS {
+    if sink.consumer.is_none() && sink.in_flight.load(std::sync::atomic::Ordering::Acquire) >= CHANNEL_SLOTS {
         if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
             let excess = p.sounds.len().saturating_sub(crate::engine::sim::presentation::MAX_PENDING_SOUNDS);
             p.sounds.drain(..excess);
@@ -2453,13 +2925,15 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
         }
         return;
     }
+    let head_span = crate::prof_span!("snapshot head");
     let request = sink.request.lock().map(|r| r.clone()).unwrap_or_default();
     // Who the snapshot shows the world to (fog of war), if anyone.
     let view = fog::view(lua, &request);
     let domain = crate::engine::api::categories::domain(lua).ok();
     let structure = domain.as_ref().and_then(|d| d.named.get("STRUCTURE"));
-    let mut snap = Snapshot { tick: sink.tick, sim_tick: crate::engine::api::sim_time::current_tick(lua), tick_ms: tick_time.as_secs_f32() * 1000.0, game_over: crate::engine::api::sim_time::has_ended(lua), ..Default::default() };
+    let mut snap = Snapshot { tick: sink.tick, sim_tick: crate::engine::api::sim_time::current_tick(lua), game_over: crate::engine::api::sim_time::has_ended(lua), ..Default::default() };
     // Props changed since the last delivered snapshot.
+    drop(head_span);
     let mut prop_ids = std::mem::take(&mut sink.pending_props);
     if let Some(mut w) = lua.app_data_mut::<EntityWorld>() {
         prop_ids.extend(w.take_prop_changes());
@@ -2467,51 +2941,48 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
         prop_ids.dedup();
     }
     if let Some(world) = lua.app_data_ref::<EntityWorld>() {
-        let mut hidden = std::mem::take(&mut sink.hidden);
-        let poses_span = crate::prof_span!("snapshot poses");
-        let mut placed = Vec::new();
-        match lua.app_data_mut::<HiddenBoneOwners>() {
-            Some(mut owners) => hidden_bones(&world, &mut owners, &mut hidden, &mut placed),
-            None => hidden.clear(),
-        }
-        let mut ops = std::mem::take(&mut sink.pose_ops);
-        if let Some(m) = lua.app_data_ref::<crate::engine::sim::manipulator::Manipulators>() {
-            let weapons = lua.app_data_ref::<crate::engine::sim::weapon::Weapons>();
-            let SnapshotSink { clip_ids, clips, .. } = &mut *sink;
-            // Exact path first (no allocation), then lowercased.
-            let intern = |path: &str| {
-                if let Some(&i) = clip_ids.get(path) {
-                    return i;
-                }
-                let lower = path.to_lowercase();
-                let i = match clip_ids.get(&lower) {
-                    Some(&i) => i,
-                    None => {
-                        let i = clips.len() as u32;
-                        clips.push(lower.clone());
-                        clip_ids.insert(lower, i);
-                        i
-                    }
-                };
-                clip_ids.insert(path.to_owned(), i);
-                i
-            };
-            manipulator_poses(&m, weapons.as_deref(), &world, intern, &mut ops);
-        } else {
-            ops.clear();
-        }
-        if !placed.is_empty() {
-            // After each owner's manipulator ops (a stable sort keeps them in order).
-            ops.extend(placed);
-            ops.sort_by_key(|(owner, _)| *owner);
-        }
-        let _ = poses_span;
+        let world: &EntityWorld = &world;
+        let mut owners = lua.app_data_mut::<HiddenBoneOwners>();
+        let manips = lua.app_data_ref::<crate::engine::sim::manipulator::Manipulators>();
+        let weapons = lua.app_data_ref::<crate::engine::sim::weapon::Weapons>();
+        let presentation = lua.app_data_ref::<crate::engine::sim::presentation::Presentation>();
+        let beams = lua.app_data_ref::<crate::engine::api::beam::Beams>();
+        let mut out = WorldViews { ops: std::mem::take(&mut sink.pose_ops), hidden: std::mem::take(&mut sink.hidden), entities: Vec::new(), poses: Vec::new() };
+        let (mut effects, mut curves) = (Vec::new(), Vec::new());
         {
-            let _s = crate::prof_span!("snapshot entities");
-            // Props only when posed (their ops must attach to a view here);
-            // the rest come in `props` when they change.
-            let posed = |id: u32| ops.binary_search_by_key(&id, |(o, _)| *o).is_ok() || hidden.binary_search_by_key(&id, |(o, _)| *o).is_ok();
-            build_where(&world, structure, &mut snap.entities, |e| e.kind != EntityKind::Prop || posed(e.id));
+            let SnapshotSink { clip_ids, clips, .. } = &mut *sink;
+            let (manips, weapons, presentation, beams) = (manips.as_deref(), weapons.as_deref(), presentation.as_deref(), beams.as_deref());
+            let mut owners = owners.as_deref_mut();
+            // The entity side and the effects read nothing of each other:
+            // built side by side (each splits further when large), so the
+            // sim thread doesn't wait for one after the other.
+            rayon::join(
+                || world_views(world, owners.as_deref_mut(), manips, weapons, (&mut *clip_ids, &mut *clips), structure, &mut out),
+                || {
+                    if let Some(p) = presentation {
+                        let _s = crate::prof_span!("snapshot effects");
+                        effect_views_with(world, p, beams, &mut effects, &mut curves);
+                    }
+                },
+            );
+            if check_enabled() {
+                check_against_serial(world, owners, manips, weapons, (clip_ids, clips), structure, presentation, beams, &out, &effects, &curves);
+            }
+        }
+        crate::prof_plot!("snapshot effects", effects.len());
+        crate::prof_plot!("snapshot effect curves", curves.len());
+        if let Some(p) = presentation.as_deref() {
+            snap.new_effect_assets = p.assets.iter().enumerate().skip(sink.sent_effect_assets).map(|(i, a)| (i as u32, a.clone())).collect();
+        }
+        snap.effects = effects;
+        snap.effect_curves = curves;
+        snap.entities = std::mem::take(&mut out.entities);
+        snap.poses = std::mem::take(&mut out.poses);
+        sink.pose_ops = out.ops;
+        snap.engine_counts = EngineCounts::of(world);
+        sink.hidden = out.hidden;
+        {
+            let _b = crate::prof_span!("snapshot busy + props");
             if let Some(c) = lua.app_data_ref::<crate::engine::sim::command::Commands>() {
                 snap.busy.extend(c.busy_units());
                 snap.busy.sort_unstable();
@@ -2519,7 +2990,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
             }
             if !sink.sent_props {
                 let mut props = Vec::new();
-                build_where(&world, structure, &mut props, |e| e.kind == EntityKind::Prop);
+                build_where(world, structure, &mut props, |e| e.kind == EntityKind::Prop);
                 snap.props = Some(Arc::new(props));
             } else {
                 snap.prop_changes = prop_ids
@@ -2528,15 +2999,8 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
                     .collect();
             }
         }
-        attach_poses(&mut snap.entities, &ops, &hidden, &mut snap.poses);
-        sink.pose_ops = ops;
-        sink.hidden = hidden;
     }
-    if let (Some(world), Some(p)) = (lua.app_data_ref::<EntityWorld>(), lua.app_data_ref::<crate::engine::sim::presentation::Presentation>()) {
-        let _s = crate::prof_span!("snapshot effects");
-        effect_views(lua, &world, &p, &mut snap.effects, &mut snap.effect_curves);
-        snap.new_effect_assets = p.assets.iter().enumerate().skip(sink.sent_effect_assets).map(|(i, a)| (i as u32, a.clone())).collect();
-    }
+    let mid_span = crate::prof_span!("snapshot assets + armies");
     snap.new_clips = sink.clips.iter().enumerate().skip(sink.sent_clips).map(|(i, c)| (i as u32, c.clone())).collect();
     if let Some(t) = lua.app_data_ref::<Terrain>()
         && sink.terrain_version != Some(t.version) {
@@ -2555,6 +3019,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
             snap.blueprint_order_categories = Some(Arc::new(blueprint_order_categories(lua, d)));
             snap.blueprint_transport = Some(Arc::new(blueprint_transport(lua, &ids)));
             snap.blueprint_selection_priority = Some(Arc::new(blueprint_selection_priority(lua, &ids)));
+            snap.blueprint_unselectable = Some(Arc::new(blueprint_unselectable(lua, &ids)));
             snap.blueprint_icons = Some(Arc::new(blueprint_icons(lua, &ids)));
             snap.blueprint_icon_zoom = Some(Arc::new(blueprint_icon_zoom(lua, &ids)));
             snap.blueprint_icon_layer = Some(Arc::new(blueprint_icon_layer(lua, &ids)));
@@ -2604,6 +3069,8 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
             sink.sent_alliances = Some(armies.alliance_version());
         }
     }
+    drop(mid_span);
+    let pres_span = crate::prof_span!("snapshot splats + decals");
     if let Some(mut p) = lua.app_data_mut::<crate::engine::sim::presentation::Presentation>() {
         snap.splats = std::mem::take(&mut p.fresh_splats)
             .into_iter()
@@ -2628,6 +3095,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
             snap.custom_names = Some(Arc::new(world.iter().filter(|e| !e.destroyed).filter_map(|e| Some((e.id, e.unit.as_deref()?.custom_name.clone()?))).collect()));
             sink.sent_custom_names = Some(p.custom_name_version);
         }
+        drop(pres_span);
         let _s = crate::prof_span!("snapshot sounds");
         // Nothing reads the shakes yet; don't let them pile up.
         p.camera_shakes.clear();
@@ -2656,6 +3124,7 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
                 .collect();
         }
     }
+    let tail_span = crate::prof_span!("snapshot placement");
     snap.placement = request
         .placement
         .iter()
@@ -2668,12 +3137,14 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
             (bp.clone(), *at, site, ok)
         })
         .collect();
+    drop(tail_span);
     snap.debug = {
         let _s = crate::prof_span!("snapshot debug + unit details");
         debug_data(lua, &request, &mut sink)
     };
     snap.debug.draw = crate::engine::api::debug_draw::current(lua);
     fog::apply(lua, &mut sink.fog, view, &mut snap);
+    let tail_span = crate::prof_span!("snapshot sync");
     let (terrain_version, blueprints) = (lua.app_data_ref::<Terrain>().map(|t| t.version), snap.blueprints.is_some());
     let full_props = snap.props.is_some();
     let (meshes, vfs) = (snap.new_meshes.last().map(|(i, _)| *i as usize + 1), snap.vfs.is_some());
@@ -2682,10 +3153,23 @@ fn offer(lua: &mlua::Lua, tick_time: std::time::Duration, advance: bool) {
     let effect_assets = snap.new_effect_assets.last().map(|(i, _)| *i as usize + 1);
     let game_over = snap.game_over;
     snap.sync = lua.app_data_mut::<crate::engine::sync::PendingSync>().map(|mut p| std::mem::take(&mut p.0)).unwrap_or_default();
+    drop(tail_span);
     let _send = crate::prof_span!("snapshot send");
     sink.in_flight.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    snap.engine_counts.platoons = lua.app_data_ref::<crate::engine::sim::platoon::Platoons>().map_or(0, |p| p.len() as u32);
+    snap.engine_counts.decals = lua.app_data_ref::<crate::engine::sim::presentation::Presentation>().map_or(0, |p| p.decals.len() as u32);
+    snap.engine_counts.lua_threads = lua.app_data_ref::<crate::engine::sim::scheduler::Scheduler>().map_or(0, |s| s.task_count() as u32);
     snap.ticket = Some(Ticket(sink.in_flight.clone()));
-    match sink.tx.try_send(snap) {
+    // The whole tick, up to here (a held tick's repeats: none).
+    if let Some(started) = started {
+        snap.tick_ms = started.elapsed().as_secs_f32() * 1000.0;
+    }
+    // In lockstep with the consumer every snapshot goes (it waits for room).
+    let sent = match &sink.consumer {
+        Some(_) => sink.tx.send(snap).map_err(|e| TrySendError::Disconnected(e.0)),
+        None => sink.tx.try_send(snap),
+    };
+    match sent {
         Ok(()) => {
             // Only mark one-off data as delivered once it actually went out.
             if terrain_version.is_some() {
@@ -2792,6 +3276,132 @@ mod speed_tests {
         for step in -15..=SimControl::MAX_STEP {
             assert_eq!(SimControl::step_of(SimControl::percent_of(step)), step);
         }
+    }
+
+    /// The interface's two numbers (`GetGameSpeed` / `GetSimRate`, FAF's
+    /// clock "+asked / +actual"): the actual one is the measured speed, so
+    /// below 0 when the sim can't keep real time, and "max" (77 inside)
+    /// never reaches the interface.
+    #[test]
+    fn interface_steps_show_the_measured_speed_and_never_max() {
+        let c = SimControl::new(100);
+        assert_eq!(c.interface_steps(), (0, 0), "nothing measured yet: as asked");
+        // A heavy scene at a quarter of real time.
+        c.set_effective(25);
+        assert_eq!(c.interface_steps(), (0, -6));
+        // Max asked: its own step, and the measured rate as actual.
+        c.set_speed(SimControl::MAX);
+        assert_eq!(c.interface_steps(), (SimControl::MAX_STEP, -6));
+        c.set_effective(2000);
+        assert_eq!(c.interface_steps(), (SimControl::MAX_STEP, 13));
+        // Max before anything was measured (a new session).
+        c.begin_session();
+        assert_eq!(c.interface_steps(), (SimControl::MAX_STEP, SimControl::MOHO_MAX_STEP));
+        assert_eq!(c.measured(), None);
+    }
+
+    /// The real-time loop's measured speed: ticks over at least half a
+    /// second, the pace while it keeps up, the measured speed when it falls
+    /// short or runs flat out, and never "max".
+    #[test]
+    fn rate_meter_measures_what_the_sim_achieves() {
+        use super::RateMeter;
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut m = RateMeter::new(t0);
+        assert_eq!(m.actual(100), Some(100), "unmeasured: the pace");
+        assert_eq!(m.actual(SimControl::MAX), None, "unmeasured flat out: unknown, not max");
+        // 2.5 ticks a second (400 ms ticks): a quarter of normal speed.
+        for i in 1..=5 {
+            m.tick(t0 + Duration::from_millis(400 * i));
+        }
+        assert_eq!(m.achieved(), Some(25));
+        assert_eq!(m.actual(100), Some(25), "short of normal speed: measured");
+        assert_eq!(m.actual(SimControl::MAX), Some(25), "flat out: measured");
+        assert_eq!(m.actual(20), Some(20), "keeps up with a fifth: the pace");
+        // Keeping up within the timer slack shows the pace.
+        let mut m = RateMeter::new(t0);
+        for i in 1..=6 {
+            m.tick(t0 + Duration::from_millis(103 * i));
+        }
+        assert_eq!(m.achieved(), Some(97));
+        assert_eq!(m.actual(100), Some(100));
+        // A pause doesn't count as slow.
+        let mut m = RateMeter::new(t0);
+        m.restart(t0 + Duration::from_secs(60));
+        for i in 1..=5 {
+            m.tick(t0 + Duration::from_secs(60) + Duration::from_millis(100 * i));
+        }
+        assert_eq!(m.achieved(), Some(100));
+        let c = SimControl::new(100);
+        c.set_effective(m.actual(SimControl::MAX).unwrap());
+        assert_ne!(SimControl::step_of(c.effective()), SimControl::MAX_STEP);
+    }
+
+    /// Runs `ticks` ticks through a pacer on a simulated clock: tick `i`
+    /// costs `cost(i)`, and every sleep ends on the timer's next `granule`
+    /// plus `overshoot` (as an OS timer does). Returns the wall time taken.
+    fn paced(ticks: u32, period_us: u64, cost: impl Fn(u32) -> u64, granule_us: u64, overshoot_us: u64) -> std::time::Duration {
+        use super::Pacer;
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut t = 0u64;
+        let mut p = Pacer::new(t0);
+        for i in 0..ticks {
+            t += cost(i);
+            if let Some(d) = p.after_tick(t0 + Duration::from_micros(t), Duration::from_micros(period_us), Duration::ZERO) {
+                let wake = d.duration_since(t0).as_micros() as u64;
+                t = wake.div_ceil(granule_us) * granule_us + overshoot_us;
+            }
+        }
+        Duration::from_micros(t)
+    }
+
+    /// The speed asked for is held whenever the machine can: ticks that run
+    /// late, sleeps that overshoot and coarse timers are made up, within 1%.
+    #[test]
+    fn pacer_holds_the_asked_rate() {
+        let period = 10_000; // 10x: 100 ticks a second
+        let target = std::time::Duration::from_micros(period * 1000);
+        let close = |d: std::time::Duration| (d.as_secs_f64() / target.as_secs_f64() - 1.0).abs() < 0.01;
+        // Light ticks, a fine timer that overshoots 80 us.
+        assert!(close(paced(1000, period, |_| 1_000, 1, 80)));
+        // An AI game: 4 ms ticks, every 7th taking 25 ms (well within what
+        // the machine can do on average), a 1.5 ms overshoot.
+        let spiky = |i: u32| if i % 7 == 0 { 25_000 } else { 4_000 };
+        assert!(close(paced(1000, period, spiky, 1, 1_500)), "{:?}", paced(1000, period, spiky, 1, 1_500));
+        // Windows' default 15.6 ms timer: every sleep overshoots past the
+        // next slot, which then starts at once.
+        assert!(close(paced(1000, period, |_| 2_000, 15_625, 0)), "{:?}", paced(1000, period, |_| 2_000, 15_625, 0));
+        // Normal speed, too.
+        assert!(close(paced(100, 100_000, spiky, 1, 1_500)));
+    }
+
+    /// A long stall is forgiven beyond a quarter of a second: no burst of
+    /// hundreds of ticks after it.
+    #[test]
+    fn pacer_caps_the_debt() {
+        use super::Pacer;
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let period = Duration::from_millis(10);
+        let mut p = Pacer::new(t0);
+        // A 5 s stall on the first tick.
+        let mut now = t0 + Duration::from_secs(5);
+        assert_eq!(p.after_tick(now, period, Duration::ZERO), None);
+        // 1 ms ticks: they run back to back until the 250 ms debt is paid
+        // (about 250 / 9 ticks), then wait again.
+        let mut burst = 0;
+        while p.after_tick(now + Duration::from_millis(1), period, Duration::ZERO).is_none() {
+            now += Duration::from_millis(1);
+            burst += 1;
+            assert!(burst < 40, "caught up in a burst");
+        }
+        assert!((25..=29).contains(&burst), "{burst}");
+        // Time excused (waiting for players) isn't owed.
+        let mut p = Pacer::new(t0);
+        assert_eq!(p.after_tick(t0 + Duration::from_millis(50), period, Duration::from_millis(40)), None);
+        assert_eq!(p.after_tick(t0 + Duration::from_millis(51), period, Duration::ZERO), Some(t0 + Duration::from_millis(60)));
     }
 }
 
@@ -2931,5 +3541,64 @@ mod decal_tests {
         p.add_decal(decal("Normals"));
         let out = ground_decals(&p);
         assert_eq!(out.iter().map(|d| d.cutoff).collect::<Vec<_>>(), [75.0, 30.0]);
+    }
+}
+
+#[cfg(test)]
+mod parallel_build_tests {
+    use super::*;
+    use crate::engine::api::blueprints::BlueprintKind;
+    use crate::engine::sim::manipulator::{ManipulatorKind, Manipulators, Rotator};
+    use crate::engine::sim::math::{Fx, FxQuat, FxVec3};
+
+    /// The entity side built in parallel (hidden bones, pose ops and views
+    /// side by side, props dropped after) is the serial build, field for
+    /// field: units, props posed and not, wrecks in a copied pose, bones
+    /// following other entities, past every parallel threshold.
+    #[test]
+    fn parallel_world_views_match_the_serial_build() {
+        let mut world = EntityWorld::default();
+        let mut ids = Vec::new();
+        for i in 0..6000u32 {
+            let (kind, bk) = if i % 3 == 0 { (EntityKind::Prop, BlueprintKind::Prop) } else { (EntityKind::Unit, BlueprintKind::Unit) };
+            let at = FxVec3 { x: Fx::from_num(i % 97), y: Fx::ZERO, z: Fx::from_num(i / 97) };
+            ids.push(world.spawn(kind, bk, String::new(), Some(1 + i % 4), at, FxQuat::IDENTITY));
+        }
+        let mut manips = Manipulators::default();
+        for (n, &id) in ids.iter().enumerate().filter(|(n, _)| n % 2 == 0) {
+            for k in 0..(1 + n as u32 % 3) {
+                let r = Rotator { bone: Some(k), axis: "y".into(), angle: Fx::from_num(k * 10 + n as u32 % 7), goal: None, speed: Fx::ZERO, accel: Fx::ZERO, target_speed: Fx::ZERO, spin: Fx::ZERO };
+                manips.add(id, ManipulatorKind::Rotator(r));
+            }
+        }
+        let mut owners = Vec::new();
+        for (n, &id) in ids.iter().enumerate().filter(|(n, _)| n % 7 == 1 || n % 11 == 3) {
+            let e = world.get_mut(id).unwrap();
+            if n % 7 == 1 {
+                e.cold.hidden_bones.insert(2);
+                e.cold.copied_pose = (0..3).map(|b| (b, (FxVec3 { x: Fx::from_num(b), y: Fx::ONE, z: Fx::ZERO }, FxQuat::IDENTITY))).collect();
+            } else {
+                // Following the next entity's origin, or a gone one's.
+                e.cold.bone_links.push((1, ids[(n + 1) % ids.len()], None));
+                e.cold.bone_links.push((4, u32::MAX - 5, None));
+            }
+            owners.push(id);
+        }
+        let build = |parallel: bool| {
+            let mut owners: HiddenBoneOwners = owners.iter().copied().collect();
+            let (mut clip_ids, mut clips) = (Default::default(), Vec::new());
+            let mut out = WorldViews { ops: Vec::new(), hidden: Vec::new(), entities: Vec::new(), poses: Vec::new() };
+            if parallel {
+                world_views(&world, Some(&mut owners), Some(&manips), None, (&mut clip_ids, &mut clips), None, &mut out);
+            } else {
+                FORCE_SERIAL.store(true, std::sync::atomic::Ordering::Relaxed);
+                world_views_serial(&world, Some(&mut owners), Some(&manips), None, (&mut clip_ids, &mut clips), None, &mut out);
+                FORCE_SERIAL.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+            format!("{:?}\n{:?}\n{:?}\n{:?}", out.ops, out.hidden, out.entities, out.poses)
+        };
+        let (a, b) = (build(true), build(false));
+        assert!(a.len() > 100_000, "a real build");
+        assert!(a == b, "parallel entity side differs from the serial build");
     }
 }

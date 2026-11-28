@@ -5,8 +5,8 @@
 //! `/env/common/splats/mass_strategic.dds` or `hydrocarbon_strategic.dds`
 //! at half the texture's size (32 x 32 -> 16 pixels), centred on the
 //! deposit's projected point (rounded to a pixel), point sampled, no depth
-//! test, white. With fog of war on, only deposits on explored ground (moho
-//! asks `IsExplored` at the centre). These are separate from the map's
+//! test, at the texture's own colour. With fog of war on, only
+//! deposits on explored ground (moho asks `IsExplored` at the centre). These are separate from the map's
 //! deposit splats (`mass_marker.dds`, FAF's `CreateResources`), which fade
 //! at their own LOD.
 //!

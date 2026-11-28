@@ -43,8 +43,8 @@ pub struct MovementScratch {
     landing_spots: crate::engine::sim::landing::LandingSpots,
 }
 
-/// Aircraft killed in the air, falling (sim state): unit -> its fall
-/// (`movement::crash_step`).
+/// Units falling (sim state): aircraft killed in the air and cargo let go
+/// above the ground, unit -> its fall (`movement::crash_step`).
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Falling(pub std::collections::BTreeMap<u32, movement::Fall>);
 
@@ -110,9 +110,28 @@ pub fn start_falling(lua: &Lua, unit: u32) {
     }
 }
 
-/// Moves falling dead aircraft; those that hit the ground or water take
-/// that layer (`OnLayerChange`), then get `OnImpact(with)` (moho's order,
-/// 0x1029eee6 then 0x1029f0c9: FAF's wreck and sinking read the layer).
+/// Cargo let go above the ground falls: moho's `Unit::DetachFrom` tells the
+/// motion (`CUnitMotion::NotifyDetached` 0x10298069), which goes ballistic
+/// with the velocity the carrier had. The real game's tanks, set down from
+/// a T1 transport hovering at 3.5, took 12 ticks to reach the ground
+/// (heights 3.00, 2.73, 2.43, 2.07, ...: 0.049 a tick each tick) and
+/// changed layer there; the dead cargo of a killed one flew on at the
+/// transport's 10.45 and hit the ground 16 ticks later (dev/probes
+/// probe_mov_air TR1, TR3). No tumble (not seen in the probe's positions;
+/// a live unit has to land upright). `velocity` is per tick.
+pub fn start_cargo_fall(lua: &Lua, unit: u32, velocity: FxVec3) {
+    if let Some(mut f) = lua.app_data_mut::<Falling>() {
+        f.0.insert(unit, movement::Fall { velocity, spin: crate::engine::sim::math::FxQuat::IDENTITY });
+    }
+}
+
+/// Moves falling units (dead aircraft, cargo let go in the air). A dead one
+/// that hits the ground or water takes that layer (`OnLayerChange`), then
+/// gets `OnImpact(with)` (moho's order, 0x1029eee6 then 0x1029f0c9: FAF's
+/// wreck and sinking read the layer). A live one (cargo set down) takes the
+/// layer its motion has there and is stood on the ground by the next
+/// movement pass; no `OnImpact`. (Moho also kills a live one that lands
+/// where it can't stand, 0x1029f094: not done, ours leaves it there.)
 fn crash_tick(lua: &Lua) -> LuaResult<()> {
     let mut landed = Vec::new();
     {
@@ -124,6 +143,15 @@ fn crash_tick(lua: &Lua) -> LuaResult<()> {
         movement::crash_step(&mut world, terrain.as_deref(), &mut falling.0, &mut landed);
     }
     for (unit, with) in landed {
+        let alive = {
+            let w = crate::engine::api::entity::world(lua);
+            w.get(unit).filter(|e| !e.cold.killed).map(|e| (e.unit.as_deref().map(|u| (u.motion_params.kind, u.motion_params.layer_change_offset)).unwrap_or_default(), e.position()))
+        };
+        if let Some(((kind, offset), p)) = alive {
+            let wet = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>().is_some_and(|t| t.water_surface.is_some_and(|w| crate::engine::sim::layer::wet(kind, t.height_at(p.x, p.z), w, offset)));
+            set_layer(lua, unit, crate::engine::sim::layer::Layer::for_motion(kind, wet))?;
+            continue;
+        }
         let layer = match with {
             movement::CrashSurface::Terrain => crate::engine::sim::layer::Layer::Land,
             movement::CrashSurface::Water => crate::engine::sim::layer::Layer::Water,
@@ -375,10 +403,11 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         let _section = crate::prof_span!("movement targets");
         // From one pass over the weapons (id order, by weapon index): each
         // unit's first target, as sorted lists (`UnitMap`):
-        // - body-slaved weapons' targets and arcs, to turn to face them;
+        // - body-slaved weapons' targets and arcs (start, stop), to turn
+        //   to face them;
         // - entity targets, for winged attack runs (and `engaged`);
         // - ground targets (attack-ground orders).
-        let mut face: movement::UnitMap<(FxVec3, Fx)> = movement::UnitMap::default();
+        let mut face: movement::UnitMap<(FxVec3, Fx, Fx)> = movement::UnitMap::default();
         let mut air_targets: movement::UnitMap<u32> = movement::UnitMap::default();
         let mut ground_targets: movement::UnitMap<FxVec3> = movement::UnitMap::default();
         if let Some(w) = lua.app_data_ref::<crate::engine::sim::weapon::Weapons>() {
@@ -409,7 +438,10 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                         None => None,
                     };
                     if let Some(at) = at {
-                        face.push_first(s.unit, (at, if attack_angle { Fx::PI / 180 } else { s.slaved_arc }));
+                        // A slaved weapon's turn starts outside its arc and
+                        // ends inside half of it (`movement::Env::face`).
+                        let one = Fx::PI / 180;
+                        face.push_first(s.unit, if attack_angle { (at, one, one) } else { (at, s.slaved_arc, s.slaved_arc / 2) });
                     }
                 }
             }
@@ -417,7 +449,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         // Builders turning to face their work before starting it
         // (`NeedToFaceTargetToBuild`): face it fully.
         if let Some(f) = lua.app_data_ref::<crate::engine::api::construction::FaceToBuild>().filter(|f| !f.0.is_empty()) {
-            let extra: Vec<_> = f.0.iter().filter(|(u, _)| face.get(u).is_none()).map(|&(u, p)| (u, (p, Fx::PI / 180))).collect();
+            let extra: Vec<_> = f.0.iter().filter(|(u, _)| face.get(u).is_none()).map(|&(u, p)| (u, (p, Fx::PI / 180, Fx::PI / 180))).collect();
             if !extra.is_empty() {
                 face.0.extend(extra);
                 face.0.sort_unstable_by_key(|f| f.0);
@@ -507,9 +539,10 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             candidates.dedup();
         }
         // Transports short of their flight height keep a movement tick: one
-        // on a load/unload order lowers to its `TransportHoverHeight`, one
-        // that just finished climbs back to its `Elevation` (moho's
-        // `ShouldHoverInsteadOfLand`, MohoEngine.dll 0x1029b210).
+        // on a load/unload order lowers to its `TransportHoverHeight` over
+        // the order's point, one that just finished climbs back to its
+        // `Elevation` (moho's `ShouldHoverInsteadOfLand`, MohoEngine.dll
+        // 0x1029b210).
         let terrain = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>();
         let before = candidates.len();
         candidates.extend(world.units().filter(|e| {
@@ -518,15 +551,11 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                 && e.unit.as_deref().is_some_and(|u| {
                     u.layer == crate::engine::sim::layer::Layer::Air
                         && u.motion_params.air.transport_hover_height > Fx::ZERO
-                        && terrain.as_deref().is_some_and(|t| {
-                            let want = if commands.current(e.id).is_some_and(|c| c.kind.is_transport_load_unload()) {
-                                u.motion_params.air.transport_hover_height
-                            } else {
-                                u.motion_params.elevation
-                            };
-                            let p = e.position();
-                            (p.y - t.surface_at(p.x, p.z) - want).abs() > Fx::from_num(0.05)
-                        })
+                        && (commands.current(e.id).is_some_and(|c| c.kind.is_transport_load_unload())
+                            || terrain.as_deref().is_some_and(|t| {
+                                let p = e.position();
+                                (p.y - t.surface_at(p.x, p.z) - u.motion_params.elevation).abs() > Fx::from_num(0.05)
+                            }))
                 })
         }).map(|e| e.id));
         if candidates.len() != before {
@@ -585,7 +614,8 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         // (snapped to the grid, as construction starts it) and its skirt
         // size, which their build range adds (`movement::goal`). Skirts read
         // once per blueprint.
-        let mut build_sites: movement::UnitMap<(FxVec3, Fx)> = movement::UnitMap::default();
+        // (Gathered by unit: the map itself takes units in ascending order.)
+        let mut sites: std::collections::BTreeMap<crate::engine::sim::entity::EntityId, (FxVec3, Fx)> = std::collections::BTreeMap::new();
         {
             let mut by_bp: std::collections::BTreeMap<&str, Fx> = std::collections::BTreeMap::new();
             for u in commands.units_doing(&[crate::engine::sim::command::CommandKind::BuildMobile]) {
@@ -599,8 +629,66 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                         s
                     }
                 };
-                build_sites.push_first(u, (crate::engine::api::construction::snap_site(lua, bp, target)?, skirt));
+                // A builder inside a structure (a factory's new unit on the
+                // pad) has no reach until it has walked out
+                // (`construction::ready_to_start`).
+                let inside = world.get(u).is_some_and(|e| {
+                    e.unit.as_deref().is_some_and(|x| x.layer != crate::engine::sim::layer::Layer::Air)
+                        && nav.as_deref().is_some_and(|n| {
+                            let (cx, cz) = n.cell_of(e.position());
+                            n.blocked_cell(cx, cz)
+                        })
+                });
+                let skirt = if inside { movement::NO_REACH } else { skirt };
+                sites.entry(u).or_insert((crate::engine::api::construction::snap_site(lua, bp, target)?, skirt));
             }
+            // A builder told to guard or repair while it stands inside a
+            // structure (a factory's new engineer, still on the pad) walks
+            // out before anything else, whatever its target's range: the
+            // real one guarding its own factory ends 5.6 in front of the
+            // factory's centre and the factory is free 16 ticks on
+            // (dev/probes probe_padassist `guardfac`; ours stayed and the
+            // factory stayed busy). Out: from the structure's centre through
+            // the unit, 3 past the footprint (the distance is inferred from
+            // that one case).
+            if let Some(n) = nav.as_deref() {
+                use crate::engine::sim::command::CommandKind as K;
+                for u in commands.units_doing(&[K::Guard, K::Repair]) {
+                    let Some(e) = world.get(u) else { continue };
+                    let p = e.position();
+                    if !e.unit.as_deref().is_some_and(|x| x.build_rate > Fx::ZERO && x.layer != crate::engine::sim::layer::Layer::Air) {
+                        continue;
+                    }
+                    let (cx, cz) = n.cell_of(p);
+                    if !n.blocked_cell(cx, cz) {
+                        continue;
+                    }
+                    // (Units are found by their centres: far enough out for
+                    // the largest footprint.)
+                    let far = Fx::from_num(16);
+                    let Some((x0, z0, x1, z1)) = world
+                        .units_in_rect(p.x - far, p.z - far, p.x + far, p.z + far)
+                        .into_iter()
+                        .filter_map(|id| world.get(id)?.unit.as_deref()?.nav_block)
+                        .find(|r| p.x >= r.0 && p.x <= r.2 && p.z >= r.1 && p.z <= r.3)
+                    else {
+                        continue;
+                    };
+                    let centre = FxVec3 { x: (x0 + x1) / 2, y: p.y, z: (z0 + z1) / 2 };
+                    // (Dead centre: out the front.)
+                    let front = FxVec3 { x: Fx::ZERO, y: Fx::ZERO, z: Fx::ONE };
+                    let off = FxVec3 { x: p.x - centre.x, y: Fx::ZERO, z: p.z - centre.z };
+                    let dir = if off.x.abs().max(off.z.abs()) < Fx::from_num(0.05) { front } else { off.normalized().unwrap_or(front) };
+                    let out = (x1 - x0).max(z1 - z0) / 2 + Fx::from_num(3);
+                    sites.entry(u).or_insert((FxVec3 { x: centre.x + dir.x * out, y: p.y, z: centre.z + dir.z * out }, movement::NO_REACH));
+                }
+            }
+        }
+        let build_sites: movement::UnitMap<(FxVec3, Fx)> = sites.into();
+        // Units in a fall don't drive or get stood on the ground: the fall
+        // moves them (`crash_tick`).
+        if let Some(falling) = lua.app_data_ref::<Falling>().filter(|f| !f.0.is_empty()) {
+            candidates.retain(|u| !falling.0.contains_key(u));
         }
         let _section = crate::prof_span!("movement step");
         let env = movement::Env { terrain: terrain.as_deref(), nav: nav.as_deref(), engaged: Some(&engaged), air_targets: Some(&air_targets), ground_targets: Some(&ground_targets), aim_ranges: Some(&aim_ranges), order_ranges: Some(&order_ranges), build_sites: Some(&build_sites), chases: Some(&chases), face: Some(&face), crowd: Some(avoidance.index()), flows: Some(flows), granted: None, tick: Some(crate::engine::api::sim_time::current_tick(lua)) };

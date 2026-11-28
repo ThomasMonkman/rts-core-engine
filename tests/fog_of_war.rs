@@ -111,9 +111,10 @@ fn explored_hides_undetected_enemies() {
             shown += 1;
             let d = grids.detect(1, e);
             match v.sighting {
-                Sighting::Seen => assert!(d.seen, "enemy {} shown but not seen", v.id),
-                Sighting::Blip => assert!(d.any() && !d.seen, "blip {} without a contact", v.id),
-                Sighting::Remembered => assert!(!d.seen, "remembered {} is in sight", v.id),
+                Sighting::Seen => assert!(d.eyes(), "enemy {} shown but not seen", v.id),
+                Sighting::Blip => assert!(d.any() && !d.eyes() && !grids.ever_seen(1, v.id), "blip {} without a contact, or seen before", v.id),
+                Sighting::Identified => assert!(d.any() && !d.eyes() && grids.ever_seen(1, v.id), "identified {} not a contact seen before", v.id),
+                Sighting::Remembered => assert!(!d.eyes(), "remembered {} is in sight", v.id),
             }
         }
         drop((world, grids, armies));

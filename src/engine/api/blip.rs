@@ -6,8 +6,15 @@
 //! don't move, so the memory stays true). Its own and allied units are always
 //! known. The blip object carries the source's entity handle, so the
 //! inherited entity methods (`GetPosition`, `GetBlueprint`, ...) read the
-//! source; the `Is*` methods take the asking army. Fake blips (jammers) come
-//! with counter-intel.
+//! source; the `Is*` methods take the asking army.
+//!
+//! A jammer's fakes (`sim::vision::Fake`) are blips too, one object per
+//! (army, fake), keyed by the fake's own blip id: their handle is the jammer
+//! (`GetSource`, `GetBlueprint`, `GetArmy` read it), `GetPosition` is the
+//! fake's own spot, the `Is*` methods answer from the fake, `IsKnownFake` is
+//! true once the army has seen it or had it under omni, and when the set
+//! goes (jammer off or dead) each is destroyed (`BeenDestroyed`, `OnDestroy`).
+//! FAF probe `dev/probes/maps/probe_intel_jam`.
 //!
 //! An army's blip of a unit is one object, made from FAF's `Blip` class
 //! (`/lua/sim/Blip.lua`: moho's `ReconBlip` constructor, MohoEngine.dll
@@ -40,7 +47,7 @@ use crate::engine::api::{moho, script_object};
 use crate::lua_api::{lua_fn, lua_method, MohoClass, Obj, Status};
 use crate::engine::sim::army::{Alliance, Armies};
 use crate::engine::sim::entity::EntityId;
-use crate::engine::sim::vision::{Detection, IntelGrids};
+use crate::engine::sim::vision::{Detection, IntelGrids, FAKE_ID_BASE};
 
 /// Registry table: `(army << 32) | unit` -> that army's blip of the unit,
 /// weak values.
@@ -113,17 +120,59 @@ fn blip_class(lua: &Lua) -> LuaResult<LuaTable> {
     Ok(class)
 }
 
-/// `army`'s blip of `unit`: the one scripts still hold, else a new one.
+/// `army`'s blip of `unit` (a unit, or a jammer fake's blip id): the one
+/// scripts still hold, else a new one. A fake's handle is its jammer, with
+/// `_fake` set.
 fn blip_object(lua: &Lua, cache: &LuaTable, class: &LuaTable, army: u32, unit: EntityId) -> LuaResult<LuaTable> {
     let key = cache_key(army, unit);
     if let Some(blip) = cache.raw_get::<Option<LuaTable>>(key)? {
         return Ok(blip);
     }
-    let blip = script_object::create(lua, EntityHandle(unit), class.clone())?;
+    let jammer = if unit >= FAKE_ID_BASE { lua.app_data_ref::<IntelGrids>().and_then(|g| g.fake(unit).map(|f| f.jammer)) } else { None };
+    let blip = script_object::create(lua, EntityHandle(jammer.unwrap_or(unit)), class.clone())?;
     blip.raw_set("_army", army)?;
     blip.raw_set("_unit", unit)?;
+    if jammer.is_some() {
+        blip.raw_set("_fake", true)?;
+    }
     cache.raw_set(key, &blip)?;
     Ok(blip)
+}
+
+/// The fake blip id of a blip object, if it is a jammer fake's.
+fn fake_id(this: &LuaTable) -> LuaResult<Option<EntityId>> {
+    if this.raw_get::<Option<bool>>("_fake")?.unwrap_or(false) {
+        return this.raw_get::<Option<EntityId>>("_unit");
+    }
+    Ok(None)
+}
+
+/// Fakes that went this update: each army's blip of one (if a script holds
+/// it) is destroyed, after the callbacks that told the army it lost them.
+fn destroy_gone_fakes(lua: &Lua, gone: &[EntityId]) -> LuaResult<()> {
+    if gone.is_empty() {
+        return Ok(());
+    }
+    let cache = blips(lua)?;
+    let kept = script_object::registry_table(lua, KEPT_KEY)?;
+    let armies: Vec<u32> = lua.app_data_ref::<Armies>().map(|a| a.list.iter().map(|a| a.index).collect()).unwrap_or_default();
+    for &id in gone {
+        let held = kept.raw_get::<Option<LuaTable>>(id)?;
+        if held.is_some() {
+            kept.raw_set(id, LuaNil)?;
+        }
+        for &army in &armies {
+            let blip = match &held {
+                Some(h) => h.raw_get::<Option<LuaTable>>(army)?,
+                None => None,
+            };
+            let Some(blip) = blip.or(cache.raw_get::<Option<LuaTable>>(cache_key(army, id))?) else { continue };
+            cache.raw_set(cache_key(army, id), LuaNil)?;
+            blip.raw_set("_dead", true)?;
+            script_object::run_script(lua, &blip, "OnDestroy", "blip", ())?;
+        }
+    }
+    Ok(())
 }
 
 /// What becomes of an army's blip of a unit as the unit is destroyed
@@ -149,23 +198,23 @@ pub fn unit_destroyed(lua: &Lua, unit: EntityId) -> LuaResult<()> {
         kept.raw_set(unit, LuaNil)?;
     }
     let structure = is_structure(lua, unit);
-    let (fates, at) = {
+    let (army_list, at) = {
         let w = world(lua);
         let Some(e) = w.get(unit) else { return Ok(()) };
-        let (Some(armies), grids) = (lua.app_data_ref::<Armies>(), lua.app_data_ref::<IntelGrids>()) else { return Ok(()) };
-        let fates: Vec<(u32, AtDeath)> = armies
-            .list
-            .iter()
-            .map(|a| {
-                let friendly = e.army.is_some_and(|owner| owner == a.index || armies.alliance(a.index, owner) == Alliance::Ally);
-                let known = friendly || grids.as_ref().is_none_or(|g| g.detect(a.index, e).any());
-                (a.index, if known { AtDeath::Destroyed } else if structure { AtDeath::MaybeDead } else { AtDeath::Stays })
-            })
-            .collect();
-        (fates, e.position())
+        let Some(armies) = lua.app_data_ref::<Armies>() else { return Ok(()) };
+        (armies.list.iter().map(|a| a.index).collect::<Vec<u32>>(), e.position())
+    };
+    // An army's fate is worked out only when it has a blip (most destroyed
+    // entities, projectiles above all, have none: no detection test each).
+    let fate = |army: u32| {
+        let w = world(lua);
+        let (Some(e), Some(armies), grids) = (w.get(unit), lua.app_data_ref::<Armies>(), lua.app_data_ref::<IntelGrids>()) else { return AtDeath::Stays };
+        let friendly = e.army.is_some_and(|owner| owner == army || armies.alliance(army, owner) == Alliance::Ally);
+        let known = friendly || grids.as_ref().is_none_or(|g| g.detect(army, e).any());
+        if known { AtDeath::Destroyed } else if structure { AtDeath::MaybeDead } else { AtDeath::Stays }
     };
     let cache = blips(lua)?;
-    for (army, fate) in fates {
+    for army in army_list {
         let kept_blip = match &held {
             Some(h) => h.raw_get::<Option<LuaTable>>(army)?,
             None => None,
@@ -176,7 +225,7 @@ pub fn unit_destroyed(lua: &Lua, unit: EntityId) -> LuaResult<()> {
         }) else {
             continue;
         };
-        match fate {
+        match fate(army) {
             AtDeath::Destroyed if kept_blip.is_some() => {
                 let dying = script_object::registry_table(lua, DYING_KEY)?;
                 dying.raw_set(dying.raw_len() + 1, blip)?;
@@ -233,7 +282,7 @@ fn destroy_dying(lua: &Lua) -> LuaResult<()> {
         let seen: Vec<bool> = match lua.app_data_ref::<IntelGrids>() {
             Some(g) => entries
                 .iter()
-                .map(|&(_, army, x, z)| g.detection(army, crate::engine::sim::math::FxVec3 { x, y: crate::engine::sim::math::Fx::ZERO, z }, crate::engine::sim::layer::Layer::Land).seen)
+                .map(|&(_, army, x, z)| g.detection(army, crate::engine::sim::math::FxVec3 { x, y: crate::engine::sim::math::Fx::ZERO, z }, crate::engine::sim::layer::Layer::Land).eyes())
                 .collect(),
             None => vec![true; entries.len()],
         };
@@ -266,7 +315,12 @@ fn destroy_dying(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
-/// What `army` knows of `unit` now, and whether it has ever seen it.
+/// What `army` knows of `unit` now, and whether it has ever seen it
+/// optically (`IsSeenEver`: omni doesn't count, probe_intel_jam). A mobile
+/// unit's blip is dropped once no intel covers it, so a blip held from
+/// before answers false for everything, `IsSeenEver` included; only a
+/// structure's blip is remembered (probe_re3_intel: a seen tank and
+/// Fatboy report `.....` after radar loss, the pgen and PD `..E..`).
 fn knowledge(lua: &Lua, army: u32, unit: EntityId) -> (Detection, bool) {
     let w = world(lua);
     let Some(e) = w.get(unit).filter(|e| !e.destroyed) else { return (Detection::default(), false) };
@@ -282,7 +336,12 @@ fn knowledge(lua: &Lua, army: u32, unit: EntityId) -> (Detection, bool) {
         return (Detection { seen: true, ..Default::default() }, true);
     };
     let now = grids.detect(army, e);
-    (now, now.seen || grids.ever_seen(army, unit))
+    if now.seen {
+        return (now, true);
+    }
+    let ever = grids.ever_seen_optically(army, unit);
+    drop((grids, w));
+    (now, ever && (now.any() || is_structure(lua, unit)))
 }
 
 fn is_structure(lua: &Lua, unit: EntityId) -> bool {
@@ -311,9 +370,10 @@ pub fn intel_callbacks(lua: &Lua) -> LuaResult<()> {
         let _s = crate::prof_span!("intel dying blips");
         destroy_dying(lua)?;
     }
+    let gone: Vec<EntityId> = lua.app_data_ref::<IntelGrids>().map(|g| g.fakes_gone().iter().map(|f| f.id).collect()).unwrap_or_default();
     let (changes, first_seen) = match lua.app_data_mut::<IntelGrids>() {
         Some(mut g) if !g.changes.is_empty() || !g.first_seen.is_empty() => (std::mem::take(&mut g.changes), std::mem::take(&mut g.first_seen)),
-        _ => return Ok(()),
+        _ => return destroy_gone_fakes(lua, &gone),
     };
     let _lua = crate::prof_span!("lua intel callbacks");
     let class = blip_class(lua)?;
@@ -358,7 +418,7 @@ pub fn intel_callbacks(lua: &Lua) -> LuaResult<()> {
         g.changes = changes;
         g.first_seen = first_seen;
     }
-    Ok(())
+    destroy_gone_fakes(lua, &gone)
 }
 
 pub fn register(lua: &Lua) -> LuaResult<()> {
@@ -383,8 +443,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         GetBlip = |lua, (this, army): (Obj<moho::Unit>, shapes::Army)| {
             let id = entity_id(&this)?;
             let army = resolve_army(lua, &army)?;
-            let (now, ever) = knowledge(lua, army, id);
-            if !now.any() && !(ever && is_structure(lua, id)) {
+            let (now, _) = knowledge(lua, army, id);
+            let sighted = || lua.app_data_ref::<IntelGrids>().is_none_or(|g| g.ever_seen(army, id));
+            if !now.any() && !(is_structure(lua, id) && sighted()) {
                 return Ok(None);
             }
             let blip = blip_object(lua, &blips(lua)?, &blip_class(lua)?, army, id)?;
@@ -407,6 +468,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     fn query(lua: &Lua, name: &'static str, f: fn((Detection, bool)) -> bool) -> LuaResult<()> {
         crate::lua_api::add_class_fn(lua, moho::Blip::CLASS, name, Some(&[Some("this"), Some("army")]), "The army defaults to the blip's own (`GetBlip`'s).", Status::Implemented, move |lua, (this, army): (Obj<moho::Blip>, shapes::Army)| {
             let army = asking_army(lua, &this, &army)?;
+            if let Some(id) = fake_id(&this)? {
+                let k = lua.app_data_ref::<IntelGrids>().and_then(|g| g.fake(id).filter(|_| g.fake_alive(id)).map(|f| f.knowledge(army)));
+                return Ok(f(k.unwrap_or_default()));
+            }
             Ok(f(knowledge(lua, army, entity_id(&this)?)))
         })
     }
@@ -416,9 +481,43 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     query(lua, "IsOnSonar", |(d, _)| d.sonar)?;
     query(lua, "IsOnOmni", |(d, _)| d.omni)?;
     lua_method!(lua, moho::Blip,
-        /// Always false: fake blips (jammers) are not modelled yet.
-        #[lua(stub)]
-        IsKnownFake = |_, (_this, _army): (Obj<moho::Blip>, shapes::Army)| Ok(false))?;
+        /// A jammer's fake the army has seen or had under omni (until the
+        /// fake goes); false for a real unit's blip.
+        IsKnownFake = |lua, (this, army): (Obj<moho::Blip>, shapes::Army)| {
+            let Some(id) = fake_id(&this)? else { return Ok(false) };
+            let army = asking_army(lua, &this, &army)?;
+            Ok(lua.app_data_ref::<IntelGrids>().and_then(|g| g.fake(id).map(|f| f.known_by(army))).unwrap_or(false))
+        })?;
+    lua_method!(lua, moho::Blip,
+        /// Where the blip is: its unit's position (of `bone`, if given), or a
+        /// jammer fake's own spot.
+        GetPosition = |lua, (this, bone): (Obj<moho::Blip>, Option<shapes::Bone>)| {
+            if let Some(id) = fake_id(&this)? {
+                let p = lua.app_data_ref::<IntelGrids>().and_then(|g| g.fake(id).map(|f| f.position)).unwrap_or_default();
+                return crate::engine::api::entity::vector(lua, p);
+            }
+            let pos = crate::engine::api::entity::bone_position(lua, &this, bone.map(shapes::Bone::into_inner))?;
+            crate::engine::api::entity::vector(lua, pos)
+        })?;
+    lua_method!(lua, moho::Blip,
+        /// The id as a string: a jammer fake's own blip id (moho's blips have
+        /// their own id range), else its unit's.
+        GetEntityId = |_, this: Obj<moho::Blip>| {
+            Ok(match fake_id(&this)? {
+                Some(id) => id.to_string(),
+                None => entity_id(&this)?.to_string(),
+            })
+        })?;
+    lua_method!(lua, moho::Blip,
+        /// A jammer fake's blip: once its set went (jammer off or dead);
+        /// else its unit's `BeenDestroyed`.
+        BeenDestroyed = |lua, this: Obj<moho::Blip>| {
+            if let Some(id) = fake_id(&this)? {
+                let dead = this.raw_get::<Option<bool>>("_dead")?.unwrap_or(false);
+                return Ok(dead || !lua.app_data_ref::<IntelGrids>().is_some_and(|g| g.fake_alive(id)));
+            }
+            crate::engine::api::destroyed::entity_destroy_queued(lua, this.table())
+        })?;
     lua_method!(lua, moho::Blip,
         /// The source structure died out of the army's sight (until the army
         /// sees the spot and the blip goes).

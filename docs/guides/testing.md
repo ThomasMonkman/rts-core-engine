@@ -77,7 +77,7 @@ checks. They cover what unit tests can't: the engine and FAF's Lua agreeing (upg
 capture, reclaim, formations, bombing runs, flight, fuel, armor, transports).
 
 Add one per new gameplay system: copy a file, keep the helper block at its top, and add a `#[test]`
-naming it. Use the land around (380-460, 560-640) on the default map; much of the rest is water.
+naming it. Use the land around (380-430, 560-670) on the default map (east of x 440 is water from z 600 down, where land units drown); much of the rest is water.
 Iterate with the binary first:
 
 ```sh
@@ -112,6 +112,7 @@ A divergence can be rare, so run 6-8 at once. These switches narrow one down (`e
 | `RTS_DUMP_TICK=t RTS_DUMP_FILE=path` | write every live entity's state (position, health, orders, motion) at tick t, to `diff` two runs. A range `a-b` writes `path.<tick>` for each tick |
 | `RTS_REFERENCE=path` | `path` holds `tick checksum` lines from a trace; at the first tick that differs, dump to `RTS_DUMP_FILE` and stop |
 | `RTS_GC_EVERY_TICK=1` | a full Lua collection after every tick (the sim must not change) |
+| `RTS_GC_PARALLEL_MIN=bytes` | heap size from which a collection marks on rayon's pool (`sim/gc.rs`; default 32 MB). `0` puts every collection there, the tests' small heaps too; a huge value keeps all on one thread (the sim must not change either way) |
 | `RTS_LOG_ISSUE_UNIT=id` | log every order given to that unit, with the Lua stack that gave it, and how each ends. Running the traceback changes the game; add `RTS_LOG_ISSUE_NOSTACK=1` to leave it unchanged |
 
 Then instrument with a `--script` (wrap the FAF function that gave the order and log its inputs every

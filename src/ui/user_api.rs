@@ -8,6 +8,7 @@ use mlua::prelude::*;
 
 use crate::lua_api::shapes::Shaped;
 use crate::lua_api::{Obj, Status, lua_fn};
+use crate::ui::session::UiState;
 use crate::ui::shapes::Loose;
 use std::collections::BTreeMap;
 
@@ -433,13 +434,26 @@ fn special_file_info(lua: &Lua, profile: &str, name: &str, kind: &str) -> LuaRes
     Ok(Some(Shaped::new(t)))
 }
 
+/// Moho's front-end data (`GetFrontEndData` / `SetFrontEndData`): kept by
+/// the engine, not a Lua state, so it outlives the interface that set it
+/// (FAF's campaign briefing, the replay a game restarts from). Interface
+/// only: the sim never sees it.
+static FRONT_END_DATA: std::sync::Mutex<BTreeMap<String, crate::engine::sim::lua_data::LuaData>> = std::sync::Mutex::new(BTreeMap::new());
+
+fn front_end_data() -> std::sync::MutexGuard<'static, BTreeMap<String, crate::engine::sim::lua_data::LuaData>> {
+    FRONT_END_DATA.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// moho `LaunchReplaySession(filename)`: from the main menu, leaves the
 /// recording for the renderer to start (`__engine_launch_replay`, taken by
 /// `UserVm::take_replay_request`) and returns true; false (FAF says it
 /// can't launch it) for a file that isn't one of our recordings with a
 /// header, or during a game (a session can't be swapped for another yet).
+/// Moho keeps the recording it launched as front-end data
+/// `replay_filename`, which FAF's restart reads (`tabs.lua`
+/// `RestartReplay`, `misckeyactions.lua` `RestartSessionOrReplay`).
 fn launch_replay_session(lua: &Lua, filename: &str) -> LuaResult<bool> {
-    if lua.globals().raw_get::<Option<String>>("__engine_ui_state")?.as_deref() != Some("frontend") {
+    if crate::ui::session::state(lua).ui_state != UiState::Frontend {
         tracing::warn!(target: "lua", filename, "LaunchReplaySession: only from the main menu for now");
         return Ok(false);
     }
@@ -461,6 +475,7 @@ fn launch_replay_session(lua: &Lua, filename: &str) -> LuaResult<bool> {
         return Ok(false);
     }
     lua.globals().raw_set("__engine_launch_replay", path.to_string_lossy())?;
+    front_end_data().insert("replay_filename".into(), crate::engine::sim::lua_data::LuaData::string(filename));
     Ok(true)
 }
 
@@ -557,7 +572,7 @@ fn blueprint_commands(domain: &CategoryDomain, bp: &LuaTable) -> LuaResult<Bluep
 }
 
 /// moho's `GetUnitCommandData`: the command caps and toggle caps any of
-/// `units` has (sorted), and what any of them can build, or will once the
+/// `units` has (sorted), and what every one of them can build, or will once the
 /// upgrades it has queued are done (a factory upgrading to T2 offers T2
 /// units to queue behind the upgrade), less what the sim's build
 /// restrictions forbid that unit now (the ACU's T2/T3 until its engineering
@@ -616,29 +631,116 @@ fn unit_command_data(lua: &Lua, units: &[Obj<moho::UserUnit>]) -> LuaResult<(Vec
                 own = Some(own.map_or_else(|| cat.clone(), |o| o.union(cat)));
             }
         }
-        if let Some(mut o) = own {
-            for id in &restricted {
-                if let Ok(cat) = domain.parse(id) {
-                    o = o.difference(&cat);
-                }
+        let mut o = own.unwrap_or_else(|| CategorySet::empty(domain.entries.len()));
+        for id in &restricted {
+            if let Ok(cat) = domain.parse(id) {
+                o = o.difference(&cat);
             }
-            own_sets.push(o);
         }
+        own_sets.push(o);
     }
+    // Orders are what any unit has; what can be built is what every unit can
+    // build (the real game: engineer + factory, or engineer + tank, offer
+    // nothing; `probe_ui_hover` build).
     let (mut orders, mut toggles) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
-    let mut buildable = CategorySet::empty(domain.entries.len());
+    let empty = CategorySet::empty(domain.entries.len());
+    let mut buildable: Option<CategorySet> = None;
+    let mut meet = |set: &CategorySet| buildable = Some(buildable.as_ref().map_or_else(|| set.clone(), |b| b.intersection(set)));
     for e in used.values().filter(|e| e.any) {
         let c = e.commands.as_ref().expect("only blueprints that exist are used");
         orders.extend(c.orders.iter().cloned());
         toggles.extend(c.toggles.iter().cloned());
-        if let (true, Some(cat)) = (e.plain, &c.buildable) {
-            buildable = buildable.union(cat);
+        if e.plain {
+            meet(c.buildable.as_ref().unwrap_or(&empty));
         }
     }
     for o in &own_sets {
-        buildable = buildable.union(o);
+        meet(o);
     }
-    Ok((orders.into_iter().collect(), toggles.into_iter().collect(), EntityCategory(buildable)))
+    Ok((orders.into_iter().collect(), toggles.into_iter().collect(), EntityCategory(buildable.unwrap_or(empty))))
+}
+
+/// `loadstring`, on its own so it can be tested without the whole layer.
+fn register_loadstring(lua: &Lua) -> LuaResult<()> {
+    lua_fn!(lua, global,
+        /// Compiles `code` (SupCom Lua, translated as every game script is)
+        /// into a function, or returns nil and the compile error. Text only:
+        /// moho also loads its own bytecode, which Luau can't. FAF removes
+        /// it from the sim (`SimHooks.lua`); interface mods use it.
+        loadstring = |lua, (code, name): (LuaString, Option<String>)| {
+            let code = code.to_string_lossy();
+            let translated = crate::engine::lua_translation::translate(&code);
+            match lua.load(translated).set_name(name.unwrap_or(code)).set_mode(mlua::ChunkMode::Text).into_function() {
+                Ok(f) => Ok((Some(f), None)),
+                Err(e) => Ok((None, Some(e.to_string()))),
+            }
+        })
+}
+
+/// `SetFocusArmy(index)` (the user function and the console command, which
+/// FAF's score board sends): view the game as army `index` (0-based; -1 every
+/// army). As moho's `CWldSession::RequestFocusArmy` (MohoEngine.dll
+/// 0x10458d20): an index outside -1 .. armies - 1 is refused; then
+/// `ValidateFocusArmyRequest` (0x10458da0) allows it when the session is a
+/// replay (no command source), cheats are on, the army is one this client
+/// commands, the game is over, or this client commands no army still in the
+/// game (an observer, or a defeated player; moho also wants the session to
+/// allow observers, which ours always do). So a player in a live game keeps
+/// their own army's view.
+///
+/// It's the view's alone: the sim, its Lua and the command stream don't
+/// hear of it (moho tells its sim driver, whose `NoteFocusArmyChanged` only
+/// fills the local `Sync`). The next `Sync` the interface gets carries
+/// `FocusArmyChanged` (`UserVm::sync`), as moho's would, so FAF's panels
+/// refresh. True if the focus is now `index`.
+pub fn request_focus_army(lua: &Lua, index: i64) -> LuaResult<bool> {
+    let g = lua.globals();
+    let armies = g.raw_get::<Option<LuaTable>>("__engine_armies")?;
+    let count = armies.as_ref().map_or(0, |a| a.raw_len() as i64);
+    if index < -1 || index >= count {
+        tracing::warn!(target: "lua", index, count, "SetFocusArmy: no such army");
+        return Ok(false);
+    }
+    let new = if index < 0 { -1 } else { index + 1 };
+    let old = lua.named_registry_value::<Option<i64>>("user.focus_army")?.unwrap_or(-1);
+    let flag = |name: &str| -> LuaResult<bool> { Ok(g.raw_get::<Option<bool>>(name)?.unwrap_or(false)) };
+    let cheats = || -> LuaResult<bool> {
+        let Some(session) = g.raw_get::<Option<LuaTable>>("__engine_session")? else { return Ok(false) };
+        let Some(options) = session.raw_get::<Option<LuaTable>>("Options")? else { return Ok(false) };
+        Ok(match options.raw_get::<LuaValue>("CheatsEnabled")? {
+            LuaValue::Boolean(b) => b,
+            LuaValue::String(s) => s.to_str().is_ok_and(|s| s.eq_ignore_ascii_case("true")),
+            _ => false,
+        })
+    };
+    let own = lua.named_registry_value::<Option<i64>>("user.own_army")?.unwrap_or(-1);
+    let own_in_game = || -> LuaResult<bool> {
+        if own < 1 {
+            return Ok(false);
+        }
+        let army = armies.as_ref().map(|a| a.raw_get::<Option<LuaTable>>(own)).transpose()?.flatten();
+        Ok(army.is_some_and(|a| !a.raw_get::<Option<bool>>("outOfGame").ok().flatten().unwrap_or(false)))
+    };
+    let allowed = flag("__engine_replay")? || cheats()? || (new >= 1 && new == own) || crate::ui::session::state(lua).game_over || !own_in_game()?;
+    if !allowed {
+        tracing::info!(target: "lua", index, "SetFocusArmy: refused (a player in a live game keeps their army's view)");
+        return Ok(false);
+    }
+    if new != old {
+        lua.set_named_registry_value("user.focus_army", new)?;
+        // The first change since the last Sync keeps its `old`.
+        let pending = match lua.named_registry_value::<Option<LuaTable>>("user.focus_changed")? {
+            Some(t) => t,
+            None => {
+                let t = lua.create_table()?;
+                t.raw_set("old", old)?;
+                lua.set_named_registry_value("user.focus_changed", &t)?;
+                t
+            }
+        };
+        pending.raw_set("new", new)?;
+    }
+    Ok(true)
 }
 
 pub fn register(lua: &Lua) -> LuaResult<()> {
@@ -647,20 +749,17 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// ([`unit_command_data`]).
         GetUnitCommandData = |lua, unit_set: Option<Vec<Obj<moho::UserUnit>>>| unit_command_data(lua, &unit_set.unwrap_or_default()))?;
     lua_fn!(lua, global,
-        #[lua(internal)]
-        __engine_con_execute = |lua, line: String| {
-            if let Err(e) = crate::ui::console(lua, &line) {
-                tracing::warn!(target: "lua", line, "ConExecute failed: {e}");
-            }
-            Ok(())
-        })?;
-    lua_fn!(lua, global,
         /// The user layer's clock: seconds of UI frames run (`UserVm::frame`),
         /// which is what animations and `WaitSeconds` count in.
         CurrentTime = |lua, ()| Ok(lua.named_registry_value::<Option<f64>>("user.time")?.unwrap_or(0.0)))?;
     lua_fn!(lua, global,
         /// Same clock as `CurrentTime`.
         GetSystemTimeSeconds = |lua, ()| Ok(lua.named_registry_value::<Option<f64>>("user.time")?.unwrap_or(0.0)))?;
+    register_loadstring(lua)?;
+    lua_fn!(lua, global,
+        /// Seconds of the `CurrentTime` clock since `origin` (FAF's binary
+        /// patch, for timings that would lose precision as one big float).
+        GetTimeForProfile = |lua, origin: Option<f64>| Ok(lua.named_registry_value::<Option<f64>>("user.time")?.unwrap_or(0.0) - origin.unwrap_or(0.0)))?;
     lua_fn!(lua, global,
         /// Wall-clock seconds since the Unix epoch.
         GetSystemTime = |_, ()| Ok(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())))?;
@@ -721,6 +820,23 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         })?;
     lua_fn!(lua, global, LaunchReplaySession = |lua, filename: String| launch_replay_session(lua, &filename))?;
     lua_fn!(lua, global,
+        /// A copy of what `SetFrontEndData` kept under `key` (nil if nothing).
+        GetFrontEndData = |lua, key: String| match front_end_data().get(&key) {
+            Some(data) => data.to_lua(lua),
+            None => Ok(LuaNil),
+        })?;
+    lua_fn!(lua, global,
+        /// Keeps a copy of `data` under `key` for the rest of the program,
+        /// across the front end's and each game's interface (nil forgets it).
+        SetFrontEndData = |_, (key, data): (String, LuaValue)| {
+            let mut all = front_end_data();
+            match data {
+                LuaNil => all.remove(&key),
+                data => all.insert(key, crate::engine::sim::lua_data::LuaData::from_lua(&data)),
+            };
+            Ok(())
+        })?;
+    lua_fn!(lua, global,
         /// Saved games aren't supported: every load fails as moho's does for a
         /// file it can't open, which FAF reports in its own dialog.
         LoadSavedGame = |_, _args: LuaMultiValue| Ok((false, "CantOpen")))?;
@@ -749,13 +865,13 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         })?;
     lua_fn!(lua, global,
         /// A game is running (not the main menu).
-        SessionIsActive = |lua, ()| Ok(lua.globals().raw_get::<Option<String>>("__engine_ui_state")?.as_deref() == Some("game")))?;
+        SessionIsActive = |lua, ()| Ok(crate::ui::session::state(lua).ui_state == UiState::Game))?;
     lua_fn!(lua, global, SessionIsReplay = |lua, ()| Ok(lua.globals().raw_get::<Option<bool>>("__engine_replay")?.unwrap_or(false)))?;
     lua_fn!(lua, global, SessionIsMultiplayer = |_, ()| Ok(crate::net::core::current().is_some_and(|n| !n.session_clients().is_empty())))?;
     lua_fn!(lua, global,
         /// A game (not the main menu) that isn't networked: a skirmish or a
         /// replay starts again on this machine alone.
-        SessionCanRestart = |lua, ()| Ok(lua.globals().raw_get::<Option<String>>("__engine_ui_state")?.as_deref() == Some("game")
+        SessionCanRestart = |lua, ()| Ok(crate::ui::session::state(lua).ui_state == UiState::Game
             && !crate::net::core::current().is_some_and(|n| !n.session_clients().is_empty())))?;
     lua_fn!(lua, global,
         /// Starts the session again from its first tick (`SessionCanRestart`):
@@ -773,7 +889,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
         /// The game ended (the sim's `EndGame`, `UserVm::set_game_over`) or this
         /// player left it (`SessionEndGame`).
-        SessionIsGameOver = |lua, ()| Ok(lua.globals().raw_get::<Option<bool>>("__engine_game_over")?.unwrap_or(false)))?;
+        SessionIsGameOver = |lua, ()| Ok(crate::ui::session::state(lua).game_over))?;
     lua_fn!(lua, global,
         /// This client has no army of its own (watching, or a replay).
         IsObserver = |lua, ()| Ok(lua.globals().raw_get::<Option<bool>>("__engine_observer")?.unwrap_or(false)))?;
@@ -781,519 +897,52 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global, SetUIControlsAlpha = |_, _alpha: Loose<f64>| Ok(()))?;
     lua_fn!(lua, global, AddConsoleOutputReciever = |_, _receiver: Loose<LuaFunction>| Ok(()))?;
     lua_fn!(lua, global, RemoveConsoleOutputReciever = |_, _receiver: Loose<LuaFunction>| Ok(()))?;
+    lua_fn!(lua, global,
+        /// Moho runs the sim at 10 ticks a second, whatever the game speed.
+        GetSimTicksPerSecond = |_, ()| Ok(10.0f64))?;
+    lua_fn!(lua, global,
+        /// The Anti-Aliasing choices besides Off (FAF's presets pick the middle
+        /// one for High, the last for Ultra): 1 is SMAA (render/smaa.rs);
+        /// MSAA counts (2, 4, 8) join it once MSAA is drawn.
+        GetAntiAliasingOptions = |_, ()| Ok(vec![1.0f64]))?;
+    lua_fn!(lua, global,
+        /// Sound globals are ui/sound.rs; the tutorial's voice-overs aren't.
+        #[lua(stub)]
+        PlayTutorialVO = |_, _args: LuaMultiValue| Ok(()))?;
+    lua_fn!(lua, global,
+        #[lua(stub)]
+        FlushEvents = |_, _args: LuaMultiValue| Ok(()))?;
+    lua_fn!(lua, global,
+        /// Console commands matching `text`: none.
+        ConTextMatches = |_, _text: Loose<String>| Ok(Vec::<String>::new()))?;
+    lua_fn!(lua, global,
+        /// The units handed in, unfiltered.
+        GetValidAttackingUnits = |_, units: Loose<Vec<Obj<crate::engine::api::moho::UserUnit>>>| Ok(units))?;
+    lua_fn!(lua, global,
+        /// The current profile's options, where FAF's options dialog keeps
+        /// them (`Prefs.SetToCurrentProfile('options', ...)`), or just the
+        /// option `key`. No profile: an empty table (nil for one option),
+        /// and FAF falls back to each option's default from optionslogic.lua.
+        GetOptions = |lua, key: Option<String>| {
+            let preference: LuaFunction = lua.globals().get("GetPreference")?;
+            let Some(current) = lua.coerce_string(preference.call::<LuaValue>("profile.current")?)? else {
+                return Ok(if key.is_none() { LuaValue::Table(lua.create_table()?) } else { LuaNil });
+            };
+            let options = format!("profile.profiles.{}.options", current.to_string_lossy());
+            // One option: read just it (a preference comes out as a copy).
+            match key {
+                Some(key) => preference.call(format!("{options}.{key}")),
+                None => preference.call((options, lua.create_table()?)),
+            }
+        })?;
     lua.set_named_registry_value("user.focus_army", -1)?;
     lua_fn!(lua, global,
         /// The army the player sees as, 1-based (`--player`, else observer: -1).
         GetFocusArmy = |lua, ()| lua.named_registry_value::<i64>("user.focus_army"))?;
     lua_fn!(lua, global,
-        /// `index` is 0-based (-1: observer); `GetFocusArmy` is 1-based.
-        SetFocusArmy = |lua, a: i64| lua.set_named_registry_value("user.focus_army", if a < 0 { -1 } else { a + 1 }))?;
-    crate::lua_api::script::exec(
-        lua,
-        r#"
-        -- The current profile's options, where FAF's options dialog keeps
-        -- them (`Prefs.SetToCurrentProfile('options', ...)`; none set: FAF
-        -- falls back to each option's default from optionslogic.lua).
-        function GetOptions(key)
-            local current = GetPreference('profile.current')
-            if not current then return key == nil and {} or nil end
-            local opts = 'profile.profiles.' .. current .. '.options'
-            -- One option: read just it (a preference comes out as a copy).
-            if key then return GetPreference(opts .. '.' .. key) end
-            return GetPreference(opts, {})
-        end
-        -- Sound globals are ui/sound.rs; the tutorial's voice-overs aren't.
-        function PlayTutorialVO(...) end
-        -- The Anti-Aliasing choices besides Off (FAF's presets pick the middle
-        -- one for High, the last for Ultra): 1 is SMAA (render/smaa.rs);
-        -- MSAA counts (2, 4, 8) join it once MSAA is drawn.
-        function GetAntiAliasingOptions() return { 1 } end
-        -- Range overlays (the military / intel rings): filters defined by
-        -- name, then the active set chosen. Kept, not drawn yet.
-        local overlayFilters, activeOverlays, overlayVersion = {}, {}, 0
-        function SetOverlayFilter(name, categories, normal, select, rollover, innerMin, innerMax, outerMin, outerMax)
-            overlayFilters[name] = { Categories = categories, NormalColor = normal, SelectColor = select, RolloverColor = rollover,
-                Inner = { innerMin, innerMax }, Outer = { outerMin, outerMax } }
-            overlayVersion = overlayVersion + 1
-        end
-        function SetOverlayFilters(names) activeOverlays = names or {} overlayVersion = overlayVersion + 1 end
-        function __engine_overlay_version() return overlayVersion end
-        -- The active filters for the renderer: colours, thicknesses, which
-        -- of `ids` (blueprints) each covers, and which range kinds (OVERLAY<kind>
-        -- categories) it takes in: those whose every blueprint it covers, so
-        -- the anti-air filter doesn't also draw a destroyer's guns.
-        function __engine_overlay_filters(ids, kinds)
-            local out = {}
-            for _, name in activeOverlays do
-                local f = overlayFilters[name]
-                if f and f.Categories then
-                    local members = {}
-                    for i, id in ids do members[i] = EntityCategoryContains(f.Categories, id) end
-                    local mask = 0
-                    for k, kind in kinds do
-                        local cat = categories['OVERLAY' .. kind]
-                        local any, all = false, true
-                        if cat then
-                            for i, id in ids do
-                                if EntityCategoryContains(cat, id) then
-                                    any = true
-                                    if not members[i] then all = false break end
-                                end
-                            end
-                        end
-                        if any and all then mask = mask + 2 ^ (k - 1) end
-                    end
-                    table.insert(out, { name = name, normal = f.NormalColor, select = f.SelectColor, rollover = f.RolloverColor,
-                        inner = f.Inner, outer = f.Outer, members = members, kinds = mask })
-                end
-            end
-            return out
-        end
-        -- Units added to the selection from the interface (a transport's
-        -- carried units in the construction panel), by entity id. Kept;
-        -- orders don't go to them yet.
-        local extraSelect = {}
-        function AddToSessionExtraSelectList(unit) if unit then extraSelect[unit:GetEntityId()] = unit end end
-        function RemoveFromSessionExtraSelectList(unit) if unit then extraSelect[unit:GetEntityId()] = nil end end
-        function ClearSessionExtraSelectList() extraSelect = {} end
-        -- Console commands: the interface's own run here, the engine's go to
-        -- the renderer (`ui::console`).
-        function ConExecute(command) __engine_con_execute(command) end
-        function ConExecuteSave(command) __engine_con_execute(command) end
-        function ConTextMatches(text) return {} end
-        function GetSimTicksPerSecond() return 10 end
-        -- Game speed as moho's step (-10..10, 0 normal; rate 10^(step/10)):
-        -- the engine keeps `__engine_game_speed` current and takes requests
-        -- (`UserVm::set_game_speed` / `take_speed_request`).
-        function GetGameSpeed() return rawget(_G, '__engine_game_speed') or 0 end
-        function SetGameSpeed(speed) rawset(_G, '__engine_speed_request', math.max(-10, math.min(10, math.floor(speed or 0)))) end
-        function GameTick() return rawget(_G, '__engine_ui_tick') or 0 end
-        function GameTime() return (rawget(_G, '__engine_ui_tick') or 0) / 10 end
-        function GetGameTime() return FormatTime((rawget(_G, '__engine_ui_tick') or 0) / 10) end
-        function GetGameTimeSeconds() return (rawget(_G, '__engine_ui_tick') or 0) / 10 end
-        function FormatTime(seconds)
-            local s = math.floor(seconds or 0)
-            return string.format('%02d:%02d:%02d', math.floor(s / 3600), math.floor(s / 60) % 60, s % 60)
-        end
-        -- The rate the sim actually runs at (1 = normal).
-        function GetSimRate() return rawget(_G, '__engine_sim_rate') or 0 end
-        -- The player's selection, set by the engine from the renderer's
-        -- selection (`UserVm::set_selection`): a new table each call, nil
-        -- when nothing is selected, as moho's. FAF adds to the table it gets
-        -- (`AppendSetToSelection`) and tells calls apart by table identity
-        -- (selection sets' double tap).
-        -- Interface ground decals (`UserDecal`: FAF's range rings under the
-        -- cursor): a texture, a centre and a size, drawn on the terrain.
-        -- The engine reads them when `version` moves (`UserVm::user_decals`).
-        do
-            local decals, nextId, version = {}, 0, 0
-            local function bump() version = version + 1 end
-            function _c_CreateDecal(self)
-                nextId = nextId + 1
-                rawset(self, '_decal', nextId)
-                decals[nextId] = { x = 0, y = 0, z = 0, sx = 1, sy = 1, sz = 1 }
-                bump()
-            end
-            local m = moho.userDecal_methods
-            local function of(self) return decals[rawget(self, '_decal') or 0] end
-            m.SetTexture = function(self, tex) local d = of(self) if d then d.texture = tex bump() end end
-            m.SetPosition = function(self, v) local d = of(self) if d and v then d.x, d.y, d.z = v[1] or v.x, v[2] or v.y, v[3] or v.z bump() end end
-            m.SetPositionByScreen = function(self, v)
-                local p = v and UnProject(nil, { v[1] or v.x, v[2] or v.y })
-                if p then m.SetPosition(self, p) end
-            end
-            m.SetScale = function(self, v) local d = of(self) if d and v then d.sx, d.sy, d.sz = v[1] or v.x, v[2] or v.y, v[3] or v.z bump() end end
-            m.Destroy = function(self) local id = rawget(self, '_decal') if id and decals[id] then decals[id] = nil bump() end end
-            -- (version, { texture, x, y, z, sx, sy, sz, ... }) of the textured ones, id order.
-            function __engine_user_decals()
-                local out = {}
-                for id = 1, nextId do
-                    local d = decals[id]
-                    if d and d.texture then
-                        for _, v in { d.texture, d.x, d.y, d.z, d.sx, d.sy, d.sz } do table.insert(out, v) end
-                    end
-                end
-                return version, out
-            end
-        end
-        -- The command-graph waypoint under the mouse (the engine sets it each
-        -- frame), nil when none.
-        function GetHighlightCommand() return rawget(_G, '__engine_highlight_command') end
-        -- Build templates (`UIBuildTemplate`: { width, height, { bp, id, x, z },
-        -- ... }, x / z offsets from the cursor). The active one is placed in
-        -- build mode, every structure at once (render/frame.rs); FAF mutates
-        -- what it gets (rotating), so copies go both ways.
-        local function copy_template(t)
-            if type(t) ~= 'table' then return {} end
-            local out = { t[1], t[2] }
-            for i = 3, table.getn(t) do
-                local e = t[i]
-                if type(e) == 'table' then out[i] = { e[1], e[2], e[3], e[4] } end
-            end
-            return out
-        end
-        function SetActiveBuildTemplate(t) rawset(_G, '__engine_build_template', copy_template(t)) end
-        function GetActiveBuildTemplate() return copy_template(rawget(_G, '__engine_build_template')) end
-        function ClearBuildTemplates() rawset(_G, '__engine_build_template', nil) end
-        -- The selected structures as a template, offsets from the first one
-        -- (inferred: FAF re-centres on the first entry's footprint itself).
-        function GenerateBuildTemplateFromSelection()
-            local units = EntityCategoryFilterDown(categories.STRUCTURE, GetSelectedUnits() or {})
-            if not units[1] then
-                ClearBuildTemplates()
-                return
-            end
-            local origin = units[1]:GetPosition()
-            local t = { 0, 0 }
-            local minX, maxX, minZ, maxZ = 0, 0, 0, 0
-            for i, u in units do
-                local p = u:GetPosition()
-                local x, z = p[1] - origin[1], p[3] - origin[3]
-                minX, maxX = math.min(minX, x), math.max(maxX, x)
-                minZ, maxZ = math.min(minZ, z), math.max(maxZ, z)
-                table.insert(t, { u:GetUnitId(), i, x, z })
-            end
-            t[1], t[2] = math.ceil(maxX - minX), math.ceil(maxZ - minZ)
-            SetActiveBuildTemplate(t)
-        end
-        -- The focus army's idle engineers (not commanders) and factories (gates
-        -- too: FAF filters those out itself), nil when none (avatars.lua).
-        local function idle(category)
-            local units = {}
-            for _, id in __engine_idle_units(category) do
-                local u = GetUnitById(id)
-                if u then table.insert(units, u) end
-            end
-            if units[1] then return units end
-        end
-        function GetIdleEngineers() return idle('ENGINEER - COMMAND') end
-        function GetIdleFactories() return idle('FACTORY STRUCTURE') end
-        -- The game world is running (the interface exists only then).
-        function WorldIsPlaying() return true end
-        -- Selects the player's units in a category expression, as the
-        -- `UI_SelectByCategory` console command does (render/console.rs).
-        function UISelectionByCategory(expression, addToCurSel, inViewFrustum, nearestToMouse, mustBeIdle)
-            local flags = ''
-            if addToCurSel then flags = flags .. '+add ' end
-            if inViewFrustum then flags = flags .. '+inview ' end
-            if nearestToMouse then flags = flags .. '+nearest ' end
-            if mustBeIdle then flags = flags .. '+idle ' end
-            ConExecute('UI_SelectByCategory ' .. flags .. expression)
-        end
-        function GetSelectedUnits()
-            local sel = rawget(_G, '__engine_selection')
-            if not sel or not sel[1] then return nil end
-            local copy = {}
-            for i, u in ipairs(sel) do copy[i] = u end
-            return copy
-        end
-        -- Selecting from the interface: the engine adopts it as the
-        -- player's selection (`UserVm::take_selection_request`).
-        function SelectUnits(units) rawset(_G, '__engine_select_request', units or {}) end
-        function AddSelectUnits(units)
-            local all = {}
-            for _, u in rawget(_G, '__engine_selection') or {} do table.insert(all, u) end
-            for _, u in units or {} do table.insert(all, u) end
-            rawset(_G, '__engine_select_request', all)
-        end
-        -- The session's scenario (the engine fills __engine_session when it
-        -- knows the map; until then a minimal one). `Share` is the lobby's
-        -- default: FAF's score panel looks it up and fails without it.
-        function SessionGetScenarioInfo()
-            return rawget(_G, '__engine_session') or { Options = { Share = 'ShareUntilDeath' }, size = {1024, 1024}, name = '', type = 'skirmish' }
-        end
-        function GetEconomyTotals()
-            return rawget(_G, '__engine_economy') or {
-                stored = {MASS = 0, ENERGY = 0}, maxStorage = {MASS = 0, ENERGY = 0}, income = {MASS = 0, ENERGY = 0},
-                lastUseRequested = {MASS = 0, ENERGY = 0}, lastUseActual = {MASS = 0, ENERGY = 0}, reclaimed = {MASS = 0, ENERGY = 0},
-            }
-        end
-        -- Alliances between army indices, from the sim's (`UserVm::set_alliances`).
-        local function alliance(a, b)
-            if a == b then return 'Ally' end
-            local row = (rawget(_G, '__engine_alliances') or {})[a]
-            return row and row[b] or 'Enemy'
-        end
-        function IsAlly(a, b) return alliance(a, b) == 'Ally' end
-        function IsEnemy(a, b) return alliance(a, b) == 'Enemy' end
-        function IsNeutral(a, b) return alliance(a, b) == 'Neutral' end
-        function GetArmiesTable()
-            local armies = rawget(_G, '__engine_armies') or {}
-            return { numArmies = table.getn(armies), focusArmy = GetFocusArmy(), armiesTable = armies }
-        end
-        function GetSessionClients()
-            local net = __net_session_clients()
-            if net then return net end
-            local out = {}
-            for i, a in rawget(_G, '__engine_armies') or {} do
-                if a.human then
-                    table.insert(out, { name = a.nickname, uid = tostring(i), connected = true, ['local'] = true, ejectedBy = {}, authorizedCommandSources = { table.getn(out) + 1 } })
-                end
-            end
-            -- Watching (no human army): moho still lists the local client,
-            -- an observer with no command source.
-            if table.getn(out) == 0 then
-                table.insert(out, { name = 'Observer', uid = '0', connected = true, ['local'] = true, ejectedBy = {}, authorizedCommandSources = {} })
-            end
-            return out
-        end
-        -- Command sources (1-based): each human army's player in army
-        -- order, then observers (the sim's numbering, `command_source.rs`).
-        function SessionGetCommandSourceNames()
-            local names = {}
-            for _, a in rawget(_G, '__engine_armies') or {} do
-                if a.human then table.insert(names, a.nickname) end
-            end
-            return names
-        end
-        function SessionGetLocalCommandSource()
-            local source, focus = 0, GetFocusArmy()
-            for i, a in rawget(_G, '__engine_armies') or {} do
-                if a.human then
-                    source = source + 1
-                    if i == focus then return source end
-                end
-            end
-            return source + 1
-        end
-        -- Engine-populated globals (/engine/Library.lua).
-        rawset(_G, '__EngineStats', rawget(_G, '__EngineStats') or { Children = {} })
-        rawset(_G, 'LaunchDir', rawget(_G, 'LaunchDir') or '')
-        -- Input capture: controls that take all input (modal dialogs), last
-        -- added first.
-        local captures = {}
-        function AddInputCapture(control) table.insert(captures, control) end
-        function RemoveInputCapture(control)
-            for i = table.getn(captures), 1, -1 do
-                if captures[i] == control then table.remove(captures, i) end
-            end
-        end
-        function GetInputCapture() return captures[table.getn(captures)] end
-        function AnyInputCapture() return table.getn(captures) > 0 end
-        function FlushEvents() end
-        function GetMouseScreenPos() return { rawget(_G, '__engine_mouse_x') or 0, rawget(_G, '__engine_mouse_y') or 0 } end
-        -- A unit's rollover table, as moho builds it (FA's exe 0x847d40):
-        -- the economy as whole numbers per second (the per-tick rate times
-        -- 10, truncated), the rest as the unit's getters give them. Not
-        -- copied: moho's 'unknown' blueprint and hidden health for units
-        -- the player can't identify (the interface only has units it sees).
-        local rolloverEcon = { 'energyConsumed', 'massConsumed', 'energyRequested', 'massRequested', 'energyProduced', 'massProduced' }
-        local function rolloverInfo(unit)
-            local info = { blueprintId = unit:GetUnitId(), health = unit:GetHealth(), maxHealth = unit:GetMaxHealth() }
-            info.kills = unit:GetStat('KILLS', 0).Value
-            local econ = unit:GetEconData()
-            for _, k in rolloverEcon do
-                info[k] = math.floor(econ[k] or 0)
-            end
-            for k, v in unit:GetMissileInfo() do
-                info[k] = v
-            end
-            info.fuelRatio = unit:GetFuelRatio()
-            info.shieldRatio = unit:GetShieldRatio()
-            info.workProgress = unit:GetWorkProgress()
-            info.userUnit = unit
-            info.entityId = unit:GetEntityId()
-            local army = unit:GetArmy()
-            info.armyIndex = army - 1
-            local a = (rawget(_G, '__engine_armies') or {})[army]
-            info.teamColor = a and a.color
-            local name = unit:GetCustomName()
-            if name and name ~= '' then info.customName = name end
-            return info
-        end
-        -- The unit under the mouse (the engine sets `__engine_rollover` each
-        -- frame, nil over the interface or empty ground), as moho's binding
-        -- builds it (FA's exe 0x848470): the unit it works on as `focus`
-        -- (`focusUpgrade` while upgrading), else the unit it guards as
-        -- `guarded`, one level deep. Not copied: moho's brief `focus` for a
-        -- unit it targets (blueprint and health) and `focusProp` for a prop
-        -- it works on; the interface has neither.
-        function GetRolloverInfo()
-            local id = rawget(_G, '__engine_rollover')
-            local unit = id and GetUnitById(id)
-            if not unit or unit:IsDead() then return nil end
-            local info = rolloverInfo(unit)
-            local focus = unit:GetFocus()
-            if focus then
-                local queue = unit:GetCommandQueue()
-                local upgrading = queue[1] and queue[1].type == 'Upgrade'
-                info[upgrading and 'focusUpgrade' or 'focus'] = rolloverInfo(focus)
-            else
-                local guarded = unit:GetGuardedEntity()
-                if guarded then info.guarded = rolloverInfo(guarded) end
-            end
-            return info
-        end
-        -- Moho's interface states: 'frontend' (the main menu) or 'game'.
-        rawset(_G, '__engine_ui_state', 'game')
-        function GetCurrentUIState() return rawget(_G, '__engine_ui_state') end
-        -- The renderer closes the window (`UserVm::exit_requested`).
-        function ExitApplication() rawset(_G, '__engine_exit_request', true) end
-        -- Session control: the engine keeps `__engine_paused` current; pause
-        -- requests are taken by the renderer (`UserVm::take_pause_request`).
-        rawset(_G, '__engine_paused', false)
-        function SessionIsPaused() return rawget(_G, '__engine_paused') end
-        function SessionRequestPause() rawset(_G, '__engine_pause_request', true) end
-        function SessionResume() rawset(_G, '__engine_pause_request', false) end
-        function SessionIsBeingRecorded() return false end
-        function SessionIsObservingAllowed() return true end
-        -- In-game chat (`net::core`): `SessionSendChatMessage([clients,]
-        -- message)`; received messages go to FAF's gamemain.ReceiveChat.
-        -- FAF's disconnect dialog's Eject button (a vote; `net::lockstep`).
-        function EjectSessionClient(index) __net_eject(index) end
-        function SessionSendChatMessage(client, message)
-            if message == nil then client, message = nil, client end
-            if type(client) == 'number' then client = { client } end
-            __net_chat_send(client, message)
-        end
-        -- This player leaves the session (FAF's score screen, quitting):
-        -- the sim stops here and a networked game is told we left
-        -- (`UserVm::take_session_left`). A session's end is when moho hands
-        -- the interface its score data, which FAF's score screen waits for
-        -- (`hotstats.scoreData`); ours fills it in here at `SessionEndGame`,
-        -- whichever end took it, in the shape of FAF's sim score table.
-        function SessionEndGame()
-            rawset(_G, '__engine_game_over', true)
-            rawset(_G, '__engine_session_left', true)
-            local scoreData = import('/lua/ui/dialogs/hotstats.lua').scoreData
-            if scoreData.interval and scoreData.current and scoreData.history then return end
-            local current = {}
-            for index, info in GetArmiesTable().armiesTable do
-                if not info.civilian then
-                    current[index] = {
-                        name = info.nickname,
-                        general = { score = 0, kills = { count = 0, mass = 0, energy = 0 },
-                            built = { count = 0, mass = 0, energy = 0 },
-                            lost = { count = 0, mass = 0, energy = 0 },
-                            currentunits = 0, currentcap = 0 },
-                        units = { cdr = { kills = 0, built = 0, lost = 0 }, land = { kills = 0, built = 0, lost = 0 },
-                            naval = { kills = 0, built = 0, lost = 0 }, air = { kills = 0, built = 0, lost = 0 },
-                            experimental = { kills = 0, built = 0, lost = 0 }, structures = { kills = 0, built = 0, lost = 0 } },
-                        resources = {
-                            massin = { total = 0, rate = 0, reclaimed = 0, reclaimRate = 0 },
-                            massout = { total = 0, rate = 0, excess = 0 },
-                            energyin = { total = 0, rate = 0, reclaimed = 0, reclaimRate = 0 },
-                            energyout = { total = 0, rate = 0, excess = 0 },
-                            storage = { storedMass = 0, storedEnergy = 0, maxMass = 0, maxEnergy = 0 } },
-                    }
-                end
-            end
-            scoreData.interval = 30
-            scoreData.current = current
-            scoreData.history = {}
-        end
-        -- Moho returns to the main menu (the score screen's Continue): the
-        -- renderer tears the game's interface down and starts the front end
-        -- (`UserVm::take_menu_request`).
-        function ExitGame()
-            SessionEndGame()
-            rawset(_G, '__engine_menu_request', true)
-        end
-        -- The focus army's synced overflow flag (moho: false for an
-        -- observer; on until the first beat, as a new army's is).
-        function GetResourceSharing()
-            local focus = GetFocusArmy()
-            if focus < 1 then return false end
-            local flags = rawget(_G, '__engine_resource_sharing')
-            local on = flags and flags[focus]
-            if on == nil then return true end
-            return on
-        end
-        function GetFrontEndData(key) return nil end
-        function SetFrontEndData(key, data) end
-        -- Unit toggles as the panels query them (defaults until they're
-        -- bridged to the sim: return fire, not paused, script bits off).
-        -- Unit toggles and lists over the units' details (selected units).
-        local function detail(u) return rawget(_G, '__engine_unit_data')[u._id] end
-        -- Any of the units in auto mode / auto-surfacing.
-        function GetIsAutoMode(units)
-            for _, u in units or {} do local d = detail(u) if d and d.autoMode then return true end end
-            return false
-        end
-        function GetIsAutoSurfaceMode(units)
-            for _, u in units or {} do local d = detail(u) if d and d.autoSurface then return true end end
-            return false
-        end
-        -- -1 all submerged, 1 none, 0 a mix (or no units).
-        function GetIsSubmerged(units)
-            local sub, surf = false, false
-            for _, u in units or {} do
-                local d = detail(u)
-                if d and d.submerged then sub = true else surf = true end
-            end
-            if sub and not surf then return -1 elseif surf and not sub then return 1 end
-            return 0
-        end
-        -- Settings for the sim, like orders (`__engine_ui_orders`).
-        function SetAutoMode(units, on)
-            table.insert(rawget(_G, '__engine_ui_orders'), { units = units, toggle = 'auto', value = on and 1 or 0 })
-        end
-        function SetAutoSurfaceMode(units, on)
-            table.insert(rawget(_G, '__engine_ui_orders'), { units = units, toggle = 'autosurface', value = on and 1 or 0 })
-        end
-        -- Units carried by / assisting any of `units`, each once.
-        local function gather(units, field)
-            local out, seen = {}, {}
-            for _, u in units or {} do
-                local d = detail(u)
-                for _, id in (d and d[field]) or {} do
-                    if not seen[id] then
-                        seen[id] = true
-                        local o = GetUnitById(id)
-                        if o then table.insert(out, o) end
-                    end
-                end
-            end
-            return out
-        end
-        function GetAttachedUnitsList(units) return gather(units, 'cargo') end
-        function GetAssistingUnitsList(units) return gather(units, 'assisters') end
-        function GetValidAttackingUnits(units) return units end
-        -- Orders from the interface: queued for the engine, which turns them
-        -- into player commands for the selection (`UserVm::take_orders`).
-        local orders = {}
-        rawset(_G, '__engine_ui_orders', orders)
-        function GetUnitCommandFromCommandCap(cap) return 'UNITCOMMAND_' .. string.gsub(cap, '^RULEUCC_', '') end
-        function IssueCommand(command, a, b) table.insert(orders, { command = command, arg = a, clear = b }) end
-        function IssueUnitCommand(units, command, a, b) table.insert(orders, { units = units, command = command, arg = a, clear = b }) end
-        function IssueUnitCommandToUnit(unit, command, a, b) table.insert(orders, { units = { unit }, command = command, arg = a, clear = b }) end
-        function IssueBlueprintCommand(command, bp, count, clear) table.insert(orders, { command = command, bp = bp, count = count, clear = clear }) end
-        function IssueBlueprintCommandToUnits(units, command, bp, count, clear) table.insert(orders, { units = units, command = command, bp = bp, count = count, clear = clear }) end
-        function IssueBlueprintCommandToUnit(unit, command, bp, count, clear) table.insert(orders, { units = { unit }, command = command, bp = bp, count = count, clear = clear }) end
-        -- Unit settings (the order panel's toggles), sent like orders.
-        local fireStates = { ReturnFire = 0, HoldFire = 1, HoldGround = 2 }
-        function SetFireState(units, state) table.insert(orders, { units = units, toggle = 'fire', value = fireStates[state] or tonumber(state) or 0 }) end
-        ToggleFireState = SetFireState
-        function SetPaused(units, paused) table.insert(orders, { units = units, toggle = 'pause', value = paused and 1 or 0 }) end
-        function SetPausedOfUnit(unit, paused) SetPaused({ unit }, paused) end
-        -- `state` is the bit's current state: it flips.
-        function ToggleScriptBit(units, bit, state) table.insert(orders, { units = units, toggle = 'bit', bit = bit, value = (not state) and 1 or 0 }) end
-        function IssueDockCommand(clear) table.insert(orders, { command = 'UNITCOMMAND_Dock', clear = clear }) end
-        -- Key maps (key name -> action), the most recently added first.
-        local keymaps = {}
-        function IN_AddKeyMapTable(map) table.insert(keymaps, map) end
-        function IN_RemoveKeyMapTable(map)
-            for i = table.getn(keymaps), 1, -1 do
-                if keymaps[i] == map then table.remove(keymaps, i) end
-            end
-        end
-        function IN_ClearKeyMap() keymaps = {} end
-        --- The action bound to the first of `names` found (newest map first).
-        function __engine_key_action(names)
-            for i = table.getn(keymaps), 1, -1 do
-                for _, name in names do
-                    local entry = keymaps[i][name]
-                    if entry then
-                        if type(entry) == 'table' then return entry.action end
-                        return entry
-                    end
-                end
-            end
-            return nil
-        end
-        "#,
-        "=[engine user strings]",
-    )?;
+        /// `index` is 0-based (-1: observer); `GetFocusArmy` is 1-based. A
+        /// request, allowed only as moho allows it ([`request_focus_army`]).
+        SetFocusArmy = |lua, a: i64| request_focus_army(lua, a).map(|_| ()))?;
     // Engine objects that only need to exist as handles for now: the world
     // UI provider (gamemain drives the game interface through it) and the
     // cursor (its textures are kept by `ui::cursor`).
@@ -1318,19 +967,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     }
     bind_handle::<crate::engine::api::moho::WldUIProvider>(lua, "InternalCreateWldUIProvider")?;
     bind_handle::<crate::engine::api::moho::Cursor>(lua, "_c_CreateCursor")?;
-    crate::lua_api::script::exec(
-        lua,
-        r#"
-        local cursor = nil
-        function SetCursor(c) cursor = c end
-        function GetCursor() return cursor end
-        "#,
-        "=[engine cursor]",
-    )?;
     lua_fn!(lua, global,
         #[lua(internal)]
         __engine_wld_provider = |lua, ()| lua.named_registry_value::<Option<Obj<crate::engine::api::moho::WldUIProvider>>>("user.wld_provider"))?;
-    lua.set_app_data(PendingSimCallbacks::default());
     lua_fn!(lua, global,
         /// `SimCallback{Func, Args}`: converted now (FAF changes some Args tables
         /// after sending them) with the selection as it is now (when
@@ -1346,32 +985,20 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 return Ok(());
             };
             let with_selection = with_selection.unwrap_or(false);
-            let units = if with_selection { lua.named_registry_value::<Option<Vec<u32>>>("user.selection")?.unwrap_or_default() } else { Vec::new() };
+            // The selection as the interface sees it now (`SelectUnits` is
+            // synchronous).
+            let units = if with_selection { crate::ui::orders::selection(lua)? } else { Vec::new() };
             let callback = crate::engine::sim::input::SimCallback {
                 func: func.to_string_lossy(),
                 args: crate::engine::sim::lua_data::LuaData::from_lua(&callback.raw_get::<LuaValue>("Args")?),
                 with_selection,
             };
-            let index = {
-                let mut pending = lua.app_data_mut::<PendingSimCallbacks>().expect("PendingSimCallbacks");
-                pending.0.push((callback, units));
-                pending.0.len()
-            };
-            let orders: LuaTable = lua.globals().raw_get("__engine_ui_orders")?;
-            let entry = lua.create_table_with_capacity(0, 1)?;
-            entry.raw_set("callback", index)?;
-            orders.raw_push(entry)
+            crate::ui::orders::push(lua, crate::ui::UiOrder { units: Some(units), callback: Some(callback), ..Default::default() });
+            Ok(())
         })?;
     lua_fn!(lua, global, GetTextureDimensions = |lua, (path, _scale): (String, Option<f64>)| Ok(crate::ui::controls::texture_dimensions(lua, &path)))?;
     Ok(())
 }
-
-/// `SimCallback`s given since the orders were last taken, with the
-/// selection each carries (its entry in `__engine_ui_orders` holds the
-/// 1-based index here).
-#[derive(Default)]
-pub struct PendingSimCallbacks(pub Vec<(crate::engine::sim::input::SimCallback, Vec<u32>)>);
-
 
 /// Every method FAF documents for a user class (`/engine/User/*.lua`
 /// annotations, from the VFS) that isn't implemented gets a stub that warns
@@ -1475,14 +1102,32 @@ mod special_file_tests {
         std::fs::write(&theirs, "12 0 0 1 2 0 - - - 5 - 0 - - -\n").unwrap();
         let (ours, theirs) = (ours.to_string_lossy().into_owned(), theirs.to_string_lossy().into_owned());
 
-        lua.globals().raw_set("__engine_ui_state", "game").unwrap();
+        crate::ui::session::state(&lua).ui_state = UiState::Game;
         assert!(!launch_replay_session(&lua, &ours).unwrap(), "not mid-game");
-        lua.globals().raw_set("__engine_ui_state", "frontend").unwrap();
+        crate::ui::session::state(&lua).ui_state = UiState::Frontend;
         assert!(!launch_replay_session(&lua, &theirs).unwrap(), "no header");
         assert!(!launch_replay_session(&lua, "/no/such/file.rtsreplay").unwrap());
         assert!(lua.globals().raw_get::<LuaValue>("__engine_launch_replay").unwrap().is_nil());
         assert!(launch_replay_session(&lua, &ours).unwrap());
         assert_eq!(lua.globals().raw_get::<String>("__engine_launch_replay").unwrap(), ours);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod loadstring_tests {
+    use super::*;
+
+    /// The interface's `loadstring` takes SupCom Lua and returns nil and
+    /// the message for code that doesn't compile, as in the real game.
+    #[test]
+    fn compiles_supcom_lua() {
+        let lua = Lua::new();
+        register_loadstring(&lua).unwrap();
+        let r: (i64, bool, bool, i64) = lua
+            .load("local f = loadstring('return probe_x, 1 != 2') setfenv(f, { probe_x = 7 }) local x, ne = f() local bad, err = loadstring('return +') return x, ne, bad == nil and type(err) == 'string', loadstring(5) == nil and 1 or 0")
+            .eval()
+            .unwrap();
+        assert_eq!(r, (7, true, true, 1));
     }
 }

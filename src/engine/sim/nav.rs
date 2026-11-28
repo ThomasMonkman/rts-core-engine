@@ -401,17 +401,33 @@ impl NavGrid {
         };
         let open_rows: Vec<Vec<bool>> =
             if parallel { (0..(z1 - z0) as usize).into_par_iter().map(anchors).collect() } else { (0..(z1 - z0) as usize).map(anchors).collect() };
-        if let Some(h) = self.hier[class.0 as usize].as_mut() {
-            h.mark(crate::engine::sim::hpa::Rect { x0, z0, x1, z1 });
-        }
         let (stride, bits) = (self.stride, &mut self.open[class.0 as usize]);
+        // The cells whose bit flipped (their bounding rect): only sectors
+        // they can reach are rebuilt (`Hier::mark`).
+        let mut changed = crate::engine::sim::hpa::Rect { x0: u32::MAX, z0: u32::MAX, x1: 0, z1: 0 };
         for (dz, row) in open_rows.into_iter().enumerate() {
-            let base = (z0 as usize + dz) * stride;
+            let z = z0 + dz as u32;
+            let base = z as usize * stride;
             for (dx, open) in row.into_iter().enumerate() {
                 let x = x0 as usize + dx;
                 let (word, b) = (&mut bits[base + x / 64], 1u64 << (x % 64));
+                if (*word & b != 0) != open {
+                    changed = crate::engine::sim::hpa::Rect {
+                        x0: changed.x0.min(x as u32),
+                        z0: changed.z0.min(z),
+                        x1: changed.x1.max(x as u32 + 1),
+                        z1: changed.z1.max(z + 1),
+                    };
+                }
                 *word = if open { *word | b } else { *word & !b };
             }
+        }
+        if let Some(h) = self.hier[class.0 as usize].as_mut() {
+            // Stale until the next refresh either way (queries until then
+            // see no graph, as they always have), but nothing to rebuild
+            // when no bit flipped.
+            h.touch();
+            h.mark(changed);
         }
     }
 
@@ -838,6 +854,19 @@ pub fn find_path(grid: &NavGrid, search: &mut Search, layer: NavClass, start: Fx
     search.work = 0;
     let s = grid.cell_for(layer, start);
     let mut g = grid.cell_for(layer, goal);
+    if s == g {
+        return vec![goal];
+    }
+    // A unit on a cell its class can't stand on (made by script at a cliff's
+    // edge, its footprint over the drop) first goes to the nearest cell it
+    // can, and its path starts there: searched from where it stands it
+    // would cross the closed cells to the goal. The real game's Fatboy made
+    // 2 from a shore cliff and sent into the water below backs off it and
+    // walks round by the beach (dev/probes probe_fatboy_path C).
+    let s = match grid.passable(layer, s.0, s.1) {
+        true => s,
+        false => nearest_open(grid, layer, s, SNAP_RADIUS).unwrap_or(s),
+    };
     if s == g {
         return vec![goal];
     }
@@ -1296,18 +1325,48 @@ pub(crate) mod tests {
     fn sector_graph_rebuilds_only_around_changes() {
         let mut g = flat(128);
         g.refresh();
-        let mut h = g.hier[0].clone().unwrap();
-        // One structure in sector (1, 1): it and its 4 neighbours rebuild.
+        let fresh_matches = |g: &NavGrid| {
+            let mut fresh = crate::engine::sim::hpa::Hier::new(g.width, g.height);
+            fresh.refresh(&g.open_at(LAND));
+            let h = g.hier(LAND).expect("fresh after refresh");
+            let mut s = Search::default();
+            for (a, b) in [((2, 41), (120, 41)), ((63, 2), (65, 120)), ((2, 2), (125, 125))] {
+                let (mut w1, mut w2) = (0, 0);
+                assert_eq!(h.search(&g.open_at(LAND), &mut s.hier, a, b, u32::MAX, &mut w1), fresh.search(&g.open_at(LAND), &mut s.hier, a, b, u32::MAX, &mut w2));
+                assert_eq!(h.component(a.0, a.1), fresh.component(a.0, a.1));
+            }
+        };
+        let rebuilt = |g: &mut NavGrid| {
+            let mut h = g.hier[0].take().unwrap();
+            let n = h.refresh(&g.open_at(LAND));
+            g.hier[0] = Some(h);
+            n
+        };
+        // One structure inside sector (1, 1): only it rebuilds.
         g.block_rect(Fx::from_num(40), Fx::from_num(40), Fx::from_num(42), Fx::from_num(42), true);
-        h.mark(Rect { x0: 40, z0: 40, x1: 42, z1: 42 });
-        assert_eq!(h.refresh(&g.open_at(LAND)), 5);
-        // And the result is the same as a fresh build.
-        let mut fresh = crate::engine::sim::hpa::Hier::new(g.width, g.height);
-        fresh.refresh(&g.open_at(LAND));
-        let mut s = Search::default();
-        let (a, b) = ((2, 41), (120, 41));
-        let (mut w1, mut w2) = (0, 0);
-        assert_eq!(h.search(&g.open_at(LAND), &mut s.hier, a, b, u32::MAX, &mut w1), fresh.search(&g.open_at(LAND), &mut s.hier, a, b, u32::MAX, &mut w2));
+        assert_eq!(rebuilt(&mut g), 1);
+        fresh_matches(&g);
+        // One across the border of (1, 1) and (2, 1): both, nothing else.
+        g.block_rect(Fx::from_num(62), Fx::from_num(40), Fx::from_num(66), Fx::from_num(42), true);
+        assert_eq!(rebuilt(&mut g), 2);
+        fresh_matches(&g);
+        // One on the last column of (1, 0): its east neighbour reads it.
+        g.block_rect(Fx::from_num(63), Fx::from_num(10), Fx::from_num(64), Fx::from_num(12), true);
+        assert_eq!(rebuilt(&mut g), 2);
+        fresh_matches(&g);
+        // One over cells already covered: stale until the refresh, but
+        // nothing to rebuild.
+        g.block_rect(Fx::from_num(40), Fx::from_num(40), Fx::from_num(41), Fx::from_num(41), true);
+        assert!(g.hier(LAND).is_none(), "stale until the refresh");
+        assert_eq!(rebuilt(&mut g), 0);
+        assert!(g.hier(LAND).is_some());
+        // Removing them all again.
+        g.block_rect(Fx::from_num(40), Fx::from_num(40), Fx::from_num(41), Fx::from_num(41), false);
+        g.block_rect(Fx::from_num(40), Fx::from_num(40), Fx::from_num(42), Fx::from_num(42), false);
+        g.block_rect(Fx::from_num(62), Fx::from_num(40), Fx::from_num(66), Fx::from_num(42), false);
+        g.block_rect(Fx::from_num(63), Fx::from_num(10), Fx::from_num(64), Fx::from_num(12), false);
+        g.refresh();
+        fresh_matches(&g);
     }
 
     #[test]

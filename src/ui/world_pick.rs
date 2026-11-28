@@ -63,9 +63,44 @@ impl PickView {
         px >= 0.0 && py >= 0.0 && px < self.screen[0] && py < self.screen[1]
     }
 
+    /// Bilinearly interpolated terrain height at world (x, z), clamped to
+    /// the map (the sim's `Terrain::height_at`, in floats).
+    fn terrain_height(&self, x: f32, z: f32) -> f32 {
+        let Some(t) = &self.terrain else { return self.target_y };
+        let (x, z) = (x.clamp(0.0, t.width as f32), z.clamp(0.0, t.height as f32));
+        let (ix, iz) = ((x as u32).min(t.width.saturating_sub(1)), (z as u32).min(t.height.saturating_sub(1)));
+        let (fx, fz) = (x - ix as f32, z - iz as f32);
+        let at = |xi: u32, zi: u32| t.heights.get((zi.min(t.height) * (t.width + 1) + xi.min(t.width)) as usize).copied().unwrap_or(self.target_y);
+        let top = at(ix, iz) + (at(ix + 1, iz) - at(ix, iz)) * fx;
+        let bottom = at(ix, iz + 1) + (at(ix + 1, iz + 1) - at(ix, iz + 1)) * fx;
+        top + (bottom - top) * fz
+    }
+
     /// The ground under interface point (x, y) (from the window's top
     /// left), if any.
     pub fn ground(&self, x: f32, y: f32) -> Option<Vec3> {
+        match self.march(x, y, |x, z| self.height_at(x, z))? {
+            (p, true) => Some(Vec3::new(p.x, self.height_at(p.x, p.z), p.z)),
+            (p, false) => Some(p),
+        }
+    }
+
+    /// Where the ray through interface point (x, y) meets the terrain or,
+    /// above it, the water surface, and the terrain height there: moho's
+    /// `__EngineStats` `Camera` / `Cursor` `Position` and `Elevation` (over
+    /// sea the position is on the surface, the elevation the sea floor
+    /// below it: FAF probe `probe_engine_stats`).
+    pub fn cursor(&self, x: f32, y: f32) -> Option<(Vec3, f32)> {
+        let water = self.terrain.as_ref().and_then(|t| t.water).unwrap_or(f32::MIN);
+        let (p, hit) = self.march(x, y, |x, z| self.terrain_height(x, z).max(water))?;
+        let ground = self.terrain_height(p.x, p.z);
+        Some((if hit { Vec3::new(p.x, ground.max(water), p.z) } else { p }, ground))
+    }
+
+    /// Where the camera ray through interface point (x, y) first goes
+    /// under `height(x, z)` (march, then bisect), and whether it did: rays
+    /// that miss meet the camera's look-at height.
+    fn march(&self, x: f32, y: f32, height: impl Fn(f32, f32) -> f32) -> Option<(Vec3, bool)> {
         let (px, py) = (x * self.ui_scale - self.origin[0], y * self.ui_scale - self.origin[1]);
         if self.screen[0] <= 0.0 || self.screen[1] <= 0.0 {
             return None;
@@ -79,7 +114,7 @@ impl PickView {
         }
         let below = |t: f32| {
             let p = near + d * t;
-            p.y <= self.height_at(p.x, p.z)
+            p.y <= height(p.x, p.z)
         };
         let step = (self.distance / 300.0).max(0.25);
         let max_t = self.distance * 6.0 + 1000.0;
@@ -92,7 +127,7 @@ impl PickView {
                 return None;
             }
             let t = (self.target_y - near.y) / d.y;
-            return (t >= 0.0).then(|| near + d * t);
+            return (t >= 0.0).then(|| (near + d * t, false));
         }
         let (mut lo, mut hi) = ((t - step).max(0.0), t);
         for _ in 0..12 {
@@ -103,8 +138,7 @@ impl PickView {
                 lo = mid;
             }
         }
-        let p = near + d * hi;
-        Some(Vec3::new(p.x, self.height_at(p.x, p.z), p.z))
+        Some((near + d * hi, true))
     }
 }
 
@@ -120,7 +154,12 @@ impl PickViews {
 
     /// The topmost view under interface point (x, y), else the first.
     fn at(&self, x: f32, y: f32) -> Option<&PickView> {
-        self.0.iter().rev().find(|v| v.contains(x, y)).or(self.0.first())
+        self.under(x, y).or(self.0.first())
+    }
+
+    /// The topmost view under interface point (x, y), if any.
+    pub fn under(&self, x: f32, y: f32) -> Option<&PickView> {
+        self.0.iter().rev().find(|v| v.contains(x, y))
     }
 }
 
@@ -225,5 +264,28 @@ mod tests {
         let v = PickView { camera: "WorldCamera".into(), origin: [0.0, 0.0], view_proj: proj * view, inv_view_proj: (proj * view).inverse(), screen: [200.0, 200.0], ui_scale: 2.0, target_y: 3.0, distance: 50.0, terrain: Some(Arc::new(terrain)) };
         let p = v.ground(50.0, 50.0).unwrap();
         assert!((p - Vec3::new(10.0, 3.0, 20.0)).length() < 0.1, "{p}");
+    }
+
+    #[test]
+    fn the_cursor_is_on_the_surface_over_the_ground_below() {
+        // Straight down at (10.5, 20) on a slope rising 0.5 a unit in x:
+        // on land the cursor is on the ground, interpolated (5.25, not the
+        // nearest sample's 5); under water at 8 it's on the surface, and the
+        // elevation is still the ground's.
+        let eye = Vec3::new(10.5, 53.0, 20.0);
+        let view = glam::camera::rh::view::look_at_mat4(eye, Vec3::new(10.5, 5.0, 20.0), Vec3::NEG_Z);
+        let proj = glam::camera::rh::proj::directx::perspective(1.0, 1.0, 1.0, 1000.0);
+        let heights = (0..65 * 65).map(|i| (i % 65) as f32 * 0.5).collect::<Vec<_>>();
+        let pick = |water| {
+            let terrain = TerrainView { width: 64, height: 64, heights: heights.clone(), water, map: None };
+            let v = PickView { camera: "WorldCamera".into(), origin: [0.0, 0.0], view_proj: proj * view, inv_view_proj: (proj * view).inverse(), screen: [200.0, 200.0], ui_scale: 2.0, target_y: 5.0, distance: 50.0, terrain: Some(Arc::new(terrain)) };
+            v.cursor(50.0, 50.0).unwrap()
+        };
+        let (p, ground) = pick(None);
+        assert!((p - Vec3::new(10.5, 5.25, 20.0)).length() < 0.01, "{p}");
+        assert!((ground - 5.25).abs() < 0.01, "{ground}");
+        let (p, ground) = pick(Some(8.0));
+        assert!((p - Vec3::new(10.5, 8.0, 20.0)).length() < 0.01, "{p}");
+        assert!((ground - 5.25).abs() < 0.01, "{ground}");
     }
 }

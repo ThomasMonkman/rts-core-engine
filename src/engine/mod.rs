@@ -19,7 +19,7 @@ use crate::debug_ui::DebugUiState;
 use crate::engine::lua::execute::exec_lua_string;
 use crate::engine::lua::script_cache::ScriptCache;
 use mlua::prelude::*;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use tracing::{info, warn};
@@ -88,7 +88,8 @@ impl Engine {
         let mut mount_points = init_script_output.mount_points.clone();
         crate::net::map_download::set_maps_dir(vault.unwrap_or(&init_script_output.vault).join("maps"));
         if let Some(vault) = vault {
-            mount_points.extend(vault_maps(vault).map_err(LuaError::external)?);
+            let mut banks = mount_points.iter().filter(|m| m.mountpoint.eq_ignore_ascii_case("/sounds")).flat_map(|m| wave_banks(&m.source)).collect();
+            mount_points.extend(vault_maps(vault, &mut banks).map_err(LuaError::external)?);
         }
         let mut hook_paths = init_script_output.hook_paths.clone();
         hook_paths.push(ENGINE_HOOK.to_string());
@@ -308,9 +309,13 @@ impl Engine {
             Some((a, b)) => Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?, true)),
             None => v.parse::<u64>().ok().map(|t| (t, t, false)),
         }).zip(std::env::var("RTS_DUMP_FILE").ok());
-        let mut next = std::time::Instant::now();
-        // Paced (headless network tests): speed changes apply as in a window.
-        let pace = self.pace.map(snapshot::SimControl::new);
+        let mut pacer = snapshot::Pacer::new(std::time::Instant::now());
+        // Paced (a window's `--ticks`, headless network tests): speed
+        // changes apply as in a real-time game. A window's run shares its
+        // control, so the player's speed changes reach it and the
+        // interface hears the speed it really runs at.
+        let pace = self.pace.map(|p| self.control.clone().unwrap_or_else(|| snapshot::SimControl::new(p)));
+        let mut meter = snapshot::RateMeter::new(std::time::Instant::now());
         // Dev: `RTS_NET_SPEED_AT=tick:step` asks for game speed `step` at
         // `tick`, as a player pressing `+` / `-` would.
         let speed_at = std::env::var("RTS_NET_SPEED_AT").ok().and_then(|v| {
@@ -331,17 +336,22 @@ impl Engine {
             self.step()?;
             self.after_step()?;
             self.note_net_tick(step_started);
+            // `--headless-with-ui`: the interface handles this tick first.
+            snapshot::await_consumer(&self.sim_lua, || self.watchdog.beat());
             if let Some(control) = &pace {
                 self.sync_net_speed(control);
             }
-            if let Some(speed) = pace.as_ref().map(|c| c.shown()).filter(|&s| s != snapshot::SimControl::MAX) {
-                let speed = self.net_pace(speed);
-                let factor = self.net_catch_up(speed);
-                next += std::time::Duration::from_micros(((100_000 * 100 / speed.max(1) as u64) as f64 * factor) as u64);
-                match next.checked_duration_since(std::time::Instant::now()) {
-                    Some(wait) => std::thread::sleep(wait),
-                    None => next = std::time::Instant::now(),
+            let speed = pace.as_ref().map(|c| self.net_pace(c.shown()));
+            if let (Some(control), Some(speed)) = (&pace, speed) {
+                meter.tick(std::time::Instant::now());
+                if let Some(actual) = meter.actual(speed) {
+                    control.set_effective(actual);
                 }
+            }
+            match speed {
+                Some(snapshot::SimControl::MAX) => pacer.restart(std::time::Instant::now()),
+                Some(speed) => self.pace_tick(&mut pacer, speed),
+                None => {}
             }
             if gc_every_tick {
                 sim::gc::collect(&self.sim_lua)?;
@@ -413,12 +423,10 @@ impl Engine {
     /// time only paces the loop; it never reaches sim state.
     pub fn run_realtime(&mut self) -> LuaResult<()> {
         let control = self.control.clone().unwrap_or_else(|| snapshot::SimControl::new(100));
-        let mut next = std::time::Instant::now();
-        // Ticks run since when, and the speed (percent) they came to: what
-        // the game really runs at when the machine can't keep up with the
-        // speed asked for (or runs flat out, "max").
-        let mut measured = (std::time::Instant::now(), 0u32);
-        let mut achieved: Option<u32> = None;
+        let mut pacer = snapshot::Pacer::new(std::time::Instant::now());
+        // What the game really runs at when the machine can't keep up with
+        // the speed asked for (or runs flat out, "max").
+        let mut meter = snapshot::RateMeter::new(std::time::Instant::now());
         // Ticks that took longer than their real-time slot (waiting for
         // players excluded: the lockstep logs that), for the log.
         let mut slow_ticks = crate::diagnostics::Hitches::new("sim tick");
@@ -455,14 +463,17 @@ impl Engine {
                     snapshot::republish(&self.sim_lua);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
-                next = std::time::Instant::now();
-                measured = (next, 0);
+                let now = std::time::Instant::now();
+                pacer.restart(now);
+                meter.restart(now);
                 continue;
             }
             let step_started = std::time::Instant::now();
             self.step()?;
             self.after_step()?;
             self.note_net_tick(step_started);
+            // `--headless-with-ui`: the interface handles this tick first.
+            snapshot::await_consumer(&self.sim_lua, || self.watchdog.beat());
             self.sync_net_speed(&control);
             let speed = self.net_pace(control.shown());
             if speed != snapshot::SimControl::MAX {
@@ -470,32 +481,30 @@ impl Engine {
                 let cost = step_started.elapsed().as_secs_f64() * 1000.0 - waited;
                 slow_ticks.note(cost, 100.0 * 100.0 / speed.max(1) as f64, tick);
             }
-            // 10 ticks a second is 100%.
-            measured.1 += 1;
-            let secs = measured.0.elapsed().as_secs_f64();
-            if secs >= 0.5 {
-                achieved = Some((measured.1 as f64 * 10.0 / secs).round() as u32);
-                measured = (std::time::Instant::now(), 0);
+            meter.tick(std::time::Instant::now());
+            if let Some(actual) = meter.actual(speed) {
+                control.set_effective(actual);
             }
-            // The speed shown as actual: what the loop paces at, unless it
-            // measurably falls short (5% slack for timer jitter).
-            let actual = match achieved {
-                Some(a) if speed == snapshot::SimControl::MAX || (a as f64) < speed as f64 * 0.95 => a,
-                _ => speed,
-            };
-            control.set_effective(actual);
             if speed == snapshot::SimControl::MAX {
-                next = std::time::Instant::now();
+                pacer.restart(std::time::Instant::now());
                 continue;
             }
-            // 100 ms per tick at 1x.
-            let factor = self.net_catch_up(speed);
-            next += std::time::Duration::from_micros(((100_000 * 100 / speed.max(1) as u64) as f64 * factor) as u64);
-            match next.checked_duration_since(std::time::Instant::now()) {
-                Some(wait) => std::thread::sleep(wait),
-                // Running behind: don't try to catch up in a burst.
-                None => next = std::time::Instant::now(),
-            }
+            self.pace_tick(&mut pacer, speed);
+        }
+    }
+
+    /// Waits for the next tick's slot at `speed` (percent; 100 ms per tick
+    /// at 1x), on the pacer's absolute schedule: a late tick is made up by
+    /// the next ones (a bounded debt), so the speed holds on average. In a
+    /// networked game the slot is shorter while catching up with the other
+    /// players, and time spent waiting for their turns isn't owed.
+    fn pace_tick(&self, pacer: &mut snapshot::Pacer, speed: u32) {
+        let factor = self.net_catch_up(speed);
+        let period = std::time::Duration::from_micros(((100_000 * 100 / speed.max(1) as u64) as f64 * factor) as u64);
+        let waited = self.sim_lua.app_data_ref::<crate::net::lockstep::Lockstep>().map_or(0.0, |l| l.last_wait_ms());
+        let excused = std::time::Duration::from_secs_f64(waited.max(0.0) / 1000.0);
+        if let Some(deadline) = pacer.after_tick(std::time::Instant::now(), period, excused) {
+            snapshot::Pacer::wait_until(deadline);
         }
     }
 
@@ -987,7 +996,11 @@ pub fn repository_root(init_path: &Path) -> Option<PathBuf> {
 /// folder in `<vault>/mods` (FAF's `MountModContent`: `/mods/<name>`), in
 /// name order. A vault without one of them has none of that kind (a
 /// mods-only vault works); a vault that isn't a folder is an error.
-fn vault_maps(vault: &Path) -> std::io::Result<Vec<vfs::MountPoint>> {
+///
+/// A map's or mod's `sounds` folder is mounted at `/sounds` too, as FAF's
+/// init file does, unless one of its wave banks has the name of one already
+/// there (`banks`: lower-case `.xwb` names, added to).
+fn vault_maps(vault: &Path, banks: &mut BTreeSet<String>) -> std::io::Result<Vec<vfs::MountPoint>> {
     if !vault.is_dir() {
         return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("vault folder not found: {}", vault.display())));
     }
@@ -995,10 +1008,32 @@ fn vault_maps(vault: &Path) -> std::io::Result<Vec<vfs::MountPoint>> {
     for kind in ["maps", "mods"] {
         let dir = vault.join(kind);
         if dir.is_dir() {
-            mounts.extend(vault_folders(&dir, kind)?);
+            for folder in vault_folders(&dir, kind)? {
+                let sounds = folder.source.join("sounds");
+                mounts.push(folder);
+                if !sounds.is_dir() {
+                    continue;
+                }
+                let own = wave_banks(&sounds);
+                if let Some(taken) = own.iter().find(|b| banks.contains(*b)) {
+                    tracing::warn!(folder = %sounds.display(), bank = %taken, "vault: sound bank name already in use, sounds not mounted");
+                    continue;
+                }
+                banks.extend(own);
+                mounts.push(vfs::MountPoint { source: sounds, mountpoint: "/sounds".into() });
+            }
         }
     }
     Ok(mounts)
+}
+
+/// The wave banks (`.xwb`) in a sounds folder, as lower-case file names.
+fn wave_banks(sounds: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(sounds) else { return Vec::new() };
+    entries
+        .filter_map(|e| e.ok()?.file_name().to_str().map(str::to_lowercase))
+        .filter(|name| name.ends_with(".xwb"))
+        .collect()
 }
 
 fn vault_folders(dir: &Path, kind: &str) -> std::io::Result<Vec<vfs::MountPoint>> {
@@ -1023,21 +1058,37 @@ mod tests {
     /// FAF 3839 moved the development init file to `setup/bin/`: the
     /// repository is still the checkout's root.
     #[test]
+    fn a_vault_mods_sounds_are_mounted_unless_a_bank_name_is_taken() {
+        let vault = std::env::temp_dir().join(format!("vault_sounds_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&vault);
+        for (name, bank) in [("a_music", "Tunes.xwb"), ("b_clash", "INTERFACE.XWB"), ("c_same", "tunes.xwb")] {
+            std::fs::create_dir_all(vault.join("mods").join(name).join("sounds")).unwrap();
+            std::fs::write(vault.join("mods").join(name).join("sounds").join(bank), "").unwrap();
+        }
+        // The game's own bank, and the first mod's, keep their names.
+        let mut banks = BTreeSet::from(["interface.xwb".to_string()]);
+        let mounts = vault_maps(&vault, &mut banks).unwrap();
+        assert_eq!(mounts.iter().map(|m| m.mountpoint.as_str()).collect::<Vec<_>>(), ["/mods/a_music", "/sounds", "/mods/b_clash", "/mods/c_same"]);
+        assert_eq!(mounts[1].source, vault.join("mods/a_music/sounds"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
     fn a_vault_without_maps_or_mods_mounts_what_it_has() {
         let vault = std::env::temp_dir().join(format!("vault_parts_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&vault);
         std::fs::create_dir_all(vault.join("mods/RNGAI")).unwrap();
-        let mounts = vault_maps(&vault).unwrap();
+        let mounts = vault_maps(&vault, &mut BTreeSet::new()).unwrap();
         assert_eq!(mounts.iter().map(|m| m.mountpoint.as_str()).collect::<Vec<_>>(), ["/mods/rngai"]);
         std::fs::create_dir_all(vault.join("maps/canis")).unwrap();
-        let mounts = vault_maps(&vault).unwrap();
+        let mounts = vault_maps(&vault, &mut BTreeSet::new()).unwrap();
         assert_eq!(mounts.iter().map(|m| m.mountpoint.as_str()).collect::<Vec<_>>(), ["/maps/canis", "/mods/rngai"]);
         // Only maps.
         std::fs::remove_dir_all(vault.join("mods")).unwrap();
-        let mounts = vault_maps(&vault).unwrap();
+        let mounts = vault_maps(&vault, &mut BTreeSet::new()).unwrap();
         assert_eq!(mounts.iter().map(|m| m.mountpoint.as_str()).collect::<Vec<_>>(), ["/maps/canis"]);
         // A vault folder that isn't there is still an error (a typo).
-        assert!(vault_maps(&vault.join("nope")).is_err());
+        assert!(vault_maps(&vault.join("nope"), &mut BTreeSet::new()).is_err());
         let _ = std::fs::remove_dir_all(&vault);
     }
 

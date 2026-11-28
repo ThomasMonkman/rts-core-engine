@@ -82,12 +82,14 @@ saved_types! {
     "attack_vectors" => api::attack_vectors::AttackVectors,
     "beaming" => api::transport::Beaming,
     "loading" => api::transport::Loading,
+    "pickups" => api::transport::Pickups,
     "ferry_tasks" => api::transport::FerryTasks,
     "ferry_routes" => api::ferry::FerryRoutes,
     "ferry_waits" => api::ferry::FerryWaits,
     "carrier_launches" => api::transport::CarrierLaunches,
     "beams" => api::beam::Beams,
     "captures" => api::capture::Captures,
+    "sacrifices" => api::sacrifice::Sacrifices,
     "cheats" => api::command_source::Cheats,
     "reported" => api::economy_event::Reported,
     "falling" => api::movement::Falling,
@@ -110,6 +112,7 @@ saved_types! {
     // would have, or every later gcid shifts.
     "footprints" => api::construction::Footprints,
     "decay_rates" => api::construction::DecayRates,
+    "regen_assist_mults" => api::construction::RegenAssistMults,
     "lifetimes" => api::effect::Lifetimes,
     "buildable" => api::build::BuildableCache,
 }

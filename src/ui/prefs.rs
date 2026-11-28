@@ -19,7 +19,42 @@ pub fn load_file(lua: &Lua, source: &str) -> LuaResult<()> {
         let (k, v) = pair?;
         set.call::<()>((k, v))?;
     }
-    Ok(())
+    migrate_profiles(lua)
+}
+
+/// Moho's profiles are a list and `current` an index into it (what FAF's
+/// and LOUD's `profile.lua` count and select by). Older prefs written by
+/// this engine keyed them by name (`current = 'player'`): those profiles
+/// move to the end of the list, by key, and `current` becomes the index of
+/// the one it named.
+fn migrate_profiles(lua: &Lua) -> LuaResult<()> {
+    lua.load(
+        r#"
+        local profile = GetPreference('profile')
+        if type(profile) ~= 'table' or type(profile.profiles) ~= 'table' then return end
+        local list, named = {}, {}
+        for k, v in pairs(profile.profiles) do
+            if type(k) == 'number' then table.insert(list, k) else table.insert(named, k) end
+        end
+        if table.getn(named) == 0 and type(profile.current) ~= 'string' then return end
+        table.sort(list)
+        table.sort(named, function(a, b) return tostring(a) < tostring(b) end)
+        local profiles, current = {}, nil
+        for _, k in ipairs(list) do
+            table.insert(profiles, profile.profiles[k])
+            if k == profile.current then current = table.getn(profiles) end
+        end
+        for _, k in ipairs(named) do
+            table.insert(profiles, profile.profiles[k])
+            if k == profile.current then current = table.getn(profiles) end
+        end
+        profile.profiles = profiles
+        profile.current = current or (table.getn(profiles) > 0 and 1 or nil)
+        SetPreference('profile', profile)
+        "#,
+    )
+    .set_name("=[engine prefs migration]")
+    .exec()
 }
 
 pub fn register(lua: &Lua) -> LuaResult<()> {
@@ -73,7 +108,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         end
         function SavePreferences() rawset(_G, '__engine_save_prefs', true) end
         -- A fresh player profile, as a new install has: the minimap on.
-        SetPreference('profile', { current = 'player', profiles = { player = { Name = 'Player', stratview = true } } })
+        -- Profiles are a list and `current` an index, as in moho.
+        SetPreference('profile', { current = 1, profiles = { { Name = 'Player', stratview = true } } })
         "#,
     )
     .set_name("=[engine prefs]")

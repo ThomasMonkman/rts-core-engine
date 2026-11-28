@@ -115,6 +115,8 @@ fn main() -> std::process::ExitCode {
         print!("{}", cli::LICENSE);
         return std::process::ExitCode::SUCCESS;
     }
+    // Before any Lua VM: level 2's zones are chosen as functions register.
+    rts_core_engine::engine::tracy::set_level(cli.tracy_level);
     if cli.enable_disk_watch {
         rts_core_engine::engine::disk_watch::enable();
     }
@@ -188,7 +190,10 @@ fn main() -> std::process::ExitCode {
                 })
                 .with_filter(ui_filter),
         )
-        .with(tracy_layer())
+        // Filtered like the logs: unfiltered, a window's wgpu / naga TRACE
+        // events (millions) outran the link to Tracy and the busiest
+        // threads' zones (sim, render) fell ever further behind.
+        .with(tracy_layer().with_filter(log_filter()))
         .init();
     rts_core_engine::threads::init_global_pool();
     // Before any VM or script cache: it changes how scripts compile.
@@ -266,7 +271,20 @@ fn main() -> std::process::ExitCode {
     };
     // Windowed runs attach a renderer through a snapshot channel; headless
     // runs don't create one, so the sim builds no snapshots.
-    let (sink, snapshots) = if headless {
+    // `--headless-with-ui`: the interface runs on this thread, in lockstep
+    // with the sim (`render::headless_ui`).
+    let (mut ui_link, mut ui_input) = (None, None);
+    let (sink, snapshots) = if cli.headless_with_ui {
+        let (mut sink, rx, _) = engine::snapshot::channel();
+        let handled = sink.lockstep();
+        let (orders, link) = engine::sim::input::channel();
+        (ui_link, ui_input) = (Some((rx, handled, orders)), Some(link));
+        (Some(sink), None)
+    } else if headless && cli.headless_snapshots {
+        let (sink, rx, _) = engine::snapshot::channel();
+        std::thread::spawn(move || rx.into_iter().for_each(drop));
+        (Some(sink), None)
+    } else if headless {
         (None, None)
     } else {
         let (sink, rx, request) = engine::snapshot::channel();
@@ -299,7 +317,9 @@ fn main() -> std::process::ExitCode {
     // not. A headless run goes flat out unless given a --speed.
     let pace = cli.pace(headless);
     // The renderer's order channel (windowed only).
-    let (orders, input_link) = if headless {
+    let (orders, input_link) = if ui_input.is_some() {
+        (None, ui_input.take())
+    } else if headless {
         (None, None)
     } else {
         let (tx, link) = engine::sim::input::channel();
@@ -463,6 +483,17 @@ fn main() -> std::process::ExitCode {
         }
     };
 
+    // `--headless-with-ui`: the sim on its thread, the interface on this one.
+    if let Some((rx, handled, orders)) = ui_link {
+        let sim = std::thread::Builder::new().name("sim".into()).spawn(move || {
+            engine::tracy::name_thread("sim");
+            run_engine()
+        }).expect("sim thread");
+        engine::tracy::name_thread("interface");
+        let options = render::headless_ui::Options { prefs: cli.prefs.clone(), ui_lua: cli.ui_lua.clone(), player: cli.player.filter(|&a| a > 0) };
+        render::headless_ui::run(rx, handled, orders, options);
+        return if sim.join().unwrap_or(false) { std::process::ExitCode::SUCCESS } else { std::process::ExitCode::from(EXIT_START_FAILED) };
+    }
     // `--headless`: run the engine to completion without opening a window
     // (used for the scripted run → fix missing API loop).
     if headless {

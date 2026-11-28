@@ -263,7 +263,9 @@ pub fn setup(lua: &Lua, cfg: &SessionConfig) -> LuaResult<()> {
     if let Some(path) = &cfg.script {
         let _s = crate::prof_span!("session script");
         let code = std::fs::read_to_string(path).map_err(|e| LuaError::runtime(format!("--script {path}: {e}")))?;
-        lua.load(code).set_name(format!("@{path}")).exec()?;
+        // Translated as game Lua is: a `--script` file is the game's Lua,
+        // so one probe body gives the same here and in the real game.
+        lua.load(crate::engine::lua_translation::translate(&code)).set_name(format!("@{path}")).exec()?;
         info!(path, "session script complete");
     }
     Ok(())

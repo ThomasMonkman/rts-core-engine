@@ -89,7 +89,8 @@ pub struct AimArc {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WeaponTarget {
     Entity(EntityId),
-    /// Attack-ground point (`SetTargetGround`); never dropped automatically.
+    /// Ground point: an attack-ground order's (kept while the order lasts),
+    /// or a script's `SetTargetGround` (dropped at the next target scan).
     Ground(FxVec3),
 }
 
@@ -139,7 +140,7 @@ pub struct WeaponState {
     pub arc: Option<AimArc>,
     /// `SlavedToBody`: the unit turns to face the target (a mobile unit
     /// engages targets outside the turret's arc and swings round to them;
-    /// see `movement::Env::face`).
+    /// see `movement::Env::face`). It doesn't hold the weapon's fire.
     pub slaved_to_body: bool,
     /// `SlavedToBodyArcRange` (radians; moho's default 1 degree): within
     /// this of the target the body counts as facing it.
@@ -319,9 +320,18 @@ pub struct WeaponState {
     /// The current target came from the unit's attack order (dropped when
     /// the order stops forcing it).
     pub target_from_order: bool,
-    /// The unit's attack-order target as this weapon last saw it: a new one
-    /// resets the weapon's target ([`advance_target`]).
+    /// The script set a ground point (`SetTargetGround`) since the last
+    /// update: it survives that update's target scan.
+    #[serde(default)]
+    pub ground_set: bool,
+    /// The unit's attack-order target once the attacker has come in range
+    /// of it (moho's desired target): setting it resets the weapon's target
+    /// ([`advance_target`]).
     pub order_seen: Option<WeaponTarget>,
+    /// `NeedPrep`: an attack order runs the weapon's `OnGotTarget` once the
+    /// attacker is in range ([`advance_target`]).
+    #[serde(default)]
+    pub need_prep: bool,
     /// `ManualFire`: never picks its own targets.
     pub manual_fire: bool,
     /// `OverChargeWeapon`: an overcharge order fires it (the first such
@@ -352,8 +362,8 @@ pub struct WeaponState {
     /// SupremeCommander.exe 0x6dc028, 0x6dc1b2).
     pub ignore_if_disabled: bool,
     /// A beam fixed to the hull (`Turreted = false`, e.g. the CZAR's Quantum
-    /// Beam Generator): its first muzzle bone, along which it fires; it fires
-    /// only at a target within `firing_tolerance` of that line.
+    /// Beam Generator): its first muzzle bone, along which it fires, at
+    /// any target in range (the firing tolerance doesn't gate it).
     pub fixed_beam_muzzle: Option<u32>,
     /// `MaximumBeamLength`: how far a collision beam reaches from its muzzle
     /// (`None` = `max_radius`). The Novax satellite's beam (200) has to span
@@ -368,8 +378,19 @@ pub struct WeaponState {
     pub max_storage: u32,
     /// A silo weapon already fired at its current target: moho sends
     /// counted weapons one `OnFire` per target (FAF's script then fires the
-    /// missile itself), not one per reload.
+    /// missile itself), not one per reload. Not a missile defence: it fires
+    /// again at the missile it holds once reloaded (FAF probe `probe_smd2`:
+    /// an SMD whose interceptor was destroyed launched another 21 ticks
+    /// after the first, at the same nuke).
     pub fired_at_target: bool,
+    /// The turret is turning: moho's aim manipulator +0xc4, set and
+    /// cleared by its update (0x1021a190) from whether the yaw bone turned
+    /// more than 0.001 rad this tick, with `OnStartTracking(label)` /
+    /// `OnStopTracking(label)` on each change. So tracking starts on the
+    /// first tick the turret turns and stops on the first it doesn't,
+    /// target or not; the swing back to rest is another pair, and a target
+    /// dead ahead gives none (FAF probe probe_q_track).
+    pub tracking: bool,
 }
 
 /// [`WeaponState::allows`] on the two fields (the targeting step's closure
@@ -398,6 +419,7 @@ impl WeaponState {
             silo: None,
             max_storage: 0,
             fired_at_target: false,
+            tracking: false,
             enabled: true,
             fire_target_layers: LayerMask::empty(),
             priorities: Vec::new(),
@@ -474,7 +496,9 @@ impl WeaponState {
             collide_friendly: false,
             firing_randomness: Fx::ZERO,
             target_from_order: false,
+            ground_set: false,
             order_seen: None,
+            need_prep: false,
             damage: None,
         }
     }
@@ -586,8 +610,22 @@ pub enum WeaponEventKind {
     HaltFire,
     LostTarget,
     GotTarget,
+    /// The turret began to turn / came to rest (`WeaponState::tracking`).
+    StartTracking,
+    StopTracking,
+    /// A `NeedPrep` weapon's unit took an attack order: `OnGotTarget`,
+    /// with no target set and nothing tracked yet.
+    Prep,
     Fire,
 }
+
+/// The most events one weapon raises in a tick: a target lost, another
+/// got, the turret starting or stopping, a shot.
+const MAX_EVENTS: usize = 4;
+
+/// A turret that turned its yaw more than this in a tick (radians) is
+/// tracking (moho's aim update, MohoEngine.dll 0x1071cd40).
+const TRACKING_EPSILON: Fx = Fx::from_bits(4_294_967); // 0.001
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WeaponEvent {
@@ -615,6 +653,10 @@ pub struct ProjectileView {
     pub velocity: FxVec3,
     pub army: Option<u32>,
     pub category: Option<u32>,
+    /// The blueprint's `DesiredShooterCap`.
+    pub shooter_cap: u32,
+    /// Units holding it as a weapon target ([`claims`]).
+    pub shooters: u32,
 }
 
 /// A missile silo weapon (`CountedProjectile`): fires only with ammo.
@@ -635,6 +677,11 @@ pub struct OrderedTarget {
     pub target: WeaponTarget,
     pub silo: Option<SiloKind>,
     pub overcharge: Option<u32>,
+    /// The attacker is in range of the target
+    /// ([`Weapons::in_attack_range`]): moho's attack task sets it as the
+    /// desired target only then ([`advance_target`]).
+    #[serde(default)]
+    pub in_range: bool,
 }
 
 /// A `ReTargetOnMiss` weapon's misses ([`WeaponState::retarget`]).
@@ -686,10 +733,112 @@ pub struct Weapons {
     /// What target searches pass over (set by the caller).
     pub filters: SearchFilters,
     /// Per-weapon events of the last pass, reused (indexed like `list`).
-    scratch: Vec<[Option<WeaponEventKind>; 3]>,
+    scratch: Vec<[Option<WeaponEventKind>; MAX_EVENTS]>,
     /// Posed muzzles (and clip-posed barrel pitches) of the last
     /// [`Weapons::pose_muzzles`], reused.
     posed: Vec<Option<(FxVec3, Option<crate::engine::sim::pose::AimBase>)>>,
+    /// The armies in each unit grid cell this step, reused.
+    #[serde(skip)]
+    cells: ArmyCells,
+}
+
+/// Which armies have units in each unit grid cell, and which armies each
+/// is hostile to, as of this step (rebuilt before it; the world doesn't
+/// change during it). A unit search only takes a hostile unit, so a search
+/// whose cells hold none of its army's enemies can find nothing: it skips
+/// the walk over its candidates (most searches late in a game: a base's
+/// defences and idle units with only friends about).
+pub struct ArmyCells {
+    /// Per unit grid cell, a bit per army (armies 0..64) with a unit listed
+    /// in it.
+    masks: Vec<u64>,
+    /// The armies with a unit in some cell.
+    present: u64,
+    /// Per army in `present`, the armies in `present` it's hostile to.
+    enemies: [u64; 64],
+    /// A unit with an army of 64 or more is listed: no skipping.
+    off: bool,
+    /// Cell index buffer.
+    scratch: Vec<u32>,
+}
+
+impl Default for ArmyCells {
+    fn default() -> Self {
+        ArmyCells { masks: Vec::new(), present: 0, enemies: [0; 64], off: false, scratch: Vec::new() }
+    }
+}
+
+impl ArmyCells {
+    fn build(&mut self, world: &EntityWorld, armies: Option<&Armies>) {
+        let _s = crate::prof_span!("weapons army cells");
+        self.masks.clear();
+        self.present = 0;
+        self.off = false;
+        self.scratch.clear();
+        let (lo, hi) = (Fx::MIN, Fx::MAX);
+        world.unit_cells_in(lo, lo, hi, hi, &mut self.scratch);
+        let n = self.scratch.iter().copied().max().map_or(0, |m| m as usize + 1);
+        self.masks.resize(n, 0);
+        for &c in &self.scratch {
+            let mut m = 0u64;
+            for &id in world.unit_cell(c) {
+                if let Some(a) = world.get(id).and_then(|e| e.army) {
+                    if a >= 64 {
+                        self.off = true;
+                    } else {
+                        m |= 1 << a;
+                    }
+                }
+            }
+            self.masks[c as usize] = m;
+            self.present |= m;
+        }
+        let mut bits = self.present;
+        while bits != 0 {
+            let a = bits.trailing_zeros();
+            bits &= bits - 1;
+            let mut e = 0u64;
+            let mut others = self.present;
+            while others != 0 {
+                let b = others.trailing_zeros();
+                others &= others - 1;
+                if hostile_to(Some(a), Some(b), armies) {
+                    e |= 1 << b;
+                }
+            }
+            self.enemies[a as usize] = e;
+        }
+    }
+
+    /// The armies hostile to `army` that a search over the box could meet
+    /// (a superset of the hostile armies among its candidates), or `None`
+    /// when that isn't known.
+    fn enemies_in(&self, world: &EntityWorld, army: Option<u32>, (x0, z0, x1, z1): (Fx, Fx, Fx, Fx), scratch: &mut Vec<u32>) -> Option<u64> {
+        if self.off {
+            return None;
+        }
+        let Some(a) = army else { return Some(0) };
+        if a >= 64 || self.present & (1 << a) == 0 {
+            return None;
+        }
+        scratch.clear();
+        world.unit_cells_in(x0, z0, x1, z1, scratch);
+        let mut m = 0u64;
+        for &c in scratch.iter() {
+            m |= self.masks.get(c as usize).copied()?;
+        }
+        Some(m & self.enemies[a as usize])
+    }
+}
+
+/// Whether army `a`'s weapons treat army `b` as an enemy (the search's
+/// rule: no armies known, only other armies).
+fn hostile_to(a: Option<u32>, b: Option<u32>, armies: Option<&Armies>) -> bool {
+    match (a, b, armies) {
+        (Some(a), Some(b), Some(armies)) => armies.alliance(a, b) == Alliance::Enemy,
+        (Some(a), Some(b), None) => a != b,
+        _ => false,
+    }
 }
 
 /// Candidates moho's target search passes over (MohoEngine.dll 0x101c4ca0).
@@ -905,6 +1054,37 @@ impl Weapons {
             .map(|w| w.max_radius)
     }
 
+    /// Whether a unit with an attack order is in range of its target: when
+    /// moho's attack task sets it as the attacker's desired target
+    /// (`CUnitAttackTargetTask` state 3, MohoEngine.dll 0x101dfba5: the
+    /// attacker's vtable +0x44, 0x101c4460, for the weapon
+    /// [`Weapons::range_for`] picks). That runs the weapon's own range test
+    /// (0x102b1be0, the fire task's) on the target's position, a structure's
+    /// centre like any unit's, from the attacker's position: ours tests
+    /// `MaxRadius` in XZ. (Moho's test also fails inside `MinRadius`, beyond
+    /// the height limit, outside the weapon's heading arc and for a disabled
+    /// weapon; the task then keeps moving. Not modelled.) A unit that can't
+    /// move is never out of range: the task sets the target as it starts
+    /// (state 1, 0x101df850..0x101df903).
+    pub fn in_attack_range(&self, world: &EntityWorld, terrain: Option<&Terrain>, unit: EntityId, target: WeaponTarget) -> bool {
+        let Some(me) = world.get(unit) else { return false };
+        if me.unit.as_deref().is_some_and(|d| d.motion_params.kind == crate::engine::sim::movement::MotionKind::None) {
+            return true;
+        }
+        let (p, kind) = match target {
+            WeaponTarget::Entity(t) => {
+                let Some(e) = world.get(t).filter(|e| !e.destroyed) else { return false };
+                let Some(d) = e.unit.as_deref() else { return false };
+                (e.position(), RangeTarget::Unit { layer: d.layer.mask(), category: e.category_index })
+            }
+            WeaponTarget::Ground(p) => {
+                let water = terrain.is_some_and(|t| t.surface_at(p.x, p.z) > t.height_at(p.x, p.z));
+                (p, RangeTarget::Ground { layer: if water { LayerMask::WATER } else { LayerMask::LAND } })
+            }
+        };
+        self.range_for(unit, kind).is_some_and(|r| dist2_xz(p, me.position()) <= r.saturating_mul(r))
+    }
+
     pub fn len(&self) -> usize {
         self.list.len()
     }
@@ -935,10 +1115,13 @@ pub fn step(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Armies>,
 /// ([`Terrain::blocks_fire`]); none, no test.
 pub fn step_with(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Armies>, intel: Option<&IntelGrids>, terrain: Option<&Terrain>, out: &mut Vec<WeaponEvent>, parallel_min: usize) {
     use rayon::prelude::*;
-    let Weapons { list, scratch, ordered, projectiles, tick, water, filters, .. } = weapons;
+    let Weapons { list, scratch, ordered, projectiles, tick, water, filters, cells, .. } = weapons;
+    let mut held = claims(list, projectiles, world);
     let (ordered, projectiles, tick, water, filters) = (&*ordered, &projectiles[..], *tick, *water, &*filters);
+    cells.build(world, armies);
+    let cells = &*cells;
     scratch.clear();
-    scratch.resize(list.len(), [None; 3]);
+    scratch.resize(list.len(), [None; MAX_EVENTS]);
     // Weapons that follow their unit's primary weapon run after the rest,
     // seeing its target from this tick as moho's in-order weapon tasks do.
     let follows = |w: &WeaponState| w.prefers_primary_target || w.stop_on_primary_busy;
@@ -947,11 +1130,11 @@ pub fn step_with(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Arm
             .zip(scratch.par_iter_mut())
             .with_min_len(64)
             .filter(|(w, _)| !follows(w))
-            .for_each_init(|| (Vec::new(), crate::prof_span!("weapons advance (worker)")), |(buf, _), (w, ev)| *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, buf));
+            .for_each_init(|| (Vec::new(), crate::prof_span!("weapons advance (worker)")), |(buf, _), (w, ev)| *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, cells, buf));
     } else {
         let mut buf = Vec::new();
         for (w, ev) in list.iter_mut().zip(scratch.iter_mut()).filter(|(w, _)| !follows(w)) {
-            *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, &mut buf);
+            *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, cells, &mut buf);
         }
     }
     // Followers. The list is sorted by unit, then index: a unit's first
@@ -989,11 +1172,11 @@ pub fn step_with(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Arm
                 .zip(scratch.par_iter_mut())
                 .with_min_len(64)
                 .filter(|(w, _)| ready(w))
-                .for_each_init(|| (Vec::new(), crate::prof_span!("weapons follower (worker)")), |(buf, _), (w, ev)| *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, buf));
+                .for_each_init(|| (Vec::new(), crate::prof_span!("weapons follower (worker)")), |(buf, _), (w, ev)| *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, cells, buf));
         } else {
             let mut buf = Vec::new();
             for (w, ev) in list.iter_mut().zip(scratch.iter_mut()).filter(|(w, _)| ready(w)) {
-                *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, &mut buf);
+                *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, cells, &mut buf);
             }
         }
     }
@@ -1005,7 +1188,7 @@ pub fn step_with(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Arm
         for (i, (w, ev)) in list[start..end].iter_mut().zip(scratch[start..end].iter_mut()).enumerate() {
             if follows(w) {
                 w.primary_target = if i == 0 { None } else { primary };
-                *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, &mut buf);
+                *ev = advance(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, cells, &mut buf);
             }
             if i == 0 {
                 primary = entity_target(w);
@@ -1013,9 +1196,80 @@ pub fn step_with(weapons: &mut Weapons, world: &EntityWorld, armies: Option<&Arm
         }
     }
     drop(_followers);
+    settle_claims(list, scratch, projectiles, &mut held);
     for (w, ev) in list.iter().zip(scratch.iter()) {
         for kind in ev.iter().flatten() {
             out.push(WeaponEvent { unit: w.unit, index: w.index, kind: *kind });
+        }
+    }
+}
+
+/// Who holds which projectile as a weapon target: (projectile, unit), sorted,
+/// one entry a unit; each view's `shooters` is set from it. Moho keeps the
+/// list on the target entity (+0x218: `UnitWeapon::SetTarget`, MohoEngine.dll
+/// 0x102b1d90, adds the weapon's unit to the new target, 0x102b1fa6, and
+/// takes it off the old one, 0x102b1e16; destroyed and dead shooters are
+/// pruned, 0x1025ead0), and its projectile search (0x101c5270) passes over a
+/// projectile whose shooters number its blueprint's `DesiredShooterCap`
+/// (0x101c5491..0x101c54a9). FAF probe `probe_smd`: of three SMDs in range
+/// of one nuke (cap 1) one launches; a second nuke goes to another SMD.
+fn claims(list: &[WeaponState], projectiles: &mut [ProjectileView], world: &EntityWorld) -> Vec<(EntityId, EntityId)> {
+    if projectiles.is_empty() {
+        return Vec::new();
+    }
+    for v in projectiles.iter_mut() {
+        v.shooters = 0;
+    }
+    let mut held: Vec<(EntityId, EntityId)> = list
+        .iter()
+        .filter(|w| w.targets_projectiles)
+        .filter_map(|w| match w.target {
+            Some(WeaponTarget::Entity(t)) => Some((t, w.unit)),
+            _ => None,
+        })
+        .filter(|&(_, unit)| world.get(unit).is_some_and(|e| !e.destroyed && !e.cold.killed))
+        .collect();
+    held.sort_unstable();
+    held.dedup();
+    for &(t, _) in &held {
+        if let Ok(i) = projectiles.binary_search_by_key(&t, |v| v.id) {
+            projectiles[i].shooters += 1;
+        }
+    }
+    held
+}
+
+/// The weapons that took a projectile this tick each saw the claims as they
+/// stood before it, so several may have taken one with room for fewer: in
+/// list order (moho's weapon tasks run one after another, each seeing the
+/// last one's claim) those past the cap give it back and search again next
+/// tick.
+fn settle_claims(list: &mut [WeaponState], events: &mut [[Option<WeaponEventKind>; MAX_EVENTS]], projectiles: &[ProjectileView], held: &mut Vec<(EntityId, EntityId)>) {
+    if projectiles.is_empty() {
+        return;
+    }
+    for (w, ev) in list.iter_mut().zip(events.iter_mut()) {
+        if !w.targets_projectiles || !ev.contains(&Some(WeaponEventKind::GotTarget)) {
+            continue;
+        }
+        let Some(WeaponTarget::Entity(t)) = w.target else { continue };
+        let Ok(view) = projectiles.binary_search_by_key(&t, |v| v.id) else { continue };
+        let at = match held.binary_search(&(t, w.unit)) {
+            // Another of the unit's weapons holds it already.
+            Ok(_) => continue,
+            Err(at) => at,
+        };
+        let start = held.partition_point(|&(p, _)| p < t);
+        let shooters = held[start..].partition_point(|&(p, _)| p == t);
+        if shooters as u32 >= projectiles[view].shooter_cap {
+            w.target = None;
+            let mut kept = [None; MAX_EVENTS];
+            for (slot, kind) in kept.iter_mut().zip(ev.iter().flatten().filter(|k| !matches!(k, WeaponEventKind::GotTarget | WeaponEventKind::Fire))) {
+                *slot = Some(*kind);
+            }
+            *ev = kept;
+        } else {
+            held.insert(at, (t, w.unit));
         }
     }
 }
@@ -1159,10 +1413,11 @@ fn advance(
     water: Option<Fx>,
     filters: &SearchFilters,
     terrain: Option<&Terrain>,
+    cells: &ArmyCells,
     buf: &mut Vec<EntityId>,
-) -> [Option<WeaponEventKind>; 3] {
+) -> [Option<WeaponEventKind>; MAX_EVENTS] {
     let before = w.target;
-    let events = advance_target(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, buf);
+    let events = advance_target(w, world, armies, intel, ordered, projectiles, tick, water, filters, terrain, cells, buf);
     if let Some(m) = w.retarget.as_deref_mut().filter(|_| w.target != before) {
         m.misses = 0;
         if w.target.is_some() && !m.ignored.is_empty() {
@@ -1186,11 +1441,12 @@ fn advance_target(
     water: Option<Fx>,
     filters: &SearchFilters,
     terrain: Option<&Terrain>,
+    cells: &ArmyCells,
     buf: &mut Vec<EntityId>,
-) -> [Option<WeaponEventKind>; 3] {
-    let mut events = [None; 3];
+) -> [Option<WeaponEventKind>; MAX_EVENTS] {
+    let mut events = [None; MAX_EVENTS];
     // Events in the order they happen this tick.
-    fn push(events: &mut [Option<WeaponEventKind>; 3], kind: WeaponEventKind) {
+    fn push(events: &mut [Option<WeaponEventKind>; MAX_EVENTS], kind: WeaponEventKind) {
         if let Some(slot) = events.iter_mut().find(|e| e.is_none()) {
             *slot = Some(kind);
         }
@@ -1208,6 +1464,10 @@ fn advance_target(
             w.target = None;
             push(&mut events, WeaponEventKind::LostTarget);
         }
+        // Its turret stays where it is.
+        if std::mem::take(&mut w.tracking) {
+            push(&mut events, WeaponEventKind::StopTracking);
+        }
         w.on_target = false;
         w.firing_solution = None;
         return events;
@@ -1218,6 +1478,10 @@ fn advance_target(
     // 0x101c5e40, 0x102afd20; FAF probe probe_aimtiming: a tank keeps its
     // target and turns after it as it moves).
     let enabled = w.enabled;
+    // The stun ended this tick: the weapon fires at once on the target the
+    // stun took from it (`probe_re3_wpn_a` `stun.*`: real shots land on the
+    // tick `IsStunned` turns false).
+    let stun_ended = tick > 0 && data.stunned_until == tick;
     // Whether this update gave the weapon a new target: it fires on it from
     // the next update at the earliest (FAF probe probe_firsttick).
     let mut took_target = false;
@@ -1232,15 +1496,14 @@ fn advance_target(
     // posed one, below).
     let frame = unit.bone_world_rotation(w.aim_bone);
     let army = unit.army;
-    let hostile = |other: Option<u32>| match (army, other, armies) {
-        (Some(a), Some(b), Some(armies)) => armies.alliance(a, b) == Alliance::Enemy,
-        (Some(a), Some(b), None) => a != b,
-        _ => false,
-    };
+    let hostile = |other: Option<u32>| hostile_to(army, other, armies);
     // Blueprint target restrictions.
     let allowed = |cat: Option<u32>| restrictions_allow(&w.only_allow, &w.disallow, cat);
     let water_targets = (w.above_water_targets_only, w.below_water_targets_only);
-    let targetable = |e: &crate::engine::sim::entity::Entity| {
+    // A target it may take, leaving intel aside. `ordered`: a target an attack
+    // order names. `SetDoNotTarget` keeps a unit out of target searches only:
+    // an attack order on it keeps firing (dev/probes probe_unit_orders O5).
+    let takes_as = |e: &crate::engine::sim::entity::Entity, ordered: bool| {
         e.kind == EntityKind::Unit
             && !w.targets_projectiles
             && !e.destroyed
@@ -1250,14 +1513,24 @@ fn advance_target(
             && hostile(e.army)
             && allowed(e.category_index)
             && e.unit.as_deref().is_some_and(|d| {
-                !d.do_not_target
+                (ordered || !d.do_not_target)
                     && w.fire_target_layers.contains(d.layer.mask())
                     && seabed_target_ok(water_targets, e, d, water)
-                    && match (intel, army) {
-                        (Some(g), Some(a)) => g.detect(a, e).any(),
-                        _ => true,
-                    }
             })
+    };
+    let takes = |e: &crate::engine::sim::entity::Entity| takes_as(e, true);
+    // One it may take from a search: its army must detect it too. An attack
+    // order's target needs no intel (`probe_firsttick`: a target ordered at
+    // tick 0 is taken at beat 2, before the army's first sighting at 11;
+    // `probe_re_wpn` `air.wpn`: a uel0205 ordered onto a gunship 24 away,
+    // beyond its vision of 20 and with nothing else of its army near, fires
+    // within a second).
+    let targetable = |e: &crate::engine::sim::entity::Entity| {
+        takes_as(e, false)
+            && match (intel, army) {
+                (Some(g), Some(a)) => g.detect(a, e).any(),
+                _ => true,
+            }
     };
 
     // The turret's turning limits (whether it turns all the way round).
@@ -1324,28 +1597,51 @@ fn advance_target(
     let projectile_ok = |v: &ProjectileView| hostile(v.army) && allowed(v.category);
     let view_of = |id: EntityId| projectiles.binary_search_by_key(&id, |v| v.id).ok().map(|i| &projectiles[i]);
 
-    // A new attack order resets every weapon's target: the attacker's
-    // `SetDesiredTarget` (vtable +0x20, MohoEngine.dll 0x101c4840) stores the
-    // order's target and calls `SetTarget(empty)` on each weapon
-    // (0x101c48b8, so `OnLostTarget`), and the target task takes the order's
-    // target on its next run. Real game (`probe_misc` AT): a tank shooting
-    // one target, ordered at tick 30 to attack another, has no target at
-    // 31 and the new one at 32 (a weapon with no target takes the order's
-    // as before: FAF probe probe_firsttick). Silo launches aren't attack
-    // orders.
-    let order_target = ordered.get(&w.unit).filter(|o| o.silo.is_none()).map(|o| o.target);
-    let new_order = order_target.is_some() && order_target != w.order_seen;
-    w.order_seen = order_target;
-    // A target an earlier order forced halts fire first, as when an order
-    // re-points (below).
-    if new_order && w.target_from_order && w.target.is_some() {
-        push(&mut events, WeaponEventKind::HaltFire);
-    }
-    let order_reset = new_order && w.target.take().is_some();
+    // An attack order resets every weapon's target once the attacker is in
+    // range of it: the attack task (`CUnitAttackTargetTask`, MohoEngine.dll
+    // 0x101df700) calls the attacker's `SetDesiredTarget` (vtable +0x20,
+    // 0x101c4840) only then (state 3, 0x101dfba5..0x101dfc03; `in_range` is
+    // [`Weapons::in_attack_range`]). It stores the order's target and calls
+    // `SetTarget(empty)` on each weapon (0x101c48b8, so `OnLostTarget`); a
+    // `NeedPrep` weapon (blueprint +0x11b, 0x101c48f1) then hears
+    // `OnGotTarget` (0x101c4918) when the target is a point or a live
+    // entity (0x101cf640), its own target still empty: FAF's idle state
+    // readies the weapon (unpacks it). The target task takes the desired
+    // target on its next run, ahead of any search (0x101c60e3), so on this
+    // update the weapon has no target and doesn't look for one. Real game
+    // (`probe_q_needprep`, `probe_q_needprep2`, `probe_q_needprep3`): ships
+    // ordered onto a ship 140 away keep shooting what they had on the way;
+    // the reset and the prep come on the tick the order's target is within
+    // range (xes0307: 79.9 of 80), the target is taken the tick after and
+    // fired on the tick after that; ordered in range, the reset is the tick
+    // after the order (`probe_misc` AT: ordered at 30, no target at 31, the
+    // new one at 32). Silo launches aren't attack orders. `order_seen` is
+    // the desired target: it stays set while the order lasts, in range or
+    // not.
+    let order = ordered.get(&w.unit).filter(|o| o.silo.is_none());
+    let seen = w.order_seen.filter(|s| order.is_some_and(|o| o.target == *s));
+    let desired = order.filter(|o| o.in_range || seen.is_some()).map(|o| o.target);
+    let order_reset = desired.is_some() && seen.is_none();
+    w.order_seen = desired;
     if order_reset {
-        w.target_from_order = false;
-        w.check_countdown = 0;
-        push(&mut events, WeaponEventKind::LostTarget);
+        // A target an earlier order forced halts fire first, as when an
+        // order re-points (below).
+        if w.target_from_order && w.target.is_some() {
+            push(&mut events, WeaponEventKind::HaltFire);
+        }
+        if w.target.take().is_some() {
+            w.target_from_order = false;
+            w.check_countdown = 0;
+            push(&mut events, WeaponEventKind::LostTarget);
+        }
+        let valid = match desired {
+            Some(WeaponTarget::Entity(id)) => world.get(id).is_some_and(|e| !e.destroyed),
+            Some(WeaponTarget::Ground(_)) => true,
+            None => false,
+        };
+        if w.need_prep && valid {
+            push(&mut events, WeaponEventKind::Prep);
+        }
     }
 
     // The primary weapon's target, while it's still a live unit (moho's
@@ -1393,7 +1689,7 @@ fn advance_target(
         } else {
             world.get(t).is_some_and(|e| {
                 let d = dist2_xz(e.position(), at);
-                targetable(e) && d <= reach.saturating_mul(reach) && (w.target_from_order || accepts(range_at(e.position(), d)))
+                (if w.target_from_order { takes(e) } else { targetable(e) }) && d <= reach.saturating_mul(reach) && (w.target_from_order || accepts(range_at(e.position(), d)))
             })
         };
         if !keep {
@@ -1403,14 +1699,16 @@ fn advance_target(
         }
     }
 
-    // An attack order points the weapon at its target once it's in reach
-    // (until then the weapon engages whatever is near); when the order stops
-    // forcing a target, that target is dropped.
+    // An attack order points the weapon at its target once it's the desired
+    // target (above; taken from the update after it's set) and in the
+    // weapon's reach; until then the weapon engages whatever is near. When
+    // the order stops forcing a target, that target is dropped.
     let reach = w.max_radius.saturating_mul(w.tracking_radius.max(Fx::ONE));
     let order = ordered.get(&w.unit);
     let overcharging = order.is_some_and(|o| o.overcharge == Some(w.index));
-    let forced = order.filter(|o| enabled && !order_reset && o.overcharge.map_or(o.silo == w.silo, |i| i == w.index) && from_primary.is_none()).map(|o| o.target).filter(|t| match *t {
-        WeaponTarget::Entity(id) => world.get(id).is_some_and(|e| targetable(e) && dist2_xz(e.position(), at) <= reach.saturating_mul(reach)),
+    let is_desired = |o: &OrderedTarget| o.silo.is_some() || w.order_seen == Some(o.target);
+    let forced = order.filter(|o| enabled && !order_reset && is_desired(o) && o.overcharge.map_or(o.silo == w.silo, |i| i == w.index) && from_primary.is_none()).map(|o| o.target).filter(|t| match *t {
+        WeaponTarget::Entity(id) => world.get(id).is_some_and(|e| takes(e) && dist2_xz(e.position(), at) <= reach.saturating_mul(reach)),
         WeaponTarget::Ground(p) => !w.cannot_attack_ground && dist2_xz(p, at) <= reach.saturating_mul(reach),
     });
     if enabled && w.target_from_order && w.target.is_some() && forced != w.target && from_primary.is_none() {
@@ -1436,6 +1734,9 @@ fn advance_target(
         if !w.retarget.as_deref_mut().is_some_and(|m| std::mem::take(&mut m.dropped_on_miss)) {
             push(&mut events, WeaponEventKind::GotTarget);
         }
+    } else if forced.is_some() {
+        // One it found itself before it was the order's: the order's now.
+        w.target_from_order = true;
     }
 
     // Search (moho's, MohoEngine.dll 0x101c4ca0): the first priority class
@@ -1455,7 +1756,23 @@ fn advance_target(
     // `AlwaysRecheckTarget` weapons search with a target too (not one their
     // order forces, nor the primary weapon's); finding nothing, they keep
     // it. (FAF's blueprint pass turns it off for anti-missile weapons.)
-    let rechecks = w.always_recheck && !w.target_from_order && from_primary.is_none() && !w.targets_projectiles && w.target.is_some();
+    // A script's ground point (`SetTargetGround`, not an attack order's)
+    // lasts only until the weapon's next target scan, which puts an enemy
+    // back or leaves it with no target (`probe_re3_wpn_c`: a point set at
+    // T40 is gone at T42 and never fired on). A point the script set again
+    // since the last update survives the scan: re-set every tick, it's
+    // fired on at every reload (`ueb2101` every 3 ticks through scans every
+    // 4), as FAF's carpet bomb does before every bomb. Dropped quietly:
+    // setting it ran no `OnLostTarget` for the target it replaced either.
+    let ground_set = std::mem::take(&mut w.ground_set);
+    if enabled && !order_reset && !w.target_from_order && !w.manual_fire && matches!(w.target, Some(WeaponTarget::Ground(_))) {
+        if w.check_countdown > 0 {
+            w.check_countdown -= 1;
+        } else if !ground_set {
+            w.target = None;
+        }
+    }
+    let rechecks = w.always_recheck && !w.target_from_order && from_primary.is_none() && !w.targets_projectiles && matches!(w.target, Some(WeaponTarget::Entity(_)));
     // Hold fire (the unit's fire state 1): no search, and the target task
     // drops the weapon's target (MohoEngine.dll 0x101c6324: with no attack
     // order's target it sets an empty target, 0x101c65ec -> `SetTarget`
@@ -1473,12 +1790,23 @@ fn advance_target(
             push(&mut events, WeaponEventKind::LostTarget);
         }
     }
-    if enabled && !order_reset && w.target.is_none() && !w.manual_fire && w.targets_projectiles && !holding_fire {
+    // A counted weapon with an empty silo doesn't search (moho's projectile
+    // search returns at once, 0x102b13b0), so it claims nothing.
+    let loaded = match w.silo {
+        Some(SiloKind::Nuke) => data.nuke_ammo > 0,
+        Some(SiloKind::Tactical) => data.tactical_ammo > 0,
+        None => true,
+    };
+    if enabled && !order_reset && w.target.is_none() && !w.manual_fire && w.targets_projectiles && !holding_fire && loaded {
         // Projectiles move fast: searched every tick, nearest first (ties to
-        // the lowest id).
+        // the lowest id). One with its `DesiredShooterCap` of units on it
+        // already is passed over ([`claims`]).
+        let _search = crate::prof_span!("weapons search projectiles");
         let best = projectiles
             .iter()
-            .filter(|v| projectile_ok(v) && range_of(v.position) == Reach::InRange)
+            // The range test first: it passes over the many far off
+            // without an alliance lookup (both pure: the same result).
+            .filter(|v| v.shooters < v.shooter_cap && range_of(v.position) == Reach::InRange && projectile_ok(v))
             .map(|v| (dist2_xz(v.position, at), v))
             .min_by_key(|&(d, v)| (d, v.id));
         if let Some((_, v)) = best {
@@ -1501,6 +1829,7 @@ fn advance_target(
             // Searches every `target_check_ticks` (a 0.5 s check: ticks 4, 9,
             // 14..., dev/probes probe_sight in FAF).
             w.check_countdown = w.target_check_ticks.max(1) - 1;
+            let _search = crate::prof_span!("weapons search units");
             // A moving shooter forgets the targets it gave up on (moho's
             // target task, MohoEngine.dll 0x101c5faf); the rest are passed
             // over (0x101c4f2e).
@@ -1555,7 +1884,7 @@ fn advance_target(
                 // `IsSeenEver` holds, MohoEngine.dll 0x101c5152 ->
                 // 0x10169500, 0x101c51c6).
                 let identified = || match (intel, army) {
-                    (Some(g), Some(a)) => g.ever_seen(a, id) || g.detect(a, e).seen,
+                    (Some(g), Some(a)) => g.ever_seen(a, id) || g.detect(a, e).eyes(),
                     _ => true,
                 };
                 let score = match barrel {
@@ -1592,8 +1921,20 @@ fn advance_target(
             // better than the best so far is passed over before the costly
             // checks (targetable, intel), which can't change the least.
             let mut best: Option<SearchKey> = None;
-            if !w.priorities.is_empty() {
+            // Only a hostile unit passes (`targetable`): with none in the
+            // box's cells the walk finds nothing, and a candidate of an army
+            // that isn't an enemy is passed over first.
+            let enemies = cells.enemies_in(world, army, (x0, z0, x1, z1), buf);
+            let enemy = |e: &crate::engine::sim::entity::Entity| match (enemies, e.army) {
+                (None, _) => true,
+                (Some(m), Some(b)) => b < 64 && m & (1 << b) != 0,
+                (Some(_), None) => false,
+            };
+            if !w.priorities.is_empty() && enemies != Some(0) {
                 world.for_each_unit_candidate(x0, z0, x1, z1, |id| {
+                    if !world.get(id).is_some_and(enemy) {
+                        return;
+                    }
                     let Some((k, e)) = key(id, best) else { return };
                     if passes(id, e) {
                         best = Some(k);
@@ -1715,6 +2056,7 @@ fn advance_target(
     // A frozen aim leaves the weapon's on-target state as it was: FAF's
     // tank with its aim `Disable`d shoots on at the target it last faced.
     let activity = w.aim_activity;
+    let heading_before = w.aim_heading;
     if activity != AimActivity::Frozen {
         w.on_target = false;
         w.firing_solution = None;
@@ -1807,19 +2149,18 @@ fn advance_target(
                     w.aim_pitch = p;
                 }
                 w.aim_heading = heading;
-                // Fixed to the hull: fires once the body faces the target.
-                w.on_target = !w.slaved_to_body || heading.abs() <= w.slaved_arc.max(w.firing_tolerance);
-                // A fixed beam: only along its muzzle (the CZAR's, straight
-                // down), within the firing tolerance.
-                if let Some(muzzle) = w.fixed_beam_muzzle {
-                    let from = unit.bone_world_position(Some(muzzle));
-                    let along = unit.bone_world_rotation(Some(muzzle)).rotate(FxVec3 { x: Fx::ZERO, y: Fx::ZERO, z: Fx::ONE });
-                    let to = tp - from;
-                    let ahead = along.x * to.x + along.y * to.y + along.z * to.z;
-                    let length2 = to.x.saturating_mul(to.x).saturating_add(to.y.saturating_mul(to.y)).saturating_add(to.z.saturating_mul(to.z));
-                    let aside = sqrt(length2.saturating_sub(ahead.saturating_mul(ahead)).max(Fx::ZERO));
-                    w.on_target = atan2(aside, ahead) <= w.firing_tolerance;
-                }
+                // Body-slaved or not: what keeps a rack fixed to the hull
+                // from firing sideways is the range test's heading arc, not
+                // the body's facing (FAF probe probe_q_slaved /
+                // probe_q_fatboy: an immobile `ual0111`, `FiringTolerance`
+                // 5 and `HeadingArcRange` 60, fires at targets 0 to 50
+                // degrees off its nose and not at 60).
+                w.on_target = true;
+                // A beam fixed to the hull too (the CZAR's, straight down):
+                // it switches on for any target in range, however far off
+                // its line (FAF probe probe_q_czar: from 20 up, for targets
+                // 8 to 28 out, `FiringTolerance` 30), and hits what is
+                // under it (`api::beam`).
             }
             (Some(arc), Some(p)) => {
                 let dt = Fx::ONE / Fx::from_num(10);
@@ -1851,6 +2192,15 @@ fn advance_target(
         return_to_rest(w, arc);
     }
 
+    // Whether the turret turned this tick (see `tracking`).
+    if w.arc.is_some() {
+        let turned = wrap_angle(w.aim_heading - heading_before).abs() > TRACKING_EPSILON;
+        if turned != w.tracking {
+            w.tracking = turned;
+            push(&mut events, if turned { WeaponEventKind::StartTracking } else { WeaponEventKind::StopTracking });
+        }
+    }
+
     // Fired on only in range (moho's fire task, MohoEngine.dll 0x102afd20,
     // range-tests every target, ordered ones too): a target kept out to
     // the tracking radius, too close or outside the heading arc is aimed
@@ -1880,9 +2230,19 @@ fn advance_target(
     let ready = if overcharging && w.target_from_order {
         !w.fired_at_target
     } else {
-        w.fire_clock == 0 && data.fire_state != 1 && ammo && !(w.silo.is_some() && w.fired_at_target)
+        w.fire_clock == 0 && data.fire_state != 1 && ammo && !(w.silo.is_some() && w.fired_at_target && !w.targets_projectiles)
     };
-    if enabled && !took_target && in_range && w.on_target && water_ok && ready {
+    // Not while the unit is `Busy` (moho's `CanFire`, FAF's
+    // `engine/Sim/UnitWeapon.lua`): FAF's firing state holds it through a
+    // salvo (unless `NotExclusive`) and the ready state clears it, so the
+    // next `OnFire` waits for the script to be ready for it instead of
+    // landing mid-salvo and being dropped. `probe_wpn_aa_hold`: Aeon T1 AA
+    // (`uab2104`, reload 6 ticks, 3 shots 2 ticks apart) fires every 7
+    // ticks, every salvo whole; on the reload clock alone every other
+    // salvo was lost (-40% damage).
+    static BUSY: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| crate::engine::sim::unit_state::UnitStates::index("Busy").expect("state"));
+    let busy = !overcharging && data.states.contains(*BUSY);
+    if enabled && (!took_target || stun_ended) && in_range && w.on_target && water_ok && ready && !busy {
         w.fired_at_target = true;
         w.fire_clock = w.reload_ticks();
         push(&mut events, WeaponEventKind::Fire);
@@ -2137,7 +2497,8 @@ mod tests {
         gun(&mut ws, me);
         let mut out = Vec::new();
         step(&mut ws, &w, None, None, &mut out);
-        assert_eq!(out, vec![WeaponEvent { unit: me, index: 1, kind: WeaponEventKind::GotTarget }]);
+        // (And its turret starts round to it.)
+        assert_eq!(out, vec![WeaponEvent { unit: me, index: 1, kind: WeaponEventKind::GotTarget }, WeaponEvent { unit: me, index: 1, kind: WeaponEventKind::StartTracking }]);
         assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(near)));
         let _ = far;
         // 90 degrees at 100 deg/s: first shot once the turret is round.
@@ -2151,6 +2512,45 @@ mod tests {
         }
         assert_eq!(fired.first(), Some(&9), "10 deg/tick from the acquiring tick: 88 deg (within 2) on tick 9");
         assert!(fired.windows(2).all(|p| p[1] - p[0] == 10), "RateOfFire 1 = every 10 ticks: {fired:?}");
+    }
+
+    /// Tracking follows the turret, not the target (FAF probe
+    /// probe_q_track): it starts on the first tick the turret turns and
+    /// stops on the first it doesn't, with the target still held; the swing
+    /// back to rest once the target is gone is another pair; and a target
+    /// dead ahead, which turns nothing, gives none.
+    #[test]
+    fn tracking_follows_the_turret_not_the_target() {
+        use WeaponEventKind::{StartTracking, StopTracking};
+        let run = |x: f64, z: f64| {
+            let mut w = EntityWorld::default();
+            w.set_bounds(256, 256);
+            let me = unit(&mut w, 1, 100.0, 100.0);
+            let enemy = unit(&mut w, 2, x, z);
+            let mut ws = Weapons::default();
+            gun(&mut ws, me);
+            let (mut out, mut log, mut fired) = (Vec::new(), Vec::new(), false);
+            for tick in 1..=80 {
+                if tick == 31 {
+                    w.destroy(enemy);
+                }
+                out.clear();
+                step(&mut ws, &w, None, None, &mut out);
+                let s = ws.get(me, 1).unwrap();
+                fired |= out.iter().any(|e| e.kind == WeaponEventKind::Fire);
+                log.extend(out.iter().filter(|e| matches!(e.kind, StartTracking | StopTracking)).map(|e| (tick, e.kind, s.target.is_some())));
+            }
+            assert!(fired, "it fired at its target");
+            assert!(!ws.get(me, 1).unwrap().tracking && ws.get(me, 1).unwrap().aim_heading == Fx::ZERO, "back at rest");
+            log
+        };
+        // 90 degrees to the right at 10 degrees a tick: turning on ticks 1
+        // to 9, at rest on its aim from tick 10.
+        let side = run(110.0, 100.0);
+        assert_eq!(side[..2], [(1, StartTracking, true), (10, StopTracking, true)], "{side:?}");
+        assert_eq!(side[2..].iter().map(|&(_, kind, target)| (kind, target)).collect::<Vec<_>>(), [(StartTracking, false), (StopTracking, false)], "the swing back: {side:?}");
+        assert!(side[2].0 > 31 && side[3].0 - side[2].0 == 9, "nine ticks back, after the hold: {side:?}");
+        assert_eq!(run(100.0, 110.0), [], "dead ahead: the turret never turns");
     }
 
     /// `HeadingArcCenter` / `HeadingArcRange`: a turret free to swing all
@@ -2206,6 +2606,33 @@ mod tests {
         assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "seen: targeted");
     }
 
+    /// An attack order's target needs no intel (FAF probes `probe_firsttick`,
+    /// `probe_re_wpn` `air.wpn`).
+    #[test]
+    fn ordered_target_needs_no_intel() {
+        use crate::engine::sim::vision::IntelGrids;
+        let mut w = EntityWorld::default();
+        w.set_bounds(256, 256);
+        let me = unit(&mut w, 1, 100.0, 100.0);
+        let enemy = unit(&mut w, 2, 110.0, 100.0);
+        let mut ws = Weapons::default();
+        gun(&mut ws, me);
+        let mut grids = IntelGrids::new(256, 256);
+        grids.set_alliances(2, |_, _| false);
+        grids.update(&w, |_| None);
+        let mut out = Vec::new();
+        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(enemy), silo: None, overcharge: None, in_range: true });
+        // Set as the desired target, then taken the step after.
+        step(&mut ws, &w, None, Some(&grids), &mut out);
+        step(&mut ws, &w, None, Some(&grids), &mut out);
+        assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "blind, ordered: taken");
+        step(&mut ws, &w, None, Some(&grids), &mut out);
+        assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "and kept");
+        ws.ordered.clear();
+        step(&mut ws, &w, None, Some(&grids), &mut out);
+        assert!(ws.get(me, 1).unwrap().target.is_none(), "the order gone, dropped");
+    }
+
     /// On hold fire a weapon searches for nothing (real game: `probe_sight`
     /// observers on hold fire never got a target), but takes an ordered
     /// target; off hold fire it searches at once.
@@ -2222,7 +2649,9 @@ mod tests {
             step(&mut ws, &w, None, None, &mut out);
         }
         assert!(out.is_empty() && ws.get(me, 1).unwrap().target.is_none(), "holding fire: no target");
-        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(enemy), silo: None, overcharge: None });
+        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(enemy), silo: None, overcharge: None, in_range: true });
+        // Set as the desired target, then taken the step after.
+        step(&mut ws, &w, None, None, &mut out);
         step(&mut ws, &w, None, None, &mut out);
         assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "an ordered target is taken");
         ws.ordered.clear();
@@ -2384,7 +2813,9 @@ mod tests {
             step(&mut ws, &w, None, None, &mut out);
         }
         assert!(out.is_empty() && ws.get(me, 1).unwrap().target.is_none(), "no priorities: no target");
-        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(enemy), silo: None, overcharge: None });
+        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(enemy), silo: None, overcharge: None, in_range: true });
+        // Set as the desired target, then taken the step after.
+        step(&mut ws, &w, None, None, &mut out);
         step(&mut ws, &w, None, None, &mut out);
         assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "an ordered target is taken");
     }
@@ -2405,7 +2836,190 @@ mod tests {
         for _ in 0..40 {
             step(&mut ws, &w, None, None, &mut out);
         }
-        assert_eq!(out.iter().map(|e| e.kind).collect::<Vec<_>>(), vec![WeaponEventKind::LostTarget], "a dying unit drops its target and never fires");
+        assert_eq!(out.iter().map(|e| e.kind).collect::<Vec<_>>(), vec![WeaponEventKind::LostTarget, WeaponEventKind::StopTracking], "a dying unit drops its target, its turret stops, and it never fires");
+    }
+
+    /// A script's `SetTargetGround` point lasts until the next target scan,
+    /// which puts the enemy back (`probe_re3_wpn_c`), unless the script set
+    /// it again since the last update.
+    #[test]
+    fn script_ground_target_lasts_until_the_next_scan() {
+        let mut w = EntityWorld::default();
+        let me = unit(&mut w, 1, 0.0, 0.0);
+        let enemy = unit(&mut w, 2, 5.0, 0.0);
+        let mut ws = Weapons::default();
+        gun(&mut ws, me);
+        ws.get_mut(me, 1).target_check_ticks = 5;
+        let mut out = Vec::new();
+        step(&mut ws, &w, None, None, &mut out);
+        assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)));
+        let point = WeaponTarget::Ground(FxVec3::from_f64(0.0, 0.0, 10.0));
+        // As `SetTargetGround`: once, then the scan 4 updates on.
+        let s = ws.get_mut(me, 1);
+        (s.target, s.target_from_order, s.ground_set) = (Some(point), false, true);
+        s.check_countdown = 3;
+        let mut held = 0;
+        while ws.get(me, 1).unwrap().target == Some(point) {
+            out.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            held += 1;
+            assert!(held < 10, "never dropped");
+        }
+        assert_eq!(held, 4, "dropped at the scan");
+        assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(enemy)), "the scan puts the enemy back");
+        assert!(!out.iter().any(|e| e.kind == WeaponEventKind::LostTarget), "dropped quietly");
+        // Set again before every update: kept through the scans.
+        for _ in 0..20 {
+            let s = ws.get_mut(me, 1);
+            (s.target, s.ground_set) = (Some(point), true);
+            step(&mut ws, &w, None, None, &mut out);
+            assert_eq!(ws.get(me, 1).unwrap().target, Some(point));
+        }
+    }
+
+    /// A stunned weapon holds fire, and fires on the tick its stun ends
+    /// (`probe_re3_wpn_a` `stun.*`), not the tick after.
+    #[test]
+    fn fires_on_the_tick_its_stun_ends() {
+        let mut w = EntityWorld::default();
+        let me = unit(&mut w, 1, 0.0, 0.0);
+        let _enemy = unit(&mut w, 2, 0.0, 5.0);
+        let mut ws = Weapons::default();
+        gun(&mut ws, me);
+        let mut out = Vec::new();
+        w.get_mut(me).unwrap().unit.as_mut().unwrap().stunned_until = 20;
+        let mut fired = Vec::new();
+        for tick in 1..=30 {
+            ws.tick = tick;
+            out.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            if out.iter().any(|e| e.kind == WeaponEventKind::Fire) {
+                fired.push(tick);
+            }
+        }
+        assert_eq!(fired, vec![20, 30], "first shot as the stun ends, then every reload");
+    }
+
+    /// MohoEngine.dll 0x101c48f1: an attack order runs a `NeedPrep` weapon's
+    /// `OnGotTarget` when the attacker is in range (moho's `SetDesiredTarget`,
+    /// real game `probe_q_needprep2` / `3`), the weapon's own target empty.
+    #[test]
+    fn need_prep_weapon_is_told_of_an_attack_order() {
+        for need_prep in [false, true] {
+            let mut w = EntityWorld::default();
+            let me = unit(&mut w, 1, 0.0, 0.0);
+            let near = unit(&mut w, 2, 5.0, 0.0);
+            let far = unit(&mut w, 2, 500.0, 0.0);
+            let mut ws = Weapons::default();
+            gun(&mut ws, me);
+            ws.get_mut(me, 1).need_prep = need_prep;
+            let mut out = Vec::new();
+            step(&mut ws, &w, None, None, &mut out);
+            assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(near)));
+            // Ordered onto a target out of range: nothing yet, the weapon
+            // keeps what it has on the way.
+            ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(far), silo: None, overcharge: None, in_range: false });
+            out.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            assert!(out.iter().all(|e| !matches!(e.kind, WeaponEventKind::LostTarget | WeaponEventKind::Prep)), "{out:?}");
+            assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(near)));
+            // In range of it: the held target is dropped, and the weapon is
+            // told to get ready.
+            ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(far), silo: None, overcharge: None, in_range: true });
+            out.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            let kinds: Vec<_> = out.iter().map(|e| e.kind).filter(|k| !matches!(k, WeaponEventKind::StartTracking | WeaponEventKind::StopTracking)).collect();
+            if need_prep {
+                assert_eq!(kinds, [WeaponEventKind::LostTarget, WeaponEventKind::Prep]);
+            } else {
+                assert_eq!(kinds, [WeaponEventKind::LostTarget]);
+            }
+            assert_eq!(ws.get(me, 1).unwrap().target, None);
+            // Once an order, not every step of it.
+            out.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            assert!(!out.iter().any(|e| e.kind == WeaponEventKind::Prep), "{out:?}");
+            // Not for a target that's gone.
+            ws.ordered.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            w.destroy(far);
+            ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(far), silo: None, overcharge: None, in_range: true });
+            out.clear();
+            step(&mut ws, &w, None, None, &mut out);
+            assert!(!out.iter().any(|e| e.kind == WeaponEventKind::Prep), "{out:?}");
+        }
+    }
+
+    /// Real game `probe_q_attackrange` P / Q: destroyers with no target,
+    /// ordered onto a ship in range at T+0, take it at T+2 (the reset at
+    /// T+1 is silent), and not something nearer in between.
+    #[test]
+    fn an_order_in_range_is_taken_the_step_after_it_is_set() {
+        let mut w = EntityWorld::default();
+        let me = unit(&mut w, 1, 0.0, 0.0);
+        let _near = unit(&mut w, 2, 5.0, 0.0);
+        let ordered = unit(&mut w, 2, 0.0, 12.0);
+        let mut ws = Weapons::default();
+        gun(&mut ws, me);
+        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(ordered), silo: None, overcharge: None, in_range: true });
+        let mut out = Vec::new();
+        step(&mut ws, &w, None, None, &mut out);
+        assert_eq!(ws.get(me, 1).unwrap().target, None, "set as the desired target: no target, no search");
+        assert!(out.is_empty(), "{out:?}");
+        step(&mut ws, &w, None, None, &mut out);
+        let s = ws.get(me, 1).unwrap();
+        assert_eq!((s.target, s.target_from_order), (Some(WeaponTarget::Entity(ordered)), true));
+        assert_eq!(out.iter().filter(|e| e.kind == WeaponEventKind::GotTarget).count(), 1, "{out:?}");
+        // The desired target stays set when the attacker drifts out of range.
+        ws.ordered.get_mut(&me).unwrap().in_range = false;
+        out.clear();
+        step(&mut ws, &w, None, None, &mut out);
+        assert_eq!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(ordered)));
+        assert!(!out.iter().any(|e| e.kind == WeaponEventKind::LostTarget), "{out:?}");
+        // An order onto another target, out of range: the forced one is
+        // dropped and the weapon looks for itself again.
+        let far = unit(&mut w, 2, 500.0, 0.0);
+        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(far), silo: None, overcharge: None, in_range: false });
+        out.clear();
+        step(&mut ws, &w, None, None, &mut out);
+        assert!(out.iter().any(|e| e.kind == WeaponEventKind::LostTarget), "{out:?}");
+        assert_ne!(ws.get(me, 1).unwrap().target, Some(WeaponTarget::Entity(ordered)));
+        assert_eq!(ws.get(me, 1).unwrap().order_seen, None);
+    }
+
+    /// MohoEngine.dll 0x101c4460: in range is the attacking weapon's
+    /// `MaxRadius` from the attacker's centre to the target's, in XZ. Real
+    /// game (`probe_q_attackrange`): 79.7 of 80 and 59.2 of 60 onto power
+    /// generators of footprint 5 and 1 alike.
+    #[test]
+    fn attack_range_is_the_first_weapon_that_can_hit_centre_to_centre() {
+        use crate::engine::sim::movement::MotionKind;
+        let mut w = EntityWorld::default();
+        let me = unit(&mut w, 1, 0.0, 0.0);
+        w.get_mut(me).unwrap().unit.as_mut().unwrap().motion_params.kind = MotionKind::Water;
+        let inside = unit(&mut w, 2, 17.9, 0.0);
+        let outside = unit(&mut w, 2, 0.0, 18.1);
+        let high = unit(&mut w, 2, 17.9, 0.0);
+        w.set_position(high, FxVec3::from_f64(17.9, 40.0, 0.0));
+        let flying = unit(&mut w, 2, 5.0, 0.0);
+        w.get_mut(flying).unwrap().unit.as_mut().unwrap().layer = Layer::Air;
+        let mut ws = Weapons::default();
+        gun(&mut ws, me);
+        // A second, longer gun doesn't widen it.
+        ws.get_mut(me, 2).max_radius = Fx::from_num(40);
+        ws.get_mut(me, 2).fire_target_layers = LayerMask::LAND;
+        let at =|ws: &Weapons, w: &EntityWorld, t| ws.in_attack_range(w, None, me, t);
+        assert!(at(&ws, &w, WeaponTarget::Entity(inside)));
+        assert!(!at(&ws, &w, WeaponTarget::Entity(outside)));
+        assert!(at(&ws, &w, WeaponTarget::Entity(high)), "height doesn't count");
+        assert!(!at(&ws, &w, WeaponTarget::Entity(flying)), "no weapon for it");
+        assert!(at(&ws, &w, WeaponTarget::Ground(FxVec3::from_f64(0.0, 0.0, -18.0))));
+        assert!(!at(&ws, &w, WeaponTarget::Ground(FxVec3::from_f64(13.0, 0.0, -13.0))));
+        // A unit that can't move sets the target as the order starts.
+        w.get_mut(me).unwrap().unit.as_mut().unwrap().motion_params.kind = MotionKind::None;
+        assert!(at(&ws, &w, WeaponTarget::Entity(outside)));
+        w.destroy(outside);
+        assert!(at(&ws, &w, WeaponTarget::Entity(outside)));
     }
 
     #[test]
@@ -2633,7 +3247,8 @@ mod tests {
         let s = ws.get(me, 1).unwrap();
         assert_eq!(s.target, Some(WeaponTarget::Entity(enemy)), "kept");
         assert!(s.aim_heading.abs() < Fx::from_num(0.1), "followed it: {}", s.aim_heading);
-        assert!(out.is_empty(), "no events, no shots: {out:?}");
+        let kinds: Vec<_> = out.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, [WeaponEventKind::StartTracking, WeaponEventKind::StopTracking], "the turret's turn and nothing else: no shots");
         ws.get_mut(me, 1).enabled = true;
         for _ in 0..5 {
             step(&mut ws, &w, None, None, &mut out);
@@ -2735,7 +3350,7 @@ mod tests {
         // the order's taken the step after, fired on a step later.
         let b = unit(&mut w, 2, 100.0, 112.0);
         ws.get_mut(me, 1).fire_clock = 0;
-        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(b), silo: None, overcharge: None });
+        ws.ordered.insert(me, OrderedTarget { target: WeaponTarget::Entity(b), silo: None, overcharge: None, in_range: true });
         let mut out = Vec::new();
         step(&mut ws, &w, None, None, &mut out);
         assert_eq!(ws.get(me, 1).unwrap().target, None, "a new attack order resets the target");
@@ -2758,8 +3373,45 @@ mod tests {
         s.targets_projectiles = true;
         s.yaw_only_on_target = true;
         let missile = w.spawn(EntityKind::Projectile, BlueprintKind::Projectile, String::new(), Some(2), FxVec3::from_f64(0.0, 0.0, 10.0), FxQuat::IDENTITY);
-        ws.projectiles = vec![ProjectileView { id: missile, position: FxVec3::from_f64(0.0, 0.0, 10.0), velocity: FxVec3::default(), army: Some(2), category: None }];
+        ws.projectiles = vec![ProjectileView { id: missile, position: FxVec3::from_f64(0.0, 0.0, 10.0), velocity: FxVec3::default(), army: Some(2), category: None, shooter_cap: 1, shooters: 0 }];
         assert_eq!(shots(&mut ws, &w), vec![false, true, false, false], "projectile: the step after");
+    }
+
+    /// A projectile is taken by no more units than its `DesiredShooterCap`
+    /// ([`claims`]): of three defences in range of a missile with cap 1 the
+    /// first in the list takes it, with cap 2 the first two; once it is
+    /// gone another takes the next.
+    #[test]
+    fn projectile_shooter_cap() {
+        for cap in [1u32, 2, 3] {
+            let mut w = EntityWorld::default();
+            let mut ws = Weapons::default();
+            let units: Vec<_> = (0..3).map(|i| unit(&mut w, 1, i as f64 * 2.0, 0.0)).collect();
+            for &u in &units {
+                gun(&mut ws, u);
+                let s = ws.get_mut(u, 1);
+                s.targets_projectiles = true;
+                s.yaw_only_on_target = true;
+            }
+            let at = FxVec3::from_f64(2.0, 0.0, 10.0);
+            let missile = w.spawn(EntityKind::Projectile, BlueprintKind::Projectile, String::new(), Some(2), at, FxQuat::IDENTITY);
+            let view = |id| ProjectileView { id, position: at, velocity: FxVec3::default(), army: Some(2), category: None, shooter_cap: cap, shooters: 0 };
+            ws.projectiles = vec![view(missile)];
+            let holders = |ws: &Weapons, id| units.iter().filter(|&&u| ws.get(u, 1).unwrap().target == Some(WeaponTarget::Entity(id))).count();
+            let mut out = Vec::new();
+            for _ in 0..4 {
+                step(&mut ws, &w, None, None, &mut out);
+                assert_eq!(holders(&ws, missile), cap as usize, "cap {cap}");
+            }
+            assert_eq!(out.iter().filter(|e| e.kind == WeaponEventKind::GotTarget).count(), cap as usize, "cap {cap}: one OnGotTarget a holder");
+            assert_eq!(ws.get(units[0], 1).unwrap().target, Some(WeaponTarget::Entity(missile)), "the first in the list holds it");
+            // A second missile: those without one take it, up to its cap.
+            let second = w.spawn(EntityKind::Projectile, BlueprintKind::Projectile, String::new(), Some(2), at, FxQuat::IDENTITY);
+            ws.projectiles = vec![view(missile), view(second)];
+            step(&mut ws, &w, None, None, &mut out);
+            assert_eq!(holders(&ws, missile), cap as usize);
+            assert_eq!(holders(&ws, second), (3 - cap as usize).min(cap as usize), "cap {cap}: the rest take the second");
+        }
     }
 
     #[test]

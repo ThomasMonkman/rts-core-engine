@@ -2,8 +2,9 @@ cargo-features = ["codegen-backend"]
 
 [package]
 name = "rts-core-engine"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
+repository = "https://github.com/ThomasMonkman/rts-core-engine"
 # Never published to crates.io (cargo-about then leaves it out of the
 # third-party notices).
 publish = false
@@ -103,15 +104,13 @@ trim-paths = "all"
 
 [features]
 tracy = ["dep:tracing-tracy", "dep:tracy-client", "dep:tracy-client-sys", "dep:profiling", "profiling/profile-with-tracy"]
-# Tracy zone per Lua thread resume, named by the forked function (a lookup
-# per ForkThread and per thread resume, so separate from `tracy`).
-lua-profile = ["tracy"]
 
 [dependencies]
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 postcard = { version = "1", features = ["alloc"] }
 ab_glyph = "0.2"
+skrifa = "0.40"
 mlua = { version = "0.10", features = ["luau"] }
 # The typed Lua API's macros (src/lua_api).
 lua-api-macros = { path = "crates/lua-api-macros" }

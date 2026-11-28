@@ -90,6 +90,7 @@ jobs:
           target/package/dist/rts-core-engine --dump-api "lua-api/$name"
           rm -f "lua-api/$name/undocumented.md"
           (cd lua-api && zip -r "$name.zip" "$name")
+          cp -r "lua-api/$name" api-site
           ls -l "lua-api/$name"
 
       - uses: actions/upload-artifact@v7
@@ -100,6 +101,28 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+      # The API browser (the dump's `index.html`) for GitHub Pages, from
+      # `main` only (Pages must be on, with "GitHub Actions" as its source).
+      - uses: actions/upload-pages-artifact@v5
+        if: matrix.os == 'linux' && github.ref == 'refs/heads/main'
+        with:
+          path: api-site
+
+  api-docs:
+    if: github.ref == 'refs/heads/main'
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -112,6 +135,8 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: dist
+          # Not the Pages site (`github-pages`).
+          pattern: rts-core-engine-*
           merge-multiple: true
 
       # A tag with a `-` in it (v0.2.0-rc1) is a prerelease.

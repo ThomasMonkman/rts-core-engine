@@ -1,5 +1,7 @@
 -- Scenario test (tests/scenarios.rs): ARMY_1 / ARMY_2 have no AI; checks go
 -- into ScenarioResult, which the test reads once `done` is set.
+-- GetPosition() is one table per entity, rewritten by each call: copy it to keep it.
+local function pos(e) local p = e:GetPosition() return Vector(p[1], p[2], p[3]) end
 rawset(_G, "ScenarioResult", { done = false, failures = {}, notes = {} })
 local function check(ok, msg) if not ok then table.insert(ScenarioResult.failures, msg) end end
 local function note(msg) table.insert(ScenarioResult.notes, msg) end
@@ -55,7 +57,7 @@ ForkThread(function()
     -- MohoEngine.dll 0x1029df60).
     local thh = t.Blueprint.Air.TransportHoverHeight
     for _ = 1, 30 do WaitTicks(10) end
-    local cruise = t:GetPosition()
+    local cruise = pos(t)
     local cruise_y = cruise[2] - ground(cruise[1], cruise[3])
     check(math.abs(cruise_y - thh) < 1.5, 'idle loaded transport holds at its TransportHoverHeight: ' .. cruise_y .. ' vs ' .. thh)
     check(t:GetCurrentLayer() == 'Air', 'in the air')
@@ -79,14 +81,14 @@ ForkThread(function()
     check(not t:IsUnitState('TransportLoading'), 'done loading')
     check(tanks[1]:IsUnitState('Attached') and tanks[1]:GetCurrentLayer() == 'Air', 'passengers ride attached, in the air')
     -- Cargo hangs underneath: the passenger's feet sit below the transport.
-    local tp, pp = t:GetPosition(), tanks[1]:GetPosition()
+    local tp, pp = pos(t), pos(tanks[1])
     check(pp[2] < tp[2], 'cargo hangs below the transport: ' .. pp[2] .. ' vs ' .. tp[2])
     IssueTransportUnload({t}, {440, 0, 560})
     local dropped_y = nil
     for _ = 1, 400 do
         WaitTicks(1)
         if table.getn(t:GetCargo()) == 0 then
-            local p = t:GetPosition()
+            local p = pos(t)
             dropped_y = p[2] - ground(p[1], p[3])
             break
         end
@@ -95,15 +97,15 @@ ForkThread(function()
     check(dropped_y ~= nil and math.abs(dropped_y - thh) < 1.5, 'transport lowers to TransportHoverHeight to drop: ' .. tostring(dropped_y) .. ' vs ' .. thh)
     -- Empty and idle, the transport lands.
     for _ = 1, 30 do WaitTicks(10) end
-    local back = t:GetPosition()
+    local back = pos(t)
     local back_y = back[2] - ground(back[1], back[3])
     check(t:GetCurrentLayer() == 'Land' and back_y < 1, 'empty idle transport lands: ' .. t:GetCurrentLayer() .. ' ' .. back_y)
-    local p = tanks[1]:GetPosition()
+    local p = pos(tanks[1])
     check(math.abs(p[2] - ground(p[1], p[3])) < 0.5, 'set down on the ground')
     check(tanks[1]:GetCurrentLayer() == 'Land' and not tanks[1]:IsUnitState('Attached'), 'back on land, detached')
     IssueMove({tanks[1]}, {p[1] + 20, 0, p[3]})
     WaitTicks(50)
-    local q = tanks[1]:GetPosition()
+    local q = pos(tanks[1])
     check(VDist2(p[1], p[3], q[1], q[3]) > 5, 'drives off after landing')
     local ferried = 0
     t.OnFerryPointSet = function(self) ferried = ferried + 1 end
@@ -114,11 +116,11 @@ ForkThread(function()
     -- A ferry route flies: the transport heads for its beacon (the route's
     -- first point), reads Ferrying, and waits there for units to ferry: the
     -- order stands until it's cleared (moho's ferry task loops).
-    local start = t:GetPosition()
+    local start = pos(t)
     local arrived
     for _ = 1, 60 do
         WaitTicks(10)
-        arrived = t:GetPosition()
+        arrived = pos(t)
         if VDist2(arrived[1], arrived[3], 420, 600) < 3 then break end
     end
     check(VDist2(start[1], start[3], arrived[1], arrived[3]) > 5, 'ferry route flies')
@@ -139,11 +141,11 @@ ForkThread(function()
         WaitTicks(1)
         if tanks[1]:IsUnitState('Attached') then break end
         if tanks[1].beam_tick ~= nil then
-            local y = tanks[1]:GetPosition()[2]
+            local y = pos(tanks[1])[2]
             if rise_from == nil then rise_from = y elseif rise_early == nil then rise_early = y end
             rise_mid = y
             if beam_transport_y == nil then
-                local tp = t:GetPosition()
+                local tp = pos(t)
                 beam_transport_y = tp[2] - ground(tp[1], tp[3])
             end
         end
@@ -162,7 +164,7 @@ ForkThread(function()
     check(beam_transport_y ~= nil and math.abs(beam_transport_y - thh) < 1.5, 'transport lowers to TransportHoverHeight before the beam-up: ' .. tostring(beam_transport_y) .. ' vs ' .. thh)
     -- After the pickup, idle with cargo, it holds at TransportHoverHeight.
     for _ = 1, 30 do WaitTicks(10) end
-    local after = t:GetPosition()
+    local after = pos(t)
     local after_y = after[2] - ground(after[1], after[3])
     check(math.abs(after_y - thh) < 1.5, 'idle transport holds at TransportHoverHeight after pickup: ' .. after_y .. ' vs ' .. thh)
     -- Unload-specific: only the named cargo leaves.

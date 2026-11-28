@@ -12,8 +12,9 @@ pub const C_OBJECT: &str = "_c_object";
 /// engine operation that fired it (e.g. `CreateProp` still returns the prop).
 pub fn run_script(lua: &Lua, obj: &LuaTable, name: &str, what: &str, args: impl IntoLuaMulti) -> LuaResult<()> {
     let Some(f) = obj.get::<Option<LuaFunction>>(name)? else { return Ok(()) };
-    // Tracy: the Lua the sim runs serially, by callback (`lua: <method>`).
-    let _s = crate::prof_span!("lua callback", method = %name, what = %what);
+    // Tracy level 2: the Lua the sim runs serially, by callback method.
+    #[cfg(feature = "tracy")]
+    let _zone = crate::engine::tracy::callback_zone(name);
     let mut args = args.into_lua_multi(lua)?;
     args.push_front(LuaValue::Table(obj.clone()));
     if let Err(e) = f.call::<()>(args) {
@@ -36,6 +37,14 @@ pub fn create<T: LuaUserData + mlua::MaybeSend + 'static>(
 
 /// Reads the native handle of a script object (`self` in a native method).
 pub fn handle<T: LuaUserData + Clone + 'static>(obj: &LuaTable) -> LuaResult<T> {
+    // Hot (every native method's `self`): borrow the userdata where the
+    // read leaves it, without making a registry reference to it first.
+    // Anything else takes the general path below, for its error.
+    match obj.raw_get::<Option<LuaUserDataRef<T>>>(C_OBJECT) {
+        Ok(Some(h)) => return Ok(h.clone()),
+        Ok(None) => return Err(LuaError::runtime("expected an engine object (no _c_object)")),
+        Err(_) => {}
+    }
     match obj.raw_get::<LuaValue>(C_OBJECT)? {
         LuaValue::UserData(ud) => Ok(ud.borrow::<T>()?.clone()),
         _ => Err(LuaError::runtime("expected an engine object (no _c_object)")),

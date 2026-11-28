@@ -20,7 +20,7 @@ use crate::lua_api::shapes::{self, Shaped};
 use crate::lua_api::{Obj, lua_method};
 use crate::engine::sim::army::{Alliance, Armies};
 use crate::engine::sim::category::CategorySet;
-use crate::engine::sim::entity::{EntityId, EntityKind};
+use crate::engine::sim::entity::EntityId;
 use crate::engine::sim::math::{from_lua, Fx};
 
 /// Side of a grid cell (world units).
@@ -153,8 +153,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             let vectors = {
                 let world = entity::world(lua);
                 let positions = world
-                    .iter()
-                    .filter(|e| e.kind == EntityKind::Unit && !e.destroyed && e.army == Some(enemy))
+                    .units_of(enemy)
+                    .filter(|e| !e.destroyed)
                     .filter(|e| e.category_index.is_some_and(|i| category.contains(i)))
                     .map(|e| (e.position().x, e.position().z));
                 compute(width, height, positions)
@@ -181,7 +181,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// (FA's order; FAF's only caller, dead code, swaps the last two, so either
         /// order is read). The optional `import(module)[function](squadX, squadZ,
         /// targetX, targetZ)` vetoes vectors; its errors are logged and allow the
-        /// vector, as in FA.
+        /// vector, as in FA. Closest, Furthest and LeastDefended give the
+        /// first vector left; HighestValue one into the cell of most value;
+        /// nil for a platoon made this tick or the one before.
         PickBestAttackVector = |lua, args: LuaMultiValue| {
             let args: Vec<LuaValue> = args.into_iter().collect();
             if args.len() == 7 {
@@ -213,7 +215,17 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             let vectors = lua.app_data_ref::<AttackVectors>().expect("AttackVectors").0.get(&index).cloned().unwrap_or_default();
             let has_enemy = lua.app_data_ref::<Armies>().expect("Armies").get(index).and_then(|a| a.current_enemy).is_some();
             let members: Vec<EntityId> = crate::engine::api::platoon::live_members(lua, &platoon, |s| s.eq_ignore_ascii_case(&squad))?;
-            if !has_enemy || members.is_empty() || vectors.is_empty() {
+            // A platoon made the tick before gets nothing yet: the real
+            // game's squad, made at t60, got nil for every pick at t61, and
+            // picks three ticks after making it worked (dev/probes
+            // probe_re3_ai AV L1, probe_re3_ai2). (Whether the platoon's age
+            // or its units' counts isn't separated: both were made together.)
+            let fresh = {
+                let id = crate::engine::api::platoon::live_id(lua, &platoon)?;
+                let made = crate::engine::api::platoon::platoons(lua).get(id).map_or(0, |p| p.created);
+                crate::engine::api::sim_time::current_tick(lua) < made + 2
+            };
+            if fresh || !has_enemy || members.is_empty() || vectors.is_empty() {
                 return Ok(LuaNil);
             }
             // The squad's centre, and the vectors whose target every squad unit
@@ -256,79 +268,56 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 let world = entity::world(lua);
                 let armies = lua.app_data_ref::<Armies>().expect("Armies");
                 world
-                    .iter()
-                    .filter(|e| e.kind == EntityKind::Unit && !e.destroyed)
+                    .units()
+                    .filter(|e| !e.destroyed)
                     .filter(|e| category.as_ref().is_none_or(|c| e.category_index.is_some_and(|i| c.contains(i))))
                     .filter(|e| e.army.is_some_and(|a| armies.alliance(index, a) == alliance))
                     .map(|e| (e.id, e.position().x, e.position().z, e.cold.blueprint_id.clone()))
                     .collect()
             };
-            let target = |v: &AttackVector| (Fx::from_num(v.px + v.vx), Fx::from_num(v.pz + v.vz));
-            let pick_by_distance = |furthest: bool| -> Option<AttackVector> {
-                // Distance to the squad, or with a category to its closest
-                // (furthest) unit of the category.
-                let near = matching.iter().map(|&(id, x, z, _)| (dist2(x, z, sx, sz), id, x, z));
-                let reference = match &category {
-                    Some(_) if furthest => near.max_by_key(|&(d, id, _, _)| (d, std::cmp::Reverse(id))),
-                    Some(_) => near.min_by_key(|&(d, id, _, _)| (d, id)),
-                    None => None,
-                };
-                let (rx, rz) = reference.map_or((sx, sz), |(_, _, x, z)| (x, z));
-                // First of equals wins (vector order).
-                let mut best: Option<(Fx, AttackVector)> = None;
-                for v in &allowed {
-                    let (x, z) = target(v);
-                    let d = dist2(x, z, rx, rz);
-                    if best.is_none_or(|(b, _)| if furthest { d > b } else { d < b }) {
-                        best = Some((d, *v));
-                    }
-                }
-                best.map(|(_, v)| v)
-            };
+            // Closest, Furthest and LeastDefended give the first vector
+            // whatever the squad's position or the intel: the real game's
+            // did at all 10 squad positions, land and air squads alike
+            // (dev/probes probe_re3_ai2, probe_re3_ai3; ours had picked by
+            // straight-line distance). HighestValue goes for the cell of the
+            // most value; which of its vectors the real game picks isn't
+            // straight-line distance (not decoded): the closest here.
             let picked = match compare {
-                Compare::Closest => pick_by_distance(false),
-                Compare::Furthest => pick_by_distance(true),
-                Compare::HighestValue | Compare::LeastDefended => {
+                Compare::Closest | Compare::Furthest | Compare::LeastDefended => allowed.first().copied(),
+                Compare::HighestValue => {
                     // Blueprint value (energy + mass cost), read once per blueprint.
                     let mut values: std::collections::BTreeMap<&str, Fx> = std::collections::BTreeMap::new();
-                    if compare == Compare::HighestValue {
-                        for (_, _, _, bp_id) in &matching {
-                            if values.contains_key(bp_id.as_str()) {
-                                continue;
-                            }
-                            let bp = entity::blueprint_table(lua, crate::engine::api::blueprints::BlueprintKind::Unit, bp_id)?;
-                            let value = match bp.get::<Option<LuaTable>>("Economy")? {
-                                Some(e) => from_lua(e.get::<Option<f64>>("BuildCostEnergy")?.unwrap_or(0.0)) + from_lua(e.get::<Option<f64>>("BuildCostMass")?.unwrap_or(0.0)),
-                                None => Fx::ZERO,
-                            };
-                            values.insert(bp_id, value);
+                    for (_, _, _, bp_id) in &matching {
+                        if values.contains_key(bp_id.as_str()) {
+                            continue;
                         }
+                        let bp = entity::blueprint_table(lua, crate::engine::api::blueprints::BlueprintKind::Unit, bp_id)?;
+                        let value = match bp.get::<Option<LuaTable>>("Economy")? {
+                            Some(e) => from_lua(e.get::<Option<f64>>("BuildCostEnergy")?.unwrap_or(0.0)) + from_lua(e.get::<Option<f64>>("BuildCostMass")?.unwrap_or(0.0)),
+                            None => Fx::ZERO,
+                        };
+                        values.insert(bp_id, value);
                     }
                     let r2 = Fx::from_num(VALUE_RADIUS * VALUE_RADIUS);
                     let mut best: Option<(Fx, Fx, AttackVector)> = None;
                     for v in &allowed {
-                        let (x, z) = target(v);
-                        let near = matching.iter().filter(|&&(_, ux, uz, _)| dist2(ux, uz, x, z) <= r2);
-                        let score = if compare == Compare::HighestValue {
-                            near.map(|(_, _, _, bp)| values.get(bp.as_str()).copied().unwrap_or(Fx::ZERO)).fold(Fx::ZERO, |a, b| a + b)
-                        } else {
-                            Fx::from_num(near.count())
-                        };
+                        let (x, z) = (Fx::from_num(v.px + v.vx), Fx::from_num(v.pz + v.vz));
+                        let score = matching
+                            .iter()
+                            .filter(|&&(_, ux, uz, _)| dist2(ux, uz, x, z) <= r2)
+                            .map(|(_, _, _, bp)| values.get(bp.as_str()).copied().unwrap_or(Fx::ZERO))
+                            .fold(Fx::ZERO, |a, b| a + b);
                         let d = dist2(x, z, sx, sz);
                         let better = match best {
                             None => score > Fx::ZERO,
-                            Some((b, bd, _)) if compare == Compare::HighestValue => score > b || (score == b && d < bd),
-                            Some((b, _, _)) => score > Fx::ZERO && score < b,
+                            Some((b, bd, _)) => score > b || (score == b && d < bd),
                         };
                         if better {
                             best = Some((score, d, *v));
                         }
                     }
-                    // Nothing of value anywhere: the closest instead.
-                    match best {
-                        Some((_, _, v)) => Some(v),
-                        None => pick_by_distance(false),
-                    }
+                    // Nothing of value anywhere: the first.
+                    best.map(|(_, _, v)| v).or_else(|| allowed.first().copied())
                 }
             };
             match picked {

@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use ab_glyph::{Font, ScaleFont};
+use ab_glyph::Font;
 use rts_core_engine::engine::vfs::Vfs;
 use rts_core_engine::ui::controls::{ControlId, DrawItem};
 use rts_core_engine::ui::movie::VideoFrame;
@@ -33,6 +33,9 @@ struct Vertex {
     pos: [f32; 2],
     uv: [f32; 2],
     color: [f32; 4],
+    /// 0: a plain quad (texel x colour, both linear). 1: a strategic icon
+    /// (`DrawItem::Icon`, `fs` in `ui.wesl`), its colour sRGB.
+    icon: f32,
 }
 
 /// Where an image sits in the atlas (texels) and, for glyphs, how to place it.
@@ -264,7 +267,7 @@ impl UiRenderer {
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32],
                 }],
             },
             fragment: Some(wgpu::FragmentState {
@@ -542,8 +545,10 @@ impl UiRenderer {
         // strategic icons): the sRGB -> linear conversion is remembered.
         let mut last_colour: Option<([f32; 4], [f32; 4])> = None;
         // `turned`: the texture a quarter anticlockwise in `r` (vertical text).
-        let mut quad = |out: &mut Vec<Vertex>, r: [f32; 4], uv: [f32; 4], c: [f32; 4], turned: bool| {
+        // `icon`: 1 for a strategic icon (its colour stays sRGB).
+        let mut quad = |out: &mut Vec<Vertex>, r: [f32; 4], uv: [f32; 4], c: [f32; 4], turned: bool, icon: f32| {
             let c = match last_colour {
+                _ if icon > 0.0 => c,
                 Some((from, to)) if from == c => to,
                 _ => {
                     let to = [linear(c[0]), linear(c[1]), linear(c[2]), c[3]];
@@ -551,7 +556,7 @@ impl UiRenderer {
                     to
                 }
             };
-            let v = |x: f32, y: f32, u: f32, w: f32| Vertex { pos: [x, y], uv: [u, w], color: c };
+            let v = |x: f32, y: f32, u: f32, w: f32| Vertex { pos: [x, y], uv: [u, w], color: c, icon };
             // Each corner's texture coordinate: top left, top right, bottom
             // left, bottom right.
             let [tl, tr, bl, br] = if turned {
@@ -589,26 +594,40 @@ impl UiRenderer {
                     let (tw, th) = if s.own.is_some() { (s.w as f32, s.h as f32) } else { (a, a) };
                     let tuv = [(x0 + uv[0] * sw) / tw, (y0 + uv[1] * sh) / th, (x0 + uv[2] * sw) / tw, (y0 + uv[3] * sh) / th];
                     batch(&mut self.batches, s.own.map_or(Tex::Atlas, Tex::Own), out.len());
-                    quad(out, *rect, tuv, *color, false);
+                    quad(out, *rect, tuv, *color, false, 0.0);
+                }
+                DrawItem::Icon { rect, texture, uv, color } => {
+                    let slot = match memo.get(texture.as_str()) {
+                        Some(&s) => s,
+                        None => {
+                            let s = self.slot(device, queue, &Key::Texture(texture.clone()), full);
+                            memo.insert(texture.as_str(), s);
+                            s
+                        }
+                    };
+                    let Some(s) = slot else { continue };
+                    // Point sampled (the shader loads the texel under each
+                    // pixel's centre): the rectangle spans the whole texels.
+                    let (tw, th) = if s.own.is_some() { (s.w as f32, s.h as f32) } else { (a, a) };
+                    let (x0, y0, sw, sh) = (s.x as f32, s.y as f32, s.w as f32, s.h as f32);
+                    let tuv = [(x0 + uv[0] * sw) / tw, (y0 + uv[1] * sh) / th, (x0 + uv[2] * sw) / tw, (y0 + uv[3] * sh) / th];
+                    batch(&mut self.batches, s.own.map_or(Tex::Atlas, Tex::Own), out.len());
+                    quad(out, *rect, tuv, *color, false, 1.0);
                 }
                 DrawItem::Text { rect, text, family, size, color, shadow, vertical } => {
                     let file = fonts::file_for(family);
-                    let Some(font) = self.fonts.as_mut().and_then(|f| f.font(family)) else { continue };
-                    let px = fonts::px(*size);
-                    let scaled = font.as_scaled(px);
-                    let baseline = rect[1] + scaled.ascent();
-                    let size4 = (px.y * 4.0).round() as u32;
+                    // Laid out as moho measures: whole-pixel advances, no
+                    // kerning, the baseline a whole-pixel ascent down.
+                    let Some(fonts) = self.fonts.as_mut() else { continue };
+                    let Some(line) = fonts.line(family, *size) else { continue };
+                    let baseline = rect[1] + line.ascent;
+                    let size4 = (line.scale.y * 4.0).round() as u32;
                     let mut pen = rect[0];
-                    let mut prev = None;
                     let mut glyphs = Vec::new();
-                    for ch in text.chars() {
-                        let g = scaled.glyph_id(ch);
-                        if let Some(p) = prev {
-                            pen += scaled.kern(p, g);
-                        }
+                    for ch in text.chars().filter(|c| !c.is_control()) {
+                        let g = line.font.glyph_id(ch);
                         glyphs.push((g, pen));
-                        pen += scaled.h_advance(g);
-                        prev = Some(g);
+                        pen += fonts.advance(family, line.ppem, g);
                     }
                     let pen_end = (pen - rect[0]).round();
                     for pass in [true, false] {
@@ -633,7 +652,7 @@ impl UiRenderer {
                             let r = [r[0] + dx, r[1] + dx, r[2] + dx, r[3] + dx];
                             let uv = [s.x as f32 / a, s.y as f32 / a, (s.x + s.w) as f32 / a, (s.y + s.h) as f32 / a];
                             batch(&mut self.batches, Tex::Atlas, out.len());
-                            quad(out, r, uv, c, *vertical);
+                            quad(out, r, uv, c, *vertical, 0.0);
                         }
                     }
                 }
@@ -646,7 +665,7 @@ impl UiRenderer {
                     // The picture, without the planes' macroblock padding.
                     let uv = [0.0, 0.0, f.planes.width as f32 / f.planes.plane_width as f32, f.planes.height as f32 / f.planes.plane_height as f32];
                     batch(&mut self.batches, Tex::Movie(*movie), out.len());
-                    quad(out, *rect, uv, *color, false);
+                    quad(out, *rect, uv, *color, false, 0.0);
                 }
             }
         }

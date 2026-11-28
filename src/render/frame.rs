@@ -103,18 +103,17 @@ fn update_camera(s: &mut RenderState, head: usize, dt: f32) {
     let pointer_here = !two || s.cursor_head == head;
     let cursor = s.input.cursor.map(|(x, y)| (x as f32, y as f32)).filter(|_| pointer_here);
     let main_here = owner(s, crate::render::camera::MAIN) == head;
-    // The ground under the cursor before a zoom (kept under it after).
-    s.zoom_anchor = match (pointer_here && s.input.wheel != 0.0, cursor) {
-        (true, Some((x, y))) => s.world.ground_at(x, y),
-        _ => None,
-    };
     let keys = &s.input.keys;
     let axis = |neg: &[K], pos: &[K]| -> f32 {
         (pos.iter().any(|k| keys.contains(k)) as i32 - neg.iter().any(|k| keys.contains(k)) as i32) as f32
     };
-    // Fractions of the zoom (the view's width) a second: the same feel as
-    // before zoom meant ground width (0.9 eye distances on a 16:9 view).
-    let speed = 0.45 * dt;
+    // The keys pan `ui_KeyboardPanSpeed` pixels of ground a (60 Hz) frame,
+    // `ui_KeyboardPanAccelerateMultiplier` times that with Ctrl (moho's
+    // world view, SupremeCommander.exe 0x876d6f); the camera's pan
+    // (0x7ae490) takes a pixel as zoom / the view's width.
+    let main_width = s.world.head_views(head).iter().find(|v| v.camera.eq_ignore_ascii_case(crate::render::camera::MAIN)).map_or(1.0, |v| v.size()[0]).max(1.0);
+    let accelerate = if s.input.mods.ctrl { crate::render::camera::KEYBOARD_PAN_ACCELERATE } else { 1.0 };
+    let speed = crate::render::camera::KEYBOARD_PAN_SPEED * accelerate * dt * 60.0 / main_width;
     let (px, pz) = match main_here {
         true => (axis(&[K::KeyA, K::ArrowLeft], &[K::KeyD, K::ArrowRight]), axis(&[K::KeyW, K::ArrowUp], &[K::KeyS, K::ArrowDown])),
         false => (0.0, 0.0),
@@ -154,9 +153,8 @@ fn update_camera(s: &mut RenderState, head: usize, dt: f32) {
         // not with Alt, FAF's Alt-Delete is a debug key). It stays turned.
         if turn != 0.0 && !s.input.mods.alt {
             let step = crate::render::camera::KEYBOARD_ROTATE_SPEED * if s.input.mods.ctrl { crate::render::camera::KEYBOARD_ROTATE_ACCELERATE } else { 1.0 } * dt * 60.0;
-            let width = s.world.head_views(head).iter().find(|v| v.camera.eq_ignore_ascii_case(crate::render::camera::MAIN)).map_or(1.0, |v| v.size()[0]);
             if let Some(cam) = s.world.camera_mut() {
-                cam.spin(turn * step, 0.0, width);
+                cam.spin(turn * step, 0.0, main_width);
             }
         }
     }
@@ -206,7 +204,9 @@ fn update_camera(s: &mut RenderState, head: usize, dt: f32) {
     if let Some(view) = pointer
         && let Some(cam) = s.world.cameras.get_mut(&view.camera) {
         if wheel != 0.0 {
-            cam.zoom(wheel);
+            // Toward the cursor (not for a followed camera, which stays on
+            // what it follows).
+            cam.zoom(wheel, cursor.filter(|_| !pointer_tracked));
         }
         if dx != 0.0 || dy != 0.0 {
             // The ground follows the cursor: zoom spans the longer side.
@@ -215,25 +215,36 @@ fn update_camera(s: &mut RenderState, head: usize, dt: f32) {
             cam.pan(-(dx as f32) / long, -(dy as f32) / long);
         }
     }
-    // Every camera stays over the map, its look-at height easing toward
-    // the ground under it.
+    // Wheel zooms ease to their goals. One closing in keeps the ground that
+    // was under the cursor under it; zooming out leaves the look-at
+    // point alone (moho's camera update, 0x7b0b80).
+    let zooming: Vec<String> = s.world.cameras.iter().filter(|(name, c)| c.zoom_goal() != c.zoom && owner(s, name) == head).map(|(n, _)| n.to_owned()).collect();
+    for name in zooming {
+        let Some(before) = s.world.cameras.get(&name).copied() else { continue };
+        let mut cam = before;
+        // It closes on where the cursor is now, not where the wheel turned.
+        if let Some((x, y)) = cursor.filter(|&(x, y)| s.world.view_at(x, y).is_some_and(|(v, _)| v.camera.eq_ignore_ascii_case(&name))) {
+            cam.zoom_cursor((x, y));
+        }
+        if let Some((x, y)) = cam.step_zoom(dt)
+            && let Some(view) = s.world.head_views(head).iter().find(|v| v.camera.eq_ignore_ascii_case(&name))
+            && let (Some(was), Some(now)) = (s.world.ground_through(view, &before, x, y), s.world.ground_through(view, &cam, x, y)) {
+            cam.target.x += was.x - now.x;
+            cam.target.z += was.z - now.z;
+        }
+        s.world.cameras.insert(&name, cam);
+    }
+    // Every camera stays over the map (nearer its middle the further out
+    // it is), its look-at height easing toward the ground under it.
+    let free = s.cam_free;
     let mine: Vec<bool> = s.world.cameras.iter().map(|(name, _)| owner(s, name) == head).collect();
     let heights: Vec<f32> = s.world.cameras.iter().map(|(_, c)| s.world.height_at(c.target.x, c.target.z)).collect();
     for (((_, cam), h), mine) in s.world.cameras.iter_mut().zip(heights).zip(mine) {
         if mine {
             cam.step_revert(dt);
-            cam.clamp_to(map.0, map.1);
+            cam.clamp_to(map.0, map.1, free);
             cam.target.y += (h - cam.target.y) * (dt * 5.0).min(1.0);
         }
-    }
-    // Zoom toward the cursor: the ground under it stays under it (not for
-    // a followed camera, which stays on what it follows).
-    if let (Some((x, y)), Some(before), true, false) = (cursor, s.zoom_anchor.take(), wheel != 0.0, pointer_tracked)
-        && let Some(after) = s.world.ground_at(x, y)
-        && let Some(cam) = s.world.camera_at_mut(x, y) {
-        cam.target.x += before.x - after.x;
-        cam.target.z += before.z - after.z;
-        cam.clamp_to(map.0, map.1);
     }
 }
 
@@ -291,7 +302,7 @@ fn spin_camera(s: &mut RenderState, pointer: Option<&crate::render::camera::View
             }
             s.apply_cursor_clip();
             let _ = s.window.set_cursor_position(winit::dpi::PhysicalPosition::new(at.0, at.1));
-            s.window.set_cursor_visible(s.os_cursor != rts_core_engine::ui::cursor::Wanted::Hidden);
+            s.window.set_cursor_visible(s.os_cursor != Some(rts_core_engine::ui::cursor::Wanted::Hidden));
         }
     }
 }
@@ -461,6 +472,7 @@ fn to_physical(item: rts_core_engine::ui::controls::DrawItem, scale: f32) -> rts
         D::World { rect, camera, shapes } => D::World { rect: r(rect), camera, shapes },
         D::Text { rect, text, family, size, color, shadow, vertical } => D::Text { rect: r(rect), text, family, size: size * scale, color, shadow, vertical },
         D::Movie { rect, movie, frame, color } => D::Movie { rect: r(rect), movie, frame, color },
+        D::Icon { rect, texture, uv, color } => D::Icon { rect: r(rect), texture, uv, color },
     }
 }
 
@@ -1013,13 +1025,14 @@ fn update_ui(s: &mut RenderState, dt: f32) {
                 cam.revert_rotation();
             }
             if r.reset {
-                // The default view faces north at the zoom's pitch.
+                // The default view faces north over the map's middle from
+                // this camera's farthest zoom (its `SetMaxZoomMult` applied,
+                // so straight down), as moho's (`probe_ui_controls` cam:
+                // zoom = `GetMaxZoom()`, pitch 1.57).
                 cam.clear_rotation();
                 if let Some((w, h)) = s.world.map_size {
-                    let mut fresh = crate::render::camera::Camera::new(w, h);
-                    fresh.aspect = cam.aspect;
-                    fresh.fit_map(w, h);
-                    (x, z, zoom) = (fresh.target.x, fresh.target.z, fresh.max_zoom);
+                    let fresh = crate::render::camera::Camera::new(w, h);
+                    (x, z, zoom) = (fresh.target.x, fresh.target.z, cam.max_zoom);
                 }
             }
             if let Some(f) = r.focus {
@@ -1132,8 +1145,7 @@ fn update_ui(s: &mut RenderState, dt: f32) {
     // really runs at (capped by the slowest machine, or measured flat out),
     // both as moho steps (FAF's clock shows "+asked / +actual", and its
     // `OnBeat` reads `GetSimRate() > 0` as sped up).
-    use rts_core_engine::engine::snapshot::SimControl;
-    let (asked, actual) = (SimControl::step_of(s.control.shown()), SimControl::step_of(s.control.effective()));
+    let (asked, actual) = s.control.interface_steps();
     let _ = vm.set_game_speed(asked, actual as f32, s.control.changed_by());
     if let Ok(Some(p)) = vm.take_pause_request() {
         s.control.set_paused(p);
@@ -1213,6 +1225,9 @@ fn update_ui(s: &mut RenderState, dt: f32) {
             tracing::warn!("UI focus army: {e}");
         }
     }
+    // An observer seeing the game as one army (the score board's
+    // `SetFocusArmy`) commands nothing.
+    s.player.view_only = s.player.player.is_none() && vm.focus_army().is_some();
     // Alliances changed in the sim (FAF's SetAlliance: teams, sharing).
     if let Some(a) = &s.world.alliances
         && !s.ui_alliances.as_ref().is_some_and(|u| std::sync::Arc::ptr_eq(u, a)) {
@@ -1306,6 +1321,19 @@ fn update_ui(s: &mut RenderState, dt: f32) {
         start_seek(s, request);
         return;
     }
+    // What this frame's `UISelectionByCategory` calls see of the view.
+    vm.set_select_scope(rts_core_engine::ui::SelectScope {
+        in_view: {
+            let test = s.world.in_view_test();
+            Box::new(move |p| test(p.into()))
+        },
+        from: s
+            .input
+            .cursor
+            .and_then(|(x, y)| s.world.ground_at(x as f32, y as f32))
+            .or_else(|| s.world.camera().map(|c| c.target))
+            .map(Into::into),
+    });
     if s.player.selection != s.ui_selection {
         let _s = rts_core_engine::prof_span!("interface selection");
         let _ = vm.update_units(&infos(&s.world, &s.player.selection));
@@ -1324,7 +1352,7 @@ fn update_ui(s: &mut RenderState, dt: f32) {
             s.player.selection = std::mem::take(&mut s.pending_select);
         }
         if let Some(code) = s.pending_ui_lua.take()
-            && let Err(e) = vm.lua().load(code.as_str()).set_name("=--ui-lua").exec() {
+            && let Err(e) = rts_core_engine::ui::run_source(vm.lua(), &code, "=--ui-lua") {
             tracing::warn!(target: "lua", "--ui-lua failed: {e}");
         }
     }
@@ -1347,7 +1375,7 @@ fn update_ui(s: &mut RenderState, dt: f32) {
                 }
                 // `IssueDockCommand`: the interface picks the platform.
                 if o.command == "UNITCOMMAND_Dock" {
-                    s.player.issue_dock(&s.world, !o.clear);
+                    s.player.issue_dock(&s.world, o.units.as_deref(), !o.clear);
                     continue;
                 }
                 match rts_core_engine::ui::command_kind(&o.command) {
@@ -1382,6 +1410,12 @@ fn update_ui(s: &mut RenderState, dt: f32) {
                 .collect(),
         );
         vm.set_busy(s.world.latest.as_ref().map_or(&[][..], |l| l.busy.as_slice()));
+        if let Some(l) = &s.world.latest
+            && let Err(e) = vm.set_engine_counts(&l.engine_counts)
+        {
+            tracing::warn!("UI engine stats: {e}");
+        }
+        vm.set_unselectable(s.world.entities().iter().filter(|e| e.attached || e.in_builder || s.world.unselectable(e)).map(|e| e.id).collect());
         if let Some(d) = &s.world.deposits {
             vm.set_deposits(d.clone());
         }
@@ -2071,6 +2105,14 @@ pub fn render_frame(s: &mut RenderState) {
     drop(debug);
     let _ = egui_span;
 
+    // egui-winit sets the window's cursor (and shows it) whenever its icon
+    // changes or the pointer comes back into the window: FAF's cursor is
+    // then set again after the frame (`app.rs`), unless the pointer is over
+    // an egui window.
+    if s.egui_cursor.sets(s.pointer_in_main, full_output.platform_output.cursor_icon) {
+        s.os_cursor = None;
+    }
+    s.egui_owns_cursor = s.egui_ctx.egui_wants_pointer_input();
     s.egui_state
         .handle_platform_output(&s.window, full_output.platform_output);
 

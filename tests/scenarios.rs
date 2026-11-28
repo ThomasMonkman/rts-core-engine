@@ -81,6 +81,21 @@ fn platoon_destroy_brain() {
 }
 
 #[test]
+fn platoon_named_pool_survives() {
+    scenario("platoon_named_pool_survives", 40);
+}
+
+#[test]
+fn platoon_emptied_next_beat() {
+    scenario("platoon_emptied_next_beat", 30);
+}
+
+#[test]
+fn platoon_call_rules() {
+    scenario("platoon_call_rules", 80);
+}
+
+#[test]
 fn water_targets_only() {
     scenario("water_targets_only", 400);
 }
@@ -169,6 +184,11 @@ fn blip_identity() {
 }
 
 #[test]
+fn jammer_fakes() {
+    scenario("jammer_fakes", 500);
+}
+
+#[test]
 fn blueprint_regen() {
     scenario("blueprint_regen", 60);
 }
@@ -176,6 +196,31 @@ fn blueprint_regen() {
 #[test]
 fn max_health() {
     scenario("max_health", 30);
+}
+
+#[test]
+fn platoon_transport() {
+    scenario("platoon_transport", 800);
+}
+
+#[test]
+fn brain_platoon_shapes() {
+    scenario("brain_platoon_shapes", 40);
+}
+
+#[test]
+fn blocking_terrain() {
+    scenario("blocking_terrain", 20);
+}
+
+#[test]
+fn platoon_find_intel() {
+    scenario("platoon_find_intel", 60);
+}
+
+#[test]
+fn threat_external_factory() {
+    scenario("threat_external_factory", 60);
 }
 
 #[test]
@@ -234,12 +279,37 @@ fn repair_refuel() {
 }
 
 #[test]
+fn repair_shield() {
+    scenario("repair_shield", 600);
+}
+
+#[test]
 fn reclaim() {
     scenario("reclaim", 600);
 }
 
 /// Reclaiming a unit takes its health down with its fraction, so
 /// one broken off partway is left as weak as it is see-through.
+#[test]
+fn blueprint_defaults() {
+    scenario("blueprint_defaults", 10);
+}
+
+#[test]
+fn spawn_height() {
+    scenario("spawn_height", 20);
+}
+
+#[test]
+fn order_states() {
+    scenario("order_states", 40);
+}
+
+#[test]
+fn arity_lenient() {
+    scenario("arity_lenient", 10);
+}
+
 #[test]
 fn reclaim_unit() {
     scenario("reclaim_unit", 1200);
@@ -273,6 +343,11 @@ fn air_lift_gains() {
 #[test]
 fn projectile_position() {
     scenario("projectile_position", 100);
+}
+
+#[test]
+fn shared_position() {
+    scenario("shared_position", 100);
 }
 
 #[test]
@@ -313,6 +388,11 @@ fn formation() {
 #[test]
 fn bomber() {
     scenario("bomber", 600);
+}
+
+#[test]
+fn strategic_bomber_drop() {
+    scenario("strategic_bomber_drop", 200);
 }
 
 #[test]
@@ -432,7 +512,7 @@ fn formation_edges() {
         let mut engine = start(None, false);
         let lua = engine.sim_lua();
         lua.globals().set("FormationEdgesTarget", lua.create_sequence_from([x as f64, 0.0, z as f64]).unwrap()).unwrap();
-        lua.load(std::fs::read_to_string("tests/scenarios/formation_edges.lua").unwrap()).exec().expect("script");
+        lua.load(engine::lua_translation::translate(&std::fs::read_to_string("tests/scenarios/formation_edges.lua").unwrap())).exec().expect("script");
         // Each tank's slot while its order lasts (the last one is where it
         // should end up).
         let mut slots: std::collections::BTreeMap<u32, (f64, f64)> = Default::default();
@@ -501,6 +581,26 @@ fn silo() {
 }
 
 #[test]
+fn unit_states_by_task() {
+    scenario("unit_states_by_task", 400);
+}
+
+#[test]
+fn build_structure_blocked() {
+    scenario("build_structure_blocked", 50);
+}
+
+#[test]
+fn attack_stop_distance() {
+    scenario("attack_stop_distance", 200);
+}
+
+#[test]
+fn orders_refused_at_issue() {
+    scenario("orders_refused_at_issue", 200);
+}
+
+#[test]
 fn air_motion() {
     scenario("air_motion", 150);
 }
@@ -523,6 +623,21 @@ fn collision_check() {
 }
 
 #[test]
+fn collision_check_timing() {
+    scenario("collision_check_timing", 50);
+}
+
+#[test]
+fn collision_check_friendly() {
+    scenario("collision_check_friendly", 120);
+}
+
+#[test]
+fn script_projectile_destroyed() {
+    scenario("script_projectile_destroyed", 10);
+}
+
+#[test]
 fn shield() {
     scenario("shield", 300);
 }
@@ -540,6 +655,11 @@ fn shield_absolver() {
 #[test]
 fn shield_fragments() {
     scenario("shield_fragments", 400);
+}
+
+#[test]
+fn projectile_survives_impact() {
+    scenario("projectile_survives_impact", 60);
 }
 
 #[test]
@@ -596,11 +716,18 @@ fn unit_cap() {
 /// `OnDecayed` at none left.
 #[test]
 fn decay() {
-    scenario("decay", 400);
+    scenario("decay", 900);
 }
 
-/// `ChangeUnitArmy` past the receiver's unit cap: refused, the giver hears
-/// `OnFailedUnitTransfer`.
+/// A build order given again on the site of the same unit left unfinished
+/// takes it up again instead of starting a second one.
+#[test]
+fn build_resume() {
+    scenario("build_resume", 500);
+}
+
+/// `ChangeUnitArmy` past the receiver's unit cap: refused, the receiver
+/// hears `OnFailedUnitTransfer`; commanders with `noRestrictions`.
 #[test]
 fn failed_transfer() {
     scenario("failed_transfer", 60);
@@ -675,6 +802,31 @@ fn placement() {
 }
 
 #[test]
+fn remembered_structures() {
+    scenario("remembered_structures", 100);
+}
+
+#[test]
+fn do_not_target() {
+    scenario("do_not_target", 200);
+}
+
+#[test]
+fn capture_interrupt() {
+    scenario("capture_interrupt", 200);
+}
+
+#[test]
+fn prop_hpr() {
+    scenario("prop_hpr", 20);
+}
+
+#[test]
+fn build_platoon() {
+    scenario("build_platoon", 20);
+}
+
+#[test]
 fn deposit_placement() {
     scenario("deposit_placement", 20);
 }
@@ -730,9 +882,50 @@ fn ai_game_runs_clean() {
         let p = engine.sim_lua().app_data_ref::<rts_core_engine::engine::sim::presentation::Presentation>().expect("presentation");
         eprintln!("live effects after 2000 ticks: {} (created {})", p.effects().len(), p.next_effect_id);
         assert!(p.effects().len() < 300, "{} effects alive of {} created", p.effects().len(), p.next_effect_id);
+        drop(p);
+        ai_economy_grows(&engine);
     });
     let errors: Vec<String> = errors.0.lock().unwrap().iter().filter(|m| !expected_noise(m)).cloned().collect();
     assert!(errors.is_empty(), "{} Lua errors in the AI game, first ones:\n  {}", errors.len(), errors.iter().take(5).cloned().collect::<Vec<_>>().join("\n  "));
+}
+
+/// The AIs of [`ai_game_runs_clean`] get their economy going, without
+/// spinning: by tick 2000 every AI army has built mass extractors and
+/// produced mass, and the game has issued a bounded number of commands.
+/// Counts, not wall-clock time, so it's deterministic (healthy: 9 and 10
+/// extractors, 379 commands; the regression: 1 and 3, 4699). It catches an AI that
+/// keeps re-ordering builds the engine won't make (a `BuildStructure` that
+/// moved extractors off their deposits: every AI loops on its unbuildable
+/// orders, the game ran 40 times slower and the AIs barely built).
+fn ai_economy_grows(engine: &engine::Engine) {
+    let lua = engine.sim_lua();
+    let rows: Vec<(i64, f64, f64)> = lua
+        .load(
+            r#"
+            local rows = {}
+            for _, brain in ArmyBrains do
+                if brain.BrainType == 'AI' and table.getn(brain:GetListOfUnits(categories.ALLUNITS, false) or {}) > 0 then
+                    table.insert(rows, { table.getn(brain:GetListOfUnits(categories.MASSEXTRACTION * categories.STRUCTURE, false, true) or {}),
+                        brain:GetArmyStat('Economy_TotalProduced_Mass', 0).Value, brain:GetArmyStat('Economy_Income_Mass', 0).Value })
+                end
+            end
+            return rows
+            "#,
+        )
+        .eval::<Vec<LuaTable>>()
+        .expect("AI economy query")
+        .iter()
+        .map(|r| (r.get(1).unwrap_or(0), r.get(2).unwrap_or(0.0), r.get(3).unwrap_or(0.0)))
+        .collect();
+    let issued = lua.app_data_ref::<rts_core_engine::engine::sim::command::Commands>().expect("commands").issued();
+    eprintln!("AI armies (extractors, mass produced, mass income): {rows:?}; commands issued: {issued}");
+    assert!(!rows.is_empty(), "no AI armies");
+    for (i, &(extractors, produced, _)) in rows.iter().enumerate() {
+        assert!(extractors >= 5, "AI {i}: only {extractors} mass extractors after 2000 ticks ({rows:?})");
+        assert!(produced >= 1000.0, "AI {i}: only {produced:.0} mass produced after 2000 ticks ({rows:?})");
+    }
+    let per_army = issued as usize / rows.len();
+    assert!(per_army < 800, "{issued} commands issued by {} AIs in 2000 ticks: an AI is re-ordering in a loop", rows.len());
 }
 
 /// Cost of FAF's `formations.lua` laying out a big group (what a 1000-unit
@@ -795,7 +988,7 @@ fn aa_attack_ground() {
 
 #[test]
 fn czar_beam() {
-    scenario("czar_beam", 250);
+    scenario("czar_beam", 400);
 }
 
 #[test]
@@ -821,6 +1014,21 @@ fn turret_reset() {
 #[test]
 fn transport_death() {
     scenario("transport_death", 300);
+}
+
+#[test]
+fn transport_pickup() {
+    scenario("transport_pickup", 800);
+}
+
+#[test]
+fn transport_flight_height() {
+    scenario("transport_flight_height", 600);
+}
+
+#[test]
+fn transport_killed_cargo() {
+    scenario("transport_killed_cargo", 400);
 }
 
 #[test]
@@ -1081,6 +1289,91 @@ fn rebuild_bonus_ids() {
 }
 
 #[test]
+fn bad_orders() {
+    scenario("bad_orders", 1100);
+}
+
+#[test]
+fn issue_stop() {
+    scenario("issue_stop", 500);
+}
+
+#[test]
+fn build_cancel() {
+    scenario("build_cancel", 300);
+}
+
+#[test]
+fn damage_ring_edges() {
+    scenario("damage_ring_edges", 100);
+}
+
+#[test]
+fn creation_terrain_type() {
+    scenario("creation_terrain_type", 100);
+}
+
+#[test]
+fn build_abandon() {
+    scenario("build_abandon", 300);
+}
+
+#[test]
+fn build_assist_finish() {
+    scenario("build_assist_finish", 400);
+}
+
+#[test]
+fn build_inside_structure() {
+    scenario("build_inside_structure", 300);
+}
+
+#[test]
+fn guard_inside_structure() {
+    scenario("guard_inside_structure", 300);
+}
+
+#[test]
+fn form_platoon_unfinished() {
+    scenario("form_platoon_unfinished", 300);
+}
+
+#[test]
+fn build_abandon_structure() {
+    scenario("build_abandon_structure", 200);
+}
+
+#[test]
+fn slaved_rack_fires_in_arc() {
+    scenario("slaved_rack_fires_in_arc", 300);
+}
+
+#[test]
+fn attack_order_waits_for_range() {
+    scenario("attack_order_waits_for_range", 400);
+}
+
+#[test]
+fn patrol_single() {
+    scenario("patrol_single", 400);
+}
+
+#[test]
+fn engineer_attack_move() {
+    scenario("engineer_attack_move", 900);
+}
+
+#[test]
+fn capture_shared() {
+    scenario("capture_shared", 900);
+}
+
+#[test]
+fn unit_counts() {
+    scenario("unit_counts", 700);
+}
+
+#[test]
 fn initial_rally() {
     scenario("initial_rally", 1700);
 }
@@ -1115,6 +1408,16 @@ fn build_target_destroyed() {
 /// Moho's destroy queue: `OnDestroy` at the end of the beat, in order and
 /// not nested, still attached; `IsDestroyed` after it; the attachment
 /// notifications of `Destroy` and `Kill`.
+#[test]
+fn orient_from_dir() {
+    scenario("orient_from_dir", 10);
+}
+
+#[test]
+fn filter_down_destroyed() {
+    scenario("filter_down_destroyed", 40);
+}
+
 #[test]
 fn destroy_queue() {
     scenario("destroy_queue", 100);
@@ -1332,4 +1635,130 @@ fn mobile_placement() {
 #[test]
 fn dispatch_hold() {
     scenario("dispatch_hold", 1200);
+}
+
+#[test]
+fn cant_be_killed() {
+    scenario("cant_be_killed", 60);
+}
+
+#[test]
+fn shield_inside_out() {
+    scenario("shield_inside_out", 200);
+}
+
+#[test]
+fn shield_centre() {
+    scenario("shield_centre", 200);
+}
+
+#[test]
+fn damage_area_self() {
+    scenario("damage_area_self", 30);
+}
+
+#[test]
+fn ground_contact() {
+    scenario("ground_contact", 40);
+}
+
+#[test]
+fn projectile_lifetime() {
+    scenario("projectile_lifetime", 200);
+}
+
+#[test]
+fn can_fire_reload() {
+    scenario("can_fire_reload", 100);
+}
+
+#[test]
+fn salvo_busy() {
+    scenario("salvo_busy", 160);
+}
+
+#[test]
+fn child_projectile() {
+    scenario("child_projectile", 30);
+}
+
+#[test]
+fn homing_centre() {
+    scenario("homing_centre", 50);
+}
+
+#[test]
+fn weapon_api_returns() {
+    scenario("weapon_api_returns", 20);
+}
+
+#[test]
+fn destroyed_salvo() {
+    scenario("destroyed_salvo", 20);
+}
+
+#[test]
+fn speed_mult_law() {
+    scenario("speed_mult_law", 80);
+}
+
+#[test]
+fn warp_move() {
+    scenario("warp_move", 80);
+}
+
+#[test]
+fn plane_move_end() {
+    scenario("plane_move_end", 520);
+}
+
+#[test]
+fn staging_lands() {
+    scenario("staging_lands", 440);
+}
+
+#[test]
+fn formation_facing() {
+    scenario("formation_facing", 440);
+}
+
+#[test]
+fn slope_velocity() {
+    scenario("slope_velocity", 90);
+}
+
+#[test]
+fn immobile_halt() {
+    scenario("immobile_halt", 60);
+}
+
+#[test]
+fn brain_queries() {
+    scenario("brain_queries", 40);
+}
+
+#[test]
+fn upgrade_on_slope() {
+    scenario("upgrade_on_slope", 60);
+}
+
+#[test]
+fn drowning() {
+    scenario("drowning", 160);
+}
+
+#[test]
+fn smd_shared_nuke() {
+    scenario("smd_shared_nuke", 1700);
+}
+
+#[test]
+fn fatboy_seabed_build() {
+    scenario("fatboy_seabed_build", 1500);
+}
+
+/// A Fatboy made at a shore cliff's edge walks round, not down it.
+#[test]
+fn fatboy_shore_cliff() {
+    scenario("fatboy_shore_cliff", 400);
 }

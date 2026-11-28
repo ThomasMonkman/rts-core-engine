@@ -26,6 +26,33 @@ fn objects(lua: &Lua) -> LuaResult<LuaTable> {
     crate::engine::api::script_object::registry_table(lua, ENTITIES_KEY)
 }
 
+/// Registry table, weak-keyed: entity Lua object -> its `GetPosition` table.
+/// Made at start-up (no lazy objects after the keyframe base); an entry is
+/// made on an entity's first plain `GetPosition` and goes with its object.
+/// Being a Lua heap table, the link is saved and loaded with keyframes.
+const SHARED_POSITIONS_KEY: &str = "sim.shared_positions";
+
+/// Plain `GetPosition()`: the real game hands back the same table for an
+/// entity on every call, rewritten (only) by the call. FAF relies on it:
+/// `AIBehaviors` keeps one as "a reference ... so it will autoupdate", and AI
+/// mods compare kept tables by identity (dev/probes probe_re4_pos: kept
+/// tables don't move between calls, writes last until the next call, an
+/// extra `[4]` is gone after it, a destroyed entity's keeps its last values).
+pub(crate) fn shared_position(lua: &Lua, obj: &LuaTable, v: FxVec3) -> LuaResult<shapes::Vector> {
+    let cache = crate::engine::api::script_object::registry_table(lua, SHARED_POSITIONS_KEY)?;
+    let Some(t) = cache.raw_get::<Option<LuaTable>>(obj)? else {
+        let fresh = vector(lua, v)?;
+        cache.raw_set(obj, &fresh.0)?;
+        return Ok(fresh);
+    };
+    let (x, y, z) = v.to_f64();
+    t.clear()?;
+    t.raw_set(1, x)?;
+    t.raw_set(2, y)?;
+    t.raw_set(3, z)?;
+    Ok(shapes::Vector(t))
+}
+
 pub fn entity_id(obj: &LuaTable) -> LuaResult<EntityId> {
     Ok(script_object::handle::<EntityHandle>(obj)?.0)
 }
@@ -126,16 +153,32 @@ fn take_off(lua: &Lua, unit: EntityId, parent: Option<EntityId>) -> LuaResult<()
 
 /// A unit's `Attached` state, which moho's `Unit::AttachTo` sets
 /// (MohoEngine.dll 0x1028aab6: state bits +0x490 |= 0x4000, `Attached`) and
-/// `Unit::DetachFrom` clears (0x1028ab2d). No-op for other entities.
+/// `Unit::DetachFrom` clears (0x1028ab2d). No-op for other entities, and
+/// for a unit without motion (`RULEUMT_None`): `Unit::AttachTo` sets the
+/// bit only when the unit has a motion object (vt +0x30). So the Fatboy's
+/// external factory (`uel0401ef`, attached to its anchor unit for good)
+/// is never `Attached` and the dispatcher starts its build orders (FAF
+/// probe `probe_fatboy_water`: its states read `Building` only).
 fn set_attached(lua: &Lua, id: EntityId, on: bool) {
     let i = crate::engine::sim::unit_state::UnitStates::index("Attached").expect("unit state");
-    if let Some(u) = world(lua).get_mut(id).and_then(|e| e.unit.as_deref_mut()) {
+    if let Some(u) = world(lua).get_mut(id).and_then(|e| e.unit.as_deref_mut())
+        && (!on || u.motion_params.kind != crate::engine::sim::movement::MotionKind::None) {
         u.states.set(i, on);
     }
 }
 
 /// Attaches with the parent bone as posed by its manipulators (the rest pose
 /// for a parent without any). A unit enters its `Attached` state.
+/// The parent bone of an attachment: bone -1 is the centre of the parent's
+/// collision box ([`crate::engine::sim::entity::CENTRE_BONE`]).
+fn resolve_parent_bone(lua: &Lua, parent: EntityId, bone: &LuaValue) -> LuaResult<Option<u32>> {
+    match bone {
+        LuaValue::Integer(-1) => Ok(Some(crate::engine::sim::entity::CENTRE_BONE)),
+        LuaValue::Number(n) if *n == -1.0 => Ok(Some(crate::engine::sim::entity::CENTRE_BONE)),
+        _ => crate::engine::api::manipulator::resolve_bone(lua, parent, bone),
+    }
+}
+
 pub fn attach_posed(lua: &Lua, child: EntityId, attachment: crate::engine::sim::entity::Attachment) {
     {
         let manips = lua.app_data_ref::<crate::engine::sim::manipulator::Manipulators>();
@@ -189,6 +232,11 @@ pub(crate) fn bone_position(lua: &Lua, this: &LuaTable, bone: Option<LuaValue>) 
         Some(b) if !b.is_nil() => crate::engine::api::manipulator::resolve_bone(lua, id, b)?,
         _ => None,
     };
+    // No bone: the origin, as `pose::bone_world` gives it, without looking
+    // up the manipulators it would not read (plain `GetPosition` is hot).
+    if index.is_none() {
+        return Ok(world(lua).get(id).map(|e| e.position()).unwrap_or_default());
+    }
     Ok(world(lua).get(id).map(|e| posed_bone(lua, e, index).0).unwrap_or_default())
 }
 
@@ -229,11 +277,15 @@ pub fn object_as<C>(lua: &Lua, id: EntityId) -> LuaResult<Option<Obj<C>>> {
     Ok(object(lua, id)?.map(Obj::new))
 }
 
-/// Platoons whose last unit died end (killing their threads). Not inside
-/// `Destroy`, which may be running on one of those threads: before the Lua
-/// threads run (units killed by weapons and projectiles this tick: their
-/// platoons' threads would otherwise wake to an empty platoon) and again at
-/// compaction (units killed by Lua).
+/// Platoons emptied since the last call (their last unit died or was moved
+/// out) end, killing their threads, once a beat: just before the Lua
+/// threads run, so one emptied by a thread lasts to the next beat, as in
+/// the real game (`OnDestroy` the beat after; dev/probes probe_ai_platoon,
+/// probe-sweep AI D34). Not inside `Destroy` or between thread resumes:
+/// calls on a platoon raise once it has ended, and AI code goes on using a
+/// platoon it has just emptied in the same beat (RNGAI's air platoons merge
+/// by restarting the emptied platoon's state machine, whose first lines
+/// call it). One given units again meanwhile lives on.
 pub fn end_emptied_platoons(lua: &Lua) -> LuaResult<()> {
     let doomed = lua.app_data_mut::<crate::engine::sim::platoon::Platoons>().map(|mut p| p.take_doomed()).unwrap_or_default();
     for id in doomed {
@@ -245,7 +297,6 @@ pub fn end_emptied_platoons(lua: &Lua) -> LuaResult<()> {
 /// End of tick: drops destroyed entities from the world and releases what
 /// the engine holds for them (script object registry, weapons, manipulators).
 pub fn compact(lua: &Lua) -> LuaResult<()> {
-    end_emptied_platoons(lua)?;
     let removed = match lua.app_data_mut::<EntityWorld>() {
         Some(mut w) => w.compact(),
         None => return Ok(()),
@@ -345,6 +396,9 @@ fn on_destroy(lua: &Lua, id: EntityId) -> LuaResult<()> {
         return Ok(());
     };
     EntityCallbacks::on_destroy(lua, &this, "entity")?;
+    // A builder destroyed at work: `OnFailedToBuild` after its `OnDestroy`
+    // (probe_q_build).
+    crate::engine::api::construction::builder_died(lua, id)?;
     let parent = world(lua).get(id).and_then(|e| e.attachment).map(|a| a.parent);
     if let Some(parent) = parent.map(|p| object(lua, p)).transpose()?.flatten() {
         EntityCallbacks::on_attached_destroyed(lua, &parent, "entity", Obj::new(this.clone()))?;
@@ -366,11 +420,37 @@ fn on_destroy(lua: &Lua, id: EntityId) -> LuaResult<()> {
 /// A Lua array of the script objects of `ids`, in order (unbound ids skipped).
 /// The script objects of `ids`, as a list of class `C` (the caller knows
 /// which: `objects_table::<moho::Unit>`).
-pub(crate) fn objects_table<C>(lua: &Lua, ids: &[EntityId]) -> LuaResult<shapes::List<Obj<C>>> {
+///
+/// Makes one Lua object (the list) either way. A long list is filled on the
+/// raw stack (`heap_snapshot::with_raw_state_args`, which makes no objects):
+/// a raw get and set per entry instead of mlua's two calls and a ref.
+pub fn objects_table<C>(lua: &Lua, ids: &[EntityId]) -> LuaResult<shapes::List<Obj<C>>> {
+    /// Below this the raw call's own cost isn't won back.
+    const RAW_FROM: usize = 8;
     let t = lua.create_table_with_capacity(ids.len(), 0)?;
+    let objects = objects(lua)?;
+    if ids.len() >= RAW_FROM && crate::engine::lua::heap_snapshot::is_prepared(lua) && ids.iter().all(|&id| id <= i32::MAX as u32) {
+        use mlua::ffi;
+        // SAFETY: the stack holds the registry's id -> object table at 1 and
+        // the new list at 2 (the call's arguments); each step pushes at most
+        // one value and pops it, and raw gets / sets on plain tables raise
+        // nothing.
+        crate::engine::lua::heap_snapshot::with_raw_state_args(lua, (&objects, &t), |state| unsafe {
+            let mut n = 0;
+            for &id in ids {
+                if ffi::lua_rawgeti_(state, 1, id as i32) == ffi::LUA_TNIL {
+                    ffi::lua_pop(state, 1);
+                } else {
+                    n += 1;
+                    ffi::lua_rawseti_(state, 2, n);
+                }
+            }
+        })?;
+        return Ok(shapes::List::new(t));
+    }
     let mut n = 0;
     for &id in ids {
-        if let Some(obj) = object(lua, id)? {
+        if let Some(obj) = objects.raw_get::<Option<LuaTable>>(id)? {
             n += 1;
             t.raw_set(n, obj)?;
         }
@@ -487,11 +567,18 @@ pub fn spawn_prop(lua: &Lua, bp_path: &str, position: FxVec3, orientation: FxQua
 
 pub fn register(lua: &Lua) -> LuaResult<()> {
     lua.set_app_data(EntityWorld::default());
+    let positions = lua.create_table()?;
+    let weak = lua.create_table_with_capacity(0, 1)?;
+    weak.raw_set("__mode", "k")?;
+    positions.set_metatable(Some(weak));
+    lua.set_named_registry_value(SHARED_POSITIONS_KEY, positions)?;
     lua.set_app_data(crate::engine::sim::bounded_props::BoundedProps::default());
 
     lua_fn!(lua, global,
-        /// `GetUnitsInRect(rect)` or `(x0, z0, x1, z1)`: live units inside the XZ
-        /// rectangle (inclusive), in entity id order; nil when there are none.
+        /// `GetUnitsInRect(rect)` or `(x0, z0, x1, z1)`: live units in the 4x4
+        /// cells the XZ rectangle overlaps (`EntityWorld::units_in_cells`:
+        /// coarse, as the real game's), in entity id order; nil when there
+        /// are none.
         GetUnitsInRect = |lua, args: LuaMultiValue| {
             let num = |v: Option<&LuaValue>| -> LuaResult<Fx> {
                 match v {
@@ -510,7 +597,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 _ => (num(args.front())?, num(args.get(1))?, num(args.get(2))?, num(args.get(3))?),
             };
             let (minx, maxx, minz, maxz) = (x0.min(x1), x0.max(x1), z0.min(z1), z0.max(z1));
-            let ids = world(lua).units_in_rect(minx, minz, maxx, maxz);
+            let ids = world(lua).units_in_cells(minx, minz, maxx, maxz);
             if ids.is_empty() {
                 return Ok(None);
             }
@@ -550,8 +637,10 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
         IsProjectile = |lua, v: LuaValue| Ok(kind_of(lua, &v) == Some(EntityKind::Projectile)))?;
     lua_fn!(lua, global,
-        /// Props (incl. wrecks) and units in the rectangle, id order; nil if none.
-        /// TODO: moho tests collision/visual boxes, we test origins.
+        /// Props (incl. wrecks) and units in the 4x4 cells the rectangle
+        /// overlaps (coarse, as `GetUnitsInRect`), id order; nil if none. FAF's
+        /// AI leans on it: a point rect at an extractor site finds the rocks
+        /// in the way (`aiutilities.lua` `EngineerTryReclaimCaptureArea`).
         GetReclaimablesInRect = |lua, args: LuaMultiValue| {
             let num = |v: Option<&LuaValue>| -> LuaResult<Fx> {
                 match v {
@@ -572,8 +661,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             let (minx, maxx, minz, maxz) = (x0.min(x1), x0.max(x1), z0.min(z1), z0.max(z1));
             let mut ids = {
                 let w = world(lua);
-                let mut ids = w.props_in_rect(minx, minz, maxx, maxz);
-                ids.extend(w.units_in_rect(minx, minz, maxx, maxz));
+                let mut ids = w.props_in_cells(minx, minz, maxx, maxz);
+                ids.extend(w.units_in_cells(minx, minz, maxx, maxz));
                 ids
             };
             ids.sort_unstable();
@@ -623,13 +712,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_fn!(lua, global,
-        /// Creates a prop from the blueprint `bp` at (x, y, z), turned by heading, pitch and roll.
+        /// Creates a prop from the blueprint `bp` at (x, y, z), turned by
+        /// heading, pitch and roll in degrees: heading 1 gives quaternion y
+        /// 0.009 in the real game (dev/probes probe_unit_misc R), and FAF
+        /// passes `Random(0, 360)` and the cheat menu's yaw. (Pitch and roll
+        /// in degrees too: inferred.)
         CreatePropHPR = |lua, (bp, x, y, z, h, p, r): (String, f64, f64, f64, f64, f64, f64)| {
-            let q = FxQuat::from_hpr(
-                crate::engine::sim::math::from_lua(h),
-                crate::engine::sim::math::from_lua(p),
-                crate::engine::sim::math::from_lua(r),
-            );
+            let rad = |deg: f64| crate::engine::sim::math::from_lua(deg).saturating_mul(Fx::PI) / Fx::from_num(180);
+            let q = FxQuat::from_hpr(rad(h), rad(p), rad(r));
             spawn_prop(lua, &bp, FxVec3::from_f64(x, y, z), q)
         })?;
 
@@ -644,7 +734,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         })?;
     lua_method!(lua, moho::Entity,
         /// Detaches this entity from what it is attached to.
-        DetachFrom = |lua, (this, _skip_ballistic): (Obj<moho::Entity>, Option<bool>)| {
+        ///
+        /// A transport's cargo leaves it as an unload does: the transport
+        /// hears `OnTransportDetach` and the unit falls from where it was
+        /// (`skipBallistic`: it doesn't), `transport::script_detach`.
+        DetachFrom = |lua, (this, skip_ballistic): (Obj<moho::Entity>, Option<bool>)| {
+            if crate::engine::api::transport::script_detach(lua, entity_id(&this)?, skip_ballistic.unwrap_or(false))? {
+                return Ok(());
+            }
             let parent = with_entity_mut(lua, &this, |e| e.attachment.take().map(|a| a.parent))?;
             take_off(lua, entity_id(&this)?, parent)
         })?;
@@ -991,16 +1088,23 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             quaternion(lua, q)
         })?;
     lua_method!(lua, moho::Entity,
-        /// The entity heading (yaw).
+        /// The entity heading: the yaw of its orientation (`GetOrientation`),
+        /// tilt and all. The real game's tank on a ramp reads the same
+        /// heading from both, drifting 0.02 with the tilt; ours gave the
+        /// course it was steering (dev/probes probe_mov_api S*).
         GetHeading = |lua, this: Obj<moho::Entity>| {
             let id = entity_id(&this)?;
-            Ok(world(lua).get(id).map_or(0.0, |e| crate::engine::sim::movement::facing(e).to_num::<f64>()))
+            Ok(world(lua).get(id).map_or(0.0, |e| e.orientation.heading().to_num::<f64>()))
         })?;
     lua_method!(lua, moho::Entity,
-        /// The position (of `bone`, if given) as a vector.
+        /// The position (of `bone`, if given) as a vector. Without a bone
+        /// it's the entity's one shared table, rewritten by each call
+        /// ([`shared_position`]); with one, a new table.
         GetPosition = |lua, (this, bone): (Obj<moho::Entity>, Option<shapes::Bone>)| {
-            let pos = bone_position(lua, &this, bone.map(shapes::Bone::into_inner))?;
-            vector(lua, pos)
+            let bone = bone.map(shapes::Bone::into_inner).filter(|b| !b.is_nil());
+            let shared = bone.is_none();
+            let pos = bone_position(lua, &this, bone)?;
+            if shared { shared_position(lua, &this, pos) } else { vector(lua, pos) }
         })?;
     lua_method!(lua, moho::Entity,
         /// Attaches this entity's `selfBone` to `parentBone` of `parent`.
@@ -1010,7 +1114,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             let parent = entity_id(&parent)?;
             let attachment = crate::engine::sim::entity::Attachment {
                 parent,
-                parent_bone: resolve_bone(lua, parent, &parent_bone)?,
+                parent_bone: resolve_parent_bone(lua, parent, &parent_bone)?,
                 self_bone: resolve_bone(lua, child, &self_bone)?,
             };
             attach_posed(lua, child, attachment);
@@ -1023,7 +1127,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             let parent = entity_id(&parent)?;
             let attachment = crate::engine::sim::entity::Attachment {
                 parent,
-                parent_bone: crate::engine::api::manipulator::resolve_bone(lua, parent, &parent_bone)?,
+                parent_bone: resolve_parent_bone(lua, parent, &parent_bone)?,
                 self_bone: None,
             };
             attach_posed(lua, child, attachment);
@@ -1048,10 +1152,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             Ok(())
         })?;
     lua_fn!(lua, global,
-        /// The rotation that turns +Z to face `dir` (`OrientFromDir`).
+        /// The rotation that turns +Z to face `dir` (`OrientFromDir`): yaw
+        /// then pitch, no roll; any length (dev/probes probe_api_spot
+        /// `core.OrientFromDir3`: `(1, 2, 3)` gives `{-0.275 0.154 0.045
+        /// 0.948}`); identity for a zero vector.
         OrientFromDir = |lua, v: shapes::Vector| {
             let num = |i: usize| -> LuaResult<f64> { Ok(v.raw_get::<Option<f64>>(i)?.unwrap_or(0.0)) };
-            quaternion(lua, FxQuat::look_along(FxVec3::from_f64(num(1)?, num(2)?, num(3)?)))
+            let dir = FxVec3::from_f64(num(1)?, num(2)?, num(3)?);
+            quaternion(lua, dir.normalized().map_or(FxQuat::IDENTITY, FxQuat::look_along))
         })?;
     lua_method!(lua, moho::Entity,
         /// Back to the blueprint's collision volume (FAF's upgrades turn the new
@@ -1319,19 +1427,26 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             })
         })?;
     lua_method!(lua, moho::Entity,
-        /// Sets health, clamped to [0, max]. The instigator is ignored.
+        /// Sets health, clamped to [0, max]. The instigator is ignored. A
+        /// unit hears `OnHealthChanged` from inside the call when a quarter
+        /// step is crossed.
         SetHealth = |lua, (this, _instigator, health): (Obj<moho::Entity>, shapes::Instigator, f64)| {
-            with_entity_mut(lua, &this, |e| {
+            let id = with_entity_mut(lua, &this, |e| {
                 e.health = crate::engine::sim::math::from_lua(health).clamp(Fx::ZERO, e.max_health);
-            })
+                Some(e.id)
+            })?;
+            id.map_or(Ok(()), |id| crate::engine::api::unit::health_changed_now(lua, id))
         })?;
     lua_method!(lua, moho::Entity,
         /// Health += delta, clamped to [0, max]. Kill credit (`instigator`) is a
-        /// TODO for veterancy.
+        /// TODO for veterancy. A unit hears `OnHealthChanged` from inside the
+        /// call when a quarter step is crossed (so from inside `Damage`).
         AdjustHealth = |lua, (this, _instigator, delta): (Obj<moho::Entity>, shapes::Instigator, f64)| {
-            with_entity_mut(lua, &this, |e| {
+            let id = with_entity_mut(lua, &this, |e| {
                 e.health = e.health.saturating_add(crate::engine::sim::math::from_lua(delta)).clamp(Fx::ZERO, e.max_health);
-            })
+                Some(e.id)
+            })?;
+            id.map_or(Ok(()), |id| crate::engine::api::unit::health_changed_now(lua, id))
         })?;
     lua_method!(lua, moho::Entity,
         /// Kills the entity once: health drops to 0 and `OnKilled(instigator,
@@ -1339,7 +1454,21 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         /// calls `Destroy`. Later calls are no-ops. A `Destroy` earlier in the
         /// beat doesn't stop it (moho's `Unit::Kill`, 0x102878b0, only tests
         /// the dead flag).
+        ///
+        /// First the engine asks the script `CheckCanBeKilled(instigator)`
+        /// when it has one: false makes the kill a no-op (FAF's
+        /// `SetCanBeKilled(false)`: build drones, external factories,
+        /// campaign units). Lethal damage reaches here through FAF's
+        /// `DoTakeDamage`, so it leaves such a unit alive at 0 health, and the
+        /// next kill after `SetCanBeKilled(true)` goes through
+        /// (`probe_wpn_misc2` `kill cantkill*`, `probe_wpn_damage` `kill nokill*`).
         Kill = |lua, (this, instigator, kind, excess): (Obj<moho::Entity>, shapes::Instigator, Option<shapes::DamageType>, Option<f64>)| {
+            let alive = world(lua).get(entity_id(&this)?).is_some_and(|e| !e.cold.killed && !e.gone);
+            if alive
+                && let Ok(LuaValue::Function(check)) = this.table().get::<LuaValue>("CheckCanBeKilled")
+                && matches!(check.call::<LuaValue>((this.table().clone(), (*instigator).clone()))?, LuaValue::Nil | LuaValue::Boolean(false)) {
+                return Ok(());
+            }
             let first = with_entity_mut(lua, &this, |e| {
                 let first = !e.cold.killed && !e.gone;
                 if first {
@@ -1357,6 +1486,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 _ => None,
             };
             crate::engine::api::unit_stats::unit_killed(lua, entity_id(&this)?, killer)?;
+            // Its build ends here, before `OnKilled` (probe_q_build).
+            crate::engine::api::construction::builder_died(lua, entity_id(&this)?)?;
             crate::engine::api::movement::start_falling(lua, entity_id(&this)?);
             let kind = kind.map(shapes::DamageType::into_inner).unwrap_or_else(|| LuaValue::String(lua.create_string("Normal").expect("string")));
             // Then the attachments hear of it (moho's `Entity::Kill`,
@@ -1380,16 +1511,79 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
 
     lua_fn!(lua, global,
         /// Moves `obj` to `pos`, and turns it to `orient` (a quaternion) if given.
+        ///
+        /// A unit that moves on the ground or water is put on its layer's
+        /// height there at once, whatever `y` it's given (the real game's
+        /// idle tank warped 10 up reads its old height straight after, where
+        /// ours floated for good). And a unit warped on a move gives the move
+        /// up: on the next tick its queue is empty and it's idle, braking to
+        /// a halt from the new spot (dev/probes probe_mov_api W2 / W3,
+        /// probe_mov_mult WP; ours drove on to the goal). Only a plain move
+        /// was probed; that aggressive moves and patrols go the same way
+        /// (moho's navigator is reset) is inferred.
         Warp = |lua, (obj, pos, orient): (Obj<moho::Entity>, shapes::Vector, Option<shapes::Quaternion>)| {
+            use crate::engine::sim::command::{CommandKind, Commands};
+            use crate::engine::sim::layer::Layer;
+            use crate::engine::sim::movement::MotionKind;
             let id = entity_id(&obj)?;
-            let p = read_vector(&pos)?;
+            let mut p = read_vector(&pos)?;
             let q = orient.as_deref().map(read_quat).transpose()?;
-            let mut w = world(lua);
-            match q {
-                Some(q) => w.set_transform(id, p, q),
-                None => w.set_position(id, p),
+            let ground = world(lua).get(id).and_then(|e| e.unit.as_deref()).filter(|u| matches!(u.motion_params.kind, MotionKind::Land | MotionKind::Hover | MotionKind::Amphibious | MotionKind::Water)).map(|u| u.layer);
+            if let Some(layer) = ground
+                && let Some(t) = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>() {
+                match layer {
+                    Layer::Land | Layer::Seabed => p.y = t.height_at(p.x, p.z),
+                    Layer::Water => p.y = t.surface_at(p.x, p.z),
+                    _ => {}
+                }
+            }
+            {
+                let mut w = world(lua);
+                match q {
+                    Some(q) => w.set_transform(id, p, q),
+                    None => w.set_position(id, p),
+                }
+                // Stood (and tilted) to the ground there on the next tick.
+                if ground.is_some()
+                    && let Some(u) = w.get_mut(id).and_then(|e| e.unit.as_deref_mut()) {
+                    u.on_ground = false;
+                }
+            }
+            if let Some(mut c) = lua.app_data_mut::<Commands>()
+                && c.dispatched(id).is_some_and(|c| matches!(c.kind, CommandKind::Move | CommandKind::FormMove | CommandKind::AggressiveMove | CommandKind::FormAggressiveMove | CommandKind::Patrol | CommandKind::FormPatrol)) {
+                c.pop_front(id);
             }
             Ok(())
         })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The raw fill (long lists, prepared VM) and the mlua one give the same
+    /// list: the bound objects of `ids` in order, unbound ids skipped.
+    #[test]
+    fn objects_table_raw_matches_mlua() {
+        for prepared in [false, true] {
+            let lua = Lua::new();
+            if prepared {
+                crate::engine::lua::heap_snapshot::prepare(&lua).unwrap();
+            }
+            let objs: Vec<LuaTable> = (0..40).map(|_| lua.create_table().unwrap()).collect();
+            for (id, o) in objs.iter().enumerate().filter(|(id, _)| id % 3 != 0) {
+                objects(&lua).unwrap().raw_set(id as u32, o).unwrap();
+            }
+            for n in [0usize, 5, 8, 40] {
+                let ids: Vec<EntityId> = (0..n as u32).rev().collect();
+                let t = objects_table::<moho::Unit>(&lua, &ids).unwrap().0;
+                let want: Vec<&LuaTable> = ids.iter().filter(|&&id| id % 3 != 0).map(|&id| &objs[id as usize]).collect();
+                assert_eq!(t.raw_len(), want.len(), "prepared={prepared} n={n}");
+                for (i, o) in want.iter().enumerate() {
+                    assert_eq!(&t.raw_get::<LuaTable>(i + 1).unwrap(), *o);
+                }
+            }
+        }
+    }
 }

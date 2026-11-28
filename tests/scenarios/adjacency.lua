@@ -26,5 +26,23 @@ ForkThread(function()
     WaitTicks(5)
     check(not ex.AdjacentUnits[st.EntityId], 'a destroyed storage is no longer adjacent')
     check(math.abs(ex:GetProductionPerSecondMass() - base) < 1e-6, 'and its buff is gone')
+
+    -- Two structures destroyed together part from each other once each way
+    -- (dev/probes probe_unit_build G1).
+    local log = {}
+    local function watch(u, tag)
+        local base = u.OnNotAdjacentTo
+        u.OnNotAdjacentTo = function(self, other)
+            table.insert(log, tag)
+            return base(self, other)
+        end
+    end
+    local a = make('ueb1101', 420, 600)
+    local b = make('ueb1101', 422, 600)
+    WaitTicks(2)
+    watch(a, 'a') watch(b, 'b')
+    a:Destroy() b:Destroy()
+    WaitTicks(2)
+    check(table.concat(log, ',') == 'a,b', 'destroyed together: each parts once: ' .. table.concat(log, ','))
     ScenarioResult.done = true
 end)

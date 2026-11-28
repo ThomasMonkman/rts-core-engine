@@ -37,6 +37,19 @@ Copy a folder (`maps/probe_fight` is the simplest) and rename it and its files. 
   numbers within a tolerance.
 - Log `PROBE done` at the end: the runner stops the game when it sees it.
 
+Gotchas:
+
+- In the real game the probe body runs at tick 0, while the armies' storage is still 0: a
+  `GiveResource` at the top of the file without a `GiveStorage` in the same tick is lost. FAF's own
+  `GiveStorage('Energy', 100)` (`CreateBrainShared`) shows from tick 2.
+- `GiveStorage` keeps one script storage pair: `GiveStorage('MASS', ...)` then
+  `GiveStorage('ENERGY', ...)` leaves no mass storage (in both engines). For mass storage, build a
+  storage structure (`ueb1106`).
+- A `ForkThread` with `WaitTicks(1)` started by the probe body resumes at tick 2 in the real game and
+  tick 1 in ours: compare ticks counted from a `t0` the probe takes itself.
+- In ours, a windowed run with `--ticks N` runs the sim back to back at 1x and ignores pause and game
+  speed from the interface. Probe those without `--ticks` (stop the run by hand).
+
 ## Running it
 
 ```powershell
@@ -51,6 +64,19 @@ grep PROBE probe_fight.log
 ```
 
 Then diff the `PROBE` lines from the two logs.
+
+A `--script` file is translated exactly as game Lua is, so the one body means the same in both: `!=`, the implicit `arg`, `for k, v in t`, `#` as a comment and `^` as XOR all behave as in the real game. Use `table.getn` and `math.pow`.
+
+### All-AI games and mods
+
+A probe map's optional `launch_args.txt` adds to the game's command line. With
+`/probeai <key>[,<key>...]` the `ui_hooks` `SinglePlayerLaunch.lua` hook starts every army as that
+AI (a list is cycled by army) instead of the stock `/map` launch (army 1 human, the rest 'rush'),
+set up as ours sets up `--session --ai`: the same options with the lobby defaults (the mods' AI
+options included), factions UEF, Aeon, Cybran, Seraphim by army. `/probemod <uid>[,<uid>...]` runs
+those sim mods (they must be in the game's mods folder) instead of the game prefs' active mods.
+Give the probe scenario the real map's `name`: game code picks plans by it (FAF's AI has a plan
+only for `"Seton's Clutch"`).
 
 ### Interface probes
 

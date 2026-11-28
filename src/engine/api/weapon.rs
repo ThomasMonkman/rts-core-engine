@@ -141,6 +141,7 @@ fn configure(lua: &Lua, st: &mut WeaponState, unit: EntityId, wbp: &LuaTable) ->
     st.below_water_fire_only = wbp.get::<Option<bool>>("BelowWaterFireOnly")?.unwrap_or(false);
     st.above_water_targets_only = wbp.get::<Option<bool>>("AboveWaterTargetsOnly")?.unwrap_or(false);
     st.below_water_targets_only = wbp.get::<Option<bool>>("BelowWaterTargetsOnly")?.unwrap_or(false);
+    st.need_prep = wbp.get::<Option<bool>>("NeedPrep")?.unwrap_or(false);
     st.cannot_attack_ground = wbp.get::<Option<bool>>("CannotAttackGround")?.unwrap_or(false);
     st.max_beam_length = num("MaximumBeamLength")?.filter(|&l| l > 0.0).map(crate::engine::sim::math::from_lua);
     st.fixed_beam_muzzle = None;
@@ -267,6 +268,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
         weapons.ordered.clear();
         if let Some(commands) = lua.app_data_ref::<crate::engine::sim::command::Commands>() {
             use crate::engine::sim::command::{CommandKind as K, CommandTarget as T};
+            let terrain = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>();
             for u in commands.units_doing(&[K::Attack, K::FormAttack, K::Nuke, K::Tactical]) {
                 let Some(cmd) = commands.current(u) else { continue };
                 let silo = match cmd.kind {
@@ -280,7 +282,8 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                     T::Ground(p) => WeaponTarget::Ground(p),
                     T::None => continue,
                 };
-                weapons.ordered.insert(u, crate::engine::sim::weapon::OrderedTarget { target, silo, overcharge: None });
+                let in_range = silo.is_some() || weapons.in_attack_range(&world, terrain.as_deref(), u, target);
+                weapons.ordered.insert(u, crate::engine::sim::weapon::OrderedTarget { target, silo, overcharge: None, in_range });
             }
             // Overcharge orders point their overcharge weapon (`api::overcharge`).
             if let Some(tasks) = lua.app_data_ref::<crate::engine::api::overcharge::OverchargeTasks>() {
@@ -296,7 +299,7 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             && let Some(ps) = lua.app_data_ref::<crate::engine::sim::projectile::Projectiles>() {
             views.extend(ps.iter().filter_map(|p| {
                 let e = world.get(p.id).filter(|e| !e.destroyed)?;
-                Some(crate::engine::sim::weapon::ProjectileView { id: p.id, position: e.position(), velocity: p.velocity(), army: e.army, category: e.category_index })
+                Some(crate::engine::sim::weapon::ProjectileView { id: p.id, position: e.position(), velocity: p.velocity(), army: e.army, category: e.category_index, shooter_cap: p.shooter_cap, shooters: 0 })
             }));
         }
         weapons.projectiles = views;
@@ -342,24 +345,30 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
             tasks.fired(ev.unit, ev.index, now);
         }
         let Some(obj) = weapon_object(lua, ev.unit, ev.index)? else { continue };
-        // The turret starts / stops tracking with its target (FAF: barrel
-        // spin sounds); the argument is the tracking aim controller's label,
-        // so weapons without one (missile launchers) aren't told.
-        // (Read by the event's unit and index: the weapon list, not the
-        // script object's handle.)
-        let label = if matches!(ev.kind, WeaponEventKind::LostTarget | WeaponEventKind::GotTarget) {
+        // The turret starts / stops turning (FAF: turret and barrel
+        // sounds; `sim::weapon` `WeaponState::tracking`); the argument is
+        // the aim controller's label, so weapons without one (missile
+        // launchers) aren't told. (Read by the event's unit and index: the
+        // weapon list, not the script object's handle.)
+        let label = if matches!(ev.kind, WeaponEventKind::StartTracking | WeaponEventKind::StopTracking) {
             lua.app_data_ref::<Weapons>().and_then(|w| w.get(ev.unit, ev.index).and_then(|w| w.fire_control.clone().or_else(|| w.first_aim.clone())))
         } else {
             None
         };
         let obj = Obj::<moho::Weapon>::new(obj);
-        if let (WeaponEventKind::LostTarget, Some(l)) = (ev.kind, &label) {
-            WeaponCallbacks::on_stop_tracking(lua, &obj, "weapon", l.clone())?;
-        }
         match ev.kind {
+            WeaponEventKind::StartTracking | WeaponEventKind::StopTracking => {
+                if let Some(l) = label {
+                    if ev.kind == WeaponEventKind::StartTracking {
+                        WeaponCallbacks::on_start_tracking(lua, &obj, "weapon", l)?;
+                    } else {
+                        WeaponCallbacks::on_stop_tracking(lua, &obj, "weapon", l)?;
+                    }
+                }
+            }
             WeaponEventKind::HaltFire => WeaponCallbacks::on_halt_fire(lua, &obj, "weapon")?,
             WeaponEventKind::LostTarget => WeaponCallbacks::on_lost_target(lua, &obj, "weapon")?,
-            WeaponEventKind::GotTarget => WeaponCallbacks::on_got_target(lua, &obj, "weapon")?,
+            WeaponEventKind::GotTarget | WeaponEventKind::Prep => WeaponCallbacks::on_got_target(lua, &obj, "weapon")?,
             WeaponEventKind::Fire => {
                 // Moho calls `OnGotTarget` from the target task
                 // (`UnitWeapon::SetTarget`, MohoEngine.dll 0x102b1fc1), before
@@ -388,9 +397,6 @@ pub fn tick(lua: &Lua) -> LuaResult<()> {
                     WeaponCallbacks::on_fire(lua, &obj, "weapon")?;
                 }
             }
-        }
-        if let (WeaponEventKind::GotTarget, Some(l)) = (ev.kind, label) {
-            WeaponCallbacks::on_start_tracking(lua, &obj, "weapon", l)?;
         }
     }
     Ok(())
@@ -524,21 +530,33 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::Weapon,
         /// Fires now, whatever the fire clock and target say: runs `OnFire` (FAF's
         /// fire beetle detonates through it, the Seraphim energy ball fires its
-        /// beam at the target it just set). True if it fired (inferred: false
-        /// when the unit is gone).
+        /// beam at the target it just set). Returns nothing (`probe_wpn_ctrl`
+        /// `manual`: `tostring(w:FireWeapon())` raised in the real game); a
+        /// unit that's gone doesn't fire.
         FireWeapon = |lua, this: Obj<moho::Weapon>| {
         let WeaponHandle { unit, .. } = handle(&this)?;
-        if !entity::world(lua).get(unit).is_some_and(|e| !e.destroyed) {
-            return Ok(false);
+        if entity::world(lua).get(unit).is_some_and(|e| !e.destroyed) {
+            WeaponCallbacks::on_fire(lua, &this, "weapon")?;
         }
-        WeaponCallbacks::on_fire(lua, &this, "weapon")?;
-        Ok(true)
+        Ok(())
     })?;
     lua_method!(lua, moho::Weapon,
         /// Overrides the weapon's damage.
         ChangeDamage = |lua, (this, damage): (Obj<moho::Weapon>, f64)| {
         with_state(lua, &this, |w| w.damage = Some(crate::engine::sim::math::from_lua(damage)))
     })?;
+    lua_method!(lua, moho::Weapon,
+        /// Sets the engine weapon's damage radius. Moho keeps it and nothing
+        /// reads it (FAF's `engine/Sim/UnitWeapon.lua`: non-functional; FAF's
+        /// projectiles take their radius from Lua), so it does nothing here.
+        /// It exists: `probe_wpn_ctrl` `dmg`, `ChangeDamageRadius=true`.
+        ChangeDamageRadius = |_lua, (_this, _radius): (Obj<moho::Weapon>, f64)| Ok(())
+    )?;
+    lua_method!(lua, moho::Weapon,
+        /// Sets the engine weapon's damage type: as `ChangeDamageRadius`,
+        /// kept by moho and read by nothing (`probe_wpn_ctrl` `dmg`).
+        ChangeDamageType = |_lua, (_this, _kind): (Obj<moho::Weapon>, String)| Ok(())
+    )?;
     lua_method!(lua, moho::Weapon,
         /// Sets the firing spread (degrees, gaussian); nil is 0.
         SetFiringRandomness = |lua, (this, r): (Obj<moho::Weapon>, Option<f64>)| {
@@ -591,10 +609,27 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         with_state(lua, &this, |w| w.target = Some(WeaponTarget::Entity(id)))
     })?;
     lua_method!(lua, moho::Weapon,
-        /// Targets a ground position (an `{x, y, z}` table).
+        /// Targets a ground position (an `{x, y, z}` table) until the weapon's
+        /// next target scan, which puts an enemy back or clears it
+        /// (`probe_re3_wpn_c`); a script re-sets it to keep firing there.
         SetTargetGround = |lua, (this, loc): (Obj<moho::Weapon>, shapes::Vector)| {
         let p = FxVec3::from_f64(loc.raw_get(1)?, loc.raw_get(2)?, loc.raw_get(3)?);
-        with_state(lua, &this, |w| w.target = Some(WeaponTarget::Ground(p)))
+        // A script's target isn't the attack order's: left marked as the
+        // order's, the next tick read it as the order re-pointing and
+        // halted fire, which ended a salvo in flight. FAF's UEF carpet
+        // bomb calls this before every bomb after the first
+        // (`TIFCarpetBombWeapon.CreateProjectileAtMuzzle`), so it dropped 2
+        // of its 4. The order takes the weapon back without a halt.
+        with_state(lua, &this, |w| {
+            let target = Some(WeaponTarget::Ground(p));
+            if w.target != target {
+                w.target = target;
+                w.target_from_order = false;
+            }
+            // A script's point, not an order's: kept through the next
+            // target scan only (`sim::weapon::advance_target`).
+            w.ground_set = !w.target_from_order;
+        })
     })?;
     lua_method!(lua, moho::Weapon,
         /// Progress of the reload, 1 = ready.
@@ -605,9 +640,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         })
     })?;
     lua_method!(lua, moho::Weapon,
-        /// True if the weapon is enabled and its fire clock has run out.
+        /// True if the weapon is enabled and aimed on its target, whatever
+        /// its reload: moho's `CanFire` (stunned / busy / layer / aim, no
+        /// reload term; FAF's `engine/Sim/UnitWeapon.lua`). `probe_wpn_ctrl`
+        /// `fireclock`: false before the first shot, then true every tick
+        /// while `GetFireClockPct` runs 0.0..0.9. FAF's counted-projectile
+        /// weapons (`DefaultProjectileWeapon` and the SMD scripts) read it
+        /// in the middle of a reload.
         CanFire = |lua, this: Obj<moho::Weapon>| {
-        with_state(lua, &this, |w| w.enabled && w.fire_clock == 0)
+        with_state(lua, &this, |w| w.enabled && w.on_target)
     })?;
     lua_method!(lua, moho::Weapon,
         /// The projectile blueprint table, or nil when the weapon has none.
@@ -645,7 +686,12 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         };
         let (position, direction, distance) = {
             let w = entity::world(lua);
-            let Some(u) = w.get(h.unit).filter(|u| !u.destroyed) else { return Ok(None) };
+            // A unit destroyed this beat still fires: it exists until the
+            // destroy queue drains, and its weapons' `OnDestroy` (FAF's
+            // `DeadState`) is what ends a salvo. A script that destroyed a
+            // unit mid-salvo otherwise left its salvo thread a nil
+            // projectile (FAF's `weapon.lua:551` raised on it).
+            let Some(u) = w.get(h.unit) else { return Ok(None) };
             // From the muzzle as posed now (recoil, walk cycle); flying
             // along the weapon's aim. Silo missiles never aim, nor do homing
             // missiles from fixed tubes: they leave along the muzzle bone
@@ -731,6 +777,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             // Only shots at a unit are followed (MohoEngine.dll 0x102b27b9).
             reports_to: (st.retarget.is_some() && matches!(target, Some(ProjectileTarget::Entity(_)))).then_some(h.index),
             rescale_after_create: true,
+            script_made: false,
         };
         let projectile_id = st.projectile_id.clone();
         drop(weapons);

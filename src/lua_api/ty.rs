@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use mlua::prelude::*;
 
+use super::registry::Src;
+
 /// A Lua type as the generated definitions spell it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LuaTy {
@@ -58,6 +60,7 @@ pub struct AliasInfo {
     pub name: &'static str,
     pub doc: &'static str,
     pub ty: fn() -> LuaTy,
+    pub src: Src,
 }
 
 /// Aliases are named: the name is the type.
@@ -73,6 +76,7 @@ pub struct EnumInfo {
     pub name: &'static str,
     pub doc: &'static str,
     pub variants: &'static [&'static str],
+    pub src: Src,
 }
 
 /// A `#[derive(LuaTable)]` struct: a table with known keys.
@@ -81,6 +85,7 @@ pub struct StructInfo {
     pub name: &'static str,
     pub doc: &'static str,
     pub fields: &'static [FieldInfo],
+    pub src: Src,
 }
 
 /// Struct types are named (`export type UnitBlueprintAir`), so the name is

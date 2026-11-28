@@ -323,6 +323,13 @@ LUA_API unsigned lua_gcid(lua_State* L, int idx);
 // `debug.info` show it), as `lua_pushcclosurek`'s `debugname` would; mlua
 // creates its callbacks unnamed. `debugname` must outlive the function.
 LUA_API void lua_setcdebugname(lua_State* L, int idx, const char* debugname);
+// RTS-CORE-ENGINE PARMARK: full collections (`lua_gc(L, LUA_GCCOLLECT, 0)`)
+// of heaps of `minbytes` or more mark on `threads` threads, in every VM of
+// the process. `run(n, fn, ctx)` calls `fn(ctx, i)` for each i in 0..n, each
+// on a thread of its own where it can, and returns when all have returned.
+// What a collection frees doesn't change. `threads` <= 1 turns it off.
+typedef void (*lua_ParallelRun)(int n, void (*fn)(void* ctx, int index), void* ctx);
+LUA_API void lua_rts_gcparallel(lua_ParallelRun run, int threads, size_t minbytes);
 
 LUA_API double lua_clock();
 

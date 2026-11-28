@@ -55,15 +55,27 @@ ForkThread(function()
     check(VDist2(p[1], p[3], fx, fz) < 25, 'beside it')
     check(transport:GetCommandQueue()[1] == nil, 'with no orders of its own')
 
+    -- It reads `MovingDown` as it comes down, cleared on touching down; a
+    -- plain take-off for a move reads no `MovingUp` (dev/probes
+    -- probe_re3_mov MS).
+    local down = false
     for _ = 1, 300 do
         if gunship:GetCurrentLayer() ~= 'Air' then break end
+        down = down or gunship:IsUnitState('MovingDown')
         WaitTicks(1)
     end
     check(gunship:GetCurrentLayer() == 'Land', 'the idle gunship landed')
+    check(down, 'MovingDown while landing')
+    check(not gunship:IsUnitState('MovingDown'), 'not once down')
     local g = gunship:GetPosition()
     check(VDist2(g[1], g[3], 425, 625) < 3, 'where it was sent')
     IssueMove({ gunship }, { 425, 0, 580 })
-    WaitTicks(5)
+    local up = false
+    for _ = 1, 5 do
+        WaitTicks(1)
+        up = up or gunship:IsUnitState('MovingUp')
+    end
+    check(not up, 'no MovingUp on a plain take-off')
     check(gunship:GetCurrentLayer() == 'Air', 'an order takes it off again')
     WaitTicks(30)
     check(height(gunship) > 3, 'and up')

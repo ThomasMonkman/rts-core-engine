@@ -39,6 +39,9 @@ struct Targets {
     if (t.a <= 0.0) { discard; }
     let s = sin(g.params.y - 10.0 * i.ripple);
     var o: Targets;
+    // The texel as it is: running, the real game shows its (137, 216, 5)
+    // (FAF probe `probe_re6_icons`); paused, FAF's pause overlay darkens
+    // it with the world to (100, 158, 4).
     o.color = t;
     o.glow = vec4<f32>(t.a * 0.6 * s * s, 0.0, 0.0, 1.0);
     return o;

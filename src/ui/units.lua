@@ -58,10 +58,13 @@ methods.GetCommandQueue = function(self)
     return out
 end
 methods.GetWorkProgress = function(self) local u = d(self) return u and u.work or 0 end
+-- The unit it works on: the one an engineer or factory builds, the
+-- structure an upgrade becomes. Those are usually not units the interface
+-- has data for yet (not selected, still being built), so it is looked up in
+-- the latest frame like `GetUnitById`.
 methods.GetFocus = function(self)
     local u = d(self)
-    if u and u.focus and data[u.focus] then return __engine_unit(u.focus) end
-    return nil
+    return u and u.focus and GetUnitById(u.focus) or nil
 end
 -- The unit its current Guard order guards (from its details).
 methods.GetGuardedEntity = function(self) local g = (d(self) or {}).guarding return g and GetUnitById(g) end
@@ -83,10 +86,12 @@ end
 methods.GetStat = function(self, name, default)
     local u = d(self)
     local v = u and u.stats and u.stats[name]
-    -- moho fills a missing stat with the default (sim `GetStat` creates
-    -- it); the UI side only reads, so it returns the default instead.
-    if v == nil then v = default or 0 end
-    return { Value = v }
+    -- Moho's interface reads a missing stat as 0 whatever the default
+    -- (`probe_ui_units` A: `GetStat('NOPE', 7)` is `{ Name = 'NOPE', Type =
+    -- 'Integer', Value = 0 }`). Every measured stat was an `Integer`; a
+    -- fractional one as `Float` is a guess.
+    if v == nil then v = 0 end
+    return { Name = name, Type = math.floor(v) == v and 'Integer' or 'Float', Value = v }
 end
 -- A name given here (FAF's rename dialog) wins over the sim's
 -- (`SetCustomName`: AI and campaign commanders).
@@ -138,20 +143,19 @@ end
 methods.IsAutoMode = function(self) local u = d(self) return u and u.autoMode or false end
 methods.IsAutoSurfaceMode = function(self) local u = d(self) return u and u.autoSurface or false end
 methods.IsRepeatQueue = function(self) return self._repeat == true end
--- Unit settings sent to the sim like orders (`__engine_ui_orders`); the
+-- Unit settings sent to the sim like orders (`ui/orders.rs`); the
 -- repeat flag is remembered here for `IsRepeatQueue`.
 methods.ProcessInfo = function(self, command, value)
     local on = value == true or value == 'true'
-    local orders = rawget(_G, '__engine_ui_orders')
     if command == 'SetRepeatQueue' then
         self._repeat = on
-        table.insert(orders, { units = { self }, toggle = 'repeat', value = on and 1 or 0 })
+        __engine_unit_setting(self, 'repeat', on and 1 or 0)
     elseif command == 'SetPaused' then
         SetPaused({ self }, on)
     elseif command == 'SetFireState' then
         SetFireState({ self }, value)
     elseif command == 'PlayNoStagingPlatformsVO' or command == 'PlayBusyStagingPlatformsVO' then
-        table.insert(orders, { units = { self }, toggle = 'vo', value = command == 'PlayBusyStagingPlatformsVO' and 1 or 0 })
+        __engine_unit_setting(self, 'vo', command == 'PlayBusyStagingPlatformsVO' and 1 or 0)
     end
 end
 methods.IsStunned = function(self) local u = d(self) return u and u.stunned or false end
@@ -250,12 +254,15 @@ local function shapeOf(q)
 end
 -- The engine reads `__engine_queue_factory` to send the shown factory's
 -- queue when it isn't selected (a mobile factory's external factory:
--- FAF's construction.lua shows `selection[1]:GetCreator()`'s queue).
+-- FAF's construction.lua shows `selection[1]:GetCreator()`'s queue). An
+-- empty queue (an idle factory, a unit that isn't one) is nil, as moho's
+-- (`probe_ui_units` Q): FAF's `ResetOrderQueue` tests `if queue`.
 function SetCurrentFactoryForQueueDisplay(unit)
     queueFactory = unit and unit._id
     rawset(_G, '__engine_queue_factory', queueFactory)
     local q = factoryQueue(queueFactory)
     queueShape = shapeOf(q)
+    if q[1] == nil then return nil end
     return q
 end
 function ClearCurrentFactoryForQueueDisplay()
@@ -269,7 +276,7 @@ end
 local function changeBuildCount(index, delta)
     local unit = queueFactory and GetUnitById(tostring(queueFactory))
     if not unit or not index or delta == 0 then return end
-    table.insert(rawget(_G, '__engine_ui_orders'), { units = { unit }, toggle = 'count', index = index, value = delta })
+    __engine_unit_setting(unit, 'count', delta, index)
 end
 function IncreaseBuildCountInQueue(index, count) changeBuildCount(index, math.floor(count or 1)) end
 function DecreaseBuildCountInQueue(index, count) changeBuildCount(index, -math.floor(count or 1)) end
@@ -307,7 +314,23 @@ end
 
 -- Toggles as the selected units have them (the first unit's state).
 local function first(units) local u = units and units[1] return u and data[u._id] end
-function GetFireState(units) local u = first(units) return u and u.fireState or 0 end
+-- The units' shared fire state; -1 if any unit has no retaliate toggle or
+-- they differ (`probe_ui_units` A: engineer, radar, transport and
+-- `{tank, factory}` give -1; the sim still has a state for the radar).
+function GetFireState(units)
+    local state
+    for _, unit in units or {} do
+        local u = data[unit._id]
+        local bp = u and __blueprints[u.bp]
+        -- (Registration leaves `CommandCaps` as text; FAF keeps the table.)
+        local caps = bp and bp.General and bp.General.CommandCapsHash
+        if not (caps and caps.RULEUCC_RetaliateToggle) then return -1 end
+        local s = u.fireState or 0
+        if state and s ~= state then return -1 end
+        state = s
+    end
+    return state or -1
+end
 function GetScriptBit(units, bit)
     local u = first(units)
     if not (u and u.scriptBits) then return false end
@@ -315,3 +338,78 @@ function GetScriptBit(units, bit)
 end
 function GetIsPaused(units) local u = first(units) return u and u.paused or false end
 function GetIsPausedOfUnit(unit) local u = unit and data[unit._id] return u and u.paused or false end
+
+-- The selected structures as a template, offsets from the first one
+-- (inferred: FAF re-centres on the first entry's footprint itself).
+function GenerateBuildTemplateFromSelection()
+    local units = EntityCategoryFilterDown(categories.STRUCTURE, GetSelectedUnits() or {})
+    if not units[1] then
+        ClearBuildTemplates()
+        return
+    end
+    local origin = units[1]:GetPosition()
+    local t = { 0, 0 }
+    local minX, maxX, minZ, maxZ = 0, 0, 0, 0
+    for i, u in units do
+        local p = u:GetPosition()
+        local x, z = p[1] - origin[1], p[3] - origin[3]
+        minX, maxX = math.min(minX, x), math.max(maxX, x)
+        minZ, maxZ = math.min(minZ, z), math.max(maxZ, z)
+        table.insert(t, { u:GetUnitId(), i, x, z })
+    end
+    t[1], t[2] = math.ceil(maxX - minX), math.ceil(maxZ - minZ)
+    SetActiveBuildTemplate(t)
+end
+
+-- A unit's rollover table, as moho builds it (FA's exe 0x847d40):
+-- the economy as whole numbers per second (the per-tick rate times
+-- 10, truncated), the rest as the unit's getters give them. Not
+-- copied: moho's 'unknown' blueprint and hidden health for units
+-- the player can't identify (the interface only has units it sees).
+local rolloverEcon = { 'energyConsumed', 'massConsumed', 'energyRequested', 'massRequested', 'energyProduced', 'massProduced' }
+local function rolloverInfo(unit)
+    local info = { blueprintId = unit:GetUnitId(), health = unit:GetHealth(), maxHealth = unit:GetMaxHealth() }
+    info.kills = unit:GetStat('KILLS', 0).Value
+    local econ = unit:GetEconData()
+    for _, k in rolloverEcon do
+        info[k] = math.floor(econ[k] or 0)
+    end
+    for k, v in unit:GetMissileInfo() do
+        info[k] = v
+    end
+    info.fuelRatio = unit:GetFuelRatio()
+    info.shieldRatio = unit:GetShieldRatio()
+    info.workProgress = unit:GetWorkProgress()
+    info.userUnit = unit
+    info.entityId = unit:GetEntityId()
+    local army = unit:GetArmy()
+    info.armyIndex = army - 1
+    local a = (rawget(_G, '__engine_armies') or {})[army]
+    info.teamColor = a and a.color
+    local name = unit:GetCustomName()
+    if name and name ~= '' then info.customName = name end
+    return info
+end
+-- The unit under the mouse (the engine sets `__engine_rollover` each
+-- frame, nil over the interface or empty ground), as moho's binding
+-- builds it (FA's exe 0x848470): the unit it works on as `focus`
+-- (`focusUpgrade` while upgrading), else the unit it guards as
+-- `guarded`, one level deep. Not copied: moho's brief `focus` for a
+-- unit it targets (blueprint and health) and `focusProp` for a prop
+-- it works on; the interface has neither.
+function GetRolloverInfo()
+    local id = rawget(_G, '__engine_rollover')
+    local unit = id and GetUnitById(id)
+    if not unit or unit:IsDead() then return nil end
+    local info = rolloverInfo(unit)
+    local focus = unit:GetFocus()
+    if focus then
+        local queue = unit:GetCommandQueue()
+        local upgrading = queue[1] and queue[1].type == 'Upgrade'
+        info[upgrading and 'focusUpgrade' or 'focus'] = rolloverInfo(focus)
+    else
+        local guarded = unit:GetGuardedEntity()
+        if guarded then info.guarded = rolloverInfo(guarded) end
+    end
+    return info
+end

@@ -1,12 +1,12 @@
 -- Scenario test (tests/scenarios.rs): factory roll-off (`IssueMoveOffFactory`).
--- A land factory's tank, released from the raised build pad, drives out (its
--- rally point is its own spot, so FAF picks the +3 x `RollOffPoints` entry,
--- and the goal is the first open cell there, just off the footprint, as in
--- the real game: dev/probes probe_rolloff) and down to the ground without
+-- A land factory's tank, released from the raised build pad, drives out (to
+-- its default rally point 5 in front, `InitialRallyZ`, through FAF's nearest
+-- `RollOffPoints` entry, as in the real game: dev/probes probe_rolloff,
+-- probe_unit_build G3) and down to the ground without
 -- dropping; the factory then builds the next one. An air
 -- factory's scout takes off by itself and climbs; another's transport (a
--- hover aircraft) drifts off the pad so the next one isn't built inside it.
--- A factory with a rally point to its east rolls its tank down the east side
+-- hover aircraft) flies off to its rally point 5 in front.
+-- A factory whose rally point is replaced by one to its east rolls its tank down the east side
 -- ramp (FAF's nearest `RollOffPoints` entry, +3 x), not out of the front.
 rawset(_G, "ScenarioResult", { done = false, failures = {}, notes = {} })
 local function check(ok, msg) if not ok then table.insert(ScenarioResult.failures, msg) end end
@@ -22,6 +22,7 @@ ForkThread(function()
     local pad = make('ueb0102', 460, 600)
     IssueBuildFactory({ land }, 'uel0201', 2)
     local side = make('ueb0101', 400, 660)
+    IssueClearFactoryCommands({ side })
     IssueFactoryRallyPoint({ side }, { 440, GetTerrainHeight(440, 660), 660 })
     IssueBuildFactory({ side }, 'uel0201', 1)
     local side_tank, side_exit
@@ -64,7 +65,7 @@ ForkThread(function()
             local sp = scout:GetPosition()
             scout_top = math.max(scout_top, sp[2] - GetTerrainHeight(sp[1], sp[3]))
         end
-        local transport_off = transport and math.max(math.abs(transport:GetPosition()[1] - 460), math.abs(transport:GetPosition()[3] - 600)) > 6
+        local transport_off = transport and math.max(math.abs(transport:GetPosition()[1] - 460), math.abs(transport:GetPosition()[3] - 600)) > 4.5
         if tanks >= 2 and side_exit and transport_off and scout_top > 0.5 then break end
     end
     check(tank ~= nil, 'the land factory finished a tank')
@@ -98,7 +99,7 @@ ForkThread(function()
         local p = transport:GetPosition()
         local off = math.max(math.abs(p[1] - 460), math.abs(p[3] - 600))
         note(string.format('transport %.1f off the pad centre, %.1f up', off, p[2] - GetTerrainHeight(p[1], p[3])))
-        check(off > 6, 'the transport moved off the pad')
+        check(off > 4.5, 'the transport moved off to its rally point')
     end
     ScenarioResult.done = true
 end)

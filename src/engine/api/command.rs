@@ -65,8 +65,9 @@ fn units_of(lua: &Lua, v: &LuaValue) -> LuaResult<Vec<EntityId>> {
 /// `IssueAttack` 0x102ce172 with `RULEUCC_Attack`; `IssueFactoryRallyPoint`
 /// and `IssueFactoryAssist` through 0x102c9840, which skips the mobility
 /// test). `None`: the binding doesn't filter (or not yet checked).
-/// `IssueOverCharge` filters on `RULEUCC_Overcharge` (0x102cc8f8) but is
-/// left alone here while overcharge is reworked.
+/// `IssueOverCharge` filters on `RULEUCC_Overcharge` (0x102cc8f8), and
+/// `IssueDive` on `RULEUCC_Dive`: a tank given either gets nothing queued
+/// (dev/probes probe_unit_orders Q).
 fn required_cap(name: &str) -> Option<&'static str> {
     Some(match name {
         "IssueMove" | "IssueMoveOffFactory" | "IssueFormMove" | "IssueAggressiveMove" | "IssueFormAggressiveMove" => "RULEUCC_Move",
@@ -79,6 +80,8 @@ fn required_cap(name: &str) -> Option<&'static str> {
         "IssueFerry" => "RULEUCC_Ferry",
         "IssueRepair" => "RULEUCC_Repair",
         "IssueSacrifice" => "RULEUCC_Sacrifice",
+        "IssueOverCharge" => "RULEUCC_Overcharge",
+        "IssueDive" => "RULEUCC_Dive",
         "IssueReclaim" => "RULEUCC_Reclaim",
         "IssueCapture" => "RULEUCC_Capture",
         // (`IssueTeleportToBeacon` too, 0x102d2288.)
@@ -99,13 +102,23 @@ fn capable(lua: &Lua, name: &str, units: Vec<EntityId>) -> Vec<EntityId> {
     let Some(cap_name) = required_cap(name) else { return units };
     let Some(cap) = cap_bit(&COMMAND_CAPS, cap_name) else { return units };
     let needs_motion = name != "IssueFactoryAssist" && matches!(cap_name, "RULEUCC_Move" | "RULEUCC_Guard" | "RULEUCC_Patrol" | "RULEUCC_Ferry");
+    // `IssueFactoryAssist` is taken by factories only: an engineer, a
+    // commander or a tank gets nothing queued (dev/probes probe_re2_orders
+    // FA).
+    let factory = (name == "IssueFactoryAssist").then(|| crate::engine::api::categories::domain(lua).ok().and_then(|d| d.named.get("FACTORY").cloned()));
     let w = entity::world(lua);
     units
         .into_iter()
         .filter(|&id| {
-            w.get(id).and_then(|e| e.unit.as_deref()).is_some_and(|u| {
-                u.command_caps & cap != 0 && (!needs_motion || u.motion_params.kind != crate::engine::sim::movement::MotionKind::None)
-            })
+            let e = w.get(id);
+            let factory_ok = match &factory {
+                None => true,
+                Some(set) => e.and_then(|e| e.category_index).zip(set.as_ref()).is_some_and(|(i, s)| s.contains(i)),
+            };
+            factory_ok
+                && e.and_then(|e| e.unit.as_deref()).is_some_and(|u| {
+                    u.command_caps & cap != 0 && (!needs_motion || u.motion_params.kind != crate::engine::sim::movement::MotionKind::None)
+                })
         })
         .collect()
 }
@@ -128,6 +141,24 @@ const MAX_QUEUED: usize = 500;
 /// Issues an order to `units` (a clearing one has emptied their queues
 /// first), leaving out units with more than [`MAX_QUEUED`] queued.
 pub(crate) fn issue(lua: &Lua, units: &[EntityId], kind: CommandKind, target: CommandTarget, blueprint: Option<String>, count: u32) -> CommandHandle {
+    // A build of a blueprint that doesn't exist is queued to nobody: the real
+    // game's `AIBrain:BuildStructure` returns false for one and the game
+    // carries on (dev/probes probe_ai_misc); queued, it would only fail when
+    // the builder got there.
+    let units = match (&blueprint, kind) {
+        (Some(bp), CommandKind::BuildMobile | CommandKind::BuildFactory | CommandKind::Upgrade) if !unit_blueprint_known(lua, bp) => {
+            tracing::warn!(target: "lua", blueprint = %bp, ?kind, "build order for an unknown unit blueprint; not queued");
+            &[][..]
+        }
+        _ => units,
+    };
+    // A silo build order goes to the silo's own requests, not the command
+    // queue (the real game's queue stays empty: dev/probes
+    // probe_re2_orders SILO). The handle is of a command nobody holds.
+    if matches!(kind, CommandKind::BuildSiloTactical | CommandKind::BuildSiloNuke) {
+        crate::engine::api::silo::request(lua, units, kind, count);
+        return CommandHandle(commands(lua).issue(&[], kind, target, blueprint, count));
+    }
     let mut c = commands(lua);
     let capped: Vec<EntityId>;
     let units = if units.iter().any(|&u| c.queue_len(u) > MAX_QUEUED) {
@@ -155,6 +186,12 @@ pub(crate) fn issue(lua: &Lua, units: &[EntityId], kind: CommandKind, target: Co
     handle
 }
 
+/// Whether `bp` (lower case) is a registered unit blueprint.
+pub(crate) fn unit_blueprint_known(lua: &Lua, bp: &str) -> bool {
+    lua.app_data_ref::<crate::engine::api::blueprints::BlueprintRegistry>()
+        .is_some_and(|r| r.get(crate::engine::api::blueprints::BlueprintKind::Unit, bp).is_some())
+}
+
 /// Registers `name(units, target)`.
 fn targeted(lua: &Lua, name: &'static str, kind: CommandKind) -> LuaResult<()> {
     crate::lua_api::register_fn(
@@ -175,7 +212,12 @@ fn targeted(lua: &Lua, name: &'static str, kind: CommandKind) -> LuaResult<()> {
             units.retain(|&u| !refuses(lua, u, kind, target, false, &all));
             // (A ferry order's `OnFerryPointSet` comes as a transport starts
             // it: `transport::ferry_tasks`.)
-            Ok(issue(lua, &units, kind, target, None, 0))
+            let handle = issue(lua, &units, kind, target, None, 0);
+            // An air transport comes for the units ordered aboard it.
+            if kind == CommandKind::TransportLoadUnits {
+                crate::engine::api::transport::join_pickup(lua, handle.0, false);
+            }
+            Ok(handle)
         },
     )
 }
@@ -552,7 +594,7 @@ fn untargeted(lua: &Lua, name: &'static str, kind: CommandKind) -> LuaResult<()>
         Status::Implemented,
         false,
         move |lua, units: shapes::Units| {
-            let units = units_of(lua, &units)?;
+            let units = capable(lua, name, units_of(lua, &units)?);
             Ok(issue(lua, &units, kind, CommandTarget::None, None, 0))
         },
     )
@@ -602,10 +644,43 @@ fn formation(lua: &Lua, name: &'static str, kind: CommandKind) -> LuaResult<()> 
     )
 }
 
-/// Whether `unit`'s current order is an attack (`Attack` / `FormAttack`):
-/// moho's `Attacking` unit state while its attack task runs.
-pub fn is_attacking(lua: &Lua, unit: EntityId) -> bool {
-    lua.app_data_ref::<Commands>().and_then(|c| c.current(unit).map(|c| matches!(c.kind, CommandKind::Attack | CommandKind::FormAttack))).unwrap_or(false)
+/// The unit states an order or a kill gives, by state index: `Attacking`
+/// while the current order is an attack (FAF's Fire Beetle enables its
+/// kamikaze weapon only then: the real game's fires on `IssueAttack` and
+/// never on a target it merely sees, dev/probes/maps/probe_auditgaps g5);
+/// `Guarding` under a guard order and `Patrolling` under a patrol or an
+/// aggressive move, as the real game reports them (dev/probes
+/// probe_unit_orders O3-O9; FAF's EngineerManager reads `Guarding`, its
+/// SimCallbacks `Patrolling`); `NoCost` on a killed unit through its death
+/// interval (probe_unit_build G9); `TransportLoading` and
+/// `WaitingForTransport` on a unit ordered aboard a transport until it's
+/// attached, and `TransportUnloading` on a transport under an unload order
+/// (dev/probes probe_re2_orders ST: the real cargo reads both from its
+/// order until it attaches, the transport the latter from the unload order
+/// until it's done). Read when asked, never stored.
+pub fn order_state(lua: &Lua, unit: EntityId, state: u32) -> bool {
+    use crate::engine::sim::unit_state::UnitStates;
+    static STATES: std::sync::LazyLock<[u32; 7]> = std::sync::LazyLock::new(|| {
+        ["Attacking", "Guarding", "Patrolling", "NoCost", "TransportLoading", "WaitingForTransport", "TransportUnloading"].map(|s| UnitStates::index(s).expect("unit state"))
+    });
+    let [attacking, guarding, patrolling, no_cost, loading, waiting, unloading] = *STATES;
+    if state == no_cost {
+        return entity::world(lua).get(unit).is_some_and(|e| e.cold.killed);
+    }
+    if ![attacking, guarding, patrolling, loading, waiting, unloading].contains(&state) {
+        return false;
+    }
+    let Some((kind, target)) = lua.app_data_ref::<Commands>().and_then(|c| c.current(unit).map(|c| (c.kind, c.target))) else { return false };
+    use CommandKind as K;
+    match kind {
+        K::Attack | K::FormAttack => state == attacking,
+        K::Guard => state == guarding,
+        K::Patrol | K::FormPatrol | K::AggressiveMove | K::FormAggressiveMove => state == patrolling,
+        // (A transport's own pick-up order names itself.)
+        K::TransportLoadUnits => (state == loading || state == waiting) && target != CommandTarget::Entity(unit),
+        K::TransportUnloadUnits | K::TransportUnloadSpecificUnits => state == unloading,
+        _ => false,
+    }
 }
 
 /// Drops all of a unit's orders (used when it's destroyed, too).
@@ -726,7 +801,8 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_fn!(lua, global,
         /// Clears the units' queues and stops their weapons now (moho's
         /// `ClearCommandQueue` + `AttackerStop`, MohoEngine.dll
-        /// 0x102cc457 / 0x102cc466); the returned command is already done.
+        /// 0x102cc457 / 0x102cc466). Returns nothing, as the real game's
+        /// (dev/probes probe_api_spot).
         IssueClearCommands = |lua, units: shapes::Units| {
             let units = units_of(lua, &units)?;
             {
@@ -737,21 +813,21 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             }
             for &u in &units {
                 crate::engine::api::orders::attacker_stop(lua, u);
+                crate::engine::api::capture::orders_cleared(lua, u)?;
+                crate::engine::api::construction::orders_cleared(lua, u)?;
             }
-            Ok(CommandHandle(commands(lua).issue(&[], CommandKind::Stop, CommandTarget::None, None, 0)))
+            Ok(())
         })?;
     lua_fn!(lua, global,
-        /// Replaces the units' queues with a Stop order (moho issues a real
-        /// command, type 1); its dispatch next tick stops their weapons
-        /// (`api::orders`).
+        /// Appends a Stop order (a real command, type 1) behind the units'
+        /// queues, clearing nothing: what's queued carries on (moves, factory
+        /// builds, upgrades, repairs) and the Stop's dispatch, once it's
+        /// reached, stops their weapons (`api::orders`). As in the real game
+        /// (dev/probes probe_mov_misc ST, probe_unit_orders Q, probe_unit_build
+        /// G2-G4): FAF's own scripts pair it with `IssueClearCommands`. The
+        /// player's stop key doesn't come here (`api::player_input` clears).
         IssueStop = |lua, units: shapes::Units| {
             let units = units_of(lua, &units)?;
-            {
-                let mut c = commands(lua);
-                for &u in &units {
-                    c.clear(u);
-                }
-            }
             Ok(issue(lua, &units, CommandKind::Stop, CommandTarget::None, None, 0))
         })?;
     lua_fn!(lua, global,
@@ -782,9 +858,24 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         })?;
     lua_fn!(lua, global,
         /// Queues `count` (default 1, at least 1) of blueprint `bp` at a factory.
+        /// A factory that may not build it now (its `AddBuildRestriction`,
+        /// its army's, its blueprint) doesn't take the order: FAF probe
+        /// `probe_fatboy_water`, a Fatboy's external factory on the seabed
+        /// (FAF restricts it to nothing there) keeps an empty queue and
+        /// never enters `Building`.
         IssueBuildFactory = |lua, (units, bp, count): (shapes::Units, String, Option<f64>)| {
-            let units = units_of(lua, &units)?;
-            Ok(issue(lua, &units, K::BuildFactory, CommandTarget::None, Some(bp.to_lowercase()), count.unwrap_or(1.0).max(1.0) as u32))
+            let bp = bp.to_lowercase();
+            let mut units = units_of(lua, &units)?;
+            if unit_blueprint_known(lua, &bp) {
+                let mut allowed = Vec::with_capacity(units.len());
+                for u in units {
+                    if crate::engine::api::build::can_build(lua, u, &bp)? {
+                        allowed.push(u);
+                    }
+                }
+                units = allowed;
+            }
+            Ok(issue(lua, &units, K::BuildFactory, CommandTarget::None, Some(bp), count.unwrap_or(1.0).max(1.0) as u32))
         })?;
     lua_fn!(lua, global,
         /// Upgrades each unit into blueprint `bp`.
@@ -858,23 +949,65 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::AIBrain,
         /// Queues a BuildMobile order. AI locations are `{x, z, ...}` (FAF
         /// converts them the same way for `IssueBuildMobile`); `relative`
-        /// ones are offsets from the builder.
+        /// ones are offsets from the army's start position, as
+        /// `FindPlaceToBuild`'s relative results are (dev/probes
+        /// probe_ai_build: `{4, 6, 0}` queued at the start + (4, 6), not
+        /// beside the builder). An unknown blueprint queues
+        /// nothing and returns false, as in the real game (dev/probes
+        /// probe_ai_misc). The site snaps as every build order's does
+        /// (`construction::snap_site`: the footprint from round(v - size /
+        /// 2), halves to even, so a generator asked at an even 0 or 0.3
+        /// goes to 0.5, at an odd 3 to 2.5, and an extractor asked on its
+        /// deposit at 155.5 stays there); one where the structure can't be built (another
+        /// structure's skirt: a unit doesn't count) moves to the first
+        /// free spot of the near-spot search in steps of 8, whatever the
+        /// blueprint (the real game queues a generator asked on another at
+        /// -8, -8 from the snapped site, and at -8, +8 with the north-west
+        /// taken too: dev/probes probe_re2_build BS). An extractor or
+        /// hydrocarbon plant isn't moved (not probed). It returns false for
+        /// an absolute site, built or moved alike; true for a relative one
+        /// (probe_ai_build): what the value means isn't known.
         BuildStructure = |lua, (_brain, builder, bp, loc, relative): (Obj<moho::AIBrain>, Obj<moho::Unit>, String, shapes::Vector, Option<bool>)| {
             let builder = entity::entity_id(&builder)?;
+            let bp = bp.to_lowercase();
+            if !unit_blueprint_known(lua, &bp) {
+                return Ok(Some(false));
+            }
             let num = |i: usize| -> LuaResult<f64> { Ok(loc.raw_get::<Option<f64>>(i)?.unwrap_or(0.0)) };
             let (mut x, mut z) = (num(1)?, num(2)?);
-            if relative.unwrap_or(false)
-                && let Some(e) = entity::world(lua).get(builder) {
-                let (bx, _, bz) = e.position().to_f64();
-                x += bx;
-                z += bz;
+            if relative.unwrap_or(false) {
+                let army = entity::world(lua).get(builder).and_then(|e| e.army);
+                let start = army.and_then(|a| lua.app_data_ref::<crate::engine::sim::army::Armies>().and_then(|armies| armies.get(a).and_then(|a| a.start)));
+                if let Some(start) = start {
+                    x += start.x.to_num::<f64>();
+                    z += start.z.to_num::<f64>();
+                }
             }
-            let y = lua
-                .app_data_ref::<crate::engine::sim::terrain::Terrain>()
-                .map_or(0.0, |t| t.height_at(crate::engine::sim::math::from_lua(x), crate::engine::sim::math::from_lua(z)).to_num::<f64>());
-            let target = CommandTarget::Ground(FxVec3::from_f64(x, y, z));
-            issue(lua, &[builder], K::BuildMobile, target, Some(bp.to_lowercase()), 1);
-            Ok(())
+            use crate::engine::api::build::{near_spot_offsets, Placement, NEAR_SPOT_RINGS};
+            use crate::engine::sim::math::{from_lua, Fx};
+            let asked = FxVec3 { x: from_lua(x), y: Fx::ZERO, z: from_lua(z) };
+            let mut site = crate::engine::api::construction::snap_site(lua, &bp, asked)?;
+            let (fx, fz) = (site.x, site.z);
+            let placement = Placement::of(lua, &bp)?;
+            // An extractor or hydrocarbon plant stays on the site asked
+            // (its deposit, taken or not), as before the move was probed:
+            // the probe moved generators only, and a step-8 search can't
+            // land on another deposit except by chance, 160 away at worst.
+            // The AI asks for taken deposits thousands of times a game, and
+            // each full search is 1680 placement checks (about 0.5 ms).
+            if !placement.needs_deposit() && !placement.allows(lua, site, &[])? {
+                let step = Fx::from_num(8);
+                for (dx, dz) in near_spot_offsets(NEAR_SPOT_RINGS).into_iter().skip(1) {
+                    let p = FxVec3 { x: fx + step * Fx::from_num(dx), y: Fx::ZERO, z: fz + step * Fx::from_num(dz) };
+                    if placement.allows(lua, p, &[])? {
+                        site = p;
+                        break;
+                    }
+                }
+            }
+            site.y = lua.app_data_ref::<crate::engine::sim::terrain::Terrain>().map_or(Fx::ZERO, |t| t.height_at(site.x, site.z));
+            issue(lua, &[builder], K::BuildMobile, CommandTarget::Ground(site), Some(bp), 1);
+            Ok(Some(relative.unwrap_or(false)))
         })?;
     lua_fn!(lua, global,
         /// Whether the command is finished (true for nil).
@@ -884,16 +1017,21 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
 
     // Platoon orders: to the platoon's live units (of `squad`, if given).
     fn platoon_units(lua: &Lua, platoon: &LuaTable, squad: &Option<String>) -> LuaResult<Vec<EntityId>> {
-        let units: LuaTable = match squad {
+        crate::engine::api::platoon::live_id(lua, platoon)?;
+        // (An empty squad's `GetSquadUnits` is nil.)
+        let units: Option<LuaTable> = match squad {
             Some(s) => platoon.call_method("GetSquadUnits", s.as_str())?,
             None => platoon.call_method("GetPlatoonUnits", ())?,
         };
-        units_of(lua, &LuaValue::Table(units))
+        match units {
+            Some(units) => units_of(lua, &LuaValue::Table(units)),
+            None => Ok(Vec::new()),
+        }
     }
     // A platoon with a formation moves in it: `kind` becomes its `Form*`
     // variant (`formed`), laid out by `formations.lua`.
     fn platoon_issue(lua: &Lua, this: &Obj<moho::Platoon>, units: &[EntityId], kind: CommandKind, formed: Option<CommandKind>, target: CommandTarget) -> LuaResult<CommandHandle> {
-        let id = crate::engine::api::platoon::platoon_id(this)?;
+        let id = crate::engine::api::platoon::live_id(lua, this)?;
         let formation = lua.app_data_ref::<crate::engine::sim::platoon::Platoons>().and_then(|p| p.get(id).and_then(|p| p.formation.clone()));
         match (formed, formation) {
             (Some(f), Some(name)) => issue_formation(lua, units, f, target, Some(&name), None),
@@ -934,7 +1072,18 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     platoon_order(lua, "AggressiveMoveToLocation", K::AggressiveMove, Some(K::FormAggressiveMove))?;
     platoon_order(lua, "AttackTarget", K::Attack, None)?;
     platoon_order(lua, "GuardTarget", K::Guard, None)?;
-    platoon_order(lua, "Patrol", K::Patrol, Some(K::FormPatrol))?;
+    crate::lua_api::add_class_fn(
+        lua,
+        moho::Platoon::CLASS,
+        "Patrol",
+        Some(&[Some("this"), Some("target"), Some("squad")]),
+        "Orders the platoon's live units (of `squad`, if given) to patrol; in its formation, if it has one. Returns nil, unlike the other platoon orders (dev/probes probe_re6_platoon).",
+        Status::Implemented,
+        |lua, (this, target, squad): (Obj<moho::Platoon>, shapes::OrderTarget, Option<String>)| {
+            let units = platoon_units(lua, &this, &squad)?;
+            platoon_issue(lua, &this, &units, K::Patrol, Some(K::FormPatrol), target_of(&target)?).map(|_| ())
+        },
+    )?;
     lua_method!(lua, moho::Platoon,
         /// Clears the orders of the platoon's live units (of `squad`, if given).
         Stop = |lua, (this, squad): (Obj<moho::Platoon>, Option<String>)| {
@@ -980,6 +1129,59 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             let all = sorted_unique(&units);
             units.retain(|&u| !refuses(lua, u, K::TransportLoadUnits, target, false, &all));
             Ok(issue(lua, &units, K::TransportLoadUnits, target, None, 0))
+        })?;
+    // The platoon's live transports (TRANSPORTATION) and the rest of its
+    // live units in `category` (all of them for none).
+    fn platoon_transports(lua: &Lua, this: &Obj<moho::Platoon>, category: Option<&crate::engine::sim::category::CategorySet>) -> LuaResult<(Vec<EntityId>, Vec<EntityId>)> {
+        let all = platoon_units(lua, this, &None)?;
+        let transport = crate::engine::api::categories::domain(lua)?.named.get("TRANSPORTATION").cloned();
+        let w = entity::world(lua);
+        let cat = |u: EntityId| w.get(u).and_then(|e| e.category_index);
+        let (transports, others): (Vec<EntityId>, Vec<EntityId>) =
+            all.into_iter().partition(|&u| transport.as_ref().zip(cat(u)).is_some_and(|(t, i)| t.contains(i)));
+        let others = others.into_iter().filter(|&u| category.is_none_or(|c| cat(u).is_some_and(|i| c.contains(i)))).collect();
+        Ok((transports, others))
+    }
+    lua_method!(lua, moho::Platoon,
+        /// Loads the platoon's live units in `category` into its first transport: the same
+        /// load order as `IssueTransportLoad(units, transport)`. The command runs until they're
+        /// aboard. (The real game, dev/probes probe_ai_transport, also gives the transport an
+        /// order and returns a table; several transports untested, ours uses the first.)
+        LoadUnits = |lua, (this, category): (Obj<moho::Platoon>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>)| {
+            let (transports, mut units) = platoon_transports(lua, &this, Some(&category.0))?;
+            let target = match transports.first() {
+                Some(&t) => CommandTarget::Entity(t),
+                None => {
+                    units.clear();
+                    CommandTarget::None
+                }
+            };
+            let all = sorted_unique(&units);
+            units.retain(|&u| !refuses(lua, u, K::TransportLoadUnits, target, false, &all));
+            let handle = issue(lua, &units, K::TransportLoadUnits, target, None, 0);
+            crate::engine::api::transport::join_pickup(lua, handle.0, false);
+            Ok(handle)
+        })?;
+    lua_method!(lua, moho::Platoon,
+        /// The platoon's transports unload everything at `pos`: `IssueTransportUnload`'s order.
+        UnloadAllAtLocation = |lua, (this, pos): (Obj<moho::Platoon>, shapes::OrderTarget)| {
+            let (mut transports, _) = platoon_transports(lua, &this, None)?;
+            let target = target_of(&pos)?;
+            let all = sorted_unique(&transports);
+            transports.retain(|&u| !refuses(lua, u, K::TransportUnloadUnits, target, false, &all));
+            Ok(issue(lua, &transports, K::TransportUnloadUnits, target, None, 0))
+        })?;
+    lua_method!(lua, moho::Platoon,
+        /// The platoon's transports unload their cargo in `category` at `pos`:
+        /// `IssueTransportUnloadSpecific`'s order. The real game takes it for air transports
+        /// too, not only carriers (dev/probes probe_ai_transport).
+        UnloadUnitsAtLocation = |lua, (this, category, pos): (Obj<moho::Platoon>, LuaUserDataRef<crate::engine::api::categories::EntityCategory>, shapes::OrderTarget)| {
+            let (transports, _) = platoon_transports(lua, &this, None)?;
+            let handle = issue(lua, &transports, K::TransportUnloadSpecificUnits, target_of(&pos)?, None, 0);
+            if let Some(c) = commands(lua).get_mut(handle.0) {
+                c.category = Some(category.0.clone());
+            }
+            Ok(handle)
         })?;
     lua_method!(lua, moho::Platoon,
         /// Whether `cmd` is still running (false for nil).
@@ -1028,27 +1230,37 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     })?;
     lua_method!(lua, moho::AIBrain,
         /// Queues the template's units (`{ name, plan, { unitId, min, max,
-        /// squad, formation }, ... }`) on the first factory: `max * count` of
-        /// each line. Inferred: moho may split the order across the given
-        /// factories.
+        /// squad, formation }, ... }`): `max * count` of line i on factory i
+        /// (dev/probes probe_ai_build: tanks on the first factory, scouts on
+        /// the second). With fewer factories than lines, the list wraps
+        /// round (inferred). Campaign AI passes `CanBuildPlatoon`'s answer,
+        /// one factory per line.
         BuildPlatoon = |lua, (_brain, template, factories, count): (Obj<moho::AIBrain>, shapes::PlatoonTemplate, shapes::List<Obj<moho::Unit>>, Option<f64>)| {
             let factories = units_of(lua, &LuaValue::Table(factories.into_inner()))?;
-            let Some(&factory) = factories.first() else { return Ok(()) };
+            if factories.is_empty() {
+                return Ok(());
+            }
             let count = count.unwrap_or(1.0).max(1.0);
+            let mut line_index = 0;
             for line in template.into_inner().sequence_values::<LuaValue>().skip(2) {
                 let LuaValue::Table(line) = line? else { continue };
                 let Some(id) = line.raw_get::<Option<String>>(1)? else { continue };
+                let factory = factories[line_index % factories.len()];
+                line_index += 1;
                 let n = (line.raw_get::<Option<f64>>(3)?.unwrap_or(1.0).max(1.0) * count) as u32;
                 issue(lua, &[factory], K::BuildFactory, CommandTarget::None, Some(id.to_lowercase()), n);
             }
             Ok(())
         })?;
     lua_method!(lua, moho::AIBrain,
-        /// Queues `count` (default 1, at least 1) of blueprint `bp` at the factory `builder`.
+        /// Queues `count` (default 1, at least 1) of blueprint `bp` at the
+        /// factory `builder`; returns the count (dev/probes probe_ai_build:
+        /// 3 for three, 1 for one).
         BuildUnit = |lua, (_brain, builder, bp, count): (Obj<moho::AIBrain>, Obj<moho::Unit>, String, Option<f64>)| {
             let builder = entity::entity_id(&builder)?;
-            issue(lua, &[builder], K::BuildFactory, CommandTarget::None, Some(bp.to_lowercase()), count.unwrap_or(1.0).max(1.0) as u32);
-            Ok(())
+            let count = count.unwrap_or(1.0).max(1.0) as u32;
+            issue(lua, &[builder], K::BuildFactory, CommandTarget::None, Some(bp.to_lowercase()), count);
+            Ok(count)
         })?;
     lua_method!(lua, moho::Unit,
         /// The unit's queued commands, as `UnitCommand` tables. A factory

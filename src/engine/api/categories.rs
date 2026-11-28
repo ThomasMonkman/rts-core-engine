@@ -167,11 +167,23 @@ struct Keys {
 /// path's `Blueprint` / `GetUnitId` lookups go through the class metatable
 /// and back into Lua, per unit, and FAF filters whole selections).
 fn index_of(lua: &Lua, domain: &dyn Fn() -> LuaResult<Arc<CategoryDomain>>, value: &LuaValue) -> LuaResult<Option<u32>> {
+    index_of_in(lua, domain, value, false)
+}
+
+/// [`index_of`]; with `drop_destroyed`, a destroyed engine entity is in no
+/// category (the real `EntityCategoryFilterDown` leaves it out, while
+/// `EntityCategoryContains` still answers from its blueprint:
+/// dev/probes probe_api_spot `misc.after_destroy5` / `8`).
+fn index_of_in(lua: &Lua, domain: &dyn Fn() -> LuaResult<Arc<CategoryDomain>>, value: &LuaValue, drop_destroyed: bool) -> LuaResult<Option<u32>> {
     if let (LuaValue::Table(t), Some(keys)) = (value, lua.app_data_ref::<Keys>()) {
         if let LuaValue::UserData(ud) = t.raw_get::<LuaValue>(&keys.c_object)?
-            && let Ok(h) = ud.borrow::<crate::engine::api::entity::EntityHandle>()
-            && let Some(i) = lua.app_data_ref::<crate::engine::sim::entity::EntityWorld>().and_then(|w| w.get(h.0).map(|e| e.category_index)) {
-            return Ok(i);
+            && let Ok(h) = ud.borrow::<crate::engine::api::entity::EntityHandle>() {
+            let entity = lua.app_data_ref::<crate::engine::sim::entity::EntityWorld>().map(|w| w.get(h.0).map(|e| (e.category_index, e.destroyed)));
+            match entity {
+                Some(Some((_, true))) | Some(None) if drop_destroyed => return Ok(None),
+                Some(Some((i, _))) => return Ok(i),
+                _ => {}
+            }
         }
         let id = t.raw_get::<LuaValue>(&keys.user_id)?;
         if let LuaValue::Integer(_) | LuaValue::Number(_) = id
@@ -224,8 +236,9 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         user_bp: lua.create_string("bp")?,
     });
     lua_fn!(lua, global,
-        /// The entries of `list` (units, blueprints or ids) in `cat`. A nil
-        /// list (no selection) filters to nothing.
+        /// The entries of `list` (units, blueprints or ids) in `cat`, leaving
+        /// out destroyed entities. A nil list (no selection) filters to
+        /// nothing.
         EntityCategoryFilterDown = 
             |lua, (cat, list): (LuaUserDataRef<EntityCategory>, Option<List<LuaValue>>)| {
                 let out = List::<LuaValue>::new(lua.create_table()?);
@@ -234,7 +247,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
                 let mut n = 0;
                 for v in list.sequence_values::<LuaValue>() {
                     let v = v?;
-                    if index_of(lua, &|| Ok(d.clone()), &v)?.is_some_and(|i| cat.0.contains(i)) {
+                    if index_of_in(lua, &|| Ok(d.clone()), &v, true)?.is_some_and(|i| cat.0.contains(i)) {
                         n += 1;
                         out.raw_set(n, v)?;
                     }

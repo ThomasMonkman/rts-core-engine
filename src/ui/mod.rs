@@ -10,14 +10,24 @@
 //! controls become a draw list the renderer batches into one draw call,
 //! as SupCom does (one texture atlas for the whole interface).
 
+pub mod armies;
+pub mod build_template;
 pub mod clipboard;
 pub mod controls;
 pub mod cursor;
+pub mod decals;
+mod engine_stats;
 pub mod fonts;
+pub mod input;
+pub mod keymap;
 pub mod movie;
 pub mod net_lobby;
+pub mod orders;
+pub mod overlays;
 pub mod prefs;
 pub mod replay;
+pub mod selection;
+pub mod session;
 pub mod shapes;
 pub mod signatures;
 pub mod sound;
@@ -190,6 +200,20 @@ struct UiDeposits(Arc<Vec<(u8, f64, f64, f64)>>);
 #[derive(Default)]
 struct UiBusy(Vec<u32>);
 
+/// Units that can't be selected (sorted): cargo in a transport, units still
+/// being built inside their factory. `UISelectionByCategory` skips them.
+#[derive(Default)]
+struct UiUnselectable(Vec<u32>);
+
+/// What `UISelectionByCategory` needs of the renderer's view this frame
+/// ([`UserVm::set_select_scope`]): whether a point is on screen
+/// (`inViewFrustum`), and the point `nearestToMouse` measures from (the
+/// ground under the cursor, else the camera's focus).
+pub struct SelectScope {
+    pub in_view: Box<dyn Fn([f32; 3]) -> bool>,
+    pub from: Option<[f32; 3]>,
+}
+
 /// Focus-army units hurt since the last beat (`OnFocusArmyUnitDamaged`).
 #[derive(Default)]
 struct DamagedUnits(Vec<u32>);
@@ -211,7 +235,9 @@ fn avatar_priority(lua: &Lua, blueprint: &str) -> LuaResult<Option<i64>> {
         .raw_get::<Option<LuaTable>>("__blueprints")?
         .and_then(|b| b.raw_get::<Option<LuaTable>>(blueprint).ok().flatten())
         .and_then(|bp| bp.raw_get::<Option<LuaTable>>("General").ok().flatten())
-        .and_then(|g| g.raw_get::<Option<i64>>("QuickSelectPriority").ok().flatten());
+        .and_then(|g| g.raw_get::<Option<i64>>("QuickSelectPriority").ok().flatten())
+        // 0 is the reflected default every blueprint carries: not an avatar.
+        .filter(|&p| p != 0);
     if let Some(mut a) = lua.app_data_mut::<AvatarPriorities>() {
         a.0.insert(blueprint.to_string(), priority);
     }
@@ -265,6 +291,14 @@ fn write_unit_basics(lua: &Lua, data: &LuaTable, u: &UnitInfo) -> LuaResult<(Lua
 /// is thousands of units whose details mostly stay put from beat to beat.
 #[derive(Default)]
 struct WrittenDetails(std::collections::BTreeMap<u32, crate::engine::snapshot::UnitDetail>);
+
+/// The frames counted towards `__EngineStats`' next `FPS` value
+/// ([`UserVm::frame`]). Interface only: never sim state.
+#[derive(Default)]
+struct FrameRate {
+    frames: u32,
+    elapsed: f32,
+}
 
 /// Units whose queue holds an order predicted at issue
 /// ([`UserVm::command_issued`]), by when (interface seconds): the sim's
@@ -416,6 +450,16 @@ impl UserVm {
         api::spec_footprints::register_safe(&lua)?;
         api::categories::register(&lua)?;
         user_api::register(&lua)?;
+        session::register(&lua)?;
+        orders::register(&lua)?;
+        overlays::register(&lua)?;
+        decals::register(&lua)?;
+        keymap::register(&lua)?;
+        build_template::register(&lua)?;
+        selection::register(&lua)?;
+        armies::register(&lua)?;
+        input::register(&lua)?;
+        engine_stats::register(&lua)?;
         api::core::register(&lua)?;
         world_pick::register(&lua)?;
         world_draw::register(&lua)?;
@@ -499,6 +543,58 @@ impl UserVm {
                 }
                 let f: LuaFunction = lua.globals().get("__engine_filter_category")?;
                 f.call::<Vec<u32>>((list, category))
+            })?;
+        lua_fn!(&lua, global_raw,
+            /// `UISelectionByCategory`'s units (user_api.rs), worked out at once
+            /// as moho does, so `GetSelectedUnits()` on the next line sees them:
+            /// the focus army's units (any army's with none) in the category
+            /// expression, idle / on screen / the one nearest the cursor when
+            /// asked, plus the selection when adding. Structures still being
+            /// built count; cargo and units inside their factory don't (as the
+            /// real game's `UISelectionByCategory('ALLUNITS')`). Nil when none,
+            /// leaving the selection as it is.
+            #[lua(internal)]
+            __engine_select_by_category = |lua, (expr, add, in_view, nearest, idle): (String, bool, bool, bool, bool)| {
+                let focus = lua.named_registry_value::<Option<i64>>("user.focus_army")?.unwrap_or(-1);
+                let units: Vec<(u32, std::sync::Arc<str>, [f32; 3])> = match lua.app_data_ref::<UiWorld>() {
+                    Some(w) => {
+                        let skip = lua.app_data_ref::<UiUnselectable>();
+                        w.0.iter()
+                            .filter(|u| focus < 1 || i64::from(u.army) == focus)
+                            .filter(|u| skip.as_ref().is_none_or(|s| s.0.binary_search(&u.id).is_err()))
+                            .map(|u| (u.id, u.blueprint.clone(), u.position))
+                            .collect()
+                    }
+                    None => Vec::new(),
+                };
+                let list = lua.create_table_with_capacity(units.len() * 2, 0)?;
+                for (id, bp, _) in &units {
+                    list.push(*id)?;
+                    list.push(&**bp)?;
+                }
+                let f: LuaFunction = lua.globals().get("__engine_filter_category")?;
+                let mut ids: Vec<u32> = f.call((list, expr))?;
+                let position = |id: u32| units.binary_search_by_key(&id, |u| u.0).ok().map(|i| units[i].2);
+                if idle && let Some(busy) = lua.app_data_ref::<UiBusy>() {
+                    ids.retain(|id| busy.0.binary_search(id).is_err());
+                }
+                let scope = lua.app_data_ref::<SelectScope>();
+                if in_view && let Some(scope) = scope.as_ref() {
+                    ids.retain(|&id| position(id).is_some_and(|p| (scope.in_view)(p)));
+                }
+                if nearest && let Some(from) = scope.as_ref().and_then(|s| s.from) {
+                    let d2 = |id: u32| position(id).map_or(f32::MAX, |p| (p[0] - from[0]).powi(2) + (p[2] - from[2]).powi(2));
+                    ids = ids.into_iter().min_by(|a, b| d2(*a).total_cmp(&d2(*b)).then(a.cmp(b))).into_iter().collect();
+                }
+                drop(scope);
+                if add {
+                    ids.extend(lua.globals().raw_get::<Option<LuaTable>>("__engine_selection")?.into_iter().flat_map(|t| {
+                        t.sequence_values::<LuaTable>().filter_map(|u| u.ok()?.raw_get::<Option<u32>>("_id").ok().flatten()).collect::<Vec<_>>()
+                    }));
+                }
+                ids.sort_unstable();
+                ids.dedup();
+                Ok(if ids.is_empty() { None } else { Some(ids) })
             })?;
         Ok(Self { lua })
     }
@@ -618,6 +714,7 @@ impl UserVm {
     /// (skin, layout, cursor), then `uimain.StartFrontEndUI()` (FAF's
     /// `menus/main.lua`).
     pub fn start_front_end(&self) -> LuaResult<()> {
+        session::state(&self.lua).ui_state = session::UiState::Frontend;
         self.lua.load(include_str!("front_end.lua")).set_name("=[engine front end]").exec()
     }
 
@@ -626,7 +723,7 @@ impl UserVm {
     /// (`gamemain.OnBeat`, which updates the economy bar and other panels).
     pub fn beat(&self, tick: u64, economy: &[crate::engine::snapshot::ArmyEconomy]) -> LuaResult<()> {
         let g = self.lua.globals();
-        g.raw_set("__engine_ui_tick", tick)?;
+        session::state(&self.lua).tick = tick;
         let focus: i64 = self.lua.named_registry_value("user.focus_army")?;
         let shown = if focus >= 1 { focus as u32 } else { 1 };
         // Each army's synced overflow flag, for `GetResourceSharing` (which
@@ -955,14 +1052,7 @@ impl UserVm {
     /// The active build template's structures (blueprint, x / z offset from
     /// the cursor), if one is set (`SetActiveBuildTemplate`).
     pub fn build_template(&self) -> LuaResult<Option<Vec<(String, f32, f32)>>> {
-        let Some(t) = self.lua.globals().raw_get::<Option<LuaTable>>("__engine_build_template")? else { return Ok(None) };
-        let mut out = Vec::new();
-        for i in 3..=t.raw_len() as i64 {
-            let Some(e) = t.raw_get::<Option<LuaTable>>(i)? else { continue };
-            let (Some(bp), Some(x), Some(z)) = (e.raw_get::<Option<String>>(1)?, e.raw_get::<Option<f32>>(3)?, e.raw_get::<Option<f32>>(4)?) else { continue };
-            out.push((bp.to_lowercase(), x, z));
-        }
-        Ok((!out.is_empty()).then_some(out))
+        Ok(build_template::structures(&self.lua))
     }
 
     /// How this client takes part: watching a recording (`SessionIsReplay`),
@@ -976,26 +1066,14 @@ impl UserVm {
     /// The interface's ground decals when they changed since the last call
     /// (`None`: unchanged): map decals, corner-placed, albedo.
     pub fn user_decals(&self) -> LuaResult<Option<Vec<crate::engine::assets::scmap::Decal>>> {
-        let f: LuaFunction = self.lua.globals().get("__engine_user_decals")?;
-        let (version, list): (i64, LuaTable) = f.call(())?;
-        let seen: Option<i64> = self.lua.named_registry_value("ui.decals_seen")?;
-        if seen == Some(version) {
-            return Ok(None);
-        }
-        self.lua.set_named_registry_value("ui.decals_seen", version)?;
-        let values: Vec<LuaValue> = list.sequence_values::<LuaValue>().collect::<LuaResult<_>>()?;
-        let num = |v: &LuaValue| match v {
-            LuaValue::Integer(i) => *i as f32,
-            LuaValue::Number(n) => *n as f32,
-            _ => 0.0,
-        };
+        let Some(decals) = decals::take_changed(&self.lua) else { return Ok(None) };
         let mut out = Vec::new();
-        for c in values.chunks_exact(7) {
-            let LuaValue::String(tex) = &c[0] else { continue };
-            let (x, y, z, sx, sy, sz) = (num(&c[1]), num(&c[2]), num(&c[3]), num(&c[4]), num(&c[5]), num(&c[6]));
+        for d in decals {
+            let Some(tex) = d.texture else { continue };
+            let ([x, y, z], [sx, sy, sz]) = (d.position, d.scale);
             out.push(crate::engine::assets::scmap::Decal {
                 kind: crate::engine::assets::scmap::decal_kind::ALBEDO,
-                textures: vec![tex.to_str()?.to_lowercase()],
+                textures: vec![tex.to_lowercase()],
                 scale: [sx, sy, sz],
                 position: [x - sx / 2.0, y, z - sz / 2.0],
                 rotation: [0.0; 3],
@@ -1045,6 +1123,16 @@ impl UserVm {
     /// The units with orders this tick (sorted): the rest are idle.
     pub fn set_busy(&self, busy: &[u32]) {
         self.lua.set_app_data(UiBusy(busy.to_vec()));
+    }
+
+    /// Units that can't be selected this tick (sorted; see [`UiUnselectable`]).
+    pub fn set_unselectable(&self, ids: Vec<u32>) {
+        self.lua.set_app_data(UiUnselectable(ids));
+    }
+
+    /// The renderer's view for this frame's `UISelectionByCategory` calls.
+    pub fn set_select_scope(&self, scope: SelectScope) {
+        self.lua.set_app_data(scope);
     }
 
     /// Units the interface holds data for (selected, or looked up), sorted.
@@ -1107,7 +1195,10 @@ impl UserVm {
     fn selection_changed(&self, ids: &[u32], refresh: bool) -> LuaResult<()> {
         let unit: LuaFunction = self.lua.globals().get("__engine_unit")?;
         let old: Vec<u32> = self.lua.named_registry_value::<Option<Vec<u32>>>("user.selection")?.unwrap_or_default();
-        if old == ids && !refresh {
+        // The interface may have selected since (`SelectUnits` is
+        // synchronous): then the same ids are still a change for it.
+        let current: Vec<u32> = self.lua.globals().raw_get::<Option<LuaTable>>("__engine_selection")?.map_or_else(Vec::new, |t| t.sequence_values::<LuaTable>().filter_map(|u| u.ok()?.raw_get::<Option<u32>>("_id").ok().flatten()).collect());
+        if old == ids && current == ids && !refresh {
             return Ok(());
         }
         let list = |ids: &mut dyn Iterator<Item = u32>| -> LuaResult<LuaTable> {
@@ -1131,67 +1222,15 @@ impl UserVm {
         Ok(())
     }
 
-    /// Orders the interface gave since the last call (its buttons and
-    /// panels: stop, factory builds, upgrades, ...), oldest first.
     /// Order feedback and world meshes (rally flags) to draw this frame.
     pub fn interface_meshes(&self) -> Vec<world_mesh::InterfaceMesh> {
         world_mesh::meshes(&self.lua)
     }
 
+    /// Orders the interface gave since the last call (its buttons and
+    /// panels: stop, factory builds, upgrades, ...), oldest first.
     pub fn take_orders(&self) -> LuaResult<Vec<UiOrder>> {
-        let list: LuaTable = self.lua.globals().raw_get("__engine_ui_orders")?;
-        let mut callbacks: Vec<Option<_>> = std::mem::take(&mut self.lua.app_data_mut::<user_api::PendingSimCallbacks>().expect("PendingSimCallbacks").0).into_iter().map(Some).collect();
-        let mut out = Vec::new();
-        for o in list.clone().sequence_values::<LuaTable>() {
-            let o = o?;
-            if let Some(index) = o.raw_get::<Option<usize>>("callback")? {
-                if let Some((callback, units)) = index.checked_sub(1).and_then(|i| callbacks.get_mut(i)).and_then(Option::take) {
-                    out.push(UiOrder { command: String::new(), units: Some(units), blueprint: None, count: 0, clear: false, toggle: None, script: Vec::new(), callback: Some(callback) });
-                }
-                continue;
-            }
-            let units = o.raw_get::<Option<LuaTable>>("units")?.map(|t| t.sequence_values::<LuaTable>().filter_map(|u| u.ok()?.raw_get::<Option<u32>>("_id").ok().flatten()).collect());
-            out.push(UiOrder {
-                command: o.raw_get::<Option<String>>("command")?.unwrap_or_default(),
-                units,
-                blueprint: o.raw_get::<Option<String>>("bp")?,
-                count: o.raw_get::<Option<f64>>("count")?.map_or(1, |c| c.max(1.0) as u32),
-                clear: o.raw_get::<Option<bool>>("clear")?.unwrap_or(false),
-                script: match o.raw_get::<LuaValue>("arg")? {
-                    LuaValue::Table(t) => {
-                        let mut kv: Vec<(String, String)> = t
-                            .pairs::<String, LuaValue>()
-                            .filter_map(|p| p.ok())
-                            .filter_map(|(k, v)| match v {
-                                LuaValue::String(s) => Some((k, s.to_str().ok()?.to_string())),
-                                _ => None,
-                            })
-                            .collect();
-                        kv.sort();
-                        kv
-                    }
-                    _ => Vec::new(),
-                },
-                toggle: {
-                    use crate::engine::sim::input::Toggle;
-                    let v = o.raw_get::<Option<f64>>("value")?.unwrap_or(0.0) as i32;
-                    match o.raw_get::<Option<String>>("toggle")?.as_deref() {
-                        Some("fire") => Some(Toggle::FireState(v)),
-                        Some("pause") => Some(Toggle::Paused(v != 0)),
-                        Some("repeat") => Some(Toggle::RepeatQueue(v != 0)),
-                        Some("vo") => Some(Toggle::StagingVo(v != 0)),
-                        Some("bit") => Some(Toggle::ScriptBit(o.raw_get::<Option<f64>>("bit")?.unwrap_or(0.0) as u8, v != 0)),
-                        Some("count") => Some(Toggle::BuildCount(o.raw_get::<Option<f64>>("index")?.unwrap_or(0.0) as u16, v)),
-                        Some("auto") => Some(Toggle::AutoMode(v != 0)),
-                        Some("autosurface") => Some(Toggle::AutoSurfaceMode(v != 0)),
-                        _ => None,
-                    }
-                },
-                callback: None,
-            });
-        }
-        list.clear()?;
-        Ok(out)
+        Ok(orders::take(&self.lua))
     }
 
     /// FAF's current command mode (`commandmode.GetCommandMode`): `("order",
@@ -1374,7 +1413,7 @@ impl UserVm {
     /// The interface asked to quit (FAF's `ExitApplication`: the main
     /// menu's Exit).
     pub fn exit_requested(&self) -> LuaResult<bool> {
-        Ok(self.lua.globals().raw_get::<Option<bool>>("__engine_exit_request")?.unwrap_or(false))
+        Ok(session::state(&self.lua).exit_request)
     }
 
     /// A pause / resume the interface asked for (FAF's pause button:
@@ -1385,9 +1424,11 @@ impl UserVm {
     /// session client who changed it, 1-based).
     pub fn set_game_speed(&self, step: i32, rate: f32, by: u32) -> LuaResult<()> {
         let g = self.lua.globals();
-        let old: Option<i32> = g.raw_get("__engine_game_speed")?;
-        g.raw_set("__engine_game_speed", step)?;
-        g.raw_set("__engine_sim_rate", rate)?;
+        let old = {
+            let mut s = session::state(&self.lua);
+            s.sim_rate = rate;
+            s.game_speed.replace(step)
+        };
         // A change, or a game that starts away from normal speed (FAF's
         // clock starts at +0 and only hears changes).
         if old.map_or(step != 0, |o| o != step) {
@@ -1403,21 +1444,11 @@ impl UserVm {
 
     /// A game speed the interface asked for (`SetGameSpeed`), as a step.
     pub fn take_speed_request(&self) -> LuaResult<Option<i32>> {
-        let g = self.lua.globals();
-        let v: Option<i32> = g.raw_get("__engine_speed_request")?;
-        if v.is_some() {
-            g.raw_set("__engine_speed_request", LuaNil)?;
-        }
-        Ok(v)
+        Ok(session::state(&self.lua).speed_request.take())
     }
 
     pub fn take_pause_request(&self) -> LuaResult<Option<bool>> {
-        let g = self.lua.globals();
-        let v: Option<bool> = g.raw_get("__engine_pause_request")?;
-        if v.is_some() {
-            g.raw_set("__engine_pause_request", LuaNil)?;
-        }
-        Ok(v)
+        Ok(session::state(&self.lua).pause_request.take())
     }
 
     /// The sim ended the game (`EndGame`): `SessionIsGameOver` turns true
@@ -1425,11 +1456,13 @@ impl UserVm {
     /// `CWldSession::DoBeat` 0x10457bda, after the beat's Sync).
     pub fn set_game_over(&self) -> LuaResult<()> {
         let g = self.lua.globals();
-        if g.raw_get::<Option<bool>>("__engine_game_over_noted")?.unwrap_or(false) {
-            return Ok(());
+        {
+            let mut s = session::state(&self.lua);
+            if std::mem::replace(&mut s.game_over_noted, true) {
+                return Ok(());
+            }
+            s.game_over = true;
         }
-        g.raw_set("__engine_game_over_noted", true)?;
-        g.raw_set("__engine_game_over", true)?;
         let import: LuaFunction = g.get("import")?;
         let uimain: LuaTable = import.call("/lua/ui/uimain.lua")?;
         if let Some(f) = uimain.get::<Option<LuaFunction>>("NoteGameOver")?
@@ -1441,12 +1474,7 @@ impl UserVm {
 
     /// The player left the session (`SessionEndGame`), taken once.
     pub fn take_session_left(&self) -> LuaResult<bool> {
-        let g = self.lua.globals();
-        let left = g.raw_get::<Option<bool>>("__engine_session_left")?.unwrap_or(false);
-        if left {
-            g.raw_set("__engine_session_left", LuaNil)?;
-        }
-        Ok(left)
+        Ok(std::mem::take(&mut session::state(&self.lua).session_left))
     }
 
     /// The interface asked for its preferences to be written
@@ -1519,12 +1547,7 @@ impl UserVm {
     /// The interface asked to return to the main menu (FAF's `ExitGame`:
     /// the score screen's Continue), taken once.
     pub fn take_menu_request(&self) -> LuaResult<bool> {
-        let g = self.lua.globals();
-        let asked = g.raw_get::<Option<bool>>("__engine_menu_request")?.unwrap_or(false);
-        if asked {
-            g.raw_set("__engine_menu_request", LuaNil)?;
-        }
-        Ok(asked)
+        Ok(std::mem::take(&mut session::state(&self.lua).menu_request))
     }
 
     /// The engine paused or resumed (whoever asked): FAF's `OnPause(by,
@@ -1532,10 +1555,9 @@ impl UserVm {
     /// `OnUserPause(pause)` (`/lua/ui/game/gamemain.lua`).
     pub fn set_paused(&self, paused: bool) -> LuaResult<()> {
         let g = self.lua.globals();
-        if g.raw_get::<Option<bool>>("__engine_paused")? == Some(paused) {
+        if std::mem::replace(&mut session::state(&self.lua).paused, paused) == paused {
             return Ok(());
         }
-        g.raw_set("__engine_paused", paused)?;
         let import: LuaFunction = g.get("import")?;
         let main: LuaTable = import.call("/lua/ui/game/gamemain.lua")?;
         if paused {
@@ -1734,16 +1756,37 @@ impl UserVm {
         let g = self.lua.globals();
         let old: LuaValue = g.raw_get("Sync")?;
         g.raw_set("PreviousSync", old)?;
-        g.raw_set("Sync", value.to_lua(&self.lua)?)?;
+        let sync = value.to_lua(&self.lua)?;
+        // The interface's own focus change (`SetFocusArmy`) since the last
+        // Sync: moho's sim driver would note it in this one.
+        if let Some(changed) = self.lua.named_registry_value::<Option<LuaTable>>("user.focus_changed")? {
+            self.lua.set_named_registry_value("user.focus_changed", LuaNil)?;
+            if let LuaValue::Table(t) = &sync
+                && changed.raw_get::<i64>("new")? != changed.raw_get::<i64>("old")?
+                && t.raw_get::<LuaValue>("FocusArmyChanged")?.is_nil() {
+                t.raw_set("FocusArmyChanged", changed)?;
+            }
+        }
+        g.raw_set("Sync", sync)?;
         if let Some(f) = g.raw_get::<Option<LuaFunction>>("OnSync")? {
             f.call::<()>(())?;
         }
         Ok(())
     }
 
-    /// The army the UI shows as (`--player`; observers: -1).
+    /// The army this client commands, and so first shows as (`--player`,
+    /// or the sim moved it; observers: -1). The interface's `SetFocusArmy`
+    /// then changes only what it shows, as far as that army's player may
+    /// (`user_api::request_focus_army`).
     pub fn set_focus_army(&self, army: i64) -> LuaResult<()> {
+        self.lua.set_named_registry_value("user.own_army", army)?;
         self.lua.set_named_registry_value("user.focus_army", army)
+    }
+
+    /// `SetFocusArmy(index)` from the engine (0-based, -1 every army), as
+    /// the interface asks it: true if the focus is now `index`.
+    pub fn request_focus_army(&self, index: i64) -> LuaResult<bool> {
+        user_api::request_focus_army(&self.lua, index)
     }
 
     /// The army the UI shows as, if any (observers: `None`): moho's sound
@@ -1787,7 +1830,42 @@ impl UserVm {
         self.lua.set_app_data(world_draw::FrameDelta(dt));
         controls::on_frame(&self.lua, dt)?;
         movie::tick(&self.lua, dt)?;
+        self.update_frame_rate(dt)?;
+        engine_stats::update_cursor(&self.lua)?;
+        engine_stats::update_lua_tasks(&self.lua)?;
         cursor::update(&self.lua)
+    }
+
+    /// `__EngineStats`' `Frame` / `FPS`: the frames shown over the last
+    /// second or so, written once that much time has gone by; the `Heap`
+    /// figures then too (and on the first frame).
+    fn update_frame_rate(&self, dt: f32) -> LuaResult<()> {
+        let fps = {
+            let mut c = match self.lua.app_data_mut::<FrameRate>() {
+                Some(c) => c,
+                None => {
+                    self.lua.set_app_data(FrameRate::default());
+                    engine_stats::update_heap(&self.lua)?;
+                    self.lua.app_data_mut::<FrameRate>().expect("just set")
+                }
+            };
+            c.frames += 1;
+            c.elapsed += dt.max(0.0);
+            if c.elapsed < 1.0 {
+                return Ok(());
+            }
+            let fps = c.frames as f32 / c.elapsed;
+            *c = FrameRate::default();
+            fps
+        };
+        engine_stats::set(&self.lua, engine_stats::Stat::Fps, fps.round().into())?;
+        engine_stats::update_heap(&self.lua)
+    }
+
+    /// The sim's counts in `__EngineStats` (`EntityCount`, `Instance
+    /// Counts`), from the latest snapshot.
+    pub fn set_engine_counts(&self, counts: &crate::engine::snapshot::EngineCounts) -> LuaResult<()> {
+        engine_stats::set_counts(&self.lua, counts)
     }
 
     /// The cursor FAF wants (the renderer makes it the window's cursor).
@@ -1812,14 +1890,17 @@ impl UserVm {
     /// not the orders (`engine/User/CUIWorldView.lua`: only the 8 contract
     /// names plus nil, e.g. `RULEUCC_CallTransport` hovering a transport
     /// with loadable units selected, `RULEUCC_Transport` hovering a drop
-    /// target with transports selected). Anything outside the contract
+    /// target or a loadable unit with transports selected: probed, a
+    /// transport over its own tank reads `RULEUCC_Transport`). Only the
+    /// cursor name changes: the click still issues the reverse load.
+    /// Anything outside the contract
     /// reads as nil, so the cursor falls back to default. Pure, so the
     /// contract is unit-tested.
     pub fn mouse_order_name(kind: Option<crate::engine::sim::command::CommandKind>) -> Option<String> {
         use crate::engine::sim::command::CommandKind as K;
         match kind {
-            Some(K::TransportLoadUnits | K::TransportReverseLoadUnits) => Some("RULEUCC_CallTransport".to_string()),
-            Some(K::TransportUnloadUnits | K::TransportUnloadSpecificUnits) => Some("RULEUCC_Transport".to_string()),
+            Some(K::TransportLoadUnits) => Some("RULEUCC_CallTransport".to_string()),
+            Some(K::TransportReverseLoadUnits | K::TransportUnloadUnits | K::TransportUnloadSpecificUnits) => Some("RULEUCC_Transport".to_string()),
             Some(K::Move) => Some("RULEUCC_Move".to_string()),
             Some(K::Attack) => Some("RULEUCC_Attack".to_string()),
             Some(K::Guard) => Some("RULEUCC_Guard".to_string()),
@@ -1833,33 +1914,7 @@ impl UserVm {
     /// The active range overlay filters when they've changed since the last
     /// call (`None`: unchanged), for the renderer's `blueprints` order.
     pub fn take_overlay_filters(&self, blueprints: &[String]) -> LuaResult<Option<Vec<OverlayFilter>>> {
-        let g = self.lua.globals();
-        let version: i64 = g.get::<LuaFunction>("__engine_overlay_version")?.call(())?;
-        let key = (version, blueprints.len() as i64);
-        let last: Option<(i64, i64)> = self.lua.named_registry_value::<Option<LuaTable>>("ui.overlay_seen")?.map(|t| (t.raw_get(1).unwrap_or(-1), t.raw_get(2).unwrap_or(-1)));
-        if last == Some(key) {
-            return Ok(None);
-        }
-        self.lua.set_named_registry_value("ui.overlay_seen", self.lua.create_sequence_from([key.0, key.1])?)?;
-        let ids = self.lua.create_sequence_from(blueprints.iter().map(String::as_str))?;
-        let kinds = self.lua.create_sequence_from(crate::engine::snapshot::RANGE_KINDS)?;
-        let list: LuaTable = g.get::<LuaFunction>("__engine_overlay_filters")?.call((ids, kinds))?;
-        let color = |v: Option<String>| overlay_color(&v.unwrap_or_default());
-        let pair = |t: Option<LuaTable>| -> [f32; 2] { t.map_or([0.0; 2], |t| [t.raw_get::<Option<f32>>(1).ok().flatten().unwrap_or(0.0), t.raw_get::<Option<f32>>(2).ok().flatten().unwrap_or(0.0)]) };
-        let mut out = Vec::new();
-        for f in list.sequence_values::<LuaTable>() {
-            let f = f?;
-            let members: LuaTable = f.raw_get("members")?;
-            out.push(OverlayFilter {
-                name: f.raw_get("name")?,
-                colors: [color(f.raw_get("normal")?), color(f.raw_get("select")?), color(f.raw_get("rollover")?)],
-                inner: pair(f.raw_get("inner")?),
-                outer: pair(f.raw_get("outer")?),
-                kinds: f.raw_get::<f64>("kinds")? as u16,
-                members: (1..=blueprints.len()).map(|i| members.raw_get::<Option<bool>>(i).ok().flatten().unwrap_or(false)).collect(),
-            });
-        }
-        Ok(Some(out))
+        overlays::take_changed(&self.lua, blueprints)
     }
 
     /// Each range kind's style (by `snapshot::RANGE_KINDS`), from FAF's
@@ -1946,8 +2001,7 @@ impl UserVm {
                 }
             }
         }
-        let find: LuaFunction = self.lua.globals().get("__engine_key_action")?;
-        let Some(action) = find.call::<Option<String>>(names.clone())? else { return Ok(false) };
+        let Some(action) = keymap::action(&self.lua, &names)? else { return Ok(false) };
         if let Err(e) = self.console(&action) {
             tracing::warn!(target: "lua", key = %names[0], action, "key action failed: {e}");
         }
@@ -2053,6 +2107,14 @@ impl UserVm {
     }
 }
 
+/// Runs interface Lua that isn't in the VFS (the console's `ui_lua`,
+/// `--ui-lua`): translated from SupCom Lua first, as every game script is
+/// (docs/architecture/lua-bridge.md), so it sees the same dialect as FAF's.
+pub fn run_source(lua: &Lua, code: &str, name: &str) -> LuaResult<()> {
+    let code = crate::engine::lua_translation::translate(code);
+    lua.load(code).set_name(name).exec()
+}
+
 /// Runs a console command line in the user layer (see [`UserVm::console`]);
 /// FAF's `ConExecute` comes here too.
 pub fn console(lua: &Lua, line: &str) -> LuaResult<()> {
@@ -2060,10 +2122,7 @@ pub fn console(lua: &Lua, line: &str) -> LuaResult<()> {
     let (cmd, rest) = line.split_once(char::is_whitespace).map_or((line, ""), |(c, r)| (c, r.trim()));
     let import = || -> LuaResult<LuaFunction> { lua.globals().get("import") };
     match cmd.to_ascii_lowercase().as_str() {
-        "ui_lua" => {
-            let code = crate::engine::lua_translation::translate(rest);
-            lua.load(code).set_name("=[console]").exec()?;
-        }
+        "ui_lua" => run_source(lua, rest, "=[console]")?,
         // Alt-F2 (`debug_create_unit`): FAF's spawn menu, opened or closed
         // (MohoEngine.dll imports `/lua/ui/dialogs/createunit.lua`; the sim
         // checks cheats when a spawn arrives).
@@ -2080,6 +2139,13 @@ pub fn console(lua: &Lua, line: &str) -> LuaResult<()> {
             data.set("name", name)?;
             cm.get::<LuaFunction>("StartCommandMode")?.call::<()>((mode, data))?;
         }
+        // FAF's score board: an army's line, or the Observer line (-1).
+        "setfocusarmy" => match rest.parse::<i64>() {
+            Ok(index) => {
+                user_api::request_focus_army(lua, index)?;
+            }
+            Err(_) => tracing::warn!(target: "lua", line, "SetFocusArmy: expected an army index"),
+        },
         // Control groups live in FAF's selection.lua.
         "ui_makeselectionset" => {
             let sel: LuaTable = import()?.call("/lua/ui/game/selection.lua")?;
@@ -2110,6 +2176,15 @@ mod tests {
     use super::*;
     use crate::engine::sim::command::CommandKind as K;
 
+    /// `--ui-lua` and the console's `ui_lua` take SupCom Lua (`!=`, `#`
+    /// comments, bit operators), like any game script.
+    #[test]
+    fn run_source_translates_supcom_lua() {
+        let lua = Lua::new();
+        run_source(&lua, "# comment\nr = (1 != 2) and (6 & 3)", "=test").unwrap();
+        assert_eq!(lua.globals().get::<i64>("r").unwrap(), 2);
+    }
+
     #[test]
     fn transport_order_names_round_trip() {
         for (name, kind) in [
@@ -2131,8 +2206,9 @@ mod tests {
 
     /// The hover cursor only ever names caps moho answers with
     /// (`engine/User/CUIWorldView.lua` `GetRightMouseButtonOrder`, 8 names
-    /// plus nil): load orders read as `RULEUCC_CallTransport`, unload
-    /// orders as `RULEUCC_Transport`, anything else falls back to nil.
+    /// plus nil): units loading onto a transport read as
+    /// `RULEUCC_CallTransport`; a transport picking units up (reverse load)
+    /// or unloading reads as `RULEUCC_Transport`; anything else is nil.
     #[test]
     fn mouse_order_names_stay_inside_the_cursor_contract() {
         use std::collections::BTreeSet;
@@ -2146,7 +2222,8 @@ mod tests {
             let name = UserVm::mouse_order_name(Some(kind)).expect("a cursor");
             assert!(contract.contains(name.as_str()), "{kind:?} -> {name}");
         }
-        assert_eq!(UserVm::mouse_order_name(Some(K::TransportLoadUnits)), UserVm::mouse_order_name(Some(K::TransportReverseLoadUnits)));
+        assert_eq!(UserVm::mouse_order_name(Some(K::TransportLoadUnits)).as_deref(), Some("RULEUCC_CallTransport"));
+        assert_eq!(UserVm::mouse_order_name(Some(K::TransportReverseLoadUnits)).as_deref(), Some("RULEUCC_Transport"));
         assert_eq!(UserVm::mouse_order_name(Some(K::TransportUnloadUnits)), UserVm::mouse_order_name(Some(K::TransportUnloadSpecificUnits)));
         for kind in K::ALL {
             if !matches!(kind, K::Move | K::Attack | K::Guard | K::Reclaim | K::Repair | K::Capture | K::TransportLoadUnits | K::TransportReverseLoadUnits | K::TransportUnloadUnits | K::TransportUnloadSpecificUnits) {

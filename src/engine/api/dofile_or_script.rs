@@ -21,12 +21,14 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         r#"
         local load = ...
         local function doscript(path, env)
-            local chunk, err = load(path, env)
+            local chunk, err, level = load(path, env)
             if chunk == nil then
-                if err ~= nil then error(err, 2) end
+                if err ~= nil then error(err, level or 2) end
                 return
             end
-            return chunk()
+            -- The chunk's own return value is dropped: moho's doscript
+            -- returns nothing (probed).
+            chunk()
         end
         _G.doscript = doscript
         _G.dofile = doscript
@@ -38,12 +40,12 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
     // can't be re-entered by a nested script without stacking Rust frames);
     // recorded here so they appear in the API.
     for (name, doc) in [
-        ("doscript", "Runs a script from the VFS, optionally in the environment `env`; returns what it returns. A missing file does nothing; one that doesn't compile is skipped with a warning."),
+        ("doscript", "Runs a script from the VFS, optionally in the environment `env`; returns nothing, whatever the chunk returns. A missing file raises `Unable to find file <path>`; one that doesn't compile is skipped with a warning."),
         ("dofile", "Same as `doscript`."),
     ] {
         crate::lua_api::registry::record(
             lua,
-            FnEntry { scope: Scope::Global, name: name.into(), params: Some(&[Some("path"), Some("env")]), args: <(String, Option<std::collections::BTreeMap<String, LuaValue>>) as LuaArgs>::types, rets: <LuaMultiValue as LuaArgs>::types, doc, status: Status::Implemented },
+            FnEntry { scope: Scope::Global, name: name.into(), params: Some(&[Some("path"), Some("env")]), args: <(String, Option<std::collections::BTreeMap<String, LuaValue>>) as LuaArgs>::types, rets: <LuaMultiValue as LuaArgs>::types, doc, status: Status::Implemented, src: crate::lua_api::Src { file: file!(), line: line!() } },
         );
     }
     #[cfg(feature = "tracy")]
@@ -98,14 +100,58 @@ fn traced_doscript(lua: &Lua) -> LuaResult<()> {
     .call::<()>((enter, leave))
 }
 
+/// The globals translated scripts call that the source never names:
+/// `for k, v in t` becomes `__forin(t)`, the bit operators `bit32.*`.
+const TRANSLATION_HELPERS: [&str; 2] = ["__forin", "bit32"];
+
+/// Lets a script run in `env` reach the [`TRANSLATION_HELPERS`]. An
+/// environment that falls back to the globals already does. A bare table
+/// (the one a prefs file is read into) gets a metatable whose `__index`
+/// holds just the helpers, so the table's own keys stay what the script
+/// set. One with a metatable of its own that doesn't lead to them (FAF's
+/// `NewSafeEnv` for a mod's `mod_icons.lua`: a list of allowed functions
+/// under the globals' metatable, which raises on a missing name) gets them
+/// as keys of its own.
+fn give_translation_helpers(lua: &Lua, env: &LuaTable) -> LuaResult<()> {
+    if !env.raw_get::<LuaValue>(TRANSLATION_HELPERS[0])?.is_nil() {
+        return Ok(());
+    }
+    if env.metatable().is_some() {
+        // A lookup that raises, or finds nothing, doesn't reach them.
+        if !matches!(env.get::<LuaValue>(TRANSLATION_HELPERS[0]), Ok(v) if !v.is_nil()) {
+            for name in TRANSLATION_HELPERS {
+                env.raw_set(name, lua.globals().raw_get::<LuaValue>(name)?)?;
+            }
+        }
+        return Ok(());
+    }
+    const KEY: &str = "doscript.translation_helpers";
+    let meta = match lua.named_registry_value::<Option<LuaTable>>(KEY)? {
+        Some(meta) => meta,
+        None => {
+            let helpers = lua.create_table()?;
+            for name in TRANSLATION_HELPERS {
+                helpers.raw_set(name, lua.globals().raw_get::<LuaValue>(name)?)?;
+            }
+            let meta = lua.create_table()?;
+            meta.raw_set("__index", helpers)?;
+            lua.set_named_registry_value(KEY, &meta)?;
+            meta
+        }
+    };
+    env.set_metatable(Some(meta));
+    Ok(())
+}
+
 /// Loads `path` (compiled bytecode from the [`ScriptCache`]) into a function,
-/// optionally bound to `env`. Returns `(nil, nil)` for a missing file or one
-/// that doesn't compile (warned), `(nil, message)` if the bytecode won't load.
+/// optionally bound to `env`. Returns `(nil, nil)` for one that doesn't
+/// compile (warned), `(nil, message, level)` for an error `doscript` raises:
+/// a missing file, or bytecode that won't load.
 fn load_file_from_vfs(
     lua: &Lua,
     path: &str,
     env: Option<LuaTable>,
-) -> LuaResult<(Option<LuaFunction>, Option<String>)> {
+) -> LuaResult<(Option<LuaFunction>, Option<String>, Option<u8>)> {
     let cache = lua
         .app_data_ref::<Arc<ScriptCache>>()
         .expect("ScriptCache not in app_data")
@@ -123,17 +169,20 @@ fn load_file_from_vfs(
         // Luau's error is `line: message`, so the file is named here.
         Ok(Err(message)) => {
             warn!(target: "lua", "SCR_LuaDoFileConcat: Loading \"{path}\" failed: [string \"{path}\"]:{message}");
-            return Ok((None, None));
+            return Ok((None, None, None));
         }
-        Err(_) => {
-            debug!(path = path, "doscript: skip missing");
-            return Ok((None, None));
-        }
+        // A missing file raises, with no position, as the real `doscript`
+        // does (`Unable to find file /lua/nosuch_file.lua`, probed). FAF's
+        // `import` turns it into `Error importing '<path>'`, so a
+        // `pcall(import, optional)` takes its fallback; FAF tests optional
+        // files with `exists` / `DiskGetFileInfo` before `doscript`.
+        Err(_) => return Ok((None, Some(format!("Unable to find file {path}")), Some(0))),
     };
 
     debug!(path = path, "doscript: exec");
     let mut chunk = lua.load(&*bytecode).set_name(path);
     if let Some(env) = env {
+        give_translation_helpers(lua, &env)?;
         chunk = chunk.set_environment(env);
     }
     match chunk.into_function() {
@@ -141,9 +190,9 @@ fn load_file_from_vfs(
             if crate::engine::lua::debugger::enabled() {
                 crate::engine::lua::debugger::on_chunk(lua, path, &f);
             }
-            Ok((Some(f), None))
+            Ok((Some(f), None, None))
         }
-        Err(e) => Ok((None, Some(e.to_string()))),
+        Err(e) => Ok((None, Some(e.to_string()), None)),
     }
 }
 
@@ -234,6 +283,94 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(after, 1);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A script run in a bare environment can still loop over a table and
+    /// call `bit32` (what `for k, v in t` and the bit operators become), and
+    /// the environment's own keys are only what the script set.
+    #[test]
+    fn bare_environment_reaches_the_translation_helpers() {
+        let dir = std::env::temp_dir().join(format!("doscript_bare_env_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("lua")).unwrap();
+        std::fs::write(dir.join("lua/icons.lua"), "Sum = 0\nfor _, v in { 1, 2, 4 } do Sum = Sum + v end\nBits = bit32.band(6, 3)\nfunction Later(t) local n = 0 for _ in t do n = n + 1 end return n end\n").unwrap();
+        let vfs = Vfs::new(vec![MountPoint { source: dir.clone(), mountpoint: "/".into() }], vec![]).unwrap();
+        let lua = Lua::new();
+        lua.set_app_data(Arc::new(ScriptCache::new(Arc::new(RwLock::new(vfs)))));
+        register(&lua).unwrap();
+        lua.load("function __forin(t) return next, t end").exec().unwrap();
+
+        let out: String = lua
+            .load(
+                "local env = {} doscript('/lua/icons.lua', env)
+                 local keys = {} for k in pairs(env) do table.insert(keys, k) end table.sort(keys)
+                 return table.concat(keys, ',') .. ' ' .. env.Sum .. ' ' .. env.Bits .. ' ' .. env.Later({ 1, 2 })",
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(out, "Bits,Later,Sum 7 2 2");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// FAF's safe environment: a table under the globals' metatable, which
+    /// raises on a name that isn't there. A module environment that falls
+    /// back to the globals is left as it is.
+    #[test]
+    fn strict_environment_reaches_the_translation_helpers() {
+        let dir = std::env::temp_dir().join(format!("doscript_strict_env_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("lua")).unwrap();
+        std::fs::write(dir.join("lua/icons.lua"), "Sum = 0\nfor _, v in { 1, 2, 4 } do Sum = Sum + v end\n").unwrap();
+        let vfs = Vfs::new(vec![MountPoint { source: dir.clone(), mountpoint: "/".into() }], vec![]).unwrap();
+        let lua = Lua::new();
+        lua.set_app_data(Arc::new(ScriptCache::new(Arc::new(RwLock::new(vfs)))));
+        register(&lua).unwrap();
+        lua.load("function __forin(t) return next, t end").exec().unwrap();
+
+        let out: String = lua
+            .load(
+                "local strict = setmetatable({}, { __index = function(_, k) error('no global ' .. k) end })
+                 doscript('/lua/icons.lua', strict)
+                 local module = setmetatable({}, { __index = _G })
+                 doscript('/lua/icons.lua', module)
+                 return strict.Sum .. ' ' .. module.Sum .. ' ' .. tostring(rawget(module, '__forin'))",
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(out, "7 7 nil");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A missing file raises `Unable to find file <path>` (no position), so
+    /// FAF's `import` of a missing module raises too, as in the real game.
+    #[test]
+    fn missing_file_raises() {
+        let dir = std::env::temp_dir().join(format!("doscript_missing_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vfs = Vfs::new(vec![MountPoint { source: dir.clone(), mountpoint: "/".into() }], vec![]).unwrap();
+        let lua = Lua::new();
+        lua.set_app_data(Arc::new(ScriptCache::new(Arc::new(RwLock::new(vfs)))));
+        register(&lua).unwrap();
+
+        let (ok, msg): (bool, String) = lua.load("return pcall(doscript, '/lua/nosuch_file.lua')").eval().unwrap();
+        assert!(!ok);
+        assert_eq!(msg, "Unable to find file /lua/nosuch_file.lua");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// `doscript` returns nothing whatever the chunk returns, as in the real
+    /// game.
+    #[test]
+    fn returns_nothing() {
+        let dir = std::env::temp_dir().join(format!("doscript_ret_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("lua")).unwrap();
+        std::fs::write(dir.join("lua/ret.lua"), "x = 1 return 5").unwrap();
+        let vfs = Vfs::new(vec![MountPoint { source: dir.clone(), mountpoint: "/".into() }], vec![]).unwrap();
+        let lua = Lua::new();
+        lua.set_app_data(Arc::new(ScriptCache::new(Arc::new(RwLock::new(vfs)))));
+        register(&lua).unwrap();
+
+        let (n, x): (i64, i64) = lua.load("return select('#', doscript('/lua/ret.lua')), x").eval().unwrap();
+        assert_eq!((n, x), (0, 1));
         std::fs::remove_dir_all(dir).ok();
     }
 }

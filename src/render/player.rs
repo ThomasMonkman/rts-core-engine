@@ -132,6 +132,11 @@ pub fn moved_marker(marker: &crate::engine::snapshot::OrderMarker, node: [f32; 3
 pub struct PlayerControl {
     /// Army commanded; `None` = observer (any army's units).
     pub player: Option<u32>,
+    /// An observer seeing the game as one army (the score board's
+    /// `SetFocusArmy`): units are selected but take no orders, as in moho.
+    /// Back on every army's view, the observer commands any army's units
+    /// again (the engine's watching mode, docs/guides/running.md).
+    pub view_only: bool,
     /// Selected entity ids, sorted.
     pub selection: Vec<u32>,
     groups: [Vec<u32>; 10],
@@ -271,6 +276,7 @@ impl PlayerControl {
     pub fn new(player: Option<u32>, select: Vec<u32>, orders: Option<Sender<PlayerCommand>>) -> Self {
         Self {
             player,
+            view_only: false,
             selection: select,
             groups: Default::default(),
             mode: Mode::Normal,
@@ -363,7 +369,7 @@ impl PlayerControl {
 
     /// Can the player give orders to `e`?
     fn commandable(&self, e: &EntityView) -> bool {
-        matches!(e.kind, ViewKind::Unit | ViewKind::Structure) && !e.in_builder && e.army != 0 && self.player.is_none_or(|p| p == e.army)
+        !self.view_only && matches!(e.kind, ViewKind::Unit | ViewKind::Structure) && !e.in_builder && e.army != 0 && self.player.is_none_or(|p| p == e.army)
     }
 
     /// Can the player give orders to unit `id` (an ally's waypoints show,
@@ -572,7 +578,7 @@ impl PlayerControl {
         let inside: Vec<&EntityView> = scene
             .entities()
             .iter()
-            .filter(|e| self.commandable(e))
+            .filter(|e| self.commandable(e) && !scene.unselectable(e))
             .filter(|e| {
                 let bounds = scene.mesh_bounds.get(e.mesh as usize).copied().flatten();
                 let pick = picks.and_then(|p| p.get(e.blueprint as usize).copied()).unwrap_or([0.0, 0.5, 1.0, 1.0, 1.0]);
@@ -847,11 +853,11 @@ impl PlayerControl {
     /// Not done: when the units outnumber the nearest platform's room, moho
     /// spreads them over the platforms within (its distance + 100) by their
     /// room (0x104075eb..0x104077d7, not fully traced).
-    pub fn issue_dock(&mut self, scene: &World, queue: bool) {
+    pub fn issue_dock(&mut self, scene: &World, units: Option<&[u32]>, queue: bool) {
         use crate::engine::snapshot::order_categories as oc;
         let Some(player) = self.player else { return };
-        let units: Vec<&EntityView> = self
-            .selection
+        let units: Vec<&EntityView> = units
+            .unwrap_or(&self.selection)
             .iter()
             .filter_map(|&id| Self::view(scene, id))
             .filter(|e| self.commandable(e) && e.build >= 1.0 && Self::caps_of(scene, e) & caps::DOCK != 0)
@@ -1060,7 +1066,7 @@ mod tests {
         ]);
         let (tx, rx) = std::sync::mpsc::channel();
         let mut p = PlayerControl::new(Some(1), vec![1, 2, 3], Some(tx));
-        p.issue_dock(&w, false);
+        p.issue_dock(&w, None, false);
         let sent: Vec<PlayerCommand> = rx.try_iter().collect();
         assert_eq!(sent.len(), 1);
         assert_eq!((sent[0].kind, sent[0].target, sent[0].units.clone(), sent[0].queue), (CommandKind::TransportLoadUnits, CommandTarget::Entity(7), vec![1, 2], false), "from x 10: 7 is 40 away, 4 is 50");

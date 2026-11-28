@@ -39,6 +39,10 @@ whole `gamemain.CreateUI`) and `StopLoadingDialog()`.
 
 Restarting or leaving a session: [replays.md](replays.md#recordings).
 
+**Without a window** (`--headless-with-ui`), `render::headless_ui` boots it the same way and runs it in
+lockstep with the sim: one beat and one frame per tick
+([running.md](../guides/running.md#headless)).
+
 ## Controls, layout and drawing
 
 `InternalCreateFrame/Group/Bitmap/Text/...` (`ui::controls`) make a native control for the Lua object
@@ -62,7 +66,10 @@ Height Depth`), then `OnInit`.
 ## Input
 
 **Mouse** (`ui::controls::mouse`). The topmost hit-testable control under the cursor gets
-`HandleEvent`, bubbling to its parents until one returns true. Over a world view (or no control) the
+`HandleEvent`, bubbling to its parents until one returns true. While there is an input capture
+(`AddInputCapture`, FAF's `MakeInputModal`), only the capture and its children are searched and
+the capture gets the event when none of them is under the cursor, as in moho: a modal dialog takes
+its clicks even under a deeper control, and the world gets none. Over a world view (or no control) the
 input belongs to the world and goes on to the renderer's selection and orders (`render/player.rs`);
 over any other control the world never sees it. Every press first goes to FAF's
 `uimain.OnMouseButtonPress` (popups close on a click outside them).
@@ -71,7 +78,9 @@ over any other control the world never sees it. Every press first goes to FAF's
 
 1. an `Edit` with the focus (typed text, editing keys, Enter / Esc callbacks);
 2. the newest input capture (`AddInputCapture`: FAF's modal dialogs);
-3. controls holding the keyboard focus (`AcquireKeyboardFocus`), newest first;
+3. the control holding the keyboard focus (`AcquireKeyboardFocus`). There is one holder, as in
+   moho: a new taker replaces it, and when the holder abandons the focus nobody has it (the focus
+   doesn't return to the previous holder);
 4. the key map: the player's bindings (FAF's preset, or their own from `Game.prefs`), looked up by
    FAF's key names and run as console commands (`UserVm::console`). Most run in the interface's Lua;
    a few (`UI_SelectByCategory`, `UI_TrackUnit`, ...) run in the engine (`render/console.rs`).
@@ -88,7 +97,9 @@ only rebuilt when that part changed, so a big selection doesn't make thousands o
 
 **Selection.** When the renderer's selection changes, `UserVm::set_selection` runs FAF's
 `gamemain.OnSelectionChanged`, so the unit view, orders and construction panels follow it. Details
-arrive a beat after the selection, so the interface re-runs it when they do.
+arrive a beat after the selection, so the interface re-runs it when they do. Selecting from the
+interface (`SelectUnits`, `UISelectionByCategory`) is synchronous as in moho: `GetSelectedUnits()`
+and selection orders see it on the next line, and the renderer adopts it at the end of the frame.
 
 **Sync.** At the end of each beat the sim copies its `Sync` table (`engine::sync`; engine objects
 become entity ids) into the next snapshot. The renderer gives each copy to the interface in order and
@@ -97,6 +108,16 @@ expects.
 
 **Beats and frames.** Each new tick, `UserVm::beat` moves `GameTick`, updates the economy and runs
 FAF's `gamemain.OnBeat`. Each frame, `UserVm::frame` runs user threads and `OnFrame`; building the draw list then calls `OnRenderWorld(delta)` of each world view with `SetCustomRender(true)`, whose `UI_Draw*` shapes go with that view to the renderer (`ui/world_draw.rs`).
+
+**Engine statistics.** `__EngineStats` is moho's statistics tree (`{Name, Type, Value, Children}`
+nodes under `Root`; the shape of a real dump is at the top of FAF's `/lua/system/performance.lua`).
+Ours holds only the nodes FAF and mods read, each updated in place only when its value changes
+(`ui::engine_stats`): `Frame` / `FPS`, `EntityCount` (`Unit`, `Projectile`, `Prop`, `Shield`, `Other`:
+the sim's live entities, carried in the snapshot as `EngineCounts`), `Camera` / `Cursor` (`Position`
+on the terrain or the water above it, `Elevation`: the terrain under it, the sea floor over water),
+`Heap` (`Committed`, `Total`, `InUse`: all the process's resident memory) and some `Instance Counts`. The rest of moho's tree (render, sound,
+sync, blips, task and script-object counts) is left out on purpose: either nothing reads it or ours
+has no count with the same meaning. A reader that searches by name finds nothing for those nodes.
 
 **Fog of war.** The interface only sees what the renderer's frame holds, which is the view army's
 fog-of-war snapshot ([rendering.md](rendering.md#fog-of-war)). Undetected enemies aren't in it at
@@ -152,8 +173,9 @@ At start it loads the first file that exists (`install::choose_prefs`):
 4. on Windows, Forged Alliance's own (`%LOCALAPPDATA%\Gas Powered Games\Supreme Commander Forged
    Alliance\Game.prefs`), so a FAF player keeps their options and hotkeys. It's only ever read.
 
-`SavePreferences` and closing the game write the store back in moho's format to the file it came
-from (or the engine's own). `--screenshot` runs read and write nothing unless given `--prefs`, so
+`SavePreferences` and the game ending (however it ends: the window closed, the interface's Exit, a
+`--ticks` run done) write the store back in moho's format to the file it came from (or the
+engine's own). FAF's key bindings dialog only sets preferences, so its bindings are kept that way. `--screenshot` runs read and write nothing unless given `--prefs`, so
 screenshots look the same on every machine.
 
 ## Adding to the interface
@@ -172,5 +194,6 @@ Implement the API in `ui::user_api` (globals) or on the control in `ui::controls
 macros ([lua-api-types.md](../guides/lua-api-types.md)). Take behaviour from the binary over FAF's
 annotations ([verifying-against-the-binary.md](../research/verifying-against-the-binary.md)).
 
-`tests/ui.rs` checks that userInit boots, FAF's layout places controls where it says, and the
-economy bar shows the economy after a beat.
+`tests/ui.rs` checks that userInit boots, FAF's layout places controls where it says, the
+economy bar shows the economy after a beat, and FAF's key bindings dialog lists, rebinds (kept
+across a restart) and resets to its presets.

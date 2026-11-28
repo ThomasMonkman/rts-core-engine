@@ -9,13 +9,16 @@ use mlua::prelude::*;
 use crate::lua_api::{lua_fn, LuaArgs, FnEntry, Scope, Status};
 
 /// `MATH_Lerp(s, a, b)`, or `MATH_Lerp(s, sMin, sMax, a, b)` (`s` mapped
-/// from `sMin..sMax` to `0..1` first): `a + (b - a) * t`, unclamped. A Luau
+/// from `sMin..sMax` to `0..1` first): `a + (b - a) * t`, unclamped; with
+/// four arguments, nothing. A Luau
 /// shim: leaf arithmetic on Lua numbers is faster there than a native call
 /// (see `vector_math.lua`), and it uses basic IEEE ops only. Moho computes
 /// `a + s * (b - a)` too, in float32 (MohoEngine.dll 0x100c30f0).
 const LERP_SRC: &str = r#"
 function MATH_Lerp(s, a, b, c, d)
     if c ~= nil then
+        -- Four arguments: nothing, as moho (dev/probes probe_api_spot).
+        if d == nil then return end
         s = (s - a) / (b - a)
         a, b = c, d
     end
@@ -36,6 +39,7 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             rets: <f64 as LuaArgs>::types,
             doc: "`MATH_Lerp(s, a, b)`: `a + (b - a) * s`, unclamped; or `MATH_Lerp(s, sMin, sMax, a, b)`, with `s` mapped from `sMin..sMax` to `0..1` first.",
             status: Status::Implemented,
+            src: crate::lua_api::Src { file: file!(), line: line!() },
         },
     );
     lua_fn!(lua, global,
@@ -150,6 +154,8 @@ mod tests {
         super::register(&lua).unwrap();
         let r: (f64, f64, f64) = lua.load("return MATH_Lerp(0.25, 10, 20), MATH_Lerp(5, 0, 10, 100, 200), MATH_Lerp(1.5, 0, 2)").eval().unwrap();
         assert_eq!(r, (12.5, 150.0, 3.0));
+        let n: mlua::MultiValue = lua.load("return MATH_Lerp(1, 2, 3, 4)").eval().unwrap();
+        assert!(n.is_empty(), "four arguments return nothing");
     }
 
     use super::*;

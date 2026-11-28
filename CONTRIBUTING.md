@@ -84,8 +84,8 @@ tracy-profiler &                       # connect to "rts-core-engine" when it ap
 cargo run --release --features tracy -- --session --speed max
 ```
 
-- Add `--features lua-profile` to see each Lua thread resume as its own zone, named by the script function it was forked from. Tracy's Statistics view then ranks scripts by cost.
-- For a headless capture to a file, use `tracy-capture -o run.tracy -f &`, then run the engine with `--headless --ticks N`.
+- Add `--tracy-level 2` for a zone per engine function Lua calls and per script callback, or `--tracy-level 3` for a zone per Lua thread resume too, named by the script function it was forked from. Tracy's Statistics view then ranks them by cost.
+- For a headless capture to a file, run the engine with `--headless --ticks N`, then `tracy-capture -o run.tracy -f` once it has started.
 - To time your own code, add a span: `let _s = prof_span!("my stage");` (`src/engine/tracy.rs`). It lasts until the end of the scope and compiles to nothing without the `tracy` feature.
 
 [`docs/guides/running.md`](docs/guides/running.md#profiling-with-tracy) covers what each track shows and the GPU timing.

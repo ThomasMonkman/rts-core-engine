@@ -14,6 +14,7 @@
 //! Luau (`.d.luau`) and EmmyLua definitions and a comparison with FAF's
 //! annotations (a report, not a source of truth). See `docs/guides/lua-api-types.md`.
 
+pub mod browser;
 pub mod class;
 pub mod compare;
 pub mod dump;
@@ -26,7 +27,7 @@ pub mod ty;
 
 pub use class::{EntityClass, MohoClass, Obj};
 pub use lua_api_macros::{LuaEnum, LuaTable, callbacks, lua_fn, lua_method, signatures};
-pub use registry::{ApiRegistry, CallbackBlock, CallbackInfo, FnEntry, Scope, Signature, SignatureBlock, Status, TypeDecl, with_registry};
+pub use registry::{ApiRegistry, CallbackBlock, CallbackInfo, FnEntry, Scope, Signature, SignatureBlock, Src, Status, TypeDecl, with_registry};
 #[doc(hidden)]
 pub use inventory;
 pub use ty::{AliasInfo, Arity, EnumInfo, FieldInfo, FieldIntoLua, LuaArgs, LuaTy, LuaType, StructInfo};
@@ -39,6 +40,7 @@ use mlua::prelude::*;
 /// records it. `scope` is `""` for globals, else the global table's name.
 /// Use [`lua_fn!`], which fills in the names, docs and status.
 #[allow(clippy::too_many_arguments)]
+#[track_caller]
 pub fn register_fn<A, R, F>(
     lua: &Lua,
     target: &LuaTable,
@@ -55,37 +57,41 @@ where
     A: FromLuaMulti + LuaArgs,
     R: IntoLuaMulti + LuaArgs,
 {
-    let func = lua.create_function(f)?;
-    if scope.is_empty() {
-        name_function(lua, &func, name)?;
-    } else {
-        name_function(lua, &func, &format!("{scope}.{name}"))?;
-    }
-    let scope = if scope.is_empty() { Scope::Global } else { Scope::Table(Cow::Borrowed(scope)) };
-    registry::record(lua, FnEntry { scope, name: Cow::Borrowed(name), params, args: A::param_types, rets: R::types, doc, status });
-    if raw { target.raw_set(name, func) } else { target.set(name, func) }
+    register_fn_at(lua, target, scope, name, params, doc, status, raw, Src::caller(), f)
 }
 
-/// Adds `f` to moho class `C` as method `name` and records it. Call before
-/// `globalInit.lua` flattens the classes. Use [`lua_method!`].
-pub fn register_method<C, A, R, F>(
+/// [`register_fn`] with the source location given ([`lua_fn!`] passes the
+/// line the name is written on).
+#[allow(clippy::too_many_arguments)]
+pub fn register_fn_at<A, R, F>(
     lua: &Lua,
+    target: &LuaTable,
+    scope: &'static str,
     name: &'static str,
     params: Option<&'static [Option<&'static str>]>,
     doc: &'static str,
     status: Status,
+    raw: bool,
+    src: Src,
     f: F,
 ) -> LuaResult<()>
 where
-    C: MohoClass,
     F: Fn(&Lua, A) -> LuaResult<R> + mlua::MaybeSend + 'static,
     A: FromLuaMulti + LuaArgs,
     R: IntoLuaMulti + LuaArgs,
 {
-    add_class_fn(lua, C::CLASS, name, params, doc, status, f)
+    let full = if scope.is_empty() { name.to_string() } else { format!("{scope}.{name}") };
+    let func = create_function(lua, &full, f)?;
+    name_function(lua, &func, &full)?;
+    let scope = if scope.is_empty() { Scope::Global } else { Scope::Table(Cow::Borrowed(scope)) };
+    registry::record(lua, FnEntry { scope, name: Cow::Borrowed(name), params, args: A::param_types, rets: R::types, doc, status, src });
+    if raw { target.raw_set(name, func) } else { target.set(name, func) }
 }
 
-/// [`register_method`] by class name (for names from a list: `moho::Unit::CLASS`).
+/// Adds `f` to moho class `class` (`moho::Unit::CLASS`) as method `name` and
+/// records it. Call before `globalInit.lua` flattens the classes. Use
+/// [`lua_method!`]; this is for names from a list.
+#[track_caller]
 pub fn add_class_fn<A, R, F>(
     lua: &Lua,
     class: &'static str,
@@ -100,10 +106,53 @@ where
     A: FromLuaMulti + LuaArgs,
     R: IntoLuaMulti + LuaArgs,
 {
-    registry::record(lua, FnEntry { scope: Scope::Class(Cow::Borrowed(class)), name: Cow::Borrowed(name), params, args: A::param_types, rets: R::types, doc, status });
-    let func = lua.create_function(f)?;
-    name_function(lua, &func, &format!("{}:{name}", class::luau_name(class).unwrap_or(class)))?;
+    add_class_fn_at(lua, class, name, params, doc, status, Src::caller(), f)
+}
+
+/// [`add_class_fn`] with the source location given ([`lua_method!`] passes
+/// the line the name is written on).
+#[allow(clippy::too_many_arguments)]
+pub fn add_class_fn_at<A, R, F>(
+    lua: &Lua,
+    class: &'static str,
+    name: &'static str,
+    params: Option<&'static [Option<&'static str>]>,
+    doc: &'static str,
+    status: Status,
+    src: Src,
+    f: F,
+) -> LuaResult<()>
+where
+    F: Fn(&Lua, A) -> LuaResult<R> + mlua::MaybeSend + 'static,
+    A: FromLuaMulti + LuaArgs,
+    R: IntoLuaMulti + LuaArgs,
+{
+    registry::record(lua, FnEntry { scope: Scope::Class(Cow::Borrowed(class)), name: Cow::Borrowed(name), params, args: A::param_types, rets: R::types, doc, status, src });
+    let full = format!("{}:{name}", class::luau_name(class).unwrap_or(class));
+    let func = create_function(lua, &full, f)?;
+    name_function(lua, &func, &full)?;
     crate::engine::api::moho::class_table(lua, class)?.raw_set(name, func)
+}
+
+/// `lua.create_function(f)`; at Tracy level 2 or more
+/// (`engine::tracy`), wrapped in a zone named `name` (its body and the
+/// conversion of what it returns). Below it, the bare function.
+fn create_function<A, R, F>(lua: &Lua, name: &str, f: F) -> LuaResult<LuaFunction>
+where
+    F: Fn(&Lua, A) -> LuaResult<R> + mlua::MaybeSend + 'static,
+    A: FromLuaMulti,
+    R: IntoLuaMulti,
+{
+    #[cfg(feature = "tracy")]
+    if crate::engine::tracy::on(2) {
+        let loc = crate::engine::tracy::location("engine fn", name);
+        return lua.create_function(move |lua, a: A| -> LuaResult<LuaMultiValue> {
+            let _zone = crate::engine::tracy::Zone::begin(loc);
+            f(lua, a)?.into_lua_multi(lua)
+        });
+    }
+    let _ = name;
+    lua.create_function(f)
 }
 
 unsafe extern "C" {
@@ -138,8 +187,9 @@ pub fn name_function(lua: &Lua, func: &LuaFunction, name: &str) -> LuaResult<()>
 
 /// Records a stub created outside the macros (names known only at run
 /// time, e.g. from FAF's annotations).
+#[track_caller]
 pub fn record_stub(lua: &Lua, scope: Scope, name: impl Into<Cow<'static, str>>) {
-    registry::record(lua, FnEntry { scope, name: name.into(), params: None, args: <LuaMultiValue as LuaArgs>::types, rets: <() as LuaArgs>::types, doc: "", status: Status::Stub });
+    registry::record(lua, FnEntry { scope, name: name.into(), params: None, args: <LuaMultiValue as LuaArgs>::types, rets: <() as LuaArgs>::types, doc: "", status: Status::Stub, src: Src::caller() });
 }
 
 /// Records moho class `name` and its bases (from `moho::register_classes`).

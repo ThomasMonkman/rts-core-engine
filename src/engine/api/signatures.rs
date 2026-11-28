@@ -10,7 +10,8 @@
 //! its closure's). When you implement a stub, its closure's types replace
 //! the signature and `tests/api_types.rs` asks you to delete it here.
 //! Globals both VMs have (FAF's `Core.lua`) are here; the user VM's own are
-//! in `src/ui/signatures.rs`.
+//! in `src/ui/signatures.rs`. Argument counts follow the real game's
+//! bindings where dev/probes `probe_api_arity` measured them.
 
 #![allow(unused_imports)]
 
@@ -26,15 +27,16 @@ use crate::lua_api::{Obj, signatures};
 signatures! {
     global {
         BeginLoggingStats(filename: String);
-        CoordinateAttacks();
+        CoordinateAttacks(units: LuaValue);
         CreateUnit2(blueprint_id: String, army: Army, layer: Layer, x: f64, z: f64, heading: f64) -> Obj<moho::Unit>;
         EndGame();
         EndLoggingStats(exit: Option<bool>);
-        EntityCategoryCountAroundPosition(category: EntityCategory, position: Vector) -> f64;
+        EntityCategoryCountAroundPosition(category: EntityCategory, position: Vector, radius: f64, army: LuaValue) -> f64;
         EntityCategoryEmpty(category: EntityCategory) -> bool;
         GenerateRandomOrientation() -> Quaternion;
         GetBlueprint(object: LuaValue) -> Blueprint;
         GetEntitiesInRect(rectangle: Rect) -> Option<Vec<Obj<moho::Entity>>>;
+        GetEntitiesInRect(x0: f64, z0: f64, x1: f64, z1: f64) -> Option<Vec<Obj<moho::Entity>>>;
         GetReclaimablesInRect(rectangle: Rect) -> Option<LuaTable>;
         GetReclaimablesInRect(x0: f64, z0: f64, x1: f64, z1: f64) -> Option<LuaTable>;
         GetUnitsInRect(rectangle: Rect) -> Option<Vec<Obj<moho::Unit>>>;
@@ -42,18 +44,17 @@ signatures! {
         LUnitMove(unit: Obj<moho::Unit>, target: Vector);
         LUnitMoveNear(unit: Obj<moho::Unit>, target: Vector, range: f64);
         MetaImpact(instigator: Obj<moho::Unit>, location: Vector, max_radius: f64, amount: f64, affects_category: Option<EntityCategory>, damage_friendly: Option<bool>);
-        PlayLoop(manager: LuaValue, sound: SoundHandle) -> SoundHandle;
+        PlayLoop(sound: SoundHandle) -> SoundHandle;
         PointVector(px: f64, py: f64, pz: f64, vx: f64, vy: f64, vz: f64) -> (Vector, Vector);
         RPCSound(sound: LuaTable);
         LOG(out: LuaValue, rest: mlua::Variadic<LuaValue>);
         SPEW(out: LuaValue, rest: mlua::Variadic<LuaValue>);
         SelectedUnit() -> Obj<moho::Unit>;
-        SetAlliedVictory(state: bool);
         SetArmyStatsSyncArmy(army: Army);
         SetTerrainType(x: f64, z: f64, type_: LuaTable);
         SetTerrainTypeRect(rect: Rect, type_: LuaTable);
         SimConExecute(command: String);
-        StopLoop(manager: LuaValue, handle: SoundHandle);
+        StopLoop(handle: SoundHandle);
         WaitFor(object: LuaValue);
         SubmitXMLArmyStats();
         Trace(enable: bool);
@@ -85,17 +86,15 @@ signatures! {
         STR_xtoi(str: String) -> i64;
         WARN(out: LuaValue, rest: mlua::Variadic<LuaValue>);
     }
-    // `FindClosestArmyWithBase`..`SetGreaterOf` are stubs, from moho's
+    // `FindClosestArmyWithBase`..`SetCurrentPlan` are stubs, from moho's
     // bindings (MohoEngine.dll 0x101781d0..0x1017fc70; the two
     // `GetNumPlatoons*` from SupremeCommander.exe 0x593970, 0x5937e0).
     moho::AIBrain {
         FindClosestArmyWithBase(alliance: String) -> Option<Obj<moho::AIBrain>>;
-        FindUnit(category: EntityCategory, need_to_be_idle: bool) -> Option<Obj<moho::Unit>>;
         /// A unit and its upgrade blueprint.
         FindUnitToUpgrade(upgrade_list: LuaTable) -> (LuaValue, LuaValue);
         /// The plan's conversion isn't identified (passed on as is).
         SetCurrentPlan(plan: LuaValue);
-        SetGreaterOf(stat_name: String, value: f64);
         /// `category` and `compare_type` may come in either order; the 8-argument
         /// form adds a filter function, `module`'s export `filter`.
         PickBestAttackVector(platoon: Obj<moho::Platoon>, squad: String, alliance: String, category: EntityCategory, compare_type: String) -> Vector;
@@ -169,8 +168,6 @@ signatures! {
     }
     // Stubs, from moho's bindings (MohoEngine.dll 0x102b4390..0x102b66d0).
     moho::Weapon {
-        ChangeDamageRadius(value: f64);
-        ChangeDamageType(type_name: String);
         DoInstaHit(bone: Bone, r: f64, g: f64, b: f64, glow: f64, width: f64, texture: String, lifetime: f64);
         /// Transfers the target from one weapon to another; `other`'s reader
         /// (0x102b1d90) isn't identified.
@@ -202,13 +199,9 @@ signatures! {
         FindFurthestUnit(squad: String, alliance: String, can_attack: bool, category: EntityCategory) -> Option<Obj<moho::Unit>>;
         FindHighestValueUnit(squad: String, alliance: String, can_attack: bool, category: EntityCategory) -> Option<Obj<moho::Unit>>;
         GetAIPlan() -> LuaValue;
-        GetFactionIndex() -> f64;
         GetFerryBeacons() -> LuaTable;
         GetPersonality() -> LuaValue;
-        LoadUnits(category: EntityCategory) -> LuaTable;
         SwitchAIPlan(plan: LuaValue);
-        UnloadAllAtLocation(position: Vector) -> LuaTable;
-        UnloadUnitsAtLocation(category: EntityCategory, position: Vector) -> LuaTable;
         UseTeleporter(teleporter: Obj<moho::Unit>, squad: Option<String>) -> LuaTable;
     }
     moho::CollisionBeamEntity {
@@ -232,7 +225,6 @@ signatures! {
     // (FA's exe only) SupremeCommander.exe 0x6d27f0, 0x6d5560, 0x6d4f20.
     // FA's exe patches change none of them.
     moho::Unit {
-        AlterArmor(damage_type: String, multiplier: f64);
         /// Both corners read by the exe's vector reader (0x4d6ba0).
         CanPathToRect(a: Vector, b: Vector) -> bool;
         EnableManipulators(bone: Bone, enable: bool);

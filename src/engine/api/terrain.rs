@@ -96,16 +96,37 @@ fn terrain(lua: &Lua) -> LuaResult<mlua::AppDataRef<'_, Terrain>> {
     lua.app_data_ref::<Terrain>().ok_or_else(|| LuaError::runtime("no map loaded"))
 }
 
+/// How far above the ground a `'none'` line in `CheckBlockingTerrain` has to
+/// be cut by the terrain to count as blocked, inferred: in the real game
+/// (dev/probes probe_ai_brain, ends at ground height on SCMP_009) a 20-unit
+/// flat line and a long one whose ground rises at most 0.37 over the chord
+/// are clear, lines with 0.99, 4.5, 8.9 and 12.8 blocked. Ours took any
+/// rise, so every line on real ground was blocked.
+const BLOCKING_LIFT: crate::engine::sim::math::Fx = crate::engine::sim::math::Fx::lit("0.5");
+
 fn register_blocking(lua: &Lua) -> LuaResult<()> {
     lua_method!(lua, moho::AIBrain,
-        /// Whether terrain blocks a shot from `from` to `to` (positions);
-        /// `arc` is the fire arc (`"none"` by default).
+        /// Whether terrain blocks a shot from `from` to `to` (positions) with fire arc `arc`
+        /// (`'none'`, `'low'`, `'high'`, any case; none if missing). `'none'` is the straight
+        /// segment test (`Terrain::blocks_fire`) with both ends lifted by [`BLOCKING_LIFT`]; an
+        /// unknown arc never blocks (dev/probes probe_ai_brain: 'bogus' false on every line).
         CheckBlockingTerrain = |lua, (_brain, from, to, arc): (Obj<moho::AIBrain>, shapes::Vector, shapes::Vector, Option<String>)| {
+            use crate::engine::sim::terrain::FireArc;
             let v = |t: &LuaTable| -> LuaResult<crate::engine::sim::math::FxVec3> {
                 Ok(crate::engine::sim::math::FxVec3::from_f64(t.raw_get(1)?, t.raw_get(2)?, t.raw_get(3)?))
             };
-            let arc = crate::engine::sim::terrain::FireArc::parse(arc.as_deref().unwrap_or("none"));
-            Ok(terrain(lua)?.blocks(v(&from)?, v(&to)?, arc))
+            let (from, to) = (v(&from)?, v(&to)?);
+            let t = terrain(lua)?;
+            let lift = |mut p: crate::engine::sim::math::FxVec3| {
+                p.y += BLOCKING_LIFT;
+                p
+            };
+            Ok(match arc.as_deref().map(str::to_ascii_lowercase).as_deref() {
+                None | Some("none") => t.blocks_fire(lift(from), lift(to), FireArc::None),
+                Some("low") => t.blocks(from, to, FireArc::Low),
+                Some("high") => t.blocks(from, to, FireArc::High),
+                Some(_) => false,
+            })
         })
 }
 
@@ -184,14 +205,39 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
             // Ground units standing on it stand on the new ground next tick
             // (the real game's do: dev/probes/maps/probe_fatboy). A unit's
             // corners reach at most half the biggest footprint out.
+            // Structures on the ground or seabed whose centre the change
+            // reaches (within a cell: heights interpolate between samples)
+            // stand at the new height at once: the real game's are at the
+            // flattened height from the tick they're made, so FAF's
+            // `StructureUnit.OnCreate`, flattening the skirt and then tilting
+            // to the slope from `GetPosition`, leans a 1x1 footprint from
+            // there (dev/probes/maps/probe_re6_tilt: a Cybran T2 shield 20.19
+            // degrees; from the height before flattening, 17.53).
             {
+                use crate::engine::sim::{layer::Layer, movement::MotionKind};
                 let reach = crate::engine::sim::math::Fx::from_num(16);
+                let (lo_x, lo_z, hi_x, hi_z) = (fx(x - 1.0), fx(z - 1.0), fx(x + sx + 1.0), fx(z + sz + 1.0));
+                let terrain = lua.app_data_ref::<Terrain>();
                 let mut world = crate::engine::api::entity::world(lua);
                 let mut ids = Vec::new();
                 world.unit_candidates(fx(x) - reach, fx(z) - reach, fx(x + sx) + reach, fx(z + sz) + reach, &mut ids);
                 for id in ids {
-                    if let Some(u) = world.get_mut(id).and_then(|e| e.unit.as_deref_mut()) {
+                    let Some(e) = world.get_mut(id) else { continue };
+                    let p = e.position();
+                    let structure = e.attachment.is_none()
+                        && e.unit.as_deref().is_some_and(|u| u.motion_params.kind == MotionKind::None && matches!(u.layer, Layer::Land | Layer::Seabed));
+                    if let Some(u) = e.unit.as_deref_mut() {
                         u.on_ground = false;
+                    }
+                    if structure
+                        && let Some(t) = terrain.as_deref()
+                        && (lo_x..=hi_x).contains(&p.x)
+                        && (lo_z..=hi_z).contains(&p.z)
+                    {
+                        let y = t.height_at(p.x, p.z);
+                        if y != p.y {
+                            world.set_position(id, crate::engine::sim::math::FxVec3 { y, ..p });
+                        }
                     }
                 }
             }
