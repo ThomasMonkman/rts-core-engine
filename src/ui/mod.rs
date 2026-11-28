@@ -704,10 +704,22 @@ impl UserVm {
     /// the economy bar). The session's sync handling first, unless
     /// `SessionInit.lua` ran it.
     pub fn start_hud(&self) -> LuaResult<()> {
+        self.start_hud_with(false)
+    }
+
+    /// [`start_hud`](Self::start_hud) for a game whose sim has set
+    /// `Sync.CampaignMode` by now (FAF's `ScenarioUtilities.lua` for
+    /// missions; co-op and survival maps in their `OnPopulate`). FAF builds
+    /// the interface by the flag, so it has to be known first: in
+    /// `gamemain.CreateUI` it decides whether the objectives panel is made,
+    /// and in `CreateGameInterface` whether the panels start hidden for the
+    /// opening animation, which a campaign never runs. Set by the first
+    /// `OnSync` afterwards, it left such a game's panels hidden for good.
+    pub fn start_hud_with(&self, campaign_mode: bool) -> LuaResult<()> {
         if self.lua.app_data_ref::<SessionInitRan>().is_none() {
             self.lua.globals().get::<LuaFunction>("doscript")?.call::<()>("/lua/UserSync.lua")?;
         }
-        self.lua.load(include_str!("hud.lua")).set_name("=[engine hud]").exec()
+        self.lua.load(include_str!("hud.lua")).set_name("=[engine hud]").call::<()>(campaign_mode)
     }
 
     /// Starts the main menu, as moho's front end does: `uimain.SetupUI()`

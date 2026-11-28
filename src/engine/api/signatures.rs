@@ -193,7 +193,6 @@ signatures! {
         /// `template` isn't converted where it's read (passed on as is).
         CanConsiderFormingPlatoon(template: LuaValue, name: String) -> bool;
         Destroy(squad: Option<String>);
-        DisbandOnIdle();
         FerryToLocation(position: Vector) -> LuaTable;
         FindClosestUnitToBase(squad: String, alliance: String, can_attack: bool, category: EntityCategory) -> Option<Obj<moho::Unit>>;
         FindFurthestUnit(squad: String, alliance: String, can_attack: bool, category: EntityCategory) -> Option<Obj<moho::Unit>>;

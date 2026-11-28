@@ -22,23 +22,28 @@ pub enum IntelType {
 }
 
 impl IntelType {
+    /// The names scripts use.
+    const NAMES: [(&'static str, Self); 13] = [
+        ("Vision", Self::Vision),
+        ("WaterVision", Self::WaterVision),
+        ("Radar", Self::Radar),
+        ("Sonar", Self::Sonar),
+        ("Omni", Self::Omni),
+        ("RadarStealthField", Self::RadarStealthField),
+        ("SonarStealthField", Self::SonarStealthField),
+        ("CloakField", Self::CloakField),
+        ("Jammer", Self::Jammer),
+        ("Spoof", Self::Spoof),
+        ("Cloak", Self::Cloak),
+        ("RadarStealth", Self::RadarStealth),
+        ("SonarStealth", Self::SonarStealth),
+    ];
+
+    /// Any letter case: FAF's Soothsayer asks for its `'vision'` radius
+    /// (`XRB3301_script.lua`).
     pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "Vision" => Self::Vision,
-            "WaterVision" => Self::WaterVision,
-            "Radar" => Self::Radar,
-            "Sonar" => Self::Sonar,
-            "Omni" => Self::Omni,
-            "RadarStealthField" => Self::RadarStealthField,
-            "SonarStealthField" => Self::SonarStealthField,
-            "CloakField" => Self::CloakField,
-            "Jammer" => Self::Jammer,
-            "Spoof" => Self::Spoof,
-            "Cloak" => Self::Cloak,
-            "RadarStealth" => Self::RadarStealth,
-            "SonarStealth" => Self::SonarStealth,
-            _ => return None,
-        })
+        let exact = Self::NAMES.iter().find(|(name, _)| *name == s);
+        exact.or_else(|| Self::NAMES.iter().find(|(name, _)| name.eq_ignore_ascii_case(s))).map(|&(_, t)| t)
     }
 
     /// Blueprint `Intel` field holding this type's radius, if any.
@@ -81,3 +86,16 @@ pub struct IntelState {
 
 /// An entity's intel, type-ordered.
 pub type IntelMap = BTreeMap<IntelType, IntelState>;
+
+#[cfg(test)]
+mod parse_tests {
+    use super::IntelType;
+
+    #[test]
+    fn intel_names_parse_in_any_letter_case() {
+        assert_eq!(IntelType::parse("Vision"), Some(IntelType::Vision));
+        assert_eq!(IntelType::parse("vision"), Some(IntelType::Vision));
+        assert_eq!(IntelType::parse("RADARSTEALTHFIELD"), Some(IntelType::RadarStealthField));
+        assert_eq!(IntelType::parse("Visions"), None);
+    }
+}

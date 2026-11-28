@@ -56,6 +56,12 @@ impl SyncValue {
         })
     }
 
+    /// Whether this beat's `Sync` sets `Sync.CampaignMode`.
+    pub fn sets_campaign_mode(&self) -> bool {
+        let SyncValue::Table(pairs) = self else { return false };
+        pairs.iter().any(|(k, v)| matches!(k, SyncValue::Str(k) if k == "CampaignMode") && !matches!(v, SyncValue::Nil | SyncValue::Bool(false)))
+    }
+
     pub fn is_empty_table(&self) -> bool {
         matches!(self, SyncValue::Table(p) if p.is_empty())
     }

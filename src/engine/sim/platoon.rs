@@ -1,6 +1,6 @@
 //! AI platoons: named groups of an army's units with squads.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::engine::sim::entity::EntityId;
 
@@ -42,6 +42,10 @@ pub struct Platoons {
     /// exists for scripts until then (`PlatoonExists` true in its first beat).
     #[serde(default)]
     fresh: Vec<PlatoonId>,
+    /// Platoons told to `DisbandOnIdle`, in id order: each ends at the
+    /// first beat's check that finds none of its units with an order.
+    #[serde(default)]
+    disband_on_idle: BTreeSet<PlatoonId>,
     /// Each member unit's platoon (a unit is in at most one): a death or
     /// reassignment touches only that platoon, not every army's pool.
     home: BTreeMap<EntityId, PlatoonId>,
@@ -75,6 +79,7 @@ impl Platoons {
 
     pub fn remove(&mut self, id: PlatoonId) -> Option<Platoon> {
         let p = self.map.remove(&id)?;
+        self.disband_on_idle.remove(&id);
         for (u, _) in &p.units {
             if self.home.get(u) == Some(&id) {
                 self.home.remove(u);
@@ -124,6 +129,18 @@ impl Platoons {
             }
         }
         doomed.into_iter().filter(|id| self.map.get(id).is_some_and(|p| p.units.is_empty() && p.unique_name.is_none())).collect()
+    }
+
+    /// `DisbandOnIdle`: the platoon ends once none of its units has an order.
+    pub fn set_disband_on_idle(&mut self, id: PlatoonId) {
+        if self.map.contains_key(&id) {
+            self.disband_on_idle.insert(id);
+        }
+    }
+
+    /// The platoons told to `DisbandOnIdle`, in id order.
+    pub fn disbanding_on_idle(&self) -> impl Iterator<Item = &Platoon> {
+        self.disband_on_idle.iter().filter_map(|id| self.map.get(id))
     }
 
     pub fn by_unique_name(&self, army: u32, name: &str) -> Option<PlatoonId> {

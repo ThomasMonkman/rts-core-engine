@@ -86,6 +86,11 @@ fn platoon_named_pool_survives() {
 }
 
 #[test]
+fn platoon_disband_on_idle() {
+    scenario("platoon_disband_on_idle", 400);
+}
+
+#[test]
 fn platoon_emptied_next_beat() {
     scenario("platoon_emptied_next_beat", 30);
 }

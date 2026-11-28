@@ -356,6 +356,15 @@ pub fn register(lua: &Lua) -> LuaResult<()> {
         DisbandPlatoon = |lua, (_brain, platoon): (Obj<moho::AIBrain>, Obj<moho::Platoon>)| {
             disband(lua, live_id(lua, &platoon)?)
         })?;
+    lua_method!(lua, moho::Platoon,
+        /// Disbands the platoon once none of its units has an order left: its units go back to the
+        /// army pool and `OnDestroy` runs on it. Checked once a beat, before the threads run, so a
+        /// platoon with no orders (or no units) lasts to the end of the beat it was called in.
+        DisbandOnIdle = |lua, this: Obj<moho::Platoon>| {
+            let id = live_id(lua, &this)?;
+            platoons(lua).set_disband_on_idle(id);
+            Ok(())
+        })?;
     lua_method!(lua, moho::AIBrain,
         /// Disbands the army's platoon holding that unique name, if any.
         DisbandPlatoonUniquelyNamed = |lua, (brain, name): (Obj<moho::AIBrain>, String)| {
@@ -763,6 +772,32 @@ pub fn destroy(lua: &Lua, id: PlatoonId) -> LuaResult<()> {
     result
 }
 
+/// Ends the platoons told to `DisbandOnIdle` whose units have all run out of
+/// orders, once a beat with the emptied ones (`entity::end_emptied_platoons`).
+/// Moho's army pass over its platoons (FA exe 0x700820) does both: a platoon
+/// with the flag (+0xe0, set by the binding 0x731690) none of whose squads
+/// has a live unit with a command in its queue (0x729fe0, 0x7247a0) gives
+/// its units to `ArmyPool` and is destroyed with `OnDestroy`. Real game
+/// (dev/probes probe_ai_misc): an idle platoon is gone after the call.
+pub fn end_idle_platoons(lua: &Lua) -> LuaResult<()> {
+    let idle: Vec<PlatoonId> = {
+        let ps = platoons(lua);
+        let mut flagged = ps.disbanding_on_idle().peekable();
+        if flagged.peek().is_none() {
+            return Ok(());
+        }
+        let world = crate::engine::api::entity::world(lua);
+        let Some(commands) = lua.app_data_ref::<crate::engine::sim::command::Commands>() else { return Ok(()) };
+        flagged
+            .filter(|p| p.units.iter().all(|(u, _)| commands.is_idle(*u) || world.get(*u).is_none_or(|e| e.cold.killed)))
+            .map(|p| p.id)
+            .collect()
+    };
+    for id in idle {
+        destroy(lua, id)?;
+    }
+    Ok(())
+}
 
 /// Which units `army`'s target searches can find (the `Find*Unit` family):
 /// its own and allied units, others it detects now (any intel), and

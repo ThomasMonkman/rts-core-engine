@@ -375,6 +375,7 @@ The other scripts in `dev/scenes/stress/` (each one's header has its command lin
 | `headon.lua` | two armies of 2000 moving straight at each other |
 | `city.lua` | two armies of 1000 crossing a city of ~14k structures |
 | `crossing.lua` | on any map with start markers: every army crosses to the farthest start |
+| `survival_defence.lua` | on a survival map from a vault (`--player 1 --armies 1`): a ring of heavily buffed defences round the player's start, so the game runs to its end with nobody playing; logs a `SURVDEF` line every 30 game seconds |
 
 ```sh
 cargo run --release -- --no-audio --vault dev/vault --no-ai --armies 0 --player 1 \
