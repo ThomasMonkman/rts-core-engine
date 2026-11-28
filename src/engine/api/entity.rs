@@ -291,7 +291,7 @@ pub fn end_emptied_platoons(lua: &Lua) -> LuaResult<()> {
     for id in doomed {
         crate::engine::api::platoon::destroy(lua, id)?;
     }
-    Ok(())
+    crate::engine::api::platoon::end_idle_platoons(lua)
 }
 
 /// End of tick: drops destroyed entities from the world and releases what

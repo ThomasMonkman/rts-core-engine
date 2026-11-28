@@ -57,7 +57,7 @@ pub const UNUSED: &[(&str, &[&str], &str)] = &[
     (
         "platoon_methods",
         &[
-            "CanConsiderFormingPlatoon", "Destroy", "DisbandOnIdle", "FerryToLocation", "FindClosestUnitToBase", "FindFurthestUnit",
+            "CanConsiderFormingPlatoon", "Destroy", "FerryToLocation", "FindClosestUnitToBase", "FindFurthestUnit",
             "FindHighestValueUnit", "GetAIPlan", "GetFerryBeacons", "GetPersonality", "GetPlatoonLifetimeStats",
             "SwitchAIPlan", "UseTeleporter",
         ],
