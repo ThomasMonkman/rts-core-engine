@@ -135,6 +135,7 @@ impl Driver {
             return;
         }
         let Some(vm) = self.booting.take() else { return };
+        let campaign_mode = w.pending_sync.iter().any(|v| v.sets_campaign_mode());
         self.player.adopt_army(w.local_army, false);
         let observer = self.player.player.is_none();
         let started = vm
@@ -145,7 +146,7 @@ impl Driver {
             .and_then(|_| vm.set_session_flags(false, observer))
             .and_then(|_| vm.set_focus_army(self.player.player.map_or(-1, |a| a as i64)))
             .and_then(|_| vm.set_screen(SCREEN.0 as f32, SCREEN.1 as f32))
-            .and_then(|_| vm.start_hud());
+            .and_then(|_| vm.start_hud_with(campaign_mode));
         match started {
             Ok(()) => {
                 tracing::info!(tick = w.tick, "user layer started (headless)");

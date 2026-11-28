@@ -940,6 +940,9 @@ fn update_ui(s: &mut RenderState, dt: f32) {
         }
         let Some(vm) = s.ui_booting.take() else { return };
         let _s = rts_core_engine::prof_span!("interface start (CreateUI)");
+        // FAF builds the interface by the flag (`UserVm::start_hud_with`);
+        // the Sync tables themselves go to `OnSync` below as always.
+        let campaign_mode = s.world.pending_sync.iter().any(|v| v.sets_campaign_mode());
         // A lobby's game: the player commands the army the sim gave them
         // (a replay's recorder's army isn't the viewer's).
         s.player.adopt_army(s.world.local_army, s.replay);
@@ -953,7 +956,7 @@ fn update_ui(s: &mut RenderState, dt: f32) {
             // Before the interface starts: FAF's gamemain keeps it as
             // `OriginalFocusArmy` (pings, ally checks).
             .and_then(|vm| vm.set_focus_army(s.player.player.map_or(-1, |a| a as i64)).map(|_| vm))
-            .and_then(|vm| vm.start_hud().map(|_| vm))
+            .and_then(|vm| vm.start_hud_with(campaign_mode).map(|_| vm))
         {
             Ok(vm) => {
                 tracing::info!("user layer started");

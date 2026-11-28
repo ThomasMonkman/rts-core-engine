@@ -487,6 +487,27 @@ fn faf_game_ui_builds() {
     assert!(items.len() > 50);
 }
 
+/// A game whose sim set `Sync.CampaignMode` before the interface started
+/// (co-op missions, survival maps such as Survival Horde EE): FAF's
+/// `CreateGameInterface` leaves the panels showing (a campaign never runs
+/// the opening animation that un-hides them) and `CreateUI` makes the
+/// objectives panel. A skirmish starts hidden and animates in.
+#[test]
+fn campaign_mode_is_known_when_the_game_ui_is_built() {
+    let hidden_at_start = |campaign: bool| -> Option<(bool, bool)> {
+        let vm = vm()?;
+        vm.set_screen(1280.0, 720.0).unwrap();
+        vm.start_hud_with(campaign).expect("the game interface");
+        let hidden: bool = vm.lua().load("return import('/lua/ui/game/gamemain.lua').gameUIHidden").eval().unwrap();
+        let objectives: bool = vm.lua().load("return import('/lua/ui/game/objectives2.lua').controls.bg ~= nil and import('/lua/ui/game/objectives2.lua').controls.bg ~= false").eval().unwrap();
+        Some((hidden, objectives))
+    };
+    let Some(skirmish) = hidden_at_start(false) else { return };
+    let campaign = hidden_at_start(true).unwrap();
+    assert_eq!(skirmish, (true, false), "a skirmish's panels start hidden for the opening animation, with no objectives panel");
+    assert_eq!(campaign, (false, true), "a campaign's panels show from the start, with the objectives panel");
+}
+
 /// Mouse input: a FAF `Button` gets its click (press posts a dragger,
 /// release over it fires `OnClick`), clicks over the world view are the
 /// world's, clicks on panels are the interface's.
