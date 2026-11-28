@@ -37,7 +37,10 @@ pub fn plan(lua: &Lua, units: &[EntityId], name: Option<&str>, target: FxVec3, d
             return Ok(Default::default());
         }
     };
-    let Some(layout) = module.get::<Option<LuaFunction>>(name)? else {
+    // A raw read: FAF's module environments raise on a name that isn't
+    // there (`/lua/system/config.lua`), and maps name formations FAF has
+    // dropped ('TravellingFormation', 'SixWideFormation').
+    let Some(layout) = module.raw_get::<Option<LuaFunction>>(name)? else {
         tracing::warn!(name, "unknown formation; ordering without formation");
         return Ok(Default::default());
     };
